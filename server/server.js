@@ -441,6 +441,13 @@ const VIEWER_MIN_SCORE = 0.80;
 // Keeps low-confidence random verses (e.g. Matthew 17:21 at 42%) off the screen entirely.
 const SUGGESTION_MIN_SCORE = 0.75;
 
+// Minimum *similarity* for a fingerprint (paraphrase) hit to auto-promote into
+// the live queue. Decoupled from the worker's confidence tier so a strong hit
+// isn't trapped in Candidates just because unrelated verses scored nearby.
+// A second agreeing method (verbatim) can lift a weaker hit over this via the
+// ensemble boost. Direct refs and verbatim quotes use their own higher bars.
+const FINGERPRINT_VIEWER_MIN_SCORE = 0.90;
+
 // Track what we already detected from interim so we skip on final
 let interimDetectedRef  = null;
 let interimDetectedTime = 0;
@@ -720,6 +727,11 @@ const TOPIC_BUILD_INTERVAL_MS = 60 * 1000;   // rebuild every 60s
 const TOPIC_WORD_MIN_COUNT     = 2;           // word must appear ≥ 2× to qualify
 const TOPIC_WORD_MIN_IDF       = 3.0;         // only distinctive words (IDF threshold)
 const TOPIC_MAX_WORDS          = 20;          // top 20 words drive the library
+// Counts are halved each rebuild (~60s). Gives recent speech ~2 min of
+// effective memory, bounds the map to the recent working set, and lets the
+// topic library follow the current passage instead of locking onto early
+// vocabulary. See maybeRebuildTopicLibrary for why this fixes the slowdown.
+const TOPIC_DECAY_FACTOR       = 0.5;
 
 let topicWordCounts   = new Map();   // Map<word, count> — raw frequency from speech
 let lastTopicBuild    = 0;
@@ -747,6 +759,20 @@ async function maybeRebuildTopicLibrary() {
   const candidates = [...topicWordCounts.entries()]
     .filter(([, count]) => count >= TOPIC_WORD_MIN_COUNT)
     .map(([word]) => word);
+
+  // Decay every count and evict words that have faded below the floor. This is
+  // what keeps topicWordCounts bounded AND makes the library track the current
+  // passage: without it the map grows for the whole service and early-sermon
+  // vocabulary dominates forever, while the per-rebuild filter/sort +
+  // getIdfScores worker call (on the detection thread) gets steadily heavier —
+  // the source of the "matching slows as service progresses" stall. Runs once
+  // per build interval, so it's O(map) at most every 60s. We decay *after*
+  // snapshotting candidates so this build still uses the full recent counts.
+  for (const [word, count] of topicWordCounts) {
+    const decayed = count * TOPIC_DECAY_FACTOR;
+    if (decayed < 1) topicWordCounts.delete(word);
+    else topicWordCounts.set(word, decayed);
+  }
 
   if (candidates.length < 3) return;   // not enough signal yet — too early in sermon
 
@@ -2120,7 +2146,10 @@ async function processVerbatim(transcript) {
         trackReadingModeHit(top, top.similarity);
       }
     }
-    if (suggestions.length) broadcastDetection(suggestions, 'verbatim', suggestions[0].similarity, 'suggestions');
+    // Top-1 only — surfacing all sub-0.92 phrase matches floods Candidates with
+    // near-miss verses that share a few words. The strongest one is the useful
+    // heads-up; the rest are noise.
+    if (suggestions.length) broadcastDetection(suggestions.slice(0, 1), 'verbatim', suggestions[0].similarity, 'suggestions');
     return true;
   } catch { return false; }
 }
@@ -2222,12 +2251,21 @@ async function runFingerprintSearch(currentSegment, skipNewTranscriptCheck = fal
 
     if (!results.length || confidence === 'none') return;
 
-    if (allowViewer && confidence === 'high' && !recentDirectRef) {
-      const fpKey = `${results[0].book}|${results[0].chapter}|${results[0].verse}`;
-      const boosted = ensembleScore(fpKey, 'fingerprint', results[0].similarity, results);
-      broadcastDetection(results, 'fingerprint', boosted, 'viewer');
-      // Feed high-confidence fingerprint hits into sermon context
-      if (confidence === 'high' && results[0].similarity >= 0.87) {
+    // Promotion to the live queue keys on the similarity the operator actually
+    // sees on the badge — not the confidence *tier*. The tier is computed from
+    // how many other verses tied nearby, so a genuinely strong 90%+ hit was
+    // being withheld in Candidates just because unrelated verses clustered near
+    // it. Rule: a fingerprint reaches viewer when its similarity clears
+    // FINGERPRINT_VIEWER_MIN_SCORE, OR when the worker is already 'high'
+    // confidence. ensembleScore still boosts when a second method agrees.
+    const fpKey   = `${results[0].book}|${results[0].chapter}|${results[0].verse}`;
+    const boosted = ensembleScore(fpKey, 'fingerprint', results[0].similarity, results);
+    const clearsViewerBar = confidence === 'high' || boosted >= FINGERPRINT_VIEWER_MIN_SCORE;
+
+    if (allowViewer && clearsViewerBar && !recentDirectRef) {
+      broadcastDetection(results.slice(0, 1), 'fingerprint', boosted, 'viewer');
+      // Feed strong fingerprint hits into sermon context
+      if (boosted >= 0.87) {
         updateSermonContext({ book: results[0].book, chapter: results[0].chapter, verse: results[0].verse });
       }
     } else if (results.length && results[0].similarity >= 0.85) {

@@ -331,14 +331,22 @@ function parseSpokenReference(text, inBibleMode = false) {
     }
     if (!bookName && SINGLE_WORD_BOOKS.has(words[i])) { bookName = BOOK_ALIASES[words[i]]; consumed = 1; }
 
-    if (!bookName && words[i].length >= 5) {
+    if (!bookName && words[i].length >= 6) {
       const nextWord = words[i+1] || '';
-      if (nextWord === 'chapter' || /^\d+$/.test(nextWord) || WORD_TO_NUM[nextWord] !== undefined) {
+      // "chapter" immediately after is a strong intent signal — allow looser
+      // matching there. A bare number after an ordinary long word is weak
+      // evidence (sermons are full of "<word> four", "<word> forty"), so we
+      // require a near-exact match (dist ≤ 1) in that case to avoid turning
+      // words like "strategical" / "accessed" into phantom book references.
+      const hasChapterKw = nextWord === 'chapter';
+      const hasNumber    = /^\d+$/.test(nextWord) || WORD_TO_NUM[nextWord] !== undefined;
+      if (hasChapterKw || hasNumber) {
         const candidate = words[i];
-        const maxDist = candidate.length >= 8 ? 2 : 1;
+        const maxDist = hasChapterKw ? (candidate.length >= 8 ? 2 : 1) : 1;
         let bestDist = Infinity, bestAlias = null;
         for (const alias of SINGLE_WORD_BOOKS) {
           if (Math.abs(alias.length - candidate.length) > maxDist) continue;
+          if (candidate[0] !== alias[0]) continue;   // STT rarely changes the first phoneme
           const d = cachedLevenshtein(candidate, alias);
           if (d <= maxDist && d < bestDist) { bestDist = d; bestAlias = alias; }
         }
@@ -613,7 +621,14 @@ function detectBookMentions(text, inBibleMode = false) {
     }
     const w = words[i];
     if (SINGLE_WORD_BOOKS.has(w)) {
-      if (!inBibleMode && AMBIGUOUS_BOOKS.has(w)) continue;
+      // Ambiguous books ("esther", "acts", "john") are common English words and
+      // sermon filler. A *bare* mention — no chapter, no trigger phrase — must
+      // never set context, even in bible mode: doing so lets a passing word
+      // ("…out of Esther if you've…") hijack an already-established book+chapter
+      // (Luke 4) and wipe the chapter, breaking later "verse N" fusion. Genuine
+      // ambiguous-book callouts arrive with a trigger phrase (handled in pass 1)
+      // or a chapter (handled by the full parser, not here).
+      if (AMBIGUOUS_BOOKS.has(w)) continue;
       const resolved = BOOK_ALIASES[w];
       if (resolved && !seen.has(resolved)) { books.push(resolved); seen.add(resolved); }
     }
