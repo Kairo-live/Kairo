@@ -34,6 +34,21 @@ def main():
         sys.exit("base not in the expected shape "
                  "(image: {}, rays: {}, blend: {})".format(n_img, n_rays, n_blend))
 
+    # --shadow: add a 45-degree long shadow extruded from the book to the
+    # bottom-right corner (clipped to the tile).
+    if "--shadow" in sys.argv:
+        ds = re.findall(r'<path class="st[27]"[^>]*\bd="([^"]+)"', svg)
+        step, count = 1.2, 120
+        uses = "".join(
+            '<path transform="translate({o} {o})" d="{d}"/>'.format(o=round(k * step, 2), d=d)
+            for k in range(1, count + 1) for d in ds)
+        clip = ('<clipPath id="lsClip"><rect x="184.13" y="277.59" '
+                'width="240.79" height="240.79" rx="46.07" ry="46.07"/></clipPath>')
+        shadow = ('<g clip-path="url(#lsClip)"><g fill="#3a0608" opacity="0.30">'
+                  + uses + '</g></g>')
+        svg = svg.replace("</defs>", clip + "\n  </defs>", 1)
+        svg = re.sub(r'(<rect class="st9"[^>]*/>)', r'\1\n' + shadow, svg, count=1)
+
     # --square: crop the canvas to the tile for a full-bleed 1024px app icon.
     if "--square" in sys.argv:
         svg = re.sub(
