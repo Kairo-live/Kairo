@@ -418,6 +418,11 @@ let lastDetectedRef  = null;
 let lastDetectedTime = 0;
 const DETECT_DEDUP_MS = 45000;   // Same verse won't flood SENT list for 45 s
 
+// Explicit citations use a much shorter window: when the preacher calls the
+// same reference again ("look at it again — verse sixteen"), that's always
+// intentional and must re-display. The 45 s window stays for fuzzy methods.
+const DIRECT_DEDUP_MS = 5000;
+
 // ── Ensemble scoring ───────────────────────────────────────────────────────
 // When verbatim + fingerprint agree on the same verse within ENSEMBLE_WINDOW_MS,
 // boost the combined score and re-broadcast. Direct detection always wins.
@@ -441,6 +446,13 @@ const VIEWER_MIN_SCORE = 0.80;
 // Keeps low-confidence random verses (e.g. Matthew 17:21 at 42%) off the screen entirely.
 const SUGGESTION_MIN_SCORE = 0.75;
 
+// Suggestions dedup. Viewer-bound sends have always been deduped, but
+// suggestions had NO dedup at all — every search pass (~1/s during speech)
+// re-broadcast the same near-miss verse into the Candidates panel. One
+// appearance per verse per window is all the operator needs.
+const SUGGESTION_DEDUP_MS = 30000;
+const recentSuggestions = new Map();   // verseKey → last suggestion broadcast time
+
 // Minimum *similarity* for a fingerprint (paraphrase) hit to auto-promote into
 // the live queue. Decoupled from the worker's confidence tier so a strong hit
 // isn't trapped in Candidates just because unrelated verses scored nearby.
@@ -458,6 +470,21 @@ const INTERIM_VERBATIM_MS = 500;  // run at most once per 500ms on interim
 
 // Sentence-level accumulator — verbatim/fingerprint run on complete sentences
 let sentenceBuffer = new SentenceBuffer(4000);
+
+// The buffer's 4s timeout only fires when something checks it, and the
+// per-segment check runs immediately after append() — at that moment the
+// buffer is never stale, so without a timer a quote that ends mid-sentence
+// (no punctuation, no speech_final) sits unprocessed until the next final
+// segment arrives — unbounded during a pause, which is exactly when preachers
+// pause. Poll every second and dispatch detection on anything that timed out.
+setInterval(() => {
+  if (!workerBasicReady || !sentenceBuffer.hasContent) return;
+  const stale = sentenceBuffer.checkTimeout();
+  if (!stale) return;
+  lastFingerprintSearch = Date.now();
+  processVerbatim(stale).catch(() => {});
+  runFingerprintSearch(stale, true).catch(() => {});
+}, 1000);
 
 // Suppress fingerprint search from routing to viewer for N ms after a direct reference
 let lastDirectRefTime = 0;
@@ -646,6 +673,45 @@ function broadcastRangeState() {
     total:     rangeQueueTotal,
     next:      rangeQueue[0] || null,
   });
+}
+
+// ── Spoken "next verse" trigger ───────────────────────────────────────────
+// "Next verse" from the preacher advances the active range queue immediately,
+// or — when no range is queued — displays the verse after the last one sent.
+// Only the tail of the transcript is checked so the phrase scrolls out of the
+// window as speech continues; the cooldown absorbs repeated interims that
+// still contain it.
+let lastNextVerseAt = 0;
+const NEXT_VERSE_COOLDOWN_MS = 4000;
+let lastOutputVerse = null;   // last verse actually pushed to outputs
+
+async function maybeHandleNextVerseTrigger(transcript) {
+  const tail = transcript.split(RE_SPACES).slice(-8).join(' ').toLowerCase();
+  if (!tail.includes('next verse')) return;
+  const now = Date.now();
+  if (now - lastNextVerseAt < NEXT_VERSE_COOLDOWN_MS) return;
+  lastNextVerseAt = now;
+
+  if (rangeQueue.length) {
+    if (rangeAdvancing) return;
+    rangeAdvancing     = true;
+    rangeLastAdvanceAt = now;
+    console.log('[Range] "next verse" trigger → advancing');
+    advanceRangeQueue().finally(() => { rangeAdvancing = false; });
+    return;
+  }
+
+  const base = lastOutputVerse;
+  if (!base?.book || !base.chapter || !base.verse) return;
+  try {
+    const msg = await workerCall('directLookup', {
+      book: base.book, chapter: base.chapter, verse: base.verse + 1,
+    }, 3000);
+    if (msg.result) {
+      console.log(`[NextVerse] "next verse" trigger → ${msg.result.reference}`);
+      broadcastDetection([msg.result], 'direct', 1.0, 'viewer');
+    }
+  } catch {}
 }
 
 // ── Reading-pace estimator ────────────────────────────────────────────────
@@ -1175,7 +1241,7 @@ app.get('/api/sessions/:id', (req, res) => {
 const MAX_TRANSCRIPT_CHARS = 200_000;
 const MAX_VERSES_PER_SESSION = 500;
 
-app.post('/api/sessions', (req, res) => {
+app.post('/api/sessions', async (req, res) => {
   const body = req.body || {};
   const transcript = String(body.transcript || '').trim().slice(0, MAX_TRANSCRIPT_CHARS);
   const verses = (Array.isArray(body.verses) ? body.verses : [])
@@ -1205,7 +1271,9 @@ app.post('/api/sessions', (req, res) => {
   session.generated   = session.generated || {};
   session.createdAt   = session.createdAt || now.toISOString();
   session.updatedAt   = now.toISOString();
-  try { writeSession(session); }
+  // writeSession is async — without await the response races the disk write
+  // (an immediate follow-up read 404s) and write errors escape the catch.
+  try { await writeSession(session); }
   catch (e) { return res.status(500).json({ error: e.message }); }
   res.json({ ok: true, id, session });
 });
@@ -1362,6 +1430,271 @@ function sanitizePoints(out, allowed) {
   };
 }
 
+// ── Structure-aware generation (map/reduce) ──────────────────────────────
+// The old single-shot path clamped to the LAST 4k words — an hour-long sermon
+// is 8-10k words, so the first half was silently discarded — and asked one
+// model call to structure everything. Instead we use what Kairo already
+// knows: the sermon segments naturally at its scripture citations.
+//
+//   1. Anchor each captured verse at its position in the transcript by
+//      locating a 4-word shingle of the verse text (the preacher read it).
+//   2. Cut the transcript into chunks at the midpoints between anchors —
+//      one chunk per scripture moment, whole sermon covered.
+//   3. MAP: one small model call per chunk (heading/point/explanation/quote).
+//      Small context per call → faster on 7B-class models, far less drift.
+//   4. REDUCE: sections/points are assembled deterministically in preaching
+//      order (structure never depends on the model); one final call writes
+//      only the connective prose (title, summary/theme, closing).
+//
+// Scriptures are attached from the anchors themselves, so the citation
+// whitelist holds by construction. Falls back to the single-shot path for
+// short sessions or if Ollama can't handle per-chunk calls.
+
+const MAX_MAP_CHUNKS    = 8;     // cap model calls per generation
+const MIN_CHUNK_WORDS   = 60;    // merge slivers into their neighbour
+const CHUNK_WORD_CAP    = 1200;  // clamp any one chunk fed to the model
+
+const CHUNK_PROMPT = `You are a sermon-transcript analyst. You are given ONE segment of a sermon transcript, and the scripture that was read in that segment (if any). Extract the preacher's teaching in this segment.
+
+STRICT RULES:
+1. Use ONLY material present in the segment.
+2. heading: a 3-8 word title for this part of the sermon.
+3. point: ONE sentence stating the main point the preacher makes here.
+4. explanation: 2-4 sentences expanding the point, faithful to the transcript.
+5. supportingQuote: an EXACT short fragment from the segment (max 25 words), or null if there is no clean quote.
+6. Output JSON only.`;
+
+const CHUNK_SCHEMA = {
+  type: 'object',
+  properties: {
+    heading:         { type: 'string' },
+    point:           { type: 'string' },
+    explanation:     { type: 'string' },
+    supportingQuote: { type: ['string', 'null'] },
+  },
+  required: ['heading', 'point', 'explanation'],
+};
+
+const NOTE_META_PROMPT = `You are a sermon-transcript analyst. You are given the section outline of a sermon (headings, points, scriptures, in preaching order). Write the framing prose for the sermon note.
+
+STRICT RULES:
+1. title: a faithful sermon title (max 12 words) drawn from the outline's theme.
+2. summary: 2-4 sentences summarising the sermon's overall message.
+3. closing: 1-3 sentences capturing the sermon's charge or conclusion.
+4. Do not introduce ideas or scriptures that are not in the outline.
+5. Output JSON only.`;
+
+const NOTE_META_SCHEMA = {
+  type: 'object',
+  properties: {
+    title:   { type: 'string' },
+    summary: { type: 'string' },
+    closing: { type: 'string' },
+  },
+  required: ['title', 'summary', 'closing'],
+};
+
+const POINTS_META_PROMPT = `You are a sermon-transcript analyst. You are given the extracted points of a sermon in preaching order. Write the framing prose.
+
+STRICT RULES:
+1. title: a faithful sermon title (max 12 words).
+2. mainTheme: 1-2 sentences stating the sermon's central theme.
+3. Do not introduce ideas that are not in the points.
+4. Output JSON only.`;
+
+const POINTS_META_SCHEMA = {
+  type: 'object',
+  properties: {
+    title:     { type: 'string' },
+    mainTheme: { type: 'string' },
+  },
+  required: ['title', 'mainTheme'],
+};
+
+const OLLAMA_CALL_TIMEOUT_MS = 120_000;
+
+// One chat call with schema-constrained output. Ollama ≥ 0.5 accepts a JSON
+// schema in `format` and guarantees conforming output; older versions reject
+// it, so retry once with plain JSON mode.
+async function ollamaChat(system, user, schema) {
+  const body = {
+    model:   ollamaModel(),
+    stream:  false,
+    options: { temperature: 0.2, num_ctx: 8192 },
+    messages: [
+      { role: 'system', content: system },
+      { role: 'user',   content: user },
+    ],
+  };
+  let raw;
+  try {
+    const r = await axios.post(ollamaUrl() + '/api/chat', { ...body, format: schema },
+      { timeout: OLLAMA_CALL_TIMEOUT_MS });
+    raw = r.data?.message?.content || '';
+  } catch (e) {
+    if (!e.response || e.response.status < 400 || e.response.status >= 500) throw e;
+    const r = await axios.post(ollamaUrl() + '/api/chat', { ...body, format: 'json' },
+      { timeout: OLLAMA_CALL_TIMEOUT_MS });
+    raw = r.data?.message?.content || '';
+  }
+  return JSON.parse(raw);   // throws on garbage — caller decides per chunk
+}
+
+function _contentNormWord(w) { return w.toLowerCase().replace(/[^a-z0-9]/g, ''); }
+
+// Cut the transcript into per-scripture chunks. Returns null when there isn't
+// enough structure to be worth it (fewer than 2 anchored verses).
+function buildSermonChunks(session) {
+  const oWords = String(session.transcript || '').split(/\s+/).filter(Boolean);
+  if (oWords.length < MIN_CHUNK_WORDS * 2) return null;
+  const nWords = oWords.map(_contentNormWord);
+
+  // Transcript 4-gram → first word position (skip grams with empty tokens)
+  const gramPos = new Map();
+  for (let i = 0; i + 4 <= nWords.length; i++) {
+    if (!nWords[i] || !nWords[i+1] || !nWords[i+2] || !nWords[i+3]) continue;
+    const g = `${nWords[i]} ${nWords[i+1]} ${nWords[i+2]} ${nWords[i+3]}`;
+    if (!gramPos.has(g)) gramPos.set(g, i);
+  }
+
+  // Anchor each verse at the earliest transcript position of any of its 4-grams
+  const anchored = [];
+  for (const v of (session.verses || [])) {
+    const vw = String(v.text || '').split(/\s+/).map(_contentNormWord).filter(Boolean);
+    let pos = null;
+    for (let i = 0; i + 4 <= vw.length; i++) {
+      const p = gramPos.get(`${vw[i]} ${vw[i+1]} ${vw[i+2]} ${vw[i+3]}`);
+      if (p !== undefined && (pos === null || p < pos)) pos = p;
+    }
+    if (pos !== null) anchored.push({ ref: v.ref, text: v.text, pos });
+  }
+  if (anchored.length < 2) return null;
+  anchored.sort((a, b) => a.pos - b.pos);
+
+  // Chunk k runs from the midpoint before its anchor to the midpoint after.
+  // First chunk absorbs the intro; last chunk runs to the end (closing).
+  let chunks = anchored.map((a, k) => {
+    const start = k === 0 ? 0 : Math.floor((anchored[k-1].pos + a.pos) / 2);
+    const end   = k === anchored.length - 1
+      ? oWords.length
+      : Math.floor((a.pos + anchored[k+1].pos) / 2);
+    return { verses: [a], start, end };
+  });
+
+  // Merge slivers into the previous chunk, then cap the total count by
+  // repeatedly merging the smallest adjacent pair.
+  chunks = chunks.filter((c, k) => {
+    if (k > 0 && c.end - c.start < MIN_CHUNK_WORDS) {
+      chunks[k-1].verses.push(...c.verses);
+      chunks[k-1].end = c.end;
+      return false;
+    }
+    return true;
+  });
+  while (chunks.length > MAX_MAP_CHUNKS) {
+    let idx = 0, best = Infinity;
+    for (let k = 0; k + 1 < chunks.length; k++) {
+      const size = (chunks[k].end - chunks[k].start) + (chunks[k+1].end - chunks[k+1].start);
+      if (size < best) { best = size; idx = k; }
+    }
+    chunks[idx].verses.push(...chunks[idx+1].verses);
+    chunks[idx].end = chunks[idx+1].end;
+    chunks.splice(idx + 1, 1);
+  }
+
+  return chunks.map(c => ({
+    verses: c.verses,
+    text:   oWords.slice(c.start, Math.min(c.end, c.start + CHUNK_WORD_CAP)).join(' '),
+  }));
+}
+
+// Quote must be an exact fragment of the chunk — enforce, don't trust.
+function _verifyQuote(quote, chunkText) {
+  if (!quote) return null;
+  const q = String(quote).trim();
+  if (!q || q.split(/\s+/).length > 25) return null;
+  const norm = s => s.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim();
+  return norm(chunkText).includes(norm(q)) ? q : null;
+}
+
+async function generateStructured(session, type) {
+  const chunks = buildSermonChunks(session);
+  if (!chunks || chunks.length < 2) return null;   // short session → single-shot
+
+  console.log(`[Content] Structured generation: ${chunks.length} chunks (${type})`);
+
+  // MAP — one small extraction per chunk. A failed chunk is skipped, not fatal.
+  const extracted = [];
+  for (let k = 0; k < chunks.length; k++) {
+    const c = chunks[k];
+    const scriptureLine = c.verses
+      .map(v => `${v.ref}: "${String(v.text || '').slice(0, 300)}"`)
+      .join('\n') || '(none)';
+    try {
+      const out = await ollamaChat(
+        CHUNK_PROMPT,
+        `SCRIPTURE READ IN THIS SEGMENT:\n${scriptureLine}\n\nSEGMENT ${k + 1} OF ${chunks.length}:\n${c.text}`,
+        CHUNK_SCHEMA,
+      );
+      if (out && out.point) {
+        extracted.push({
+          heading:         String(out.heading || '').slice(0, 120),
+          point:           String(out.point || '').slice(0, 200),
+          explanation:     String(out.explanation || '').slice(0, 1200),
+          supportingQuote: _verifyQuote(out.supportingQuote, c.text),
+          scriptures:      c.verses.map(v => v.ref),
+        });
+      }
+    } catch (e) {
+      console.warn(`[Content] Chunk ${k + 1}/${chunks.length} failed: ${e.message}`);
+    }
+    broadcast({ type: 'content-progress', done: k + 1, total: chunks.length + 1 });
+  }
+  if (extracted.length < 2) return null;   // not enough survived → single-shot
+
+  // REDUCE — structure is assembled here, in preaching order; the model only
+  // writes the connective prose around it.
+  const outline = extracted
+    .map((s, k) => `${k + 1}. ${s.heading} — ${s.point} [${s.scriptures.join(', ') || 'no scripture'}]`)
+    .join('\n');
+
+  let meta = {};
+  try {
+    meta = await ollamaChat(
+      type === 'note' ? NOTE_META_PROMPT : POINTS_META_PROMPT,
+      `SERMON OUTLINE:\n${outline}`,
+      type === 'note' ? NOTE_META_SCHEMA : POINTS_META_SCHEMA,
+    ) || {};
+  } catch (e) {
+    console.warn('[Content] Meta call failed, using fallbacks:', e.message);
+  }
+  broadcast({ type: 'content-progress', done: chunks.length + 1, total: chunks.length + 1 });
+
+  const fallbackTitle = session.title || `Sermon — ${session.date || session.id}`;
+  if (type === 'note') {
+    return {
+      title:   String(meta.title || fallbackTitle).slice(0, 200),
+      summary: String(meta.summary || '').slice(0, 600),
+      sections: extracted.map(s => ({
+        heading:    s.heading,
+        body:       s.supportingQuote ? `${s.explanation} — "${s.supportingQuote}"` : s.explanation,
+        scriptures: s.scriptures,
+      })),
+      closing: String(meta.closing || '').slice(0, 400),
+    };
+  }
+  return {
+    title:     String(meta.title || fallbackTitle).slice(0, 200),
+    mainTheme: String(meta.mainTheme || '').slice(0, 400),
+    points: extracted.slice(0, 10).map(s => ({
+      point:           s.point,
+      explanation:     s.explanation,
+      scripture:       s.scriptures[0] || null,
+      supportingQuote: s.supportingQuote,
+    })),
+  };
+}
+
 app.post('/api/content/generate', async (req, res) => {
   const { sessionId, type } = req.body || {};
   if (!sessionId) return res.status(400).json({ error: 'sessionId required' });
@@ -1375,41 +1708,116 @@ app.post('/api/content/generate', async (req, res) => {
 
   const url = ollamaUrl();
   const model = ollamaModel();
-  const systemPrompt = type === 'note' ? NOTE_PROMPT : POINTS_PROMPT;
+  const allowed = (session.verses || []).map(v => v.ref);
 
-  let raw;
+  // ── Structured map/reduce path ──────────────────────────────────────────
+  let parsed = null;
   try {
-    const r = await axios.post(url + '/api/chat', {
-      model,
-      stream: false,
-      format: 'json',
-      options: { temperature: 0.2, num_ctx: 8192 },
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user',   content: buildUserPayload(session) },
-      ],
-    }, { timeout: 180_000 });
-    raw = r.data?.message?.content || '';
+    parsed = await generateStructured(session, type);
   } catch (e) {
-    const msg = e.response?.data?.error || e.code || e.message;
-    return res.status(502).json({ error: `Ollama request failed: ${msg}`, url, model });
+    console.warn('[Content] Structured generation failed — falling back to single-shot:', e.message);
   }
 
-  let parsed;
-  try { parsed = JSON.parse(raw); }
-  catch { return res.status(502).json({ error: 'Model returned invalid JSON', raw: raw.slice(0, 500) }); }
+  // ── Single-shot fallback (short sessions, or structured path failed) ────
+  if (!parsed) {
+    const systemPrompt = type === 'note' ? NOTE_PROMPT : POINTS_PROMPT;
+    let raw;
+    try {
+      const r = await axios.post(url + '/api/chat', {
+        model,
+        stream: false,
+        format: 'json',
+        options: { temperature: 0.2, num_ctx: 8192 },
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user',   content: buildUserPayload(session) },
+        ],
+      }, { timeout: 180_000 });
+      raw = r.data?.message?.content || '';
+    } catch (e) {
+      const msg = e.response?.data?.error || e.code || e.message;
+      return res.status(502).json({ error: `Ollama request failed: ${msg}`, url, model });
+    }
+    try { parsed = JSON.parse(raw); }
+    catch { return res.status(502).json({ error: 'Model returned invalid JSON', raw: raw.slice(0, 500) }); }
+  }
 
-  const allowed = (session.verses || []).map(v => v.ref);
   const cleaned = type === 'note' ? sanitizeNote(parsed, allowed) : sanitizePoints(parsed, allowed);
   if (!cleaned) return res.status(502).json({ error: 'Model output failed validation' });
 
   session.generated = session.generated || {};
   session.generated[type] = { ...cleaned, generatedAt: new Date().toISOString(), model };
   session.updatedAt = new Date().toISOString();
-  try { writeSession(session); }
+  try { await writeSession(session); }
   catch (e) { return res.status(500).json({ error: e.message }); }
 
   res.json({ ok: true, type, content: session.generated[type] });
+});
+
+// ── DOCX export ───────────────────────────────────────────────────────────
+// Renders a generated note/points document as a properly formatted Word file.
+app.get('/api/content/export', async (req, res) => {
+  const { sessionId, type } = req.query;
+  if (!sessionId || (type !== 'note' && type !== 'points')) {
+    return res.status(400).json({ error: 'sessionId and type=note|points required' });
+  }
+  const session = readSession(sessionId);
+  const content = session?.generated?.[type];
+  if (!content) return res.status(404).json({ error: 'no generated content — generate it in Content Studio first' });
+
+  try {
+    const { Document, Packer, Paragraph, TextRun, HeadingLevel } = require('docx');
+    const children = [
+      new Paragraph({ heading: HeadingLevel.TITLE, children: [new TextRun(content.title || 'Sermon')] }),
+      new Paragraph({ children: [new TextRun({ text: session.date || '', italics: true, color: '666666' })] }),
+      new Paragraph({ text: '' }),
+    ];
+
+    if (type === 'note') {
+      if (content.summary) {
+        children.push(new Paragraph({ children: [new TextRun({ text: content.summary, italics: true })] }),
+                      new Paragraph({ text: '' }));
+      }
+      for (const s of (content.sections || [])) {
+        children.push(new Paragraph({ heading: HeadingLevel.HEADING_1, children: [new TextRun(s.heading || '')] }));
+        if (s.scriptures?.length) {
+          children.push(new Paragraph({ children: [new TextRun({ text: s.scriptures.join('  ·  '), bold: true, color: '8B0000' })] }));
+        }
+        if (s.body) children.push(new Paragraph({ children: [new TextRun(s.body)] }));
+        children.push(new Paragraph({ text: '' }));
+      }
+      if (content.closing) {
+        children.push(new Paragraph({ heading: HeadingLevel.HEADING_1, children: [new TextRun('Closing')] }),
+                      new Paragraph({ children: [new TextRun({ text: content.closing, italics: true })] }));
+      }
+    } else {
+      if (content.mainTheme) {
+        children.push(new Paragraph({ children: [new TextRun({ text: content.mainTheme, italics: true })] }),
+                      new Paragraph({ text: '' }));
+      }
+      (content.points || []).forEach((p, i) => {
+        children.push(new Paragraph({ heading: HeadingLevel.HEADING_2, children: [new TextRun(`${i + 1}. ${p.point || ''}`)] }));
+        if (p.scripture) {
+          children.push(new Paragraph({ children: [new TextRun({ text: p.scripture, bold: true, color: '8B0000' })] }));
+        }
+        if (p.explanation) children.push(new Paragraph({ children: [new TextRun(p.explanation)] }));
+        if (p.supportingQuote) {
+          children.push(new Paragraph({ children: [new TextRun({ text: `"${p.supportingQuote}"`, italics: true, color: '444444' })] }));
+        }
+        children.push(new Paragraph({ text: '' }));
+      });
+    }
+
+    const doc = new Document({ sections: [{ children }] });
+    const buf = await Packer.toBuffer(doc);
+    const safeDate = (session.date || session.id || '').replace(/[^A-Za-z0-9_\-]/g, '-');
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+    res.setHeader('Content-Disposition', `attachment; filename="KAIRO_${type}_${safeDate}.docx"`);
+    res.send(buf);
+  } catch (e) {
+    console.error('[Content] DOCX export failed:', e.message);
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // ── Shared transcript pipeline ───────────────────────────────────────────
@@ -1429,6 +1837,10 @@ async function handleTranscriptSegment(transcript, isFinal, confidence, speechFi
   // Fingerprint also fires on longer interim segments so paraphrase
   // detection doesn't wait for the endpoint (300-1200ms delay).
   if (!isFinal) {
+    // Feed new words into the anchor trie immediately — don't wait for the
+    // final. Quotes start matching while the preacher is mid-sentence.
+    streamNewWords(transcript, false);
+    maybeHandleNextVerseTrigger(transcript).catch(() => {});
     if (workerBasicReady) {
       let foundRef = await processForReferences(transcript, false);
       if (!foundRef && referenceContext.isValid) {
@@ -1467,9 +1879,8 @@ async function handleTranscriptSegment(transcript, isFinal, confidence, speechFi
   while (transcriptBuffer.length && transcriptBuffer[0].time < now - 90000) transcriptBuffer.shift();
   hasNewTranscript = true;
 
-  if (workerBasicReady) {
-    processStreamText(transcript).catch(() => {});
-  }
+  streamNewWords(transcript, true);
+  maybeHandleNextVerseTrigger(transcript).catch(() => {});
 
   accumulateTopicWords(transcript);
   maybeRebuildTopicLibrary();
@@ -1567,7 +1978,11 @@ async function handleTranscriptSegment(transcript, isFinal, confidence, speechFi
   }
 
   if (speechFinal && workerBasicReady) {
-    const bufferText = transcriptBuffer.map(t => t.text).join(' ').trim();
+    // Last ~60 words only. Re-searching the full 90s buffer cost 200-500ms of
+    // worker time per utterance and queued ahead of direct reference lookups;
+    // anything older than ~60 words was already covered by earlier passes.
+    const bufferText = transcriptBuffer.map(t => t.text).join(' ')
+      .split(RE_SPACES).slice(-60).join(' ').trim();
     if (bufferText && bufferText !== textForExpensive) {
       await Promise.all([
         processVerbatim(bufferText),
@@ -1611,6 +2026,7 @@ async function startVosk() {
 
     voskActive = true;
     voskLastPartial = '';
+    streamWatermark = 0;
     connectionState = 'connected';
     broadcast({ type: 'connection-state', state: 'connected', engine: 'vosk' });
     return { ok: true, engine: 'vosk' };
@@ -1726,11 +2142,13 @@ async function startDeepgram(config = {}) {
   interimDetectedRef    = null;
   lastInterimVerbatim   = 0;
   lastDirectRefTime     = 0;
+  streamWatermark       = 0;
   resetSermonContext();
   resetTopicAccumulator();
   resetReadingMode();
   sentenceBuffer = new SentenceBuffer(4000);
   ensembleCache.clear();
+  recentSuggestions.clear();
   audioRingBuffer = [];
   audioRingBytes  = 0;
 
@@ -1821,6 +2239,19 @@ async function startDeepgram(config = {}) {
           );
         } catch (err) {
           console.error('[Deepgram] Transcript handler error:', err.message);
+        }
+      });
+
+      // utterance_end_ms is configured above but the event was never
+      // subscribed. It fires when Deepgram detects an utterance boundary even
+      // when no speech_final arrives (fast continuous preaching) — the exact
+      // moment to flush the sentence buffer and run quote detection.
+      deepgramConnection.on(LiveTranscriptionEvents.UtteranceEnd, () => {
+        const flushed = sentenceBuffer.forceFlush();
+        if (flushed && workerBasicReady) {
+          lastFingerprintSearch = Date.now();
+          processVerbatim(flushed).catch(() => {});
+          runFingerprintSearch(flushed, true).catch(() => {});
         }
       });
 
@@ -1927,8 +2358,25 @@ function tryRangeAdvanceByRef(verses) {
 }
 
 // ── Streaming anchor detection ────────────────────────────────────────────
-// Every final word is fed into the worker's 4-gram anchor trie + alignment
-// tracker (Layer 1 + Layer 2). No sentence buffer, no throttle.
+// Every word — interim and final — is fed into the worker's 4-gram anchor
+// trie + alignment tracker (Layer 1 + Layer 2). No sentence buffer, no throttle.
+//
+// Interims are growing prefixes of the current utterance, so we keep a word
+// watermark and feed only the suffix that hasn't been streamed yet. This gets
+// each word into the trie the moment STT hears it (~1-3s before the final
+// lands) without double-feeding when the final repeats the same words. The
+// watermark resets on each final, matching Deepgram/Vosk utterance semantics.
+let streamWatermark = 0;
+
+function streamNewWords(transcript, isFinal) {
+  const words = transcript.split(RE_SPACES).filter(Boolean);
+  const fresh = words.slice(streamWatermark);
+  streamWatermark = isFinal ? 0 : words.length;
+  if (fresh.length && workerBasicReady) {
+    processStreamText(fresh.join(' ')).catch(() => {});
+  }
+}
+
 //
 //   • Anchor-only hits (4 distinctive words match) → 'suggestions' at 0.80.
 //   • Confirmed hits (≥6 words align in sequence) → 'viewer' at 0.90+.
@@ -1955,8 +2403,16 @@ async function processStreamText(text) {
       broadcastDetection(top, 'stream', top[0].similarity || 0.90, 'viewer');
     }
     if (anchors.length) {
-      const top = anchors.slice(0, 5);
-      broadcastDetection(top, 'stream', top[0].similarity || 0.80, 'suggestions');
+      // Anchor-only = 4 matched words, no sequential confirmation yet. Only
+      // surface the distinctive ones: a phrase shared by ≤2 verses, or one
+      // inside the sermon's active topic frame. Shared 4-grams outside the
+      // topic (df 3-5) fire on coincidental speech and were the main source
+      // of Candidates-panel noise. Cap at 2 — Layer 2 promotes the real one
+      // to viewer within a few more words anyway.
+      const strong = anchors.filter(r => r.df <= 2 || r.inTopicLibrary).slice(0, 2);
+      if (strong.length) {
+        broadcastDetection(strong, 'stream', strong[0].similarity || 0.80, 'suggestions');
+      }
     }
   } catch (err) {
     if (!err.message?.includes('timeout')) {
@@ -2076,7 +2532,7 @@ async function processForReferences(transcript, isFinal) {
         // Interim: only show in suggestions (less confirmed), use lighter dedup
         const topKey = `${verses[0].book}|${verses[0].chapter}|${verses[0].verse}`;
         const now = Date.now();
-        if (topKey === interimDetectedRef && now - interimDetectedTime < DETECT_DEDUP_MS) continue;
+        if (topKey === interimDetectedRef && now - interimDetectedTime < DIRECT_DEDUP_MS) continue;
         interimDetectedRef  = topKey;
         interimDetectedTime = now;
         // Also feed through the main dedup so final won't re-fire
@@ -2329,18 +2785,39 @@ function broadcastDetection(verses, method, topScore, target) {
   // Below the suggestions floor → drop entirely. Not useful enough to show anywhere.
   if (target === 'suggestions' && topScore < SUGGESTION_MIN_SCORE) return;
 
+  // ── Suggestions dedup ─────────────────────────────────────────────────────
+  // Drop verses already suggested within the window; if nothing new remains,
+  // skip the broadcast entirely. Keeps repeated near-misses from flooding the
+  // Candidates panel (and the WebSocket) on every search pass.
+  if (target === 'suggestions') {
+    if (recentSuggestions.size > 200) {
+      for (const [k, t] of recentSuggestions) {
+        if (now - t > SUGGESTION_DEDUP_MS) recentSuggestions.delete(k);
+      }
+    }
+    verses = verses.filter(v => {
+      const key  = `${v.book}|${v.chapter}|${v.verse}`;
+      const last = recentSuggestions.get(key) || 0;
+      if (now - last < SUGGESTION_DEDUP_MS) return false;
+      recentSuggestions.set(key, now);
+      return true;
+    });
+    if (!verses.length) return;
+  }
+
   // ── Deduplication (viewer-bound only) ─────────────────────────────────────
   // Prevents the same verse from flooding the SENT panel.
   // Exception: if the new verse is from the same book as the last sent verse
   // and arrives within SAME_BOOK_WINDOW_MS, always let it through — the preacher
   // is likely correcting or continuing in the same passage.
   if (target === 'viewer') {
+    const dedupMs = method === 'direct' ? DIRECT_DEDUP_MS : DETECT_DEDUP_MS;
     const incomingBook = verses[0]?.book || null;
     const sameBookContinuation = incomingBook && incomingBook === lastSentBook
       && now - lastSentBookTime < SAME_BOOK_WINDOW_MS
       && topKey !== lastDetectedRef; // only bypass if it's actually a different verse
     if (!sameBookContinuation) {
-      if (topKey && topKey === lastDetectedRef && now - lastDetectedTime < DETECT_DEDUP_MS) return;
+      if (topKey && topKey === lastDetectedRef && now - lastDetectedTime < dedupMs) return;
     }
     if (topKey) { lastDetectedRef = topKey; lastDetectedTime = now; }
   }
@@ -2365,6 +2842,7 @@ function broadcastDetection(verses, method, topScore, target) {
 
 // ── Output routing — sends to all enabled destinations ───────────────────
 async function sendToOutputs(verse) {
+  lastOutputVerse = verse;
   const s = loadSettings();
   const tasks = [];
   if (s.proPresenterEnabled !== false) tasks.push(sendToProPresenter(verse).catch(err => console.warn('[ProPresenter] send failed:', err.message)));

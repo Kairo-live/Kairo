@@ -219,6 +219,16 @@ function handleServerMessage(msg) {
       if (workerStatusEl) { workerStatusEl.textContent = 'Engine ready'; workerStatusEl.style.color = 'var(--green)'; }
       break;
 
+    case 'content-progress': {
+      // Map/reduce generation reports per-chunk progress; reflect it on the
+      // Content Studio generate button if a generation is in flight.
+      const lbl = document.getElementById('cs-generate-label');
+      if (lbl && lbl.textContent.startsWith('Generating')) {
+        lbl.textContent = `Generating… ${msg.done}/${msg.total}`;
+      }
+      break;
+    }
+
     case 'worker-error':
       workerReady = false;
       if (workerStatusEl) { workerStatusEl.textContent = 'Engine error'; workerStatusEl.style.color = 'var(--red)'; }
@@ -1628,6 +1638,8 @@ navigator.mediaDevices?.addEventListener?.('devicechange', () => {
       else if (kind === 'transcript')  downloadTranscriptTxt();
       else if (kind === 'note')        await downloadAIContent('note');
       else if (kind === 'points')      await downloadAIContent('points');
+      else if (kind === 'note-docx')   await downloadAIContentDocx('note');
+      else if (kind === 'points-docx') await downloadAIContentDocx('points');
     } catch (err) {
       toast('Download failed: ' + (err.message || err), 'error');
     }
@@ -1689,6 +1701,40 @@ async function downloadAIContent(type) {
   } else {
     toast('Content Studio not ready', 'error');
   }
+}
+
+// Word export goes through the server, which renders the generated content
+// as a real .docx (headings, scripture lines, quotes). Same session
+// resolution as the PDF path.
+async function downloadAIContentDocx(type) {
+  let sessions = [];
+  try {
+    const r = await fetch(`${SERVER}/api/sessions`);
+    sessions = (await r.json()).sessions || [];
+  } catch {
+    toast('Could not reach Kairo server', 'error');
+    return;
+  }
+  const want = type === 'note' ? 'hasNote' : 'hasPoints';
+  const candidate = sessions.find(s => s[want]);
+  if (!candidate) {
+    toast(`No saved sermon ${type === 'note' ? 'note' : 'points'} yet — opening Content Studio`, 'info');
+    document.getElementById('settings-modal')?.classList.add('hidden');
+    document.getElementById('content-studio-btn')?.click();
+    return;
+  }
+  const r = await fetch(`${SERVER}/api/content/export?sessionId=${encodeURIComponent(candidate.id)}&type=${type}`);
+  if (!r.ok) {
+    const j = await r.json().catch(() => ({}));
+    throw new Error(j.error || 'export failed');
+  }
+  const blob = await r.blob();
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  a.href     = url;
+  a.download = `KAIRO_${type}_${(candidate.date || candidate.id).replace(/[^A-Za-z0-9_\-]/g, '-')}.docx`;
+  a.click();
+  URL.revokeObjectURL(url);
 }
 
 // ── Elapsed timer ──────────────────────────────────────────────────────────

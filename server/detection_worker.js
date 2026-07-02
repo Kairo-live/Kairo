@@ -290,13 +290,21 @@ async function init() {
   // Also tracks document frequency (df) for IDF computation
   const norm = s => s.toLowerCase().replace(RE_NORM, '').replace(RE_WS, ' ').trim();
 
+  // KJV markup: [bracketed] section headings ("[A Psalm of David.]") are not
+  // spoken — drop them before indexing, or they inflate verse word counts and
+  // suppress verbatim coverage scores (Psalm 23:1 read verbatim scored 0.77
+  // instead of 0.93 and never cleared the auto-display bar). {braced} italic
+  // words ARE spoken; norm() strips the braces and keeps the word, which is
+  // already correct.
+  const RE_HEADING = /\[[^\]]*\]/g;
+
   // Pre-compute normalized text for every verse (avoids re-normalizing in hot loops)
   verseNormText = new Map();
   verseNormNlt  = new Map();
   for (let i = 0; i < verseMetadata.length; i++) {
     const v = verseMetadata[i];
-    verseNormText.set(i, norm(v.kjv_text));
-    if (v.nlt_text) verseNormNlt.set(i, norm(v.nlt_text));
+    verseNormText.set(i, norm(v.kjv_text.replace(RE_HEADING, ' ')));
+    if (v.nlt_text) verseNormNlt.set(i, norm(v.nlt_text.replace(RE_HEADING, ' ')));
   }
 
   const tempIndex = new Map(); // word → Set<idx> (unique per verse)
@@ -560,9 +568,22 @@ function lookupRange(book, chapter, verseStart, verseEnd) {
   return results;
 }
 
+// KJV markup → display text. {supplied words} are part of the verse — unwrap
+// them; {notes with a colon} ("{banqueting...: Heb. house of wine}") and
+// [section headings] ("[A Psalm of David.]") are translator apparatus that
+// should never reach the projector or the operator panel.
+function displayText(s) {
+  if (!s) return s;
+  return s
+    .replace(/\{([^}:]*)\}/g, '$1')
+    .replace(/\{[^}]*\}/g, '')
+    .replace(/\[[^\]]*\]/g, '')
+    .replace(/\s{2,}/g, ' ').trim();
+}
+
 function formatVerse(v, similarity, method) {
   return {
-    reference: v.reference, text: v.kjv_text, nlt_text: v.nlt_text,
+    reference: v.reference, text: displayText(v.kjv_text), nlt_text: displayText(v.nlt_text),
     book: v.book, chapter: v.chapter, verse: v.verse, similarity, method,
   };
 }
@@ -641,11 +662,13 @@ function verbatimSearch(transcript, minWords = 6, limit = 3) {
   }
 
   const threshold  = Math.max(2, Math.floor(queryWords.length * 0.4));
-  const candidates = [...counts.entries()]
-    .filter(([, c]) => c >= threshold)
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 300)
-    .map(([idx]) => idx);
+  // topK instead of a full sort — with a long transcript the counts map spans
+  // a large slice of the index, and sorting it per clause dominated the search.
+  const qualifying = [];
+  for (const entry of counts.entries()) {
+    if (entry[1] >= threshold) qualifying.push(entry);
+  }
+  const candidates = topK(qualifying, 300, (a, b) => b[1] - a[1]).map(([idx]) => idx);
 
   const results = [];
   const seen    = new Set();
@@ -996,7 +1019,10 @@ parentPort.on('message', async (msg) => {
           const results = verbatimSearch(text, msg.minWords || 6, msg.limit || 3);
           if (!results.length) continue;
           if (!best || results[0].similarity > best[0].similarity) best = results;
-          if (best[0].similarity >= 0.98) break;   // perfect match — stop early
+          // Stop at the server's viewer bar (0.92) — the old 0.98 cutoff was
+          // effectively unreachable given the score cap, so every clause was
+          // always searched even after a hit strong enough to route on-air.
+          if (best[0].similarity >= 0.92) break;
         }
         parentPort.postMessage({ type: 'verbatimResults', id: msg.id, results: best || [] });
         break;

@@ -28,6 +28,10 @@ const WORD_TO_NUM = {
   'ninety-one':91,'ninety-two':92,'ninety-three':93,'ninety-four':94,
   'ninety-five':95,'ninety-six':96,'ninety-seven':97,'ninety-eight':98,
   'ninety-nine':99,'hundred':100,'one hundred':100,
+  // Digit-by-digit zero: "Psalm one oh eight" = 108. Only meaningful inside
+  // the 3-digit composition below — a bare "oh" resolving to 0 never produces
+  // a valid chapter/verse, so it can't create phantom references.
+  'oh':0,
   'first':1,'second':2,'third':3,'fourth':4,'fifth':5,
   // Deepgram STT artifacts — common mishearings for number words in biblical context
   'for':4,   // "four" → "for"  (e.g. "john for verse one")
@@ -66,11 +70,15 @@ function consumeNumber(words, idx, maxValue = Infinity) {
   // Handles "one hundred seventy six" (176), "one hundred nineteen" (119),
   // "one hundred and five" (105) — common in Psalm 119 verse callouts, which
   // the digit-by-digit paths below can't compose.
+  // Also bare "hundred [and] N" and "a hundred [and] N" — many preachers drop
+  // the leading "one": "Psalm hundred and eight" = Psalm 108.
   const lead = spokenToNumber(words[idx]);
-  if (lead !== null && lead >= 1 && lead <= 9 && words[idx + 1] === 'hundred') {
-    let value = lead * 100;
-    let consumed = 2;
-    let j = idx + 2;
+  const bareHundred = words[idx] === 'hundred' ||
+                      (words[idx] === 'a' && words[idx + 1] === 'hundred');
+  if (bareHundred || (lead !== null && lead >= 1 && lead <= 9 && words[idx + 1] === 'hundred')) {
+    let value    = bareHundred ? 100 : lead * 100;
+    let consumed = (bareHundred && words[idx] === 'hundred') ? 1 : 2;
+    let j = idx + consumed;
     if (words[j] === 'and') { j++; consumed++; }
     const rest = consumeNumber(words, j, 99);
     if (rest && rest.value >= 1 && rest.value <= 99) {
@@ -232,7 +240,13 @@ const PARSER_HEALING_PAIRS = [
   ['thessalonian','1 thessalonians'],
   ['profit chapter','proverbs chapter'],['profit verse','proverbs verse'],
   ['first chronic','1 chronicles'],['second chronic','2 chronicles'],
+  // Song of Solomon — all spoken variants collapse to the single token
+  // "songofsolomon" so it flows through the single-word book machinery.
+  // Plural forms first: "songs of solomon" doesn't contain the singular
+  // substring, so it needs its own pair.
+  ['songs of solomon','songofsolomon'],['songs of songs','songofsolomon'],
   ['song of songs','songofsolomon'],['song of solomon','songofsolomon'],
+  ['solomon songs','songofsolomon'],['solomons song','songofsolomon'],
   // Deepgram number mishearing
   ['chapter won ','chapter one '],['verse fork','verse four'],['verse tree','verse three'],
   ['verse ate','verse eight'],['chapter ate','chapter eight'],['verse sick','verse six'],
