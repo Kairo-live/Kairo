@@ -334,6 +334,13 @@ function showEmptyTranscript(show) {
   }
 }
 
+// Cap DOM nodes in the Live Transcript Log — unlike Candidates/Live Queue
+// (both trimmed to 50), this panel had no limit and grew for the whole
+// service. Every interim update forces a scrollHeight reflow over the full
+// list, so a long sermon made the UI progressively heavier until it felt
+// frozen. Full text is still captured in sessionTranscriptParts for export.
+const TRANSCRIPT_LOG_MAX_SPANS = 400;
+
 function handleTranscript(msg) {
   if (!transcriptDiv) showEmptyTranscript(false);
   if (msg.isFinal) {
@@ -343,6 +350,10 @@ function handleTranscript(msg) {
     if (interimSpan) transcriptDiv.insertBefore(span, interimSpan);
     else transcriptDiv.appendChild(span);
     if (interimSpan) interimSpan.textContent = '';
+    const finals = transcriptDiv.querySelectorAll('.transcript-final');
+    if (finals.length > TRANSCRIPT_LOG_MAX_SPANS) {
+      for (let i = 0; i < finals.length - TRANSCRIPT_LOG_MAX_SPANS; i++) finals[i].remove();
+    }
     // Capture for Content Studio — finals only, never interim drafts.
     sessionTranscriptParts.push({ time: new Date().toLocaleTimeString(), text: msg.text });
     wordCount += msg.text.split(/\s+/).length;
