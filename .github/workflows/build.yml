@@ -45,60 +45,33 @@ jobs:
         working-directory: server
         run: npm ci --omit=dev
 
-      # ── Mirror vosk-koffi native lib for the universal Mac build ──────
-      # The upstream vosk-osx zip is a universal binary (x86_64 + arm64),
-      # but the postinstall only creates bin-darwin-${process.arch} for the
-      # CI runner's arch. We need both directory names so Intel + Apple
-      # Silicon users both resolve at runtime.
-      - name: Mirror vosk-koffi bin dir for both Mac arches
-        if: matrix.platform == 'macos-latest'
-        run: |
-          set -e
-          ARM="server/node_modules/vosk-koffi/bin-darwin-arm64"
-          X64="server/node_modules/vosk-koffi/bin-darwin-x64"
-          if [ -d "$ARM" ] && [ ! -d "$X64" ]; then
-            cp -R "$ARM" "$X64"
-            echo "✓ mirrored $ARM → $X64"
-          elif [ -d "$X64" ] && [ ! -d "$ARM" ]; then
-            cp -R "$X64" "$ARM"
-            echo "✓ mirrored $X64 → $ARM"
-          fi
+      # ── Strip build-time-only weight before bundling ───────────────────
+      # tauri.conf.json's beforeBuildCommand already runs this, but it's kept
+      # explicit here too so CI's size impact stays visible in the log. Trims
+      # smart-whisper's compiled-away source/object files (whisper.cpp compiles
+      # from source via node-gyp, leaving ~20MB that's never touched again once
+      # build/Release/smart-whisper.node exists) plus generic doc/test/map
+      # bloat across every package — see scripts/prune-server-deps.js.
+      - name: Prune server dependencies
+        run: node scripts/prune-server-deps.js
 
-      # ── Download Vosk model (offline speech engine) ────────────────────
-      # Bundled into the .app/.msi/.deb so the Offline mode works on first
-      # launch without any network round-trip. ~40MB compressed → ~68MB extracted.
-      - name: Download Vosk model (Unix)
-        if: matrix.platform != 'windows-latest'
-        run: |
-          set -euo pipefail
-          MODEL_DIR="server/models/vosk-en"
-          if [ -d "$MODEL_DIR" ] && [ -f "$MODEL_DIR/conf/model.conf" ]; then
-            echo "Vosk model already present, skipping download"
-          else
-            mkdir -p server/models
-            cd server/models
-            curl -fsSL -o vosk-en.zip "https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip"
-            unzip -q vosk-en.zip
-            rm vosk-en.zip
-            mv vosk-model-small-en-us-0.15 vosk-en
-            echo "✓ Vosk model installed at $MODEL_DIR"
-          fi
-
-      - name: Download Vosk model (Windows)
-        if: matrix.platform == 'windows-latest'
-        shell: pwsh
-        run: |
-          $MODEL_DIR = "server\models\vosk-en"
-          if (Test-Path "$MODEL_DIR\conf\model.conf") {
-            Write-Host "Vosk model already present, skipping download"
-          } else {
-            New-Item -ItemType Directory -Force -Path "server\models" | Out-Null
-            Invoke-WebRequest -Uri "https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip" -OutFile "server\models\vosk-en.zip"
-            Expand-Archive -Path "server\models\vosk-en.zip" -DestinationPath "server\models"
-            Remove-Item "server\models\vosk-en.zip"
-            Rename-Item "server\models\vosk-model-small-en-us-0.15" "vosk-en"
-            Write-Host "✓ Vosk model installed at $MODEL_DIR"
-          }
+      # ── Offline speech model: fetched on first run, NOT bundled ────────
+      # The whisper.cpp model is downloaded on first launch (behind the startup
+      # overlay) only when the operator actually selects the offline engine —
+      # keeping the base download small the way Pewbeam does. See
+      # bootstrapStartup() in src/app.js and /api/whisper/install in
+      # server/server.js.
+      #
+      # KNOWN GAP — universal macOS build: smart-whisper compiles whisper.cpp
+      # natively via node-gyp, unlike the old vosk-koffi dependency which
+      # shipped prebuilt per-arch binaries. `npm ci` on this single-arch CI
+      # runner only produces a smart-whisper.node for the runner's own
+      # architecture, so the OTHER arch's slice of the universal build will
+      # fail to load the offline engine at runtime. Fixing this needs an
+      # explicit per-arch rebuild step (e.g. `npm rebuild smart-whisper
+      # --target_arch=x64` and `--target_arch=arm64`, keeping both .node
+      # outputs and picking the right one at runtime by process.arch) — not
+      # yet wired up here. Deepgram and every other feature are unaffected.
 
       # ── Rust ───────────────────────────────────────────────────────────
       - name: Setup Rust
@@ -225,7 +198,7 @@ jobs:
             - **macOS launch fix** — bundled Node sidecar ships with JIT entitlements (was the v2.2.0 white-screen cause).
             - **Branded loading splash** — instant feedback while the server boots.
             - **Microphone permission prompt** — proper macOS dialog with a usage description.
-            - **Offline speech engine** — runs entirely on-device. No internet, no API key, no monthly cost. Powered by Vosk.
+            - **Offline speech engine** — runs entirely on-device. No internet, no API key, no monthly cost. Powered by whisper.cpp.
             - **Pill Start/Stop button** — outlined when idle, filled while listening.
 
             ### Pick your engine in Settings → Audio

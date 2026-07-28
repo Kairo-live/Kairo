@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-ndi-available"
+description = "Enables the ndi_available command without any pre-configured scope."
+commands.allow = ["ndi_available"]
+
+[[permission]]
+identifier = "deny-ndi-available"
+description = "Denies the ndi_available command without any pre-configured scope."
+commands.deny = ["ndi_available"]

@@ -228,6 +228,26 @@ fn get_server_config(state: tauri::State<'_, ServerConfig>) -> serde_json::Value
     serde_json::json!({ "port": state.port, "token": state.token })
 }
 
+/// Called by the frontend once it has actually painted the real app (auth
+/// token loaded, styles applied) — this is the signal to reveal the main
+/// window and dismiss the splash. Showing the window immediately after
+/// dispatching `navigate()` (the old approach) raced the new page's own
+/// load/paint: the window could become visible while WebKit was still
+/// mid-navigation, showing its default white document background before our
+/// dark CSS applied — a visible white flash. Letting the frontend decide
+/// "ready" removes the race entirely; see the health-check thread's fallback
+/// timer in `run()` for what happens if this is never called (JS error, etc).
+#[tauri::command]
+fn signal_main_ready(app: AppHandle) {
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.show();
+        let _ = win.set_focus();
+    }
+    if let Some(splash) = app.get_webview_window("splash") {
+        let _ = splash.close();
+    }
+}
+
 /// Called from the frontend when the user clicks "Update & Restart".
 /// Re-fetches the update (already confirmed available) and installs it.
 #[tauri::command]
@@ -363,6 +383,7 @@ pub fn run() {
             get_server_port,
             get_server_token,
             get_server_config,
+            signal_main_ready,
             install_update,
             ndi_available,
             ndi_start,
@@ -453,9 +474,16 @@ pub fn run() {
                     eprintln!("[KAIRO] Server/worker not ready within 20s — showing main window anyway so the user isn't stuck on the splash.");
                 }
 
-                // Show the main window FIRST so the focus transfer from splash
-                // is seamless, THEN close the splash so there's no flash of
-                // empty desktop between the two.
+                // Navigate to the real server URL, but do NOT show the window
+                // yet — showing it here raced the new page's own load/paint
+                // (navigate() only dispatches the load; it doesn't wait for
+                // it), so the window could become visible while WebKit was
+                // still mid-navigation and briefly show its default white
+                // background before our dark CSS applied. The frontend now
+                // calls `signal_main_ready` once it has actually painted, and
+                // THAT reveals the window instead. This fallback timer just
+                // guarantees we're never stuck on the splash forever if that
+                // signal never arrives (JS error, non-Tauri edge case, etc).
                 if let Some(win) = handle2.get_webview_window("main") {
                     // ALWAYS (re)navigate now that the server is confirmed up.
                     // The window auto-loads `frontendDist` (localhost:7777) at
@@ -475,12 +503,21 @@ pub fn run() {
                         Ok(url) => { let _ = win.navigate(url); }
                         Err(e)  => eprintln!("[KAIRO] invalid frontend URL: {e}"),
                     }
-                    let _ = win.show();
-                    let _ = win.set_focus();
                 }
-                if let Some(splash) = handle2.get_webview_window("splash") {
-                    let _ = splash.close();
-                }
+                let handle_fallback = handle2.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_secs(12));
+                    if let Some(win) = handle_fallback.get_webview_window("main") {
+                        if !win.is_visible().unwrap_or(false) {
+                            eprintln!("[KAIRO] Frontend never signalled ready within 12s — showing main window anyway.");
+                            let _ = win.show();
+                            let _ = win.set_focus();
+                            if let Some(splash) = handle_fallback.get_webview_window("splash") {
+                                let _ = splash.close();
+                            }
+                        }
+                    }
+                });
 
                 // Check for updates in the background after the window is visible.
                 // Only runs in release builds — updater endpoint won't resolve in dev.

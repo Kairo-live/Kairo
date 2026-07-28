@@ -98,7 +98,10 @@ const HIT_DEDUP_MS   = 12000;  // don't re-fire the same verse within 12s in-wor
 
 // Layer 2 tuning
 const ALIGN_CONFIRM_AT   = 6;     // words aligned to escalate from anchor → confirmed
-const ALIGN_MISS_BUDGET  = 2;     // tolerate this many word skips before dropping
+const ALIGN_MISS_BUDGET  = 3;     // tolerate this many word skips before dropping —
+                                  // covers filler ("you know", "uh", "amen") and
+                                  // paraphrase substitutions between verse words so a
+                                  // scrambled reading still reaches sequential confirmation.
 const ALIGN_AGE_MS       = 20000; // drop candidates older than 20s without confirmation
 
 // ── Algorithmic KJV stemmer ───────────────────────────────────────────────
@@ -836,12 +839,29 @@ function scoreFingerprint(matchedWeight, matchedWordCount, contextHint, limit, f
   const secondCoverage = scored.length > 1 ? scored[1][1] : 0;
   const tied           = scored.filter(([, c]) => c >= topCoverage * 0.9);
 
+  // 'high' used to mean only "no real competitor" — a verse that barely
+  // cleared COVERAGE_THRESHOLD (0.35) with nobody else in the running scored
+  // exactly the same 'high' as a verse at 95% coverage, and server.js sends
+  // any 'high' straight to the live screen regardless of the raw similarity.
+  // That let low-evidence coincidental word overlap ("wrong verse suggested")
+  // auto-broadcast just because no second candidate happened to tie it.
+  // 'high' now ALSO requires the absolute coverage to be real, not just
+  // uncontested; an isolated-but-weak match degrades to medium/low instead of
+  // getting the same trust as a genuinely strong one.
+  const HIGH_ABS_MIN   = 0.55;
+  const MEDIUM_ABS_MIN = 0.42;
   let confidence;
-  if (tied.length === 1 || secondCoverage === 0)                     confidence = 'high';
-  else if (tied.length <= 3 && topCoverage / secondCoverage >= 1.4)  confidence = 'high';
-  else if (tied.length <= 3)                                         confidence = 'medium';
-  else if (tied.length <= 5)                                         confidence = 'low';
-  else                                                               confidence = 'none';
+  if (tied.length === 1 || secondCoverage === 0) {
+    confidence = topCoverage >= HIGH_ABS_MIN ? 'high' : (topCoverage >= MEDIUM_ABS_MIN ? 'medium' : 'low');
+  } else if (tied.length <= 3 && topCoverage / secondCoverage >= 1.4) {
+    confidence = topCoverage >= HIGH_ABS_MIN ? 'high' : 'medium';
+  } else if (tied.length <= 3) {
+    confidence = 'medium';
+  } else if (tied.length <= 5) {
+    confidence = 'low';
+  } else {
+    confidence = 'none';
+  }
 
   if (confidence === 'none') return { results: [], confidence: 'none' };
 

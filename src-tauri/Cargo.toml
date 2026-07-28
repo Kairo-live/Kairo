@@ -1,6 +1,6 @@
 [package]
 name = "kairo"
-version = "2.5.0"
+version = "2.6.0"
 description = "KAIRO — AI Scripture Assistant"
 authors = ["KAIRO"]
 edition = "2021"
@@ -49,3 +49,10 @@ codegen-units = 1
 lto = true
 opt-level = "s"
 strip = true
+
+# Proc-macro/build-script crates are host tooling, not shipped code — LTO +
+# strip on them (inherited from [profile.release] by default) was producing
+# a proc-macro dylib rustc couldn't load ("can't find crate for X_derive").
+[profile.release.build-override]
+opt-level = 0
+strip = false

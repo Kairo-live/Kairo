@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-syphon-update"
+description = "Enables the syphon_update command without any pre-configured scope."
+commands.allow = ["syphon_update"]
+
+[[permission]]
+identifier = "deny-syphon-update"
+description = "Denies the syphon_update command without any pre-configured scope."
+commands.deny = ["syphon_update"]

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-ndi-start"
+description = "Enables the ndi_start command without any pre-configured scope."
+commands.allow = ["ndi_start"]
+
+[[permission]]
+identifier = "deny-ndi-start"
+description = "Denies the ndi_start command without any pre-configured scope."
+commands.deny = ["ndi_start"]

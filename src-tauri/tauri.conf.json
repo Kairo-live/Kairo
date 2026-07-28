@@ -1,11 +1,11 @@
 {
   "productName": "KAIRO",
-  "version": "2.5.0",
+  "version": "2.6.0",
   "identifier": "com.kairo.scripture",
   "build": {
     "beforeDevCommand": "npm run server",
     "devUrl": "http://localhost:7777",
-    "beforeBuildCommand": "",
+    "beforeBuildCommand": "node scripts/prune-server-deps.js",
     "frontendDist": "http://localhost:7777"
   },
   "app": {

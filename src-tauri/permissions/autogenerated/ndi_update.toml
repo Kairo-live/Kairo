@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-ndi-update"
+description = "Enables the ndi_update command without any pre-configured scope."
+commands.allow = ["ndi_update"]
+
+[[permission]]
+identifier = "deny-ndi-update"
+description = "Denies the ndi_update command without any pre-configured scope."
+commands.deny = ["ndi_update"]

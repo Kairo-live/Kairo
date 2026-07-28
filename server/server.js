@@ -346,15 +346,15 @@ wss.on('connection', (ws) => {
 
   // Forward binary audio frames to whichever engine is active.
   // - Deepgram: streamed straight to the WS connection (Deepgram does endpointing)
-  // - Vosk:     fed to the local recognizer; result() / partialResult() drive detection
+  // - Whisper:  fed to the local recognizer; partial()/final() drive detection
   // Either way we keep a short audio ring buffer for the REST fallback path.
   ws.on('message', (data, isBinary) => {
     if (!isBinary) return;
     const chunk = Buffer.isBuffer(data) ? data : Buffer.from(data);
     if (deepgramConnection) {
       try { deepgramConnection.send(chunk); } catch {}
-    } else if (voskActive) {
-      feedVoskAudio(chunk);
+    } else if (whisperActive) {
+      feedWhisperAudio(chunk);
     }
     audioRingBuffer.push({ data: chunk, time: Date.now() });
     audioRingBytes += chunk.length;
@@ -380,28 +380,6 @@ let deepgramKeepAliveTimer  = null;  // 8-second ping to prevent silent connecti
 let deepgramSilenceWatchdog = null;  // 30-second watchdog — reconnects if no transcript received
 let deepgramLastTranscriptAt = 0;    // timestamp of last received transcript segment
 
-// ── Vosk (offline STT) state ──────────────────────────────────────────────
-// Loaded lazily on first use so we don't pay the ~80MB RAM cost when the
-// user is on Deepgram. Model is reused across sessions; recognizer is per-session.
-let voskLib          = null;        // require('vosk-koffi'), loaded once
-let voskModel        = null;        // Vosk.Model instance — heavy, kept alive
-let voskRecognizer   = null;        // per-listening-session recognizer
-let voskActive       = false;       // true when Vosk path is the active engine
-let voskLastPartial  = '';          // last partial we broadcast — dedupe noise
-let voskPartialFlushTimer = null;   // throttles partials so we don't flood detection
-const VOSK_SAMPLE_RATE = 16000;
-// Default partial-flush throttle. Tightened to 100 ms in reading mode so
-// scripture matches and slide transitions feel instant while a verse is
-// actively being read — see voskPartialThrottleMs() below.
-const VOSK_PARTIAL_FLUSH_MS         = 220;  // emit partials at most ~4×/s
-const VOSK_PARTIAL_FLUSH_MS_READING = 100;  // ~10×/s during active scripture reading
-function voskPartialThrottleMs() {
-  return readingModeActive ? VOSK_PARTIAL_FLUSH_MS_READING : VOSK_PARTIAL_FLUSH_MS;
-}
-const VOSK_MODELS_DIR = process.env.KAIRO_APP_DATA_DIR
-  ? path.join(process.env.KAIRO_APP_DATA_DIR, 'models')
-  : path.join(__dirname, 'models');
-const VOSK_MODEL_PATH = path.join(VOSK_MODELS_DIR, 'vosk-en');
 let transcriptBuffer    = [];
 let lastFingerprintSearch    = 0;
 const FINGERPRINT_INTERVAL_MS = 1000;   // don't run fingerprint search more than once per 1s
@@ -453,12 +431,12 @@ const SUGGESTION_MIN_SCORE = 0.75;
 const SUGGESTION_DEDUP_MS = 30000;
 const recentSuggestions = new Map();   // verseKey → last suggestion broadcast time
 
-// Minimum *similarity* for a fingerprint (paraphrase) hit to auto-promote into
-// the live queue. Decoupled from the worker's confidence tier so a strong hit
-// isn't trapped in Candidates just because unrelated verses scored nearby.
-// A second agreeing method (verbatim) can lift a weaker hit over this via the
-// ensemble boost. Direct refs and verbatim quotes use their own higher bars.
-const FINGERPRINT_VIEWER_MIN_SCORE = 0.90;
+// Fingerprint (per-word IDF context/paraphrase) hits never auto-deploy to the
+// live viewer, at any score — the algorithm surfaces plausible allusions from
+// word overlap, which a noisy transcript can push arbitrarily high without the
+// preacher having said anything close to that verse. Auto-deploy is reserved
+// for explicit citations (direct) and near-exact quotes (verbatim); fingerprint
+// hits only ever appear as Candidates suggestions.
 
 // Track what we already detected from interim so we skip on final
 let interimDetectedRef  = null;
@@ -960,14 +938,107 @@ app.post('/api/propresenter/send', async (req, res) => {
   res.json({ ok: await sendToProPresenter(verse) });
 });
 
+// Import slides from a document. The file arrives base64-encoded so this stays
+// on the existing JSON transport rather than needing multipart handling.
+const slideImport = require('./slide_import');
+app.post('/api/service/import', (req, res) => {
+  const { filename, dataBase64, text } = req.body || {};
+  try {
+    if (typeof text === 'string' && text.trim()) {
+      return res.json({ ok: true, format: 'text', blocks: slideImport.fromText(text) });
+    }
+    if (!dataBase64) return res.status(400).json({ error: 'Nothing to import' });
+    const buf = Buffer.from(dataBase64, 'base64');
+    const out = slideImport.importSlides(filename || '', buf);
+    // Playlists resolve to multiple presentations (each its own item) rather
+    // than one flat block list — everything else keeps the single-item shape.
+    if (out.items) {
+      if (!out.items.length) return res.status(422).json({ error: 'No presentations found in that playlist' });
+      return res.json({ ok: true, format: out.format, items: out.items });
+    }
+    if (!out.blocks.length) return res.status(422).json({ error: 'No text found in that file' });
+    res.json({ ok: true, ...out });
+  } catch (err) {
+    res.status(422).json({ error: err.message, code: err.code || null });
+  }
+});
+
+// Send a playlist slide. Unlike /api/propresenter/send this also broadcasts to
+// every display window, and carries an optional per-item `look` so a song can
+// render on the lyrics theme while scripture stays on the output's own theme.
+app.post('/api/service/send', async (req, res) => {
+  const { verse, look } = req.body;
+  if (!verse) return res.status(400).json({ error: 'No slide provided' });
+  broadcast({
+    type: 'detection', target: 'viewer', method: 'service',
+    verses: [verse], topScore: 1,
+    look: look || null,
+    timestamp: Date.now(),
+  });
+  try { await sendToOutputs(verse); } catch (err) {
+    console.warn('[Service] sendToOutputs failed:', err.message);
+  }
+  res.json({ ok: true });
+});
+
 app.post('/api/propresenter/clear', async (_, res) => {
   await clearProPresenter();
   res.json({ ok: true });
 });
 
 // Broadcast active look to all connected display windows via WebSocket
+// Apply themes to outputs. Two shapes are accepted:
+//   { look }            → legacy: one theme for every output
+//   { themes: {key:look} } → per-output map; each display client picks the entry
+//                            matching its own output key and ignores the rest.
+// Scripture language packs. Only English ships with the app; other languages
+// download their verse corpus on demand into the app data dir. Returns a clear
+// error while a pack has no published corpus yet, rather than silently
+// pretending the language is installed.
+const LANG_PACK_DIR = process.env.KAIRO_APP_DATA_DIR
+  ? path.join(process.env.KAIRO_APP_DATA_DIR, 'lang')
+  : path.join(__dirname, '..', 'databases', 'lang');
+
+app.get('/api/lang/status', (_req, res) => {
+  let installed = ['en'];
+  try {
+    if (fs.existsSync(LANG_PACK_DIR)) {
+      installed = installed.concat(
+        fs.readdirSync(LANG_PACK_DIR).filter(f => /^[a-z]{2}$/.test(f))
+      );
+    }
+  } catch {}
+  res.json({ installed: [...new Set(installed)], dir: LANG_PACK_DIR });
+});
+
+app.post('/api/lang/install', async (req, res) => {
+  const code = String(req.body?.code || '').toLowerCase();
+  if (!/^[a-z]{2}$/.test(code)) return res.status(400).json({ error: 'Invalid language code' });
+  if (code === 'en') return res.json({ ok: true, bundled: true });
+
+  const base = process.env.KAIRO_LANG_PACK_BASE_URL;
+  if (!base) {
+    return res.status(503).json({
+      error: 'no scripture pack source configured yet — set KAIRO_LANG_PACK_BASE_URL',
+    });
+  }
+  try {
+    fs.mkdirSync(path.join(LANG_PACK_DIR, code), { recursive: true });
+    const url = `${base.replace(/\/+$/, '')}/${code}/map.json`;
+    const r = await axios.get(url, { responseType: 'arraybuffer', timeout: 120000 });
+    fs.writeFileSync(path.join(LANG_PACK_DIR, code, 'map.json'), Buffer.from(r.data));
+    res.json({ ok: true, code });
+  } catch (err) {
+    res.status(502).json({ error: `download failed: ${err.message}` });
+  }
+});
+
 app.post('/api/look/apply', (req, res) => {
-  const { look } = req.body;
+  const { look, themes } = req.body;
+  if (themes && typeof themes === 'object') {
+    broadcast({ type: 'look-update', themes, look: look || null });
+    return res.json({ ok: true, outputs: Object.keys(themes).length });
+  }
   if (!look || typeof look !== 'object') return res.status(400).json({ error: 'No look provided' });
   broadcast({ type: 'look-update', look });
   res.json({ ok: true });
@@ -1114,44 +1185,47 @@ app.post('/api/test-transcript', async (req, res) => {
   res.json({ ok: true, foundRef });
 });
 
-// Unified start endpoint — body.engine selects 'deepgram' (cloud) or 'vosk' (offline).
+// Unified start endpoint — body.engine selects 'deepgram' (cloud) or the local
+// whisper.cpp engine, reached via 'whisper', 'offline', or the legacy aliases
+// 'vosk'/'browser' left over from the Vosk-based engine this replaced (so an
+// operator's previously-saved setting keeps working after the upgrade).
 // Default is deepgram for backward compatibility.
 app.post('/api/start-listening', async (req, res) => {
   const engine = String(req.body?.engine || 'deepgram').toLowerCase();
-  if (engine === 'vosk' || engine === 'offline' || engine === 'browser') {
-    return res.json(await startVosk());
+  if (['whisper', 'offline', 'vosk', 'browser'].includes(engine)) {
+    return res.json(await startWhisper());
   }
   return res.json(await startDeepgram(req.body || {}));
 });
 
 app.post('/api/stop-listening', async (_, res) => {
   // Stop whichever engine is active. Both calls are idempotent / no-op if inactive.
-  if (voskActive) await stopVosk();
+  if (whisperActive) await stopWhisper();
   if (deepgramConnection) await stopDeepgram();
   res.json({ ok: true });
 });
 
-// ── Vosk offline model installer ─────────────────────────────────────────
-// GUI-driven counterpart to `npm run vosk:install`. The settings panel POSTs
-// here when the operator hits "Download offline model" and renders the
+// ── Whisper offline model installer ──────────────────────────────────────
+// GUI-driven counterpart to `npm run whisper:install`. The settings panel
+// POSTs here when the operator hits "Download offline model" and renders the
 // streamed NDJSON progress events as a progress bar.
 // One install at a time — second call returns 409 instead of double-downloading.
-const voskInstaller = require('./vosk_installer');
-let voskInstallInProgress = false;
+const whisperInstaller = require('./whisper_installer');
+let whisperInstallInProgress = false;
 
-app.get('/api/vosk/status', (_req, res) => {
+app.get('/api/whisper/status', (_req, res) => {
   res.json({
-    installed: voskInstaller.isModelPresent(VOSK_MODELS_DIR),
-    modelDir:  voskInstaller.modelDir(VOSK_MODELS_DIR),
-    installing: voskInstallInProgress,
+    installed: whisperInstaller.isModelPresent(),
+    modelPath: whisperInstaller.modelPath(),
+    installing: whisperInstallInProgress,
   });
 });
 
-app.post('/api/vosk/install', async (_req, res) => {
-  if (voskInstallInProgress) {
+app.post('/api/whisper/install', async (_req, res) => {
+  if (whisperInstallInProgress) {
     return res.status(409).json({ error: 'install already in progress' });
   }
-  voskInstallInProgress = true;
+  whisperInstallInProgress = true;
 
   res.setHeader('Content-Type', 'application/x-ndjson');
   res.setHeader('Cache-Control', 'no-cache');
@@ -1163,15 +1237,12 @@ app.post('/api/vosk/install', async (_req, res) => {
   };
 
   try {
-    await voskInstaller.installVoskModel({
-      modelsDir: VOSK_MODELS_DIR,
-      onProgress: (e) => send(e),
-    });
+    await whisperInstaller.installWhisperModel({ onProgress: send });
     send({ phase: 'complete', ok: true });
   } catch (err) {
     send({ phase: 'complete', ok: false, error: err.message || String(err) });
   } finally {
-    voskInstallInProgress = false;
+    whisperInstallInProgress = false;
     res.end();
   }
 });
@@ -1839,7 +1910,15 @@ async function handleTranscriptSegment(transcript, isFinal, confidence, speechFi
   if (!isFinal) {
     // Feed new words into the anchor trie immediately — don't wait for the
     // final. Quotes start matching while the preacher is mid-sentence.
-    streamNewWords(transcript, false);
+    // Skipped for Whisper: its onPartial re-transcribes the entire growing
+    // audio window from scratch every pass (no stable append-only prefix
+    // guarantee the way Deepgram's interim API has), so the word-count-based
+    // watermark diff in streamNewWords can't tell a genuine new word from an
+    // earlier word whisper silently revised. Feeding a revised tail into the
+    // anchor trie's persistent alignment state produces false sequential
+    // matches — wrong verses reaching the viewer before the utterance even
+    // finishes. The trie still gets the (stable, one-shot) final text below.
+    if (!whisperActive) streamNewWords(transcript, false);
     maybeHandleNextVerseTrigger(transcript).catch(() => {});
     if (workerBasicReady) {
       let foundRef = await processForReferences(transcript, false);
@@ -1951,7 +2030,7 @@ async function handleTranscriptSegment(transcript, isFinal, confidence, speechFi
     await Promise.all([
       processVerbatim(textForExpensive),
       canFingerprint
-        ? runFingerprintSearch(textForExpensive, true, !foundRef)
+        ? runFingerprintSearch(textForExpensive, true)
         : Promise.resolve(),
     ]);
   } else {
@@ -1966,7 +2045,7 @@ async function handleTranscriptSegment(transcript, isFinal, confidence, speechFi
       await Promise.all([
         processVerbatim(textForExpensive),
         canFingerprint
-          ? runFingerprintSearch(textForExpensive, true, !foundRef)
+          ? runFingerprintSearch(textForExpensive, true)
           : Promise.resolve(),
       ]);
     } else if (workerBasicReady && !textForExpensive) {
@@ -1986,138 +2065,91 @@ async function handleTranscriptSegment(transcript, isFinal, confidence, speechFi
     if (bufferText && bufferText !== textForExpensive) {
       await Promise.all([
         processVerbatim(bufferText),
-        runFingerprintSearch(bufferText, true, !foundRef),
+        runFingerprintSearch(bufferText, true),
       ]);
     }
   }
 }
 
-// ── Vosk (offline STT) ────────────────────────────────────────────────────
+// ── Whisper (offline STT, whisper.cpp) ─────────────────────────────────────
 // Local, no-internet engine. Audio streams from the client over the same
-// WebSocket the Deepgram path uses. Recognizer results are routed through
-// the shared `handleTranscriptSegment` so detection / broadcast / viewer
-// behaviour is identical to Deepgram.
-function loadVoskModel() {
-  if (voskModel) return voskModel;
-  if (!fs.existsSync(VOSK_MODEL_PATH) || !fs.existsSync(path.join(VOSK_MODEL_PATH, 'conf', 'model.conf'))) {
-    const e = new Error(`Vosk model not found at ${VOSK_MODEL_PATH}. Run: npm run vosk:install`);
-    e.code = 'VOSK_MODEL_MISSING';
-    throw e;
-  }
-  if (!voskLib) voskLib = require('vosk-koffi');
-  // Quiet Vosk's verbose log spam — we only want errors.
-  try { voskLib.setLogLevel(-1); } catch {}
-  voskModel = new voskLib.Model(VOSK_MODEL_PATH);
-  return voskModel;
+// WebSocket the Deepgram path uses. Results are routed through the shared
+// `handleTranscriptSegment` so detection / broadcast / viewer behaviour is
+// identical to Deepgram.
+let whisperMod    = null;   // require('./whisper_engine'), loaded once
+let whisperEngine = null;   // WhisperEngine instance
+let whisperActive = false;
+let whisperLastPartial = '';
+
+function loadWhisperMod() {
+  if (whisperMod) return whisperMod;
+  whisperMod = require('./whisper_engine');   // pure JS, always requireable
+  return whisperMod;
 }
 
-async function startVosk() {
+async function startWhisper() {
   if (connectionState === 'connected' || connectionState === 'connecting') {
     return { error: 'Already listening' };
   }
   try {
     connectionState = 'connecting';
-    broadcast({ type: 'connection-state', state: 'connecting', engine: 'vosk' });
+    broadcast({ type: 'connection-state', state: 'connecting', engine: 'whisper' });
 
-    const model = loadVoskModel();
-    voskRecognizer = new voskLib.Recognizer({ model, sampleRate: VOSK_SAMPLE_RATE });
-    try { voskRecognizer.setWords(false); } catch {}
-    try { voskRecognizer.setPartialWords(false); } catch {}
+    const { WhisperEngine, defaultModelPath } = loadWhisperMod();
+    whisperLastPartial = '';
+    whisperEngine = new WhisperEngine({
+      modelPath: process.env.KAIRO_WHISPER_MODEL || defaultModelPath(),
+      gpu: true,
+      language: 'en',
+      onPartial: (text) => {
+        const t = (text || '').trim();
+        if (!t || t === whisperLastPartial) return;
+        whisperLastPartial = t;
+        handleTranscriptSegment(t, false, 0.85, false).catch(() => {});
+      },
+      onFinal: (text) => {
+        const t = (text || '').trim();
+        whisperLastPartial = '';
+        if (t) handleTranscriptSegment(t, true, 0.9, true).catch(() => {});
+      },
+      onError: (err) => console.warn('[Whisper]', err.message),
+    });
 
-    voskActive = true;
-    voskLastPartial = '';
+    await whisperEngine.start();
+    whisperActive = true;
     streamWatermark = 0;
     connectionState = 'connected';
-    broadcast({ type: 'connection-state', state: 'connected', engine: 'vosk' });
-    return { ok: true, engine: 'vosk' };
+    broadcast({ type: 'connection-state', state: 'connected', engine: 'whisper' });
+    return { ok: true, engine: 'whisper' };
   } catch (err) {
-    voskActive = false;
-    if (voskRecognizer) { try { voskRecognizer.free(); } catch {} voskRecognizer = null; }
+    whisperActive = false;
+    whisperEngine = null;
     connectionState = 'error';
-    const friendly = err.code === 'VOSK_MODEL_MISSING'
-      ? 'Offline model missing. Run "npm run vosk:install" to download it (~40MB).'
-      : `Vosk failed to start: ${err.message}`;
-    broadcast({ type: 'connection-state', state: 'error', error: friendly, errorKind: err.code === 'VOSK_MODEL_MISSING' ? 'model-missing' : 'unknown' });
+    const friendly = err.code === 'WHISPER_MODEL_MISSING'
+      ? 'Offline model missing. Run "npm run whisper:install" to download it (~182MB), or wait for the startup download to finish.'
+      : err.code === 'WHISPER_BINDING_MISSING'
+      ? 'Offline engine not installed. Run "npm install" in the server folder.'
+      : `Whisper failed to start: ${err.message}`;
+    broadcast({ type: 'connection-state', state: 'error', error: friendly, errorKind: err.code === 'WHISPER_MODEL_MISSING' ? 'model-missing' : 'unknown' });
     return { error: friendly };
   }
 }
 
-// vosk-koffi's result methods return already-parsed objects (unlike upstream
-// `vosk` which returns JSON strings). Accept both for forward-compat.
-function _voskUnpack(out) {
-  if (!out) return {};
-  if (typeof out === 'string') {
-    try { return JSON.parse(out); } catch { return {}; }
-  }
-  return out;
+function feedWhisperAudio(buffer) {
+  if (!whisperActive || !whisperEngine) return;
+  try { whisperEngine.feed(buffer); }
+  catch (err) { console.warn('[Whisper] feed error:', err.message); }
 }
 
-async function stopVosk() {
-  voskActive = false;
-  clearTimeout(voskPartialFlushTimer);
-  voskPartialFlushTimer = null;
-  if (voskRecognizer) {
-    // Flush any remaining audio so the last utterance lands as a final transcript
-    try {
-      const tail = (_voskUnpack(voskRecognizer.finalResult()).text || '').trim();
-      if (tail) {
-        await handleTranscriptSegment(tail, true, 0.9, true).catch(() => {});
-      }
-    } catch {}
-    try { voskRecognizer.free(); } catch {}
-    voskRecognizer = null;
+async function stopWhisper() {
+  whisperActive = false;
+  whisperLastPartial = '';
+  if (whisperEngine) {
+    try { await whisperEngine.stop(); } catch {}
+    whisperEngine = null;
   }
-  // The model itself is the ~100 MB native heap allocation — recognizers are
-  // cheap by comparison. Free it on stop so switching to Deepgram or just
-  // pausing listening immediately returns that memory to the OS. The next
-  // startVosk() call lazily reloads it via loadVoskModel().
-  if (voskModel) {
-    try { voskModel.free(); } catch {}
-    voskModel = null;
-  }
-  voskLastPartial = '';
   connectionState = 'disconnected';
   broadcast({ type: 'connection-state', state: 'disconnected' });
-}
-
-// Called from the WebSocket binary-message handler when Vosk is the active engine.
-function feedVoskAudio(buffer) {
-  if (!voskActive || !voskRecognizer) return;
-  let isFinal = false;
-  try {
-    isFinal = voskRecognizer.acceptWaveform(buffer);
-  } catch (err) {
-    console.warn('[Vosk] acceptWaveform error:', err.message);
-    return;
-  }
-  if (isFinal) {
-    try {
-      const finalText = (_voskUnpack(voskRecognizer.result()).text || '').trim();
-      voskLastPartial = '';
-      if (finalText) {
-        handleTranscriptSegment(finalText, true, 0.9, true).catch(err => {
-          console.error('[Vosk] final handler error:', err.message);
-        });
-      }
-    } catch (err) {
-      console.warn('[Vosk] result parse error:', err.message);
-    }
-  } else {
-    // Throttle partials — Vosk emits one per chunk and we don't need that rate
-    if (voskPartialFlushTimer) return;
-    voskPartialFlushTimer = setTimeout(() => {
-      voskPartialFlushTimer = null;
-      if (!voskActive || !voskRecognizer) return;
-      try {
-        const partial = (_voskUnpack(voskRecognizer.partialResult()).partial || '').trim();
-        if (!partial || partial === voskLastPartial) return;
-        voskLastPartial = partial;
-        handleTranscriptSegment(partial, false, 0.85, false).catch(err => {
-          console.error('[Vosk] partial handler error:', err.message);
-        });
-      } catch {}
-    }, voskPartialThrottleMs());
-  }
 }
 
 // ── Deepgram ──────────────────────────────────────────────────────────────
@@ -2165,7 +2197,9 @@ async function startDeepgram(config = {}) {
     const dg = createClient(key);
 
     deepgramConnection = dg.listen.live({
-      model: 'nova-2', language: 'en-US', smart_format: true, punctuate: true,
+      // Spoken language comes from Settings → Language. 'multi' asks Deepgram
+      // to auto-detect, for services that code-switch mid-sentence.
+      model: 'nova-2', language: (loadSettings().sttLanguage || 'en-US'), smart_format: true, punctuate: true,
       interim_results: true, utterance_end_ms: 1200, endpointing: 300,
       encoding: 'linear16', sample_rate: 16000, channels: 1,
       no_delay: true, filler_words: false, diarize: false,
@@ -2365,7 +2399,7 @@ function tryRangeAdvanceByRef(verses) {
 // watermark and feed only the suffix that hasn't been streamed yet. This gets
 // each word into the trie the moment STT hears it (~1-3s before the final
 // lands) without double-feeding when the final repeats the same words. The
-// watermark resets on each final, matching Deepgram/Vosk utterance semantics.
+// watermark resets on each final, matching Deepgram/Whisper utterance semantics.
 let streamWatermark = 0;
 
 function streamNewWords(transcript, isFinal) {
@@ -2378,10 +2412,13 @@ function streamNewWords(transcript, isFinal) {
 }
 
 //
-//   • Anchor-only hits (4 distinctive words match) → 'suggestions' at 0.80.
+//   • Bible-wide-unique hits (df=1, 4 distinctive words match) → 'viewer' at 0.90+.
 //   • Confirmed hits (≥6 words align in sequence) → 'viewer' at 0.90+.
+//   • Shared/ambiguous anchors (df>1, not yet confirmed) → dropped. Candidates
+//     is fingerprint/context suggestions only; these promote to viewer on
+//     their own if the alignment keeps going, otherwise they're noise.
 //
-// Ties broken by:
+// Ties broken by (rankStreamHits):
 //   1. Confirmed > anchor-only
 //   2. Topic library membership (sermon's active theme)
 //   3. Chapter proximity to recent citations (±5 chapters, decaying with age)
@@ -2403,16 +2440,26 @@ async function processStreamText(text) {
       broadcastDetection(top, 'stream', top[0].similarity || 0.90, 'viewer');
     }
     if (anchors.length) {
-      // Anchor-only = 4 matched words, no sequential confirmation yet. Only
-      // surface the distinctive ones: a phrase shared by ≤2 verses, or one
-      // inside the sermon's active topic frame. Shared 4-grams outside the
-      // topic (df 3-5) fire on coincidental speech and were the main source
-      // of Candidates-panel noise. Cap at 2 — Layer 2 promotes the real one
-      // to viewer within a few more words anyway.
-      const strong = anchors.filter(r => r.df <= 2 || r.inTopicLibrary).slice(0, 2);
-      if (strong.length) {
-        broadcastDetection(strong, 'stream', strong[0].similarity || 0.80, 'suggestions');
+      // ── Unique-phrase fast-share (df === 1) ───────────────────────────────
+      // A df=1 four-gram is unique to exactly ONE verse in the entire Bible, so
+      // an exact (stemmed) hit is as certain as a spoken citation — "God so
+      // loved the world" can only be John 3:16. Sequential confirmation (6
+      // aligned words) is what makes a scrambled or filler-laden reading
+      // ("for God — you know — so loved the world, and he gave his only son")
+      // never reach the viewer: the filler burns the alignment budget and the
+      // quote ends before 6 words line up. Share these the instant the 4th
+      // distinctive word lands. Verified safe against conversational speech —
+      // ordinary sermon prose produces no df=1 anchors.
+      const unique = anchors.filter(r => r.df === 1);
+      if (unique.length) {
+        broadcastDetection(unique.slice(0, 1), 'stream', Math.max(0.90, unique[0].similarity || 0.90), 'viewer');
       }
+
+      // Anchor-only, shared phrase (df 2, or df 3-5 inside the sermon's active
+      // topic frame): plausible but not unique — dropped rather than shown as a
+      // suggestion. Candidates is fingerprint/context suggestions only; Layer 2
+      // still promotes the real one to viewer within a few more words if it
+      // keeps aligning into a confirmed (6+ word) or df=1 unique match.
     }
   } catch (err) {
     if (!err.message?.includes('timeout')) {
@@ -2587,8 +2634,7 @@ async function processVerbatim(transcript) {
     const msg     = await workerCall('verbatimSearchBatch', { texts, minWords: 6, limit: 3 }, 4000);
     const results = msg.results || [];
     if (!results.length) return false;
-    const viewer      = results.filter(r => r.similarity >= 0.92);
-    const suggestions = results.filter(r => r.similarity < 0.92);
+    const viewer = results.filter(r => r.similarity >= 0.92);
     if (viewer.length) {
       const top        = viewer[0];
       const vKey       = `${top.book}|${top.chapter}|${top.verse}`;
@@ -2602,10 +2648,8 @@ async function processVerbatim(transcript) {
         trackReadingModeHit(top, top.similarity);
       }
     }
-    // Top-1 only — surfacing all sub-0.92 phrase matches floods Candidates with
-    // near-miss verses that share a few words. The strongest one is the useful
-    // heads-up; the rest are noise.
-    if (suggestions.length) broadcastDetection(suggestions.slice(0, 1), 'verbatim', suggestions[0].similarity, 'suggestions');
+    // Sub-0.92 verbatim near-misses are dropped entirely — Candidates is
+    // context (fingerprint) suggestions only; auto-deploy is direct + verbatim.
     return true;
   } catch { return false; }
 }
@@ -2657,7 +2701,7 @@ function maybeCorrectMiscitation(topMatch) {
 }
 
 // skipNewTranscriptCheck: true on interim path
-async function runFingerprintSearch(currentSegment, skipNewTranscriptCheck = false, allowViewer = true) {
+async function runFingerprintSearch(currentSegment, skipNewTranscriptCheck = false) {
   if (!workerBasicReady) return;
   if (!skipNewTranscriptCheck && !hasNewTranscript) return;
   if (!skipNewTranscriptCheck) hasNewTranscript = false;
@@ -2707,33 +2751,21 @@ async function runFingerprintSearch(currentSegment, skipNewTranscriptCheck = fal
 
     if (!results.length || confidence === 'none') return;
 
-    // Promotion to the live queue keys on the similarity the operator actually
-    // sees on the badge — not the confidence *tier*. The tier is computed from
-    // how many other verses tied nearby, so a genuinely strong 90%+ hit was
-    // being withheld in Candidates just because unrelated verses clustered near
-    // it. Rule: a fingerprint reaches viewer when its similarity clears
-    // FINGERPRINT_VIEWER_MIN_SCORE, OR when the worker is already 'high'
-    // confidence. ensembleScore still boosts when a second method agrees.
-    const fpKey   = `${results[0].book}|${results[0].chapter}|${results[0].verse}`;
-    const boosted = ensembleScore(fpKey, 'fingerprint', results[0].similarity, results);
-    const clearsViewerBar = confidence === 'high' || boosted >= FINGERPRINT_VIEWER_MIN_SCORE;
-
-    if (allowViewer && clearsViewerBar && !recentDirectRef) {
-      broadcastDetection(results.slice(0, 1), 'fingerprint', boosted, 'viewer');
-      // Feed strong fingerprint hits into sermon context
+    // Fingerprint (context/paraphrase) hits only ever surface as Candidates
+    // suggestions — see the FINGERPRINT note above runFingerprintSearch for why
+    // they never auto-deploy. Suppressed briefly after a direct citation so the
+    // operator isn't shown a redundant "context" suggestion for a verse the
+    // preacher just explicitly cited.
+    // Limit to top-1 only: the noise problem came from all 5 fingerprint results
+    // flooding the panel with unrelated verses at similar scores.
+    if (!recentDirectRef && results[0].similarity >= 0.85) {
+      const fpKey   = `${results[0].book}|${results[0].chapter}|${results[0].verse}`;
+      const boosted = ensembleScore(fpKey, 'fingerprint', results[0].similarity, results);
+      broadcastDetection(results.slice(0, 1), 'fingerprint', boosted, 'suggestions');
       if (boosted >= 0.87) {
         updateSermonContext({ book: results[0].book, chapter: results[0].chapter, verse: results[0].verse });
       }
-    } else if (results.length && results[0].similarity >= 0.85) {
-      // Not confident enough for the live screen, but the top result clears a high
-      // bar — surface it as a single early-warning suggestion so the operator gets
-      // a heads-up before verbatim confirms it.
-      // Limit to top-1 only: the noise problem came from all 5 fingerprint results
-      // flooding the panel with unrelated verses at similar scores.
-      broadcastDetection(results.slice(0, 1), 'fingerprint', results[0].similarity, 'suggestions');
     }
-    // Fingerprint below viewer threshold → drop entirely.
-  // Right panel is now verbatim/phrase candidates only.
   } catch (err) {
     if (!err.message?.includes('timeout')) {
       console.warn('[Server] Fingerprint search error:', err.message);

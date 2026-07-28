@@ -14,9 +14,12 @@
   --border-md:   rgba(255,255,255,0.12);
 
   --text:        #f0f0f0;
-  --text-2:      #888888;
-  --text-3:      #444444;
-  --text-4:      #222222;
+  --text-2:      #8e8e8e;
+  /* Tertiary text / idle icon colour. #444 was ~1.4:1 against the panel
+     surfaces it sits on, which made icon buttons effectively invisible;
+     this keeps the muted feel while staying legible. */
+  --text-3:      #6e6e6e;
+  --text-4:      #333333;
 
   --red:         #e8404a;
   --red-dim:     rgba(232,64,74,0.15);
@@ -43,7 +46,118 @@
 
   --shadow-sm: 0 1px 6px rgba(0,0,0,0.2);
   --shadow-md: 0 2px 12px rgba(0,0,0,0.4);
+
+  /* ── Spacing scale (4px base) — use instead of ad-hoc px so rhythm is uniform ── */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+
+  /* ── Type scale ── */
+  --fs-xs:  11px;
+  --fs-sm:  12px;
+  --fs-md:  13px;
+  --fs-base:14px;
+  --fs-lg:  16px;
+  --fs-xl:  20px;
+  --fs-2xl: 26px;
+
+  /* ── Icon system ── one stroke weight, one set of sizes, everywhere ── */
+  --icon-stroke: 1.75;   /* normalized weight for 24-grid icons */
+  --icon-sm: 14px;
+  --icon-md: 16px;
+  --icon-lg: 20px;
 }
+
+/* ── Startup bootstrap overlay ───────────────────────────────────────────────
+   Full-screen branded loader shown until permissions are granted and required
+   resources are downloaded. Fades out and is removed once ready. */
+#bootstrap-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100000;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-5);
+  background: linear-gradient(180deg, #131313 0%, #0a0a0a 100%);
+  transition: opacity 450ms ease;
+}
+#bootstrap-overlay.done { opacity: 0; pointer-events: none; }
+.bootstrap-wordmark {
+  font-family: var(--font-head);
+  font-size: 46px;
+  font-weight: 800;
+  letter-spacing: 0.16em;
+  color: var(--text);
+  line-height: 1;
+}
+.bootstrap-wordmark span { color: var(--red); }
+.bootstrap-tagline {
+  font-size: 10px;
+  letter-spacing: 0.36em;
+  text-transform: uppercase;
+  color: var(--text-2);
+  margin-top: calc(var(--space-3) * -1);
+}
+.bootstrap-bar {
+  width: 220px;
+  height: 3px;
+  border-radius: 3px;
+  background: rgba(255,255,255,0.08);
+  overflow: hidden;
+  margin-top: var(--space-2);
+}
+.bootstrap-bar-fill {
+  height: 100%;
+  width: 30%;
+  border-radius: 3px;
+  background: var(--red);
+  transition: width 400ms ease;
+}
+/* Indeterminate sweep when width is 0 (unknown progress). */
+.bootstrap-bar-fill.indeterminate {
+  width: 40% !important;
+  animation: bootstrap-sweep 1.1s ease-in-out infinite;
+}
+@keyframes bootstrap-sweep {
+  0%   { transform: translateX(-120%); }
+  100% { transform: translateX(320%); }
+}
+.bootstrap-status {
+  font-size: var(--fs-xs);
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--text-2);
+  font-weight: 500;
+}
+
+/* ── Icon normalization ─────────────────────────────────────────────────────
+   The UI's inline SVGs were drawn with 5 different stroke weights (1.2–2.5) and
+   mixed line joins, which read as visual noise. Rather than hand-edit every
+   glyph, normalize them here: one stroke weight for the 24-grid family, round
+   caps/joins for all, and currentColor so icons inherit text color. New icons
+   drawn on the same grid inherit this automatically. */
+svg[viewBox="0 0 24 24"] {
+  stroke-width: var(--icon-stroke);
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+svg[viewBox="0 0 16 16"],
+svg[viewBox="0 0 12 12"],
+svg[viewBox="0 0 10 10"] {
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+/* Sizing utility for markup that opts in (keeps width/height off the SVG). */
+.ic    { width: var(--icon-md); height: var(--icon-md); flex: none; }
+.ic-sm { width: var(--icon-sm); height: var(--icon-sm); }
+.ic-lg { width: var(--icon-lg); height: var(--icon-lg); }
 
 html, body {
   height: 100%;
@@ -82,7 +196,13 @@ html, body {
   box-shadow: 0 1px 0 rgba(0,0,0,0.4);
 }
 
+/* macOS: inset the logo so it clears the traffic lights. Windows/Linux draw
+   their controls on the right, so the logo sits flush left and the right side
+   reserves room for the in-app window buttons instead. */
 .platform-darwin .top-bar { padding-left: 84px; }
+.platform-win32 .top-bar,
+.platform-linux .top-bar { padding-left: 16px; }
+.platform-win32 .top-bar { padding-right: 8px; }
 
 .top-bar-left,
 .top-bar-center,
@@ -170,6 +290,22 @@ html, body {
   flex-shrink: 0;
   margin-left: auto;
 }
+
+/* Groups the buttons that feed the now-dynamic centre column (Songs, Theme
+   Studio) so they read as one primary control cluster rather than loose icons. */
+.tb-group {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  flex-shrink: 0;
+}
+.tb-group .tb-studio-btn { background: transparent; border-color: transparent; }
+.tb-group .tb-studio-btn:hover  { background: var(--bg-hover); }
+.tb-group .tb-studio-btn.active { background: var(--red-dim); border-color: var(--red-dim); }
 
 .tb-divider {
   width: 1px;
@@ -824,12 +960,19 @@ html, body {
   width: 100%;
 }
 
+/* The content (Bible text, lyric line, slide body — whatever is bound to
+   "verse") is always what the audience is meant to read; the reference
+   (citation, song title, slide title — bound to "reference") is a caption.
+   That held for scripture, where a longer verse naturally reads as the
+   visual anchor beneath a short reference, but a short lyric chunk is about
+   the same length as its song title — and the old bold accent-coloured ref
+   style then read as the HEADLINE, backwards from the actual hierarchy. */
 .live-screen-text {
   font-family: var(--font);
-  font-size: clamp(10px, 0.85vw, 13px);
-  font-weight: 600;
-  color: rgba(255,255,255,0.95);
-  line-height: 1.55;
+  font-size: clamp(12px, 1.05vw, 16px);
+  font-weight: 700;
+  color: #fff;
+  line-height: 1.5;
   font-style: normal;
   margin-bottom: 6px;
   letter-spacing: 0.01em;
@@ -843,12 +986,12 @@ html, body {
 
 .live-screen-ref {
   font-family: var(--font-head);
-  font-size: clamp(10px, 1vw, 13px);
-  font-weight: 800;
-  color: var(--blue);
-  letter-spacing: 0.22em;
+  font-size: clamp(8px, 0.65vw, 10px);
+  font-weight: 700;
+  color: var(--text-2);
+  letter-spacing: 0.18em;
   text-transform: uppercase;
-  opacity: 0.9;
+  opacity: 0.75;
 }
 
 /* LIVE badge in corner */
@@ -1108,20 +1251,727 @@ html, body {
   align-items: start;
 }
 
-/* Left column — Audio + Bible */
-.settings-col-left {
-  display: flex;
-  flex-direction: column;
-  gap: 20px;
+/* ── Settings: split view ───────────────────────────────────────────────────
+   Category list on the left, only the selected category on the right. Replaces
+   the old two-column dump where every section was visible at once. */
+.modal-body.settings-split {
+  display: grid;
+  grid-template-columns: 194px 1fr;
+  gap: 0;
+  padding: 0;
+  overflow: hidden;
+  align-items: stretch;
 }
 
-/* Right column — Outputs */
-.settings-col-right {
+/* Give the settings dialog a stable working height so switching between a
+   short pane (Bible) and a tall one (Outputs) doesn't resize the window. */
+#settings-modal .modal-content {
+  width: 880px;
+  height: 78vh;
+}
+
+.settings-nav {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 2px;
+  padding: var(--space-3) var(--space-2);
+  border-right: 1px solid var(--border);
+  background: var(--bg-input);
+  overflow-y: auto;
+}
+
+.settings-nav-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  width: 100%;
+  padding: 9px 10px;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius);
+  color: var(--text-2);
+  font-family: var(--font);
+  font-size: var(--fs-md);
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+  transition: var(--trans);
+}
+.settings-nav-item svg { width: 16px; height: 16px; flex: none; }
+.settings-nav-item:hover { background: var(--bg-hover); color: var(--text); }
+.settings-nav-item.active { background: var(--red-dim); color: var(--red); }
+
+.settings-panes {
+  overflow-y: auto;
+  padding: var(--space-5);
+  min-width: 0;
+}
+
+/* Theme assignment shown on the collapsed output card. */
+.output-theme-badge {
+  margin-left: auto;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--blue-dim);
+  color: var(--blue);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  white-space: nowrap;
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.output-theme-group .setting-input { width: 100%; }
+
+/* One row per physical screen: name · theme · open · remove. */
+.display-output-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr auto auto;
+  gap: 6px;
+  align-items: center;
+  margin-bottom: 6px;
+}
+.display-output-row .modal-btn { padding: 6px 10px; font-size: var(--fs-xs); }
+.display-output-del {
+  color: var(--red) !important;
+  border-color: rgba(232,64,74,0.3) !important;
+  line-height: 1;
+}
+.display-output-del:disabled { opacity: 0.35; cursor: not-allowed; }
+.display-output-row { margin-top: 6px; }
+
+/* ── Playlist ───────────────────────────────────────────────────────────────
+   Lives in the left sidebar above the transcript; selecting an item takes over
+   the centre column. */
+/* Playlist and transcript share the sidebar and are traded off with a drag
+   handle — a fixed split always shortchanges one of them, since a 12-item
+   service and a long sermon transcript want opposite things. */
+.ls-playlist-section {
+  display: flex;
+  flex-direction: column;
+  height: 320px;      /* JS drag + localStorage override this */
+  flex: none;
+  min-height: 110px;
+  overflow: hidden;
+  /* Match the transcript card so the two read as peers. */
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--border);
+  background: var(--bg-panel);
+  box-shadow: var(--shadow-sm);
+}
+
+/* Sidebar splitter is horizontal and sits between the two cards. */
+#ls-splitter {
+  flex: none;
+  height: 9px;
+  background: transparent;
+  border: none;
+  cursor: row-resize;
+  position: relative;
+}
+#ls-splitter::after {
+  content: '';
+  position: absolute;
+  left: 50%; top: 50%;
+  transform: translate(-50%, -50%);
+  width: 30px; height: 2px;
+  border-radius: 2px;
+  background: var(--border-md);
+  transition: background var(--trans);
+}
+#ls-splitter:hover::after,
+#ls-splitter.dragging::after { background: var(--blue); }
+.ls-playlist-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px 6px 8px;
+}
+.svc-empty-sm {
+  padding: 16px 10px;
+  text-align: center;
+  color: var(--text-3);
+  font-size: var(--fs-xs);
+  line-height: 1.6;
+}
+
+/* Playlist switcher — replaces the old static "Playlist" label so an operator
+   running several folders (Sunday AM / PM, midweek study) can change which
+   one is active without leaving the sidebar. */
+.svc-playlist-switcher {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  background: transparent;
+  border: none;
+  color: var(--text-2);
+  font-family: var(--font);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 2px 4px;
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+}
+.svc-playlist-switcher:hover { background: var(--bg-hover); color: var(--text); }
+.svc-playlist-switcher svg { opacity: 0.6; }
+
+/* Nothing to switch or add to until a playlist exists — the create-first
+   prompt (rendered into #svc-items-list) is the only control shown. */
+.ls-playlist-section.no-playlist .svc-playlist-switcher,
+.ls-playlist-section.no-playlist #svc-add-menu-btn { display: none; }
+.svc-create-first {
+  padding: var(--space-4) var(--space-3);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.svc-create-first p {
+  font-size: var(--fs-sm);
+  color: var(--text-2);
+  line-height: 1.5;
+  margin: 0 0 4px;
+}
+
+.svc-popover-wide { min-width: 200px; }
+.svc-playlist-row { display: flex; align-items: center; gap: 2px; }
+.svc-playlist-row .svc-popover-item { flex: 1; }
+.svc-playlist-row.active .svc-popover-item { color: var(--blue); font-weight: 600; }
+.svc-playlist-row-del {
+  flex: none;
+  width: 20px; height: 20px;
+  display: flex; align-items: center; justify-content: center;
+  background: transparent; border: none;
+  color: var(--text-3);
+  font-size: 13px;
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+}
+.svc-playlist-row-del:hover:not(:disabled) { color: var(--red); }
+.svc-playlist-row-del:disabled { opacity: 0.25; cursor: not-allowed; }
+.svc-popover-add {
+  margin-top: 4px;
+  border-top: 1px solid var(--border);
+  padding-top: 8px !important;
+  color: var(--blue) !important;
+  font-weight: 600;
+}
+
+.ls-playlist-section .ls-transcript-header { position: relative; }
+.svc-add-menu-sep { height: 1px; background: var(--border); margin: 4px 2px; }
+
+/* Inline rename input — replaces the switcher's label+chevron in place
+   ("New Folder" style: name it right where it appears, no dialog). */
+.svc-playlist-rename-input {
+  width: 140px;
+  background: var(--bg-input);
+  border: 1px solid var(--blue);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 3px 6px;
+}
+
+.svc-delim {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-left: var(--space-4);
+}
+.svc-delim-label {
+  font-size: var(--fs-xs);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-3);
+  font-weight: 600;
+}
+
+.svc-empty {
+  padding: 28px 16px;
+  text-align: center;
+  color: var(--text-3);
+  font-size: var(--fs-sm);
+  line-height: 1.6;
+}
+
+/* Running-order rows */
+.svc-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 9px 10px;
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: var(--trans);
+  user-select: none;
+}
+.svc-item:hover { background: var(--bg-hover); }
+.svc-item.active { background: var(--blue-dim); }
+.svc-item-num {
+  width: 20px; height: 20px;
+  flex: none;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: 50%;
+  background: var(--bg-input);
+  color: var(--text-2);
+  font-size: 10px; font-weight: 700;
+}
+.svc-item.active .svc-item-num { background: var(--blue); color: #06201d; }
+.svc-item-body { flex: 1; min-width: 0; }
+.svc-item-title {
+  font-size: var(--fs-md); font-weight: 600; color: var(--text);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.svc-item-sub { font-size: var(--fs-xs); color: var(--text-3); }
+.svc-item-del {
+  background: transparent; border: none; cursor: pointer;
+  color: var(--text-3); font-size: 16px; line-height: 1;
+  padding: 0 4px; border-radius: 4px;
+}
+.svc-item-del:hover { color: var(--red); }
+.svc-item-dragging { opacity: 0.4; }
+.svc-drop-before { box-shadow: inset 0 2px 0 0 var(--blue); }
+.svc-drop-after  { box-shadow: inset 0 -2px 0 0 var(--blue); }
+
+/* Panel header */
+.svc-header { flex-wrap: wrap; gap: var(--space-2) var(--space-3); }
+.svc-header-right {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-left: auto;
+}
+.svc-scale { width: 84px; accent-color: var(--blue); }
+.svc-edit-btn { padding: 5px 14px; font-size: var(--fs-xs); }
+
+/* Slide grid — card width is driven by the scale slider. */
+.svc-slides-grid {
+  --svc-card: 190px;
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--space-4);
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(var(--svc-card), 1fr));
+  gap: var(--space-3);
+  align-content: start;
+}
+.svc-slides-grid.is-list {
+  grid-template-columns: 1fr;
+  gap: 6px;
+}
+.svc-slide {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-md);
+  border-radius: var(--radius);
+  cursor: pointer;
+  text-align: left;
+  font-family: var(--font);
+  transition: var(--trans);
+}
+.svc-slide:hover { border-color: var(--blue); }
+.svc-slide.live { border-color: var(--red); box-shadow: 0 0 0 1px var(--red); }
+
+/* The lyric is the content; the stanza label is chrome, so it sits under the
+   slide at secondary weight rather than heading it. */
+.svc-slide-label {
+  font-size: var(--fs-xs); font-weight: 600;
+  letter-spacing: 0.06em; text-transform: uppercase;
+  color: var(--text-3);
+}
+.svc-slide-preview {
+  aspect-ratio: 16/9;
+  background: #000;
+  border-radius: 4px;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 2px;
+  overflow: hidden;
+}
+/* Wrap rather than truncate: the real output wraps too, so an ellipsis both
+   hides the words the operator is choosing between and misrepresents the
+   result. Overflow is still clipped so a runaway line can't stretch the card. */
+.svc-slide-line {
+  font-size: 12px;
+  line-height: 1.32;
+  font-weight: 600;
+  color: var(--text);
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+.svc-slide-preview.is-image {
+  background-size: cover;
+  background-position: center;
+  padding: 0;
+}
+
+/* List view: preview shrinks to a thumbnail, label sits beside it. */
+.svc-slides-grid.is-list .svc-slide {
+  flex-direction: row;
+  align-items: center;
+  gap: var(--space-3);
+  padding: 6px 10px;
+}
+.svc-slides-grid.is-list .svc-slide-preview {
+  width: 116px;
+  flex: none;
+  padding: 6px;
+}
+.svc-slides-grid.is-list .svc-slide-line { font-size: 9px; }
+.svc-slides-grid.is-list .svc-slide-label { order: -1; min-width: 96px; }
+
+.svc-add-line {
+  margin-top: 6px;
+  background: transparent;
+  border: 1px dashed var(--border-md);
+  border-radius: var(--radius-sm);
+  color: var(--text-3);
+  font-family: var(--font);
+  font-size: var(--fs-xs);
+  padding: 5px 10px;
+  cursor: pointer;
+}
+.svc-add-line:hover { color: var(--blue); border-color: var(--blue); }
+.svc-live-tag {
+  position: absolute;
+  top: 6px; right: 6px;
+  background: var(--red);
+  color: #fff;
+  font-size: 9px; font-weight: 800;
+  letter-spacing: 0.1em;
+  padding: 2px 6px;
+  border-radius: 3px;
+}
+
+/* ── Playlist stack (the folder view) ────────────────────────────────────── */
+.svc-stack-list {
+  flex: 1;
+  /* Flex items default to min-height:auto, which lets this list grow to fit
+     ALL expanded cards instead of being clamped by the parent — killing its
+     own scrollbar and pushing the page itself to overflow. min-height:0 is
+     what actually makes overflow-y:auto engage. */
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--space-3) var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.svc-card {
+  /* .svc-stack-list is a flex column, so children default to flex-shrink:1 —
+     with several long cards expanded, the flex algorithm was squeezing each
+     card down to fit the container instead of letting the LIST scroll, and
+     since the card clips overflow, the squeezed-out slides just vanished.
+     Pin cards to their content height; .svc-stack-list is the only thing
+     that's allowed to shrink/scroll. */
+  flex-shrink: 0;
+  border: 1px solid var(--border-md);
+  border-radius: var(--radius);
+  background: var(--bg-card);
+  overflow: hidden;
+  transition: border-color var(--trans);
+}
+.svc-card.active { border-color: var(--blue); }
+.svc-card.svc-item-dragging { opacity: 0.4; }
+.svc-card.svc-drop-before { box-shadow: inset 0 2px 0 0 var(--blue); }
+.svc-card.svc-drop-after  { box-shadow: inset 0 -2px 0 0 var(--blue); }
+
+.svc-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  cursor: pointer;
+}
+.svc-card.open .svc-card-head { border-bottom: 1px solid var(--border); }
+.svc-card-grip { color: var(--text-3); flex: none; cursor: grab; }
+.svc-card-chevron {
+  flex: none;
+  width: 20px; height: 20px;
+  display: flex; align-items: center; justify-content: center;
+  background: transparent; border: none;
+  color: var(--text-2);
+  cursor: pointer;
+  transition: transform var(--trans);
+}
+.svc-card.open .svc-card-chevron { transform: rotate(180deg); }
+.svc-card-num {
+  flex: none;
+  width: 20px; height: 20px;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: 50%;
+  background: var(--bg-input);
+  color: var(--text-2);
+  font-size: 10px; font-weight: 700;
+}
+.svc-card.active .svc-card-num { background: var(--blue); color: #06201d; }
+.svc-card-title {
+  flex: 1;
+  min-width: 0;
+  background: transparent;
+  border: none;
+  color: var(--text);
+  font-family: var(--font);
+  font-size: var(--fs-md);
+  font-weight: 600;
+  padding: 2px 0;
+}
+.svc-card-title:focus { outline: none; }
+.svc-card-type {
+  flex: none;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  color: var(--text-3);
+  background: var(--bg-input);
+  border-radius: 999px;
+  padding: 2px 8px;
+}
+.svc-card-count { flex: none; font-size: var(--fs-xs); color: var(--text-3); white-space: nowrap; }
+.svc-card-icon-btn {
+  flex: none;
+  min-width: 22px; height: 22px;
+  padding: 0 5px;
+  display: flex; align-items: center; justify-content: center;
+  background: transparent;
+  border: 1px solid var(--border-md);
+  border-radius: var(--radius-sm);
+  color: var(--text-2);
+  font-size: 10px; font-weight: 700;
+  cursor: pointer;
+  transition: var(--trans);
+}
+.svc-card-icon-btn:hover { color: var(--blue); border-color: var(--blue); }
+.svc-card-edit:hover { color: var(--blue); border-color: var(--blue); }
+.svc-card-del { color: var(--text-3); border-color: transparent; font-size: 15px; }
+.svc-card-del:hover { color: var(--red); border-color: transparent; }
+
+.svc-card-body { padding: var(--space-3); }
+.svc-card-body .svc-slides-grid { padding: 0; }
+
+/* ── Popover (theme / lines pickers) ── */
+.svc-popover {
+  position: absolute;
+  z-index: 60;
+  min-width: 160px;
+  max-width: 240px;
+  padding: 8px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-md);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-md);
+}
+.svc-popover.hidden { display: none; }
+.svc-popover-label {
+  font-size: var(--fs-xs);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-3);
+  font-weight: 700;
+  margin-bottom: 6px;
+}
+.svc-popover-list { display: flex; flex-direction: column; gap: 1px; max-height: 240px; overflow-y: auto; }
+.svc-popover-item {
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: var(--fs-sm);
+  text-align: left;
+  padding: 6px 8px;
+  cursor: pointer;
+}
+.svc-popover-item:hover { background: var(--bg-hover); }
+.svc-popover-item.active { color: var(--blue); font-weight: 600; }
+
+/* ── Full-scale edit ──────────────────────────────────────────────────────
+   Back button + editable title + (song-only) delimiter + theme icon, all on
+   one line; strip of slides / WYSIWYG canvas / style inspector below. */
+.svc-back-btn { flex: none; }
+.svc-fs-title {
+  flex: 1;
+  min-width: 120px;
+  max-width: 360px;
+}
+.svc-theme-icon-btn { width: 28px; height: 28px; }
+
+.svc-edit-stage {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+  overflow: hidden;
+}
+.svc-edit-stage.hidden { display: none; }
+
+.svc-strip {
+  width: 190px;
+  flex: none;
+  overflow-y: auto;
+  padding: var(--space-2);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.svc-strip-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  padding: 6px 8px;
+  cursor: pointer;
+  text-align: left;
+  font-family: var(--font);
+  color: var(--text-2);
+}
+.svc-strip-item:hover { background: var(--bg-hover); }
+.svc-strip-item.active { background: var(--blue-dim); color: var(--text); border-color: rgba(77,182,172,0.3); }
+.svc-strip-item.live { border-color: var(--red); }
+.svc-strip-num {
+  flex: none;
+  font-size: 10px; font-weight: 700;
+  color: var(--text-3);
+  min-width: 16px;
+}
+.svc-strip-item.active .svc-strip-num { color: var(--blue); }
+.svc-strip-text {
+  font-size: var(--fs-xs);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.svc-canvas-wrap {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  padding: var(--space-4);
+  background: #0a0a0a;
+}
+.svc-canvas {
+  position: relative;
+  width: 100%;
+  max-width: 900px;
+  aspect-ratio: 16/9;
+  background: #000;
+  border-radius: var(--radius);
+  overflow: hidden;
+  box-shadow: 0 4px 24px rgba(0,0,0,0.6);
+}
+.svc-canvas.is-alpha {
+  background: repeating-conic-gradient(#1a1a1a 0% 25%, #0e0e0e 0% 50%) 0 0 / 14px 14px;
+}
+.svc-canvas-text { outline: none; white-space: pre-wrap; }
+.svc-canvas-text.is-verse:focus { box-shadow: 0 0 0 1px var(--blue); border-radius: 4px; }
+.svc-canvas-hint {
+  font-size: var(--fs-xs);
+  color: var(--text-3);
+  text-align: center;
+}
+
+.svc-inspector {
+  width: 240px;
+  flex: none;
+  overflow-y: auto;
+  padding: var(--space-3);
   border-left: 1px solid var(--border);
-  padding-left: 20px;
+}
+.svc-insp-head {
+  font-size: var(--fs-xs);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-3);
+  font-weight: 700;
+  margin-bottom: var(--space-2);
+}
+.svc-insp-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.svc-insp-label {
+  font-size: var(--fs-xs);
+  color: var(--text-3);
+  font-weight: 600;
+  min-width: 34px;
+}
+.svc-insp-num { width: 72px; flex: none; }
+
+/* Hymn picker */
+.hymn-list { flex: 1; overflow-y: auto; padding: 10px 16px 16px; }
+.hymn-row {
+  display: flex; align-items: center; gap: var(--space-3);
+  width: 100%;
+  padding: 10px 12px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  margin-bottom: 6px;
+  cursor: pointer;
+  text-align: left;
+  font-family: var(--font);
+  transition: var(--trans);
+}
+.hymn-row:hover { background: var(--bg-hover); border-color: var(--blue); }
+.hymn-row-main { flex: 1; min-width: 0; }
+.hymn-title { font-size: var(--fs-base); font-weight: 600; color: var(--text); }
+.hymn-sub { font-size: var(--fs-xs); color: var(--text-3); }
+.hymn-add {
+  font-size: var(--fs-xs); font-weight: 700;
+  color: var(--blue);
+  border: 1px solid rgba(77,182,172,0.35);
+  border-radius: 999px;
+  padding: 3px 10px;
+}
+
+/* ── Language packs ── */
+.lang-pack-list {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+.lang-pack-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--border);
+}
+.lang-pack-row:last-child { border-bottom: none; }
+.lang-pack-meta { flex: 1; min-width: 0; }
+.lang-pack-name { font-size: var(--fs-md); font-weight: 600; color: var(--text); }
+.lang-pack-sub {
+  font-size: var(--fs-xs);
+  color: var(--text-3);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.lang-pack-row .modal-btn { padding: 5px 12px; font-size: var(--fs-xs); }
+.lang-pack-remove { color: var(--red) !important; border-color: rgba(232,64,74,0.3) !important; }
+.settings-pane { display: none; }
+.settings-pane.active {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
 }
 
 .setting-group { display: flex; flex-direction: column; gap: 5px; }
@@ -2698,19 +3548,157 @@ select {
    THEME STUDIO
 ══════════════════════════════════════ */
 
-.ts-modal {
-  width: 1060px;
-  max-width: 97vw;
-  max-height: 92vh;
+/* ── Theme Studio: full in-window view (not a modal) ────────────────────────
+   Occupies the whole content region below the top bar so the canvas gets real
+   estate — a builder, not a dialog. Swaps with .main-layout. */
+.ts-view {
+  position: fixed;
+  top: var(--topbar-h);
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 60;
+  background: var(--bg);
+  display: flex;
+  flex-direction: column;
 }
+.ts-view.hidden { display: none; }
+
+.ts-view-inner {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+/* The studio header is app chrome, not canvas — give it its own raised surface
+   and a hard edge so it reads as separate from the working area below (they
+   previously ran together as one flat field). */
+.ts-view-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  padding: 0 var(--space-4);
+  height: 56px;
+  flex: none;
+  background: var(--bg-hover);
+  border-bottom: 1px solid var(--border-md);
+  box-shadow: 0 1px 0 rgba(0,0,0,0.5);
+  position: relative;
+  z-index: 5;
+}
+
+.ts-back-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  background: transparent;
+  border: 1px solid var(--border-md);
+  border-radius: var(--radius);
+  color: var(--text-2);
+  font-family: var(--font);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  padding: 6px 12px 6px 8px;
+  cursor: pointer;
+  transition: var(--trans);
+}
+.ts-back-btn:hover { background: var(--bg-hover); color: var(--text); }
+.ts-back-btn svg { width: 14px; height: 14px; }
+
+.ts-view-title {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex: 1;
+  min-width: 0;
+}
+.ts-view-title h2 {
+  font-size: var(--fs-lg);
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+}
+
+.ts-view-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: none;
+}
+.ts-danger-btn {
+  color: var(--red) !important;
+  border-color: rgba(232,64,74,0.3) !important;
+}
+
+/* ── Add-content bar (above the canvas) ── */
+.ts-add-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4) var(--space-2);
+  flex: none;
+}
+.ts-add-label {
+  font-size: var(--fs-xs);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text-3);
+  font-weight: 600;
+  margin-right: var(--space-1);
+}
+.ts-add-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--bg-input);
+  border: 1px solid var(--border-md);
+  border-radius: var(--radius);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  padding: 6px 12px;
+  cursor: pointer;
+  transition: var(--trans);
+}
+.ts-add-btn:hover {
+  background: var(--bg-hover);
+  border-color: var(--blue);
+  color: var(--blue);
+}
+.ts-add-btn svg { width: 14px; height: 14px; }
+
+.ts-layers-hint {
+  font-size: var(--fs-xs);
+  color: var(--text-3);
+  letter-spacing: 0.04em;
+}
+
+/* ── Layer rows: drag to reorder ── */
+.ts-layer-grip {
+  display: flex;
+  align-items: center;
+  color: var(--text-3);
+  cursor: grab;
+  flex: none;
+  padding-right: 2px;
+}
+.ts-layer-row:hover .ts-layer-grip { color: var(--text-2); }
+.ts-layer-dragging { opacity: 0.4; }
+.ts-layer-drop-before { box-shadow: inset 0 2px 0 0 var(--blue); }
+.ts-layer-drop-after  { box-shadow: inset 0 -2px 0 0 var(--blue); }
+
+/* Themes column header: label left, actions right. */
+.ts-themes-col .ts-col-header { gap: var(--space-1); }
+.ts-themes-col .ts-col-header .ts-col-label { margin-right: auto; }
 
 .ts-body {
   flex: 1;
   display: grid;
-  grid-template-columns: 160px 1fr 260px;
+  grid-template-columns: 232px 1fr 310px;
   min-height: 0;
   overflow: hidden;
-  border-top: 1px solid var(--border);
 }
 
 /* ── Shared col styles ── */
@@ -2734,7 +3722,7 @@ select {
   width: 22px; height: 22px;
   display: flex; align-items: center; justify-content: center;
   background: transparent; border: 1px solid var(--border-md);
-  border-radius: 4px; color: var(--text-3); cursor: pointer;
+  border-radius: 4px; color: var(--text-2); cursor: pointer;
   transition: all var(--trans);
 }
 .ts-icon-btn:hover { background: var(--bg-hover); color: var(--text); }
@@ -2766,12 +3754,14 @@ select {
   cursor: pointer;
   font-size: 12px;
   font-weight: 500;
-  color: var(--text-3);
+  /* Inactive themes are still primary navigation — they were dropping to the
+     tertiary tone, which read as disabled. */
+  color: var(--text-2);
   transition: all var(--trans);
   user-select: none;
 }
 
-.ts-theme-item:hover { background: var(--bg-hover); color: var(--text-2); }
+.ts-theme-item:hover { background: var(--bg-hover); color: var(--text); }
 .ts-theme-item.active { background: var(--blue-dim); color: var(--blue); font-weight: 600; }
 
 .ts-theme-dot {
@@ -2791,15 +3781,21 @@ select {
   background: #141416;
 }
 
+/* Take the leftover column height and centre the canvas in it, so the working
+   area reads as a deliberate stage rather than leaving dead space underneath. */
 .ts-preview-wrap {
-  flex-shrink: 0;
+  flex: 1;
+  min-height: 0;
   padding: 16px 16px 12px;
   display: flex;
+  align-items: center;
   justify-content: center;
+  overflow: hidden;
 }
 
 .ts-preview-stage {
   width: 100%;
+  max-height: 100%;
   aspect-ratio: 16/9;
   background: #000;
   border-radius: 6px;
@@ -2813,6 +3809,37 @@ select {
 .ts-preview-stage.ts-transparent-bg {
   background: repeating-conic-gradient(#1a1a1a 0% 25%, #0e0e0e 0% 50%) 0 0 / 14px 14px;
 }
+
+/* ── Free-canvas selection ── */
+.ts-preview-stage .ts-el-selected {
+  outline: 1.5px solid var(--blue);
+  outline-offset: 0;
+}
+.ts-preview-stage [data-layer-id]:hover:not(.ts-el-selected) {
+  outline: 1px dashed rgba(255,255,255,0.25);
+  outline-offset: 2px;
+}
+/* ── Eight-point selection frame (design-tool style) ── */
+.ts-handle {
+  position: absolute;
+  width: 9px;
+  height: 9px;
+  background: #ffffff;
+  border: 1.5px solid var(--blue);
+  border-radius: 2px;
+  z-index: 30;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.5);
+}
+/* Corners */
+.ts-handle-nw { left: -5px;  top: -5px;    cursor: nwse-resize; }
+.ts-handle-ne { right: -5px; top: -5px;    cursor: nesw-resize; }
+.ts-handle-se { right: -5px; bottom: -5px; cursor: nwse-resize; }
+.ts-handle-sw { left: -5px;  bottom: -5px; cursor: nesw-resize; }
+/* Edge midpoints */
+.ts-handle-n { left: 50%; top: -5px;    transform: translateX(-50%); cursor: ns-resize; }
+.ts-handle-s { left: 50%; bottom: -5px; transform: translateX(-50%); cursor: ns-resize; }
+.ts-handle-w { top: 50%;  left: -5px;   transform: translateY(-50%); cursor: ew-resize; }
+.ts-handle-e { top: 50%;  right: -5px;  transform: translateY(-50%); cursor: ew-resize; }
 
 /* ── Meta row (layout + animation + name) ── */
 .ts-meta-row {
@@ -2840,7 +3867,10 @@ select {
 }
 
 .ts-chip-group {
-  display: flex;
+  /* inline-flex + fit-content so the pill hugs its buttons — stretching it to
+     the row width left a dead gap after the last chip. */
+  display: inline-flex;
+  width: fit-content;
   background: var(--bg-input);
   border: 1px solid var(--border-md);
   border-radius: 5px;
@@ -2881,6 +3911,40 @@ select {
 .ts-name-input:focus { border-bottom-color: var(--blue); }
 
 /* ── Layers panel ── */
+/* ── Left column: Themes over Layers, split by a draggable divider ── */
+.ts-pane {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+#ts-pane-themes {
+  height: 240px;      /* JS drag updates this; layers takes the remainder */
+  flex: none;
+}
+.ts-pane-layers { flex: 1; min-height: 0; }
+
+.ts-splitter {
+  height: 7px;
+  flex: none;
+  cursor: row-resize;
+  background: var(--bg);
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  position: relative;
+}
+.ts-splitter::after {
+  content: '';
+  position: absolute;
+  left: 50%; top: 50%;
+  transform: translate(-50%, -50%);
+  width: 26px; height: 2px;
+  border-radius: 2px;
+  background: var(--border-md);
+}
+.ts-splitter:hover::after,
+.ts-splitter.dragging::after { background: var(--blue); }
+
 .ts-layers-panel {
   flex: 1;
   display: flex;
@@ -2998,6 +4062,10 @@ select {
   display: flex;
   align-items: center;
   gap: 8px;
+  /* Rows pack several controls (e.g. Italic + Case); wrap rather than clip
+     them against the panel edge. */
+  flex-wrap: wrap;
+  row-gap: 6px;
 }
 
 .ts-prop-label {
@@ -3072,11 +4140,12 @@ select {
   gap: 2px;
 }
 
+/* Interactive icon buttons need more contrast than static hint text. */
 .ts-align-btn {
   width: 28px; height: 26px;
   display: flex; align-items: center; justify-content: center;
   background: #2c2c2e; border: 1px solid var(--border-md);
-  border-radius: 4px; color: var(--text-3); cursor: pointer;
+  border-radius: 4px; color: var(--text-2); cursor: pointer;
   transition: all var(--trans);
 }
 .ts-align-btn:hover { color: var(--text); }

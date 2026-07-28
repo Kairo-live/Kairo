@@ -15,14 +15,40 @@ const WS_URL = `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.h
 // in a stock browser during dev) the IPC call fails and we run unauthenticated
 // — the server also treats auth as optional when its env var is absent.
 let AUTH_TOKEN = '';
-async function loadAuthToken() {
-  try {
+// Retries with backoff rather than a single attempt: the packaged app runs
+// with AUTH_REQUIRED on (dev mode never sets KAIRO_AUTH_TOKEN, so this whole
+// path went untested all the way through this build), and a cold ad-hoc-signed
+// launch is exactly the scenario where the injected `window.__TAURI__` bridge
+// might not be fully ready on the very first task-queue turn. A silent,
+// permanent failure here means EVERY authenticated request 401s for the rest
+// of the session — Start Listening surfaces it, but so would verse search,
+// settings, everything else, just without an obvious toast.
+async function loadAuthToken(attempts = 5, delayMs = 200) {
+  for (let i = 0; i < attempts; i++) {
+    // `window.__TAURI__` missing here does NOT mean "plain-browser dev, give
+    // up forever" — on a fresh navigation the IPC bridge can attach a tick or
+    // two after our script starts running, which is exactly the race this
+    // retry loop exists to survive. Returning here (as this used to do) exited
+    // the whole function on the very first check, before the backoff below
+    // ever got a chance — AUTH_TOKEN stayed '' permanently and every request
+    // for the rest of the session silently dropped its Authorization header
+    // and 401'd. Skip this attempt instead and let the loop keep retrying;
+    // only a plain browser with no Tauri bridge at all pays the full ~3s of
+    // backoff before giving up.
     const inv = window.__TAURI__?.core?.invoke || window.__TAURI__?.invoke;
-    if (!inv) return;
-    AUTH_TOKEN = await inv('get_server_token');
-  } catch (err) {
-    console.warn('[KAIRO] Could not load auth token from Tauri:', err?.message || err);
+    if (inv) {
+      try {
+        AUTH_TOKEN = await inv('get_server_token');
+        if (AUTH_TOKEN) return;
+      } catch (err) {
+        if (i === attempts - 1) {
+          console.error('[KAIRO] Could not load auth token from Tauri after retries:', err?.message || err);
+        }
+      }
+    }
+    await new Promise(r => setTimeout(r, delayMs * (i + 1)));
   }
+  console.error('[KAIRO] No auth token after ' + attempts + ' attempts — every API/WS request will 401 for this session.');
 }
 
 // Wrap fetch so every call automatically carries the token. All existing
@@ -816,7 +842,7 @@ listenBtn?.addEventListener('click', async () => {
 
 // Both engines use the same client-side audio capture: PCM16 over the
 // existing WebSocket. Only the body of /api/start-listening differs —
-// the server uses `engine` to choose between Deepgram (cloud) and Vosk
+// the server uses `engine` to choose between Deepgram (cloud) and whisper.cpp
 // (offline, on-device).
 async function startListening() {
   if (isListening) return;
@@ -827,8 +853,10 @@ async function startListening() {
   sessionTranscriptParts = [];
   allConfidences = [];
   const engine = (settings.speechEngine || 'deepgram').toLowerCase();
-  // Map UI value 'browser' → server-side 'vosk' so the offline path is selected.
-  const serverEngine = (engine === 'browser' || engine === 'offline') ? 'vosk' : 'deepgram';
+  // Both the current 'offline' value and the legacy 'browser' value (the
+  // Settings toggle's data-engine, kept as an alias for anyone with an old
+  // saved setting) route to the server's whisper.cpp offline engine.
+  const serverEngine = (engine === 'offline' || engine === 'browser') ? 'offline' : 'deepgram';
   try {
     const deviceId = audioSourceSettings?.value || '';
     const constraints = {
@@ -839,7 +867,7 @@ async function startListening() {
     mediaStream = await navigator.mediaDevices.getUserMedia(constraints);
     if (micDisplay) micDisplay.textContent = mediaStream.getAudioTracks()[0]?.label || 'Microphone';
 
-    // Start the server-side engine (Deepgram or Vosk)
+    // Start the server-side engine (Deepgram or whisper.cpp)
     const r = await fetch(`${SERVER}/api/start-listening`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1016,6 +1044,15 @@ async function loadSettings() {
     syncToggleGroup('audio-mode-toggle',    'mode',   settings.audioMode    || 'mic');
     updatePPTokenLabel();
     initCustomSelects();
+    // Per-output theme pickers live inside each output card.
+    renderOutputThemePickers();
+    renderDisplayOutputs();
+    // Language
+    const sttLang = document.getElementById('stt-language');
+    if (sttLang) sttLang.value = settings.sttLanguage || 'en-US';
+    const bibleLang = document.getElementById('bible-language');
+    if (bibleLang) bibleLang.value = settings.bibleLanguage || 'en';
+    renderLangPacks();
     // First-run: no Deepgram key → show a nudge banner so the user knows what to do.
     showFirstRunBannerIfNeeded(settings);
   } catch {}
@@ -1491,23 +1528,26 @@ async function populateAudioDevices() {
 
 refreshDevicesBtn?.addEventListener('click', populateAudioDevices);
 
-// ── Offline (Vosk) model installer UI ────────────────────────────────────
+// ── Offline (whisper.cpp) model installer UI ─────────────────────────────
 // Shown only when the Speech Engine toggle is set to "Offline". Streams
-// NDJSON progress events from POST /api/vosk/install into a progress bar
+// NDJSON progress events from POST /api/whisper/install into a progress bar
 // so the operator doesn't have to drop to a terminal to run npm scripts.
-(function wireVoskInstaller() {
-  const group       = document.getElementById('vosk-installer-group');
-  const statusLine  = document.getElementById('vosk-status-line');
-  const installBtn  = document.getElementById('vosk-install-btn');
-  const progressWrap = document.getElementById('vosk-progress-wrap');
-  const progressBar  = document.getElementById('vosk-progress-bar');
-  const progressText = document.getElementById('vosk-progress-text');
+// Normally the startup bootstrap (bootstrapStartup()) already fetched this
+// model before the operator ever opens Settings — this panel is the manual
+// fallback for a first install that was skipped, interrupted, or run offline.
+(function wireWhisperInstaller() {
+  const group       = document.getElementById('whisper-installer-group');
+  const statusLine  = document.getElementById('whisper-status-line');
+  const installBtn  = document.getElementById('whisper-install-btn');
+  const progressWrap = document.getElementById('whisper-progress-wrap');
+  const progressBar  = document.getElementById('whisper-progress-bar');
+  const progressText = document.getElementById('whisper-progress-text');
   const engineToggle = document.getElementById('speech-engine-toggle');
   if (!group || !installBtn) return;
 
   async function refreshStatus() {
     try {
-      const r = await fetch(`${SERVER}/api/vosk/status`);
+      const r = await fetch(`${SERVER}/api/whisper/status`);
       const s = await r.json();
       if (s.installed) {
         statusLine.textContent = '✓ Offline model installed';
@@ -1545,7 +1585,7 @@ refreshDevicesBtn?.addEventListener('click', populateAudioDevices);
 
     let res;
     try {
-      res = await fetch(`${SERVER}/api/vosk/install`, { method: 'POST' });
+      res = await fetch(`${SERVER}/api/whisper/install`, { method: 'POST' });
     } catch (err) {
       progressText.textContent = `Failed: ${err.message}`;
       installBtn.style.display = '';
@@ -1771,7 +1811,12 @@ function toast(msg, type = 'info') {
 }
 
 // ── Platform class ─────────────────────────────────────────────────────────
-if (navigator.userAgent.includes('Mac')) document.body.classList.add('platform-darwin');
+// Platform class is set on <html> by an inline script in index.html (before
+// first paint). Mirror it onto <body> so existing `.platform-darwin .x` rules
+// that were written against body keep matching.
+if (document.documentElement.classList.contains('platform-darwin')) {
+  document.body.classList.add('platform-darwin');
+}
 
 // ── Boot ───────────────────────────────────────────────────────────────────
 populateAudioDevices();
@@ -1794,6 +1839,19 @@ const FONTS = [
 
 const loadedFonts = new Set(['Manrope', 'system-ui']);
 
+// Weights named the way a font names them, not raw numbers.
+const FONT_WEIGHTS = [
+  { label: 'Thin',        value: 100 },
+  { label: 'Extra Light', value: 200 },
+  { label: 'Light',       value: 300 },
+  { label: 'Regular',     value: 400 },
+  { label: 'Medium',      value: 500 },
+  { label: 'Semi Bold',   value: 600 },
+  { label: 'Bold',        value: 700 },
+  { label: 'Extra Bold',  value: 800 },
+  { label: 'Black',       value: 900 },
+];
+
 function loadGoogleFont(family) {
   if (loadedFonts.has(family)) return;
   loadedFonts.add(family);
@@ -1803,192 +1861,147 @@ function loadGoogleFont(family) {
   document.head.appendChild(link);
 }
 
+// ── Canonical theme variants ──────────────────────────────────────────────
+// Deliberately a short, purposeful set rather than a sprawl of near-duplicates:
+//   1. Full — Background      opaque canvas, verse centred
+//   2. Full — Transparent     same geometry, keyed canvas (chroma / alpha rigs)
+//   3. Lower Third            independently coloured verse + reference bands
+//   4/5. Split Left / Right   one half filled, the other fully transparent
+// Every layer carries an explicit `pos` (1920×1080 design space) so the canvas
+// is free-form from the start — drag anything, nothing is locked to a preset.
+const LOOKS_KEY = 'kairo-looks-v3';
+const TXT_SHADOW_SOFT = { enabled: true,  color: '#000000', opacity: 70, blur: 12, x: 0, y: 3 };
+const TXT_SHADOW_NONE = { enabled: false, color: '#000000', opacity: 70, blur: 4,  x: 0, y: 1 };
+const NO_OUTLINE      = { enabled: false, color: '#000000', width: 2 };
+
 const DEFAULT_LOOKS = [
   {
-    id: 'default', name: 'Default', layout: 'fullscreen', animation: 'fade',
+    id: 'full-bg', name: 'Full — Background', layout: 'fullscreen', animation: 'fade',
     layers: [
-      { id: 'bg',    type: 'background', name: 'Background', visible: true, fill: 'solid', color: '#000000', opacity: 100, color2: '#1a1a2e', angle: 160 },
-      { id: 'verse', type: 'text', name: 'Verse Text', visible: true, binding: 'verse', customText: '',
-        font: { family: 'Manrope', size: 48, weight: 500, italic: false, lineHeight: 1.35, letterSpacing: 0, transform: 'none' },
+      { id: 'bg', type: 'background', name: 'Canvas', visible: true,
+        fill: 'gradient', color: '#0b0b0f', opacity: 100, color2: '#1c1c30', angle: 160 },
+      { id: 'verse', type: 'text', name: 'Verse', visible: true, binding: 'verse', customText: '',
+        pos: { x: 210, y: 300, w: 1500, h: 440 },
+        font: { family: 'Manrope', size: 64, weight: 500, italic: false, lineHeight: 1.35, letterSpacing: 0, transform: 'none' },
         color: '#ffffff', opacity: 100, align: 'center',
-        shadow: { enabled: true, color: '#000000', opacity: 70, blur: 8, x: 0, y: 2 },
-        outline: { enabled: false, color: '#000000', width: 2 } },
-      { id: 'ref',   type: 'text', name: 'Reference', visible: true, binding: 'reference', customText: '',
-        font: { family: 'Manrope', size: 22, weight: 600, italic: false, lineHeight: 1.2, letterSpacing: 3, transform: 'uppercase' },
+        shadow: { ...TXT_SHADOW_SOFT }, outline: { ...NO_OUTLINE } },
+      { id: 'ref', type: 'text', name: 'Reference', visible: true, binding: 'reference', customText: '',
+        pos: { x: 210, y: 790, w: 1500, h: 0 },
+        font: { family: 'Manrope', size: 28, weight: 600, italic: false, lineHeight: 1.2, letterSpacing: 4, transform: 'uppercase' },
+        color: '#ffffff', opacity: 60, align: 'center',
+        shadow: { ...TXT_SHADOW_NONE }, outline: { ...NO_OUTLINE } },
+    ],
+  },
+  {
+    // Identical geometry to Full — Background, but the canvas is keyed out.
+    // Heavier shadow + outline so the text survives over any live source.
+    id: 'full-alpha', name: 'Full — Transparent', layout: 'fullscreen', animation: 'fade',
+    layers: [
+      { id: 'bg', type: 'background', name: 'Canvas', visible: true,
+        fill: 'transparent', fillBefore: 'solid', color: '#000000', opacity: 100, color2: '#1c1c30', angle: 160 },
+      { id: 'verse', type: 'text', name: 'Verse', visible: true, binding: 'verse', customText: '',
+        pos: { x: 210, y: 300, w: 1500, h: 440 },
+        font: { family: 'Manrope', size: 64, weight: 600, italic: false, lineHeight: 1.35, letterSpacing: 0, transform: 'none' },
+        color: '#ffffff', opacity: 100, align: 'center',
+        shadow: { enabled: true, color: '#000000', opacity: 85, blur: 18, x: 0, y: 4 },
+        outline: { enabled: true, color: '#000000', width: 2 } },
+      { id: 'ref', type: 'text', name: 'Reference', visible: true, binding: 'reference', customText: '',
+        pos: { x: 210, y: 790, w: 1500, h: 0 },
+        font: { family: 'Manrope', size: 28, weight: 700, italic: false, lineHeight: 1.2, letterSpacing: 4, transform: 'uppercase' },
+        color: '#ffffff', opacity: 85, align: 'center',
+        shadow: { enabled: true, color: '#000000', opacity: 85, blur: 10, x: 0, y: 2 },
+        outline: { ...NO_OUTLINE } },
+    ],
+  },
+  {
+    // Two independent bands so the verse section and the reference section can
+    // be recoloured separately — select either band layer and change its fill.
+    id: 'lower-third', name: 'Lower Third', layout: 'lower-third', animation: 'slide-up',
+    layers: [
+      { id: 'bg', type: 'background', name: 'Canvas', visible: true,
+        fill: 'transparent', fillBefore: 'solid', color: '#000000', opacity: 100, color2: '#000000', angle: 0 },
+      { id: 'band-verse', type: 'background', name: 'Verse Band', visible: true,
+        fill: 'solid', color: '#0a0e14', opacity: 95, color2: '#0a0e14', angle: 0, radius: 0,
+        pos: { x: 0, y: 754, w: 1920, h: 206 } },
+      { id: 'band-ref', type: 'background', name: 'Reference Band', visible: true,
+        fill: 'solid', color: '#e8404a', opacity: 100, color2: '#8a2128', angle: 90, radius: 0,
+        pos: { x: 0, y: 960, w: 1920, h: 76 } },
+      { id: 'verse', type: 'text', name: 'Verse', visible: true, binding: 'verse', customText: '',
+        pos: { x: 96, y: 784, w: 1728, h: 150 },
+        font: { family: 'Manrope', size: 44, weight: 500, italic: false, lineHeight: 1.3, letterSpacing: 0, transform: 'none' },
+        color: '#ffffff', opacity: 100, align: 'left',
+        shadow: { ...TXT_SHADOW_NONE }, outline: { ...NO_OUTLINE } },
+      { id: 'ref', type: 'text', name: 'Reference', visible: true, binding: 'reference', customText: '',
+        pos: { x: 96, y: 980, w: 1728, h: 0 },
+        font: { family: 'Manrope', size: 22, weight: 800, italic: false, lineHeight: 1.2, letterSpacing: 6, transform: 'uppercase' },
+        color: '#ffffff', opacity: 100, align: 'left',
+        shadow: { ...TXT_SHADOW_NONE }, outline: { ...NO_OUTLINE } },
+    ],
+  },
+  {
+    // Lyrics default. Transparent canvas so it keys straight over camera or
+    // motion backgrounds, and a heavy block face sized for the two-line chunks
+    // the playlist produces — big, centred, no panel behind it. The reference
+    // line doubles as the song title.
+    id: 'lyrics-block', name: 'Lyrics — Block', layout: 'fullscreen', animation: 'fade',
+    layers: [
+      { id: 'bg', type: 'background', name: 'Canvas', visible: true,
+        fill: 'transparent', fillBefore: 'solid', color: '#000000', opacity: 100, color2: '#000000', angle: 0 },
+      { id: 'verse', type: 'text', name: 'Lyrics', visible: true, binding: 'verse', customText: '',
+        pos: { x: 140, y: 360, w: 1640, h: 380 },
+        font: { family: 'Montserrat', size: 96, weight: 800, italic: false, lineHeight: 1.22, letterSpacing: 0, transform: 'uppercase' },
+        color: '#ffffff', opacity: 100, align: 'center',
+        shadow: { enabled: true, color: '#000000', opacity: 85, blur: 22, x: 0, y: 4 },
+        outline: { enabled: true, color: '#000000', width: 2 } },
+      { id: 'ref', type: 'text', name: 'Song Title', visible: true, binding: 'reference', customText: '',
+        pos: { x: 140, y: 880, w: 1640, h: 0 },
+        font: { family: 'Montserrat', size: 26, weight: 600, italic: false, lineHeight: 1.2, letterSpacing: 6, transform: 'uppercase' },
         color: '#ffffff', opacity: 55, align: 'center',
-        shadow: { enabled: false, color: '#000000', opacity: 70, blur: 4, x: 0, y: 1 },
-        outline: { enabled: false, color: '#000000', width: 1 } },
+        shadow: { enabled: true, color: '#000000', opacity: 80, blur: 10, x: 0, y: 2 },
+        outline: { ...NO_OUTLINE } },
     ],
   },
   {
-    id: 'lower-third', name: 'Lower Third — Glass', layout: 'lower-third', animation: 'slide-up',
+    // Filled left half, fully transparent right half — the right side keys out
+    // so a camera / lyric feed shows through on a chroma or alpha rig.
+    id: 'split-left', name: 'Split — Left', layout: 'split-left', animation: 'slide-up',
     layers: [
-      { id: 'bg',    type: 'background', name: 'Background', visible: true, fill: 'blur', color: '#000000', opacity: 85, color2: '#000000', angle: 0 },
-      { id: 'verse', type: 'text', name: 'Verse Text', visible: true, binding: 'verse', customText: '',
-        font: { family: 'Manrope', size: 36, weight: 500, italic: false, lineHeight: 1.3, letterSpacing: 0, transform: 'none' },
+      { id: 'bg', type: 'background', name: 'Canvas', visible: true,
+        fill: 'transparent', fillBefore: 'solid', color: '#000000', opacity: 100, color2: '#000000', angle: 0 },
+      { id: 'panel', type: 'background', name: 'Filled Half', visible: true,
+        fill: 'gradient', color: '#0b0b0f', opacity: 100, color2: '#1c1c30', angle: 160, radius: 0,
+        pos: { x: 0, y: 0, w: 960, h: 1080 } },
+      { id: 'verse', type: 'text', name: 'Verse', visible: true, binding: 'verse', customText: '',
+        pos: { x: 88, y: 300, w: 784, h: 430 },
+        font: { family: 'Manrope', size: 44, weight: 500, italic: false, lineHeight: 1.4, letterSpacing: 0, transform: 'none' },
         color: '#ffffff', opacity: 100, align: 'left',
-        shadow: { enabled: false, color: '#000000', opacity: 70, blur: 4, x: 0, y: 1 },
-        outline: { enabled: false, color: '#000000', width: 1 } },
-      { id: 'ref',   type: 'text', name: 'Reference', visible: true, binding: 'reference', customText: '',
-        font: { family: 'Manrope', size: 18, weight: 700, italic: false, lineHeight: 1.2, letterSpacing: 4, transform: 'uppercase' },
-        color: '#ffffff', opacity: 60, align: 'left',
-        shadow: { enabled: false, color: '#000000', opacity: 70, blur: 4, x: 0, y: 1 },
-        outline: { enabled: false, color: '#000000', width: 1 } },
+        shadow: { ...TXT_SHADOW_NONE }, outline: { ...NO_OUTLINE } },
+      { id: 'ref', type: 'text', name: 'Reference', visible: true, binding: 'reference', customText: '',
+        pos: { x: 88, y: 762, w: 784, h: 0 },
+        font: { family: 'Manrope', size: 22, weight: 700, italic: false, lineHeight: 1.2, letterSpacing: 5, transform: 'uppercase' },
+        color: '#ffffff', opacity: 65, align: 'left',
+        shadow: { ...TXT_SHADOW_NONE }, outline: { ...NO_OUTLINE } },
     ],
   },
   {
-    // Solid dark slate strip with red accent reference — broadcast-news style
-    id: 'lower-third-broadcast', name: 'Lower Third — Broadcast', layout: 'lower-third', animation: 'slide-up',
+    // Mirror of Split — Left: filled right half, transparent left half.
+    id: 'split-right', name: 'Split — Right', layout: 'split-right', animation: 'slide-up',
     layers: [
-      { id: 'bg',    type: 'background', name: 'Background', visible: true, fill: 'solid', color: '#0a0e14', opacity: 95, color2: '#0a0e14', angle: 0 },
-      { id: 'verse', type: 'text', name: 'Verse Text', visible: true, binding: 'verse', customText: '',
-        font: { family: 'Manrope', size: 32, weight: 500, italic: false, lineHeight: 1.3, letterSpacing: 0, transform: 'none' },
+      { id: 'bg', type: 'background', name: 'Canvas', visible: true,
+        fill: 'transparent', fillBefore: 'solid', color: '#000000', opacity: 100, color2: '#000000', angle: 0 },
+      { id: 'panel', type: 'background', name: 'Filled Half', visible: true,
+        fill: 'gradient', color: '#0b0b0f', opacity: 100, color2: '#1c1c30', angle: 160, radius: 0,
+        pos: { x: 960, y: 0, w: 960, h: 1080 } },
+      { id: 'verse', type: 'text', name: 'Verse', visible: true, binding: 'verse', customText: '',
+        pos: { x: 1048, y: 300, w: 784, h: 430 },
+        font: { family: 'Manrope', size: 44, weight: 500, italic: false, lineHeight: 1.4, letterSpacing: 0, transform: 'none' },
         color: '#ffffff', opacity: 100, align: 'left',
-        shadow: { enabled: false, color: '#000000', opacity: 70, blur: 4, x: 0, y: 1 },
-        outline: { enabled: false, color: '#000000', width: 1 } },
-      { id: 'ref',   type: 'text', name: 'Reference', visible: true, binding: 'reference', customText: '',
-        font: { family: 'Manrope', size: 14, weight: 800, italic: false, lineHeight: 1.2, letterSpacing: 6, transform: 'uppercase' },
-        color: '#e8404a', opacity: 100, align: 'left',
-        shadow: { enabled: false, color: '#000000', opacity: 70, blur: 4, x: 0, y: 1 },
-        outline: { enabled: false, color: '#000000', width: 1 } },
-    ],
-  },
-  {
-    // Gradient ribbon — warm dark→teal sweep, centered modern serif
-    id: 'lower-third-ribbon', name: 'Lower Third — Ribbon', layout: 'lower-third', animation: 'slide-up',
-    layers: [
-      { id: 'bg',    type: 'background', name: 'Background', visible: true, fill: 'gradient', color: '#0d1b1f', opacity: 92, color2: '#1f4d4a', angle: 90 },
-      { id: 'verse', type: 'text', name: 'Verse Text', visible: true, binding: 'verse', customText: '',
-        font: { family: 'Playfair Display', size: 38, weight: 500, italic: true, lineHeight: 1.3, letterSpacing: 0, transform: 'none' },
-        color: '#ffffff', opacity: 100, align: 'center',
-        shadow: { enabled: true, color: '#000000', opacity: 50, blur: 8, x: 0, y: 2 },
-        outline: { enabled: false, color: '#000000', width: 1 } },
-      { id: 'ref',   type: 'text', name: 'Reference', visible: true, binding: 'reference', customText: '',
-        font: { family: 'Manrope', size: 13, weight: 600, italic: false, lineHeight: 1.2, letterSpacing: 5, transform: 'uppercase' },
-        color: '#4db6ac', opacity: 100, align: 'center',
-        shadow: { enabled: false, color: '#000000', opacity: 70, blur: 4, x: 0, y: 1 },
-        outline: { enabled: false, color: '#000000', width: 1 } },
-    ],
-  },
-  {
-    // Solid black bar, large white verse, ref in muted brand red — bold + readable on stream
-    id: 'lower-third-bold', name: 'Lower Third — Bold Title', layout: 'lower-third', animation: 'slide-up',
-    layers: [
-      { id: 'bg',    type: 'background', name: 'Background', visible: true, fill: 'solid', color: '#000000', opacity: 100, color2: '#000000', angle: 0 },
-      { id: 'verse', type: 'text', name: 'Verse Text', visible: true, binding: 'verse', customText: '',
-        font: { family: 'Manrope', size: 42, weight: 800, italic: false, lineHeight: 1.2, letterSpacing: -0.5, transform: 'none' },
-        color: '#ffffff', opacity: 100, align: 'left',
-        shadow: { enabled: false, color: '#000000', opacity: 70, blur: 4, x: 0, y: 1 },
-        outline: { enabled: false, color: '#000000', width: 1 } },
-      { id: 'ref',   type: 'text', name: 'Reference', visible: true, binding: 'reference', customText: '',
-        font: { family: 'Manrope', size: 15, weight: 700, italic: false, lineHeight: 1.2, letterSpacing: 5, transform: 'uppercase' },
-        color: '#e8404a', opacity: 95, align: 'left',
-        shadow: { enabled: false, color: '#000000', opacity: 70, blur: 4, x: 0, y: 1 },
-        outline: { enabled: false, color: '#000000', width: 1 } },
-    ],
-  },
-  {
-    // Minimal whisper — barely-there gradient, light typography, low contrast
-    id: 'lower-third-whisper', name: 'Lower Third — Whisper', layout: 'lower-third', animation: 'fade',
-    layers: [
-      { id: 'bg',    type: 'background', name: 'Background', visible: true, fill: 'gradient', color: '#000000', opacity: 60, color2: '#000000', angle: 0 },
-      { id: 'verse', type: 'text', name: 'Verse Text', visible: true, binding: 'verse', customText: '',
-        font: { family: 'Manrope', size: 30, weight: 300, italic: false, lineHeight: 1.4, letterSpacing: 0.3, transform: 'none' },
-        color: '#ffffff', opacity: 92, align: 'center',
-        shadow: { enabled: true, color: '#000000', opacity: 80, blur: 12, x: 0, y: 2 },
-        outline: { enabled: false, color: '#000000', width: 1 } },
-      { id: 'ref',   type: 'text', name: 'Reference', visible: true, binding: 'reference', customText: '',
-        font: { family: 'Manrope', size: 12, weight: 500, italic: false, lineHeight: 1.2, letterSpacing: 6, transform: 'uppercase' },
-        color: '#ffffff', opacity: 55, align: 'center',
-        shadow: { enabled: true, color: '#000000', opacity: 80, blur: 8, x: 0, y: 1 },
-        outline: { enabled: false, color: '#000000', width: 1 } },
-    ],
-  },
-  {
-    // Brand block — solid red brand color, white verse, white reference badge above
-    id: 'lower-third-brand', name: 'Lower Third — Brand Block', layout: 'lower-third', animation: 'slide-up',
-    layers: [
-      { id: 'bg',    type: 'background', name: 'Background', visible: true, fill: 'gradient', color: '#c0353d', opacity: 95, color2: '#8a2128', angle: 135 },
-      { id: 'verse', type: 'text', name: 'Verse Text', visible: true, binding: 'verse', customText: '',
-        font: { family: 'Manrope', size: 34, weight: 600, italic: false, lineHeight: 1.3, letterSpacing: 0, transform: 'none' },
-        color: '#ffffff', opacity: 100, align: 'left',
-        shadow: { enabled: true, color: '#000000', opacity: 30, blur: 8, x: 0, y: 2 },
-        outline: { enabled: false, color: '#000000', width: 1 } },
-      { id: 'ref',   type: 'text', name: 'Reference', visible: true, binding: 'reference', customText: '',
-        font: { family: 'Manrope', size: 13, weight: 800, italic: false, lineHeight: 1.2, letterSpacing: 5, transform: 'uppercase' },
-        color: '#ffffff', opacity: 80, align: 'left',
-        shadow: { enabled: false, color: '#000000', opacity: 70, blur: 4, x: 0, y: 1 },
-        outline: { enabled: false, color: '#000000', width: 1 } },
-    ],
-  },
-  {
-    // Bottom-left offset card — gives the right side breathing room (great when
-    // the broadcast has a presenter shot on the right of frame).
-    id: 'card-bottom-left', name: 'Bottom-Left Card', layout: 'lower-third-card', animation: 'slide-up',
-    layers: [
-      { id: 'bg',    type: 'background', name: 'Background', visible: true, fill: 'gradient', color: '#0d0d11', opacity: 95, color2: '#1f1f28', angle: 135 },
-      { id: 'verse', type: 'text', name: 'Verse Text', visible: true, binding: 'verse', customText: '',
-        font: { family: 'Manrope', size: 28, weight: 500, italic: false, lineHeight: 1.35, letterSpacing: 0, transform: 'none' },
-        color: '#ffffff', opacity: 100, align: 'left',
-        shadow: { enabled: false, color: '#000000', opacity: 70, blur: 4, x: 0, y: 1 },
-        outline: { enabled: false, color: '#000000', width: 1 } },
-      { id: 'ref',   type: 'text', name: 'Reference', visible: true, binding: 'reference', customText: '',
-        font: { family: 'Manrope', size: 13, weight: 700, italic: false, lineHeight: 1.2, letterSpacing: 5, transform: 'uppercase' },
-        color: '#e8404a', opacity: 100, align: 'left',
-        shadow: { enabled: false, color: '#000000', opacity: 70, blur: 4, x: 0, y: 1 },
-        outline: { enabled: false, color: '#000000', width: 1 } },
-    ],
-  },
-  {
-    // Compact upper-right corner pop-in — minimal footprint, useful when the
-    // preacher quotes briefly and you don't want to cover the slide entirely.
-    id: 'corner-pop', name: 'Corner Pop', layout: 'corner-card', animation: 'fade',
-    layers: [
-      { id: 'bg',    type: 'background', name: 'Background', visible: true, fill: 'solid', color: '#000000', opacity: 88, color2: '#000000', angle: 0 },
-      { id: 'verse', type: 'text', name: 'Verse Text', visible: true, binding: 'verse', customText: '',
-        font: { family: 'Manrope', size: 18, weight: 500, italic: false, lineHeight: 1.4, letterSpacing: 0, transform: 'none' },
-        color: '#ffffff', opacity: 100, align: 'left',
-        shadow: { enabled: false, color: '#000000', opacity: 70, blur: 4, x: 0, y: 1 },
-        outline: { enabled: false, color: '#000000', width: 1 } },
-      { id: 'ref',   type: 'text', name: 'Reference', visible: true, binding: 'reference', customText: '',
-        font: { family: 'Manrope', size: 11, weight: 700, italic: false, lineHeight: 1.2, letterSpacing: 4, transform: 'uppercase' },
-        color: '#4db6ac', opacity: 100, align: 'left',
-        shadow: { enabled: false, color: '#000000', opacity: 70, blur: 4, x: 0, y: 1 },
-        outline: { enabled: false, color: '#000000', width: 1 } },
-    ],
-  },
-  {
-    // Vertical left rail — full-height accent bar with verse + ref centered.
-    // Pairs well with portrait video / mobile-first streams.
-    id: 'side-rail-rail', name: 'Side Rail', layout: 'side-rail', animation: 'slide-up',
-    layers: [
-      { id: 'bg',    type: 'background', name: 'Background', visible: true, fill: 'gradient', color: '#0d0e14', opacity: 95, color2: '#1a1f2e', angle: 180 },
-      { id: 'verse', type: 'text', name: 'Verse Text', visible: true, binding: 'verse', customText: '',
-        font: { family: 'Manrope', size: 22, weight: 500, italic: false, lineHeight: 1.4, letterSpacing: 0, transform: 'none' },
-        color: '#ffffff', opacity: 100, align: 'left',
-        shadow: { enabled: false, color: '#000000', opacity: 70, blur: 4, x: 0, y: 1 },
-        outline: { enabled: false, color: '#000000', width: 1 } },
-      { id: 'ref',   type: 'text', name: 'Reference', visible: true, binding: 'reference', customText: '',
-        font: { family: 'Manrope', size: 12, weight: 700, italic: false, lineHeight: 1.2, letterSpacing: 5, transform: 'uppercase' },
-        color: '#e8404a', opacity: 100, align: 'left',
-        shadow: { enabled: false, color: '#000000', opacity: 70, blur: 4, x: 0, y: 1 },
-        outline: { enabled: false, color: '#000000', width: 1 } },
-    ],
-  },
-  {
-    id: 'no-bg', name: 'No Background', layout: 'fullscreen', animation: 'fade',
-    layers: [
-      { id: 'bg',    type: 'background', name: 'Background', visible: true, fill: 'transparent', color: '#000000', opacity: 0, color2: '#000000', angle: 0 },
-      { id: 'verse', type: 'text', name: 'Verse Text', visible: true, binding: 'verse', customText: '',
-        font: { family: 'Manrope', size: 52, weight: 700, italic: false, lineHeight: 1.4, letterSpacing: 0, transform: 'none' },
-        color: '#ffffff', opacity: 100, align: 'center',
-        shadow: { enabled: true, color: '#000000', opacity: 90, blur: 16, x: 0, y: 4 },
-        outline: { enabled: false, color: '#000000', width: 2 } },
-      { id: 'ref',   type: 'text', name: 'Reference', visible: true, binding: 'reference', customText: '',
-        font: { family: 'Manrope', size: 20, weight: 600, italic: false, lineHeight: 1.2, letterSpacing: 3, transform: 'uppercase' },
-        color: '#ffffff', opacity: 70, align: 'center',
-        shadow: { enabled: true, color: '#000000', opacity: 80, blur: 8, x: 0, y: 2 },
-        outline: { enabled: false, color: '#000000', width: 1 } },
+        shadow: { ...TXT_SHADOW_NONE }, outline: { ...NO_OUTLINE } },
+      { id: 'ref', type: 'text', name: 'Reference', visible: true, binding: 'reference', customText: '',
+        pos: { x: 1048, y: 762, w: 784, h: 0 },
+        font: { family: 'Manrope', size: 22, weight: 700, italic: false, lineHeight: 1.2, letterSpacing: 5, transform: 'uppercase' },
+        color: '#ffffff', opacity: 65, align: 'left',
+        shadow: { ...TXT_SHADOW_NONE }, outline: { ...NO_OUTLINE } },
     ],
   },
 ];
@@ -1996,17 +2009,36 @@ const DEFAULT_LOOKS = [
 // Load saved looks from localStorage and back-fill any NEW default-look IDs
 // the user doesn't have yet (so adding new built-in lower-third designs in
 // future releases shows up for existing users without nuking their custom themes).
+// Ids of the retired v2 built-ins. v3 replaced the sprawling preset list with
+// the canonical set above; on first v3 load we drop these stock themes but keep
+// anything the operator actually made or imported.
+const LEGACY_BUILTIN_IDS = new Set([
+  'default', 'lower-third', 'lower-third-broadcast', 'lower-third-ribbon',
+  'lower-third-bold', 'lower-third-whisper', 'lower-third-brand',
+  'card-bottom-left', 'corner-pop', 'side-rail-rail', 'no-bg',
+  'split-left', 'split-right',
+]);
+
 let looks = (function loadLooks() {
-  const stored = JSON.parse(localStorage.getItem('kairo-looks-v2') || 'null');
-  if (!stored || !Array.isArray(stored) || stored.length === 0) return DEFAULT_LOOKS;
-  const knownIds = new Set(stored.map(l => l.id));
-  const missing  = DEFAULT_LOOKS.filter(d => !knownIds.has(d.id));
-  return missing.length ? [...stored, ...missing] : stored;
+  const stored = JSON.parse(localStorage.getItem(LOOKS_KEY) || 'null');
+  if (Array.isArray(stored) && stored.length) {
+    const knownIds = new Set(stored.map(l => l.id));
+    const missing  = DEFAULT_LOOKS.filter(d => !knownIds.has(d.id));
+    return missing.length ? [...stored, ...missing] : stored;
+  }
+  // First run on v3 — carry over the operator's own themes from v2, if any.
+  const legacy = JSON.parse(localStorage.getItem('kairo-looks-v2') || 'null');
+  const custom = Array.isArray(legacy) ? legacy.filter(l => l && !LEGACY_BUILTIN_IDS.has(l.id)) : [];
+  return [...DEFAULT_LOOKS, ...custom];
 })();
 let activeLook  = looks[0];
 let activeLayer = null; // currently selected layer object
 
-function saveLooks() { localStorage.setItem('kairo-looks-v2', JSON.stringify(looks)); }
+function saveLooks() {
+  localStorage.setItem(LOOKS_KEY, JSON.stringify(looks));
+  // Keep the Settings pickers and every live output in step with the edit.
+  try { renderOutputThemePickers(); renderDisplayOutputs(); applyOutputThemes(); } catch {}
+}
 function deepClone(o) { return JSON.parse(JSON.stringify(o)); }
 
 // ── Hex ↔ rgba helpers ────────────────────────────────────────────────────
@@ -2050,6 +2082,17 @@ function syncMetaRow() {
     b.classList.toggle('active', b.dataset.anim === activeLook.animation));
   const ni = document.getElementById('look-name-input');
   if (ni) ni.value = activeLook.name;
+  const alphaBtn = document.getElementById('ts-alpha-toggle');
+  if (alphaBtn) alphaBtn.classList.toggle('active', isAlphaCanvas());
+}
+
+// The canvas is "transparent" when the base background layer is keyed out —
+// the state operators want for chroma / alpha-key rigs.
+function baseBgLayer() {
+  return activeLook?.layers?.find(l => l.type === 'background' && !l.pos) || null;
+}
+function isAlphaCanvas() {
+  return baseBgLayer()?.fill === 'transparent';
 }
 
 // ── Render layers list ────────────────────────────────────────────────────
@@ -2066,7 +2109,7 @@ function renderLayersList() {
     row.dataset.layerId = layer.id;
 
     const isText = layer.type === 'text';
-    const isBg   = layer.type === 'background';
+    const isBg   = layer.type === 'background' && !layer.pos;   // base canvas only
 
     // Visibility icon
     const visBtn = document.createElement('button');
@@ -2085,7 +2128,9 @@ function renderLayersList() {
     // Type icon
     const typeIcon = document.createElement('div');
     typeIcon.className = 'ts-layer-type-icon';
-    typeIcon.textContent = isBg ? '■' : 'T';
+    typeIcon.textContent = layer.type === 'image' ? '▣'
+                         : layer.type === 'background' ? '■'
+                         : 'T';
 
     // Name
     const name = document.createElement('div');
@@ -2108,19 +2153,83 @@ function renderLayersList() {
       renderProps();
     });
 
+    // Drag handle — reordering changes paint order (top of the list paints
+    // last / in front, matching how the rows are shown).
+    const grip = document.createElement('div');
+    grip.className = 'ts-layer-grip';
+    grip.title = 'Drag to reorder';
+    grip.innerHTML = `<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round"><line x1="4" y1="9" x2="20" y2="9"/><line x1="4" y1="15" x2="20" y2="15"/></svg>`;
+
+    row.appendChild(grip);
     row.appendChild(visBtn);
     row.appendChild(typeIcon);
     row.appendChild(name);
     row.appendChild(delBtn);
 
+    row.draggable = true;
+    row.addEventListener('dragstart', (e) => {
+      tsDragLayerId = layer.id;
+      row.classList.add('ts-layer-dragging');
+      e.dataTransfer.effectAllowed = 'move';
+      // Firefox requires data to be set for a drag to start.
+      try { e.dataTransfer.setData('text/plain', layer.id); } catch {}
+    });
+    row.addEventListener('dragend', () => {
+      tsDragLayerId = null;
+      document.querySelectorAll('.ts-layer-row').forEach(r =>
+        r.classList.remove('ts-layer-dragging', 'ts-layer-drop-before', 'ts-layer-drop-after'));
+    });
+    row.addEventListener('dragover', (e) => {
+      if (!tsDragLayerId || tsDragLayerId === layer.id) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      const r = row.getBoundingClientRect();
+      const after = (e.clientY - r.top) > r.height / 2;
+      row.classList.toggle('ts-layer-drop-after', after);
+      row.classList.toggle('ts-layer-drop-before', !after);
+    });
+    row.addEventListener('dragleave', () => {
+      row.classList.remove('ts-layer-drop-before', 'ts-layer-drop-after');
+    });
+    row.addEventListener('drop', (e) => {
+      e.preventDefault();
+      const after = row.classList.contains('ts-layer-drop-after');
+      row.classList.remove('ts-layer-drop-before', 'ts-layer-drop-after');
+      reorderLayer(tsDragLayerId, layer.id, after);
+    });
+
     row.addEventListener('click', () => {
       activeLayer = layer;
       renderLayersList();
       renderProps();
+      renderPreview();
     });
 
     el.appendChild(row);
   });
+}
+
+let tsDragLayerId = null;
+
+// Move `draggedId` next to `targetId`. The list is rendered reversed (front
+// layer on top), so a drop "after" a row in the list means *below* it visually,
+// i.e. earlier in the underlying paint array.
+function reorderLayer(draggedId, targetId, after) {
+  if (!activeLook || !draggedId || draggedId === targetId) return;
+  const layers = activeLook.layers;
+  const from = layers.findIndex(l => l.id === draggedId);
+  const to   = layers.findIndex(l => l.id === targetId);
+  if (from < 0 || to < 0) return;
+
+  const [moved] = layers.splice(from, 1);
+  // Recompute the target index after removal, then convert the visual
+  // before/after into array position (array order is back-to-front).
+  let idx = layers.findIndex(l => l.id === targetId);
+  if (!after) idx += 1;          // visually above → later in paint order
+  layers.splice(Math.max(0, Math.min(layers.length, idx)), 0, moved);
+
+  renderLayersList();
+  renderPreview();
 }
 
 // ── Render preview ────────────────────────────────────────────────────────
@@ -2142,6 +2251,9 @@ function renderPreview() {
   stage.className = 'ts-preview-stage';
 
   const layout = activeLook.layout;
+  // Dynamic preview scale — real stage width over design width, so fonts and
+  // free positions render at true relative size whatever the modal size is.
+  const pxScale = (stage.clientWidth / TS_DESIGN_W) || SCALE;
 
   activeLook.layers.forEach(layer => {
     if (!layer.visible) return;
@@ -2179,7 +2291,53 @@ function renderPreview() {
         div.style.height = layout === 'ticker' ? '18%' : '38%';
       }
 
+      // Split: bg covers one half, full height
+      if (layout === 'split-left') {
+        div.style.inset = '0 auto 0 0';
+        div.style.width = '50%';
+        div.style.height = '';
+      } else if (layout === 'split-right') {
+        div.style.inset = '0 0 0 auto';
+        div.style.width = '50%';
+        div.style.height = '';
+      }
+
+      // Free-canvas override (shapes / repositioned backgrounds)
+      if (layer.pos) {
+        div.style.inset  = '';
+        div.style.left   = (layer.pos.x / TS_DESIGN_W * 100) + '%';
+        div.style.top    = (layer.pos.y / TS_DESIGN_H * 100) + '%';
+        div.style.width  = (layer.pos.w / TS_DESIGN_W * 100) + '%';
+        div.style.height = (layer.pos.h / TS_DESIGN_H * 100) + '%';
+        div.style.right  = 'auto';
+        div.style.bottom = 'auto';
+        if (layer.radius) div.style.borderRadius = (layer.radius * pxScale).toFixed(1) + 'px';
+      }
+
       stage.appendChild(div);
+      // Full-stage backgrounds are select-only; positioned shapes are draggable.
+      tsDecorateLayerEl(div, layer, !!layer.pos);
+      return;
+    }
+
+    if (layer.type === 'image') {
+      const div = document.createElement('div');
+      const p = layer.pos || { x: 0, y: 0, w: TS_DESIGN_W, h: TS_DESIGN_H };
+      div.style.cssText = `
+        position:absolute;
+        left:${(p.x / TS_DESIGN_W * 100)}%;
+        top:${(p.y / TS_DESIGN_H * 100)}%;
+        width:${(p.w / TS_DESIGN_W * 100)}%;
+        height:${(p.h / TS_DESIGN_H * 100)}%;
+        background-image:url('${layer.src}');
+        background-size:${layer.fit === 'fill' ? '100% 100%' : layer.fit};
+        background-position:center;
+        background-repeat:no-repeat;
+        opacity:${(layer.opacity ?? 100) / 100};
+        border-radius:${((layer.radius || 0) * pxScale).toFixed(1)}px;
+      `;
+      stage.appendChild(div);
+      tsDecorateLayerEl(div, layer, true);
       return;
     }
 
@@ -2189,11 +2347,11 @@ function renderPreview() {
         position: absolute;
         color: ${hexOpacity(layer.color, layer.opacity)};
         font-family: '${layer.font.family}', system-ui, sans-serif;
-        font-size: ${(layer.font.size * SCALE).toFixed(1)}px;
+        font-size: ${(layer.font.size * pxScale).toFixed(1)}px;
         font-weight: ${layer.font.weight};
         font-style: ${layer.font.italic ? 'italic' : 'normal'};
         line-height: ${layer.font.lineHeight};
-        letter-spacing: ${(layer.font.letterSpacing * SCALE * 0.5).toFixed(2)}px;
+        letter-spacing: ${(layer.font.letterSpacing * pxScale).toFixed(2)}px;
         text-transform: ${layer.font.transform};
         text-align: ${layer.align};
         padding: ${layout === 'fullscreen' ? '8%' : '3% 5%'};
@@ -2202,7 +2360,7 @@ function renderPreview() {
       // Shadow
       if (layer.shadow.enabled) {
         const sc = hexOpacity(layer.shadow.color, layer.shadow.opacity);
-        div.style.textShadow = `${layer.shadow.x}px ${(layer.shadow.y * SCALE).toFixed(1)}px ${(layer.shadow.blur * SCALE).toFixed(1)}px ${sc}`;
+        div.style.textShadow = `${layer.shadow.x}px ${(layer.shadow.y * pxScale).toFixed(1)}px ${(layer.shadow.blur * pxScale).toFixed(1)}px ${sc}`;
       }
 
       // Position based on layout and binding
@@ -2223,15 +2381,220 @@ function renderPreview() {
         div.style.overflow = 'hidden';
         div.style.textOverflow = 'ellipsis';
         div.style.padding = '0 3%';
+      } else if (layout === 'split-left' || layout === 'split-right') {
+        div.style.width = '50%';
+        div.style.padding = '0 4%';
+        if (layout === 'split-left') div.style.left = '0'; else div.style.right = '0';
+        if (layer.binding === 'verse')     { div.style.top = '50%'; div.style.transform = 'translateY(-58%)'; }
+        if (layer.binding === 'reference') { div.style.top = '50%'; div.style.transform = 'translateY(120%)'; }
       }
 
+      // Free-canvas override: explicit box wins over every layout rule.
+      if (layer.pos) {
+        div.style.left      = (layer.pos.x / TS_DESIGN_W * 100) + '%';
+        div.style.top       = (layer.pos.y / TS_DESIGN_H * 100) + '%';
+        div.style.width     = (layer.pos.w / TS_DESIGN_W * 100) + '%';
+        div.style.right     = 'auto';
+        div.style.bottom    = 'auto';
+        div.style.transform = 'none';
+        div.style.padding   = '0';
+        if (layer.pos.h > 0) div.style.height = (layer.pos.h / TS_DESIGN_H * 100) + '%';
+      }
+
+      if (layer.binding) div.dataset.binding = layer.binding;
+      div.dataset.baseSize = (layer.font.size * pxScale).toFixed(1);
       div.textContent = layerTextContent(layer);
       stage.appendChild(div);
+      tsDecorateLayerEl(div, layer, true);
 
       // Load font
       if (layer.font.family !== 'system-ui') loadGoogleFont(layer.font.family);
     }
   });
+
+  // Auto-fit the verse in the preview so long verses (e.g. Esther 8:9) shrink to
+  // fit — mirrors the live renderer's fitVerse() so the preview never lies about
+  // how a long verse will actually lay out on the output.
+  fitPreviewVerse(stage, layout);
+}
+
+// Preview-side counterpart to display.html's fitVerse(). Same per-layout height
+// budget, scaled to the preview stage.
+function fitPreviewVerse(stage, layout) {
+  const el = stage.querySelector('[data-binding="verse"]');
+  if (!el) return;
+  const stageH = stage.clientHeight || 0;
+  if (stageH < 20) return;   // not laid out yet — skip
+  const FRAC = {
+    'lower-third': 0.30, 'lower-third-card': 0.24, 'corner-card': 0.20,
+    'ticker': 0.16, 'side-rail': 0.80, 'split-left': 0.84, 'split-right': 0.84,
+  };
+  // Free-canvas verse box: budget is its own height, or space to stage bottom.
+  const vLayer = (activeLook?.layers || []).find(l => l.type === 'text' && l.binding === 'verse' && l.visible !== false);
+  const maxH = (vLayer && vLayer.pos)
+    ? stageH * (vLayer.pos.h > 0 ? vLayer.pos.h / TS_DESIGN_H : Math.max(0.08, 1 - vLayer.pos.y / TS_DESIGN_H))
+    : stageH * (FRAC[layout] || 0.72);
+  let size = parseFloat(el.dataset.baseSize) || parseFloat(el.style.fontSize) || 20;
+  el.style.fontSize = size + 'px';
+  // Measure unconstrained: a box with an explicit height reports scrollHeight
+  // >= that height no matter how small the text gets, so comparing against it
+  // would shrink the font to nothing. Release the height while measuring.
+  const prevH = el.style.height;
+  el.style.height = 'auto';
+  let guard = 60;
+  while (el.scrollHeight > maxH && size > 6 && guard-- > 0) {
+    size = Math.max(6, size * 0.94);
+    el.style.fontSize = size.toFixed(1) + 'px';
+  }
+  el.style.height = prevH;
+}
+
+// ── Free-canvas machinery ─────────────────────────────────────────────────
+// Layers may carry `pos: {x, y, w, h}` in 1920×1080 design-space pixels (same
+// convention as the live renderer in display.html). A layer without pos follows
+// its layout preset; the first drag (or a Position/Dimension edit) converts it
+// by measuring where the preset actually put it, so nothing jumps.
+const TS_DESIGN_W = 1920, TS_DESIGN_H = 1080;
+
+function tsStageEl() { return document.getElementById('looks-preview-stage'); }
+
+// Current design-space box of a layer: explicit pos, or measured from the DOM.
+function measurePos(layer) {
+  if (layer.pos) return { ...layer.pos };
+  const stage = tsStageEl();
+  const el = stage?.querySelector(`[data-layer-id="${CSS.escape(layer.id)}"]`);
+  if (!el || !stage || !stage.clientWidth) {
+    return { x: 560, y: 800, w: 800, h: layer.type === 'background' ? 120 : 0 };
+  }
+  const s = stage.getBoundingClientRect(), r = el.getBoundingClientRect();
+  return {
+    x: Math.round((r.left - s.left) / s.width  * TS_DESIGN_W),
+    y: Math.round((r.top  - s.top)  / s.height * TS_DESIGN_H),
+    w: Math.round(r.width  / s.width  * TS_DESIGN_W),
+    h: layer.type === 'background' ? Math.round(r.height / s.height * TS_DESIGN_H) : 0,
+  };
+}
+
+function ensurePos(layer) {
+  if (!layer.pos) layer.pos = measurePos(layer);
+  return layer.pos;
+}
+
+// Rendered height in design px — for vertical alignment of auto-height text.
+function tsEffectiveH(layer, p) {
+  if (p.h > 0) return p.h;
+  const stage = tsStageEl();
+  const el = stage?.querySelector(`[data-layer-id="${CSS.escape(layer.id)}"]`);
+  if (!el || !stage || !stage.clientHeight) return 100;
+  return Math.round(el.getBoundingClientRect().height / stage.getBoundingClientRect().height * TS_DESIGN_H);
+}
+
+let tsDrag = null;   // { layer, mode:'move'|'resize', dir, startX, startY, start, stageRect }
+
+function tsBeginDrag(e, layer, mode, dir) {
+  if (e.button !== 0) return;
+  e.preventDefault(); e.stopPropagation();
+  if (activeLayer !== layer) { activeLayer = layer; renderLayersList(); renderProps(); }
+  const stage = tsStageEl();
+  if (!stage) return;
+  const pos = ensurePos(layer);
+  tsDrag = {
+    layer, mode, dir: dir || 'se',
+    startX: e.clientX, startY: e.clientY,
+    start: { ...pos },
+    stageRect: stage.getBoundingClientRect(),
+  };
+  document.addEventListener('mousemove', tsDragMove);
+  document.addEventListener('mouseup', tsDragEnd);
+  renderPreview();
+}
+
+function tsDragMove(e) {
+  if (!tsDrag) return;
+  const { layer, mode, start, stageRect } = tsDrag;
+  const dx = (e.clientX - tsDrag.startX) / stageRect.width  * TS_DESIGN_W;
+  const dy = (e.clientY - tsDrag.startY) / stageRect.height * TS_DESIGN_H;
+
+  if (mode === 'move') {
+    let nx = Math.round(start.x + dx);
+    let ny = Math.round(start.y + dy);
+    // Center snap — makes "visually centered" effortless, like pro canvases.
+    const eh = tsEffectiveH(layer, layer.pos);
+    if (Math.abs(nx + start.w / 2 - TS_DESIGN_W / 2) < 14) nx = Math.round((TS_DESIGN_W - start.w) / 2);
+    if (Math.abs(ny + eh / 2 - TS_DESIGN_H / 2) < 14)      ny = Math.round((TS_DESIGN_H - eh) / 2);
+    layer.pos.x = nx; layer.pos.y = ny;
+  } else {
+    // Resize from whichever handle was grabbed — the opposite edge stays put,
+    // exactly like dragging a selection corner in a design tool.
+    const d = tsDrag.dir;
+    const MIN_W = 40, MIN_H = 24;
+    // An auto-height text box gets a real height the moment it's stretched
+    // vertically; horizontal-only drags leave it on auto.
+    const vertical = d.includes('n') || d.includes('s');
+    const baseH = start.h > 0 ? start.h : tsEffectiveH(layer, start);
+
+    let nx = start.x, ny = start.y, nw = start.w, nh = start.h;
+
+    if (d.includes('e')) nw = start.w + dx;
+    if (d.includes('w')) { nw = start.w - dx; nx = start.x + dx; }
+    if (vertical) {
+      if (d.includes('s')) nh = baseH + dy;
+      if (d.includes('n')) { nh = baseH - dy; ny = start.y + dy; }
+    }
+
+    // Clamp without letting the anchored edge drift.
+    if (nw < MIN_W) { if (d.includes('w')) nx = start.x + (start.w - MIN_W); nw = MIN_W; }
+    if (vertical && nh < MIN_H) { if (d.includes('n')) ny = start.y + (baseH - MIN_H); nh = MIN_H; }
+
+    layer.pos.x = Math.round(nx);
+    layer.pos.y = Math.round(ny);
+    layer.pos.w = Math.round(nw);
+    layer.pos.h = Math.round(nh);
+  }
+  renderPreview();
+  tsSyncPosInputs(layer);
+}
+
+function tsDragEnd() {
+  document.removeEventListener('mousemove', tsDragMove);
+  document.removeEventListener('mouseup', tsDragEnd);
+  if (tsDrag) { tsDrag = null; renderProps(); }
+}
+
+// Live-update the Position/Dimension inputs during a drag without a full
+// (focus-stealing) renderProps rebuild.
+function tsSyncPosInputs(layer) {
+  if (!layer.pos) return;
+  document.querySelectorAll('#ts-props-panel [data-pos-input]').forEach(inp => {
+    const k = inp.dataset.posInput;
+    if (document.activeElement !== inp) inp.value = layer.pos[k];
+  });
+}
+
+// Selection outline + drag/resize wiring for a rendered preview element.
+function tsDecorateLayerEl(div, layer, draggable) {
+  div.dataset.layerId = layer.id;
+  div.style.cursor = draggable ? 'move' : 'pointer';
+  div.addEventListener('mousedown', (e) => {
+    if (e.target.classList && e.target.classList.contains('ts-handle')) return;
+    if (draggable) {
+      tsBeginDrag(e, layer, 'move');
+    } else {
+      e.stopPropagation();
+      if (activeLayer !== layer) { activeLayer = layer; renderLayersList(); renderProps(); renderPreview(); }
+    }
+  });
+  if (activeLayer === layer) {
+    div.classList.add('ts-el-selected');
+    // Eight-point selection frame: four corners + four edge midpoints, each
+    // resizing from the opposite anchor.
+    ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'].forEach(dir => {
+      const h = document.createElement('div');
+      h.className = `ts-handle ts-handle-${dir}`;
+      h.addEventListener('mousedown', (e) => tsBeginDrag(e, layer, 'resize', dir));
+      div.appendChild(h);
+    });
+  }
 }
 
 // ── Render properties panel ───────────────────────────────────────────────
@@ -2253,6 +2616,8 @@ function renderProps() {
 
   if (activeLayer.type === 'background') {
     renderBgProps(panel, activeLayer);
+  } else if (activeLayer.type === 'image') {
+    renderImageProps(panel, activeLayer);
   } else {
     renderTextProps(panel, activeLayer);
   }
@@ -2365,6 +2730,20 @@ function makeAlignBtns(current, onChange) {
   return wrap;
 }
 
+function makeWeightSelect(current, onChange) {
+  const sel = document.createElement('select');
+  sel.className = 'ts-font-select';
+  FONT_WEIGHTS.forEach(w => {
+    const opt = document.createElement('option');
+    opt.value = w.value;
+    opt.textContent = w.label;
+    if (Number(w.value) === Number(current)) opt.selected = true;
+    sel.appendChild(opt);
+  });
+  sel.addEventListener('change', () => onChange(parseInt(sel.value, 10)));
+  return sel;
+}
+
 function makeFontSelect(current, onChange) {
   const sel = document.createElement('select');
   sel.className = 'ts-font-select';
@@ -2387,7 +2766,6 @@ function makeFontSelect(current, onChange) {
 function makeChips(options, current, onChange) {
   const wrap = document.createElement('div');
   wrap.className = 'ts-chip-group';
-  wrap.style.cssText = 'flex:1;';
   options.forEach(({ label, value }) => {
     const btn = document.createElement('button');
     btn.className = 'ts-chip' + (current === value ? ' active' : '');
@@ -2404,8 +2782,81 @@ function makeChips(options, current, onChange) {
 
 function up() { renderPreview(); renderLayersList(); }
 
+// ── Layout (free-canvas) props — Alignment / Position / Dimension ─────────
+function renderLayoutProps(panel, layer) {
+  const cur = measurePos(layer);
+
+  const posNum = (key, min, max) => {
+    const inp = makeNumber(cur[key], min, max, 1, v => {
+      ensurePos(layer)[key] = Math.round(v);
+      renderPreview();
+    });
+    inp.dataset.posInput = key;
+    return inp;
+  };
+
+  // Alignment: snap the box to canvas edges/center, Pewbeam-style.
+  const alignWrap = document.createElement('div');
+  alignWrap.className = 'ts-align-group';
+  [
+    ['Left',   '<line x1="4" y1="4" x2="4" y2="20"/><rect x="8" y="9" width="12" height="6"/>',  p => { p.x = 0; }],
+    ['Center', '<line x1="12" y1="4" x2="12" y2="20"/><rect x="5" y="9" width="14" height="6"/>', p => { p.x = Math.round((TS_DESIGN_W - p.w) / 2); }],
+    ['Right',  '<line x1="20" y1="4" x2="20" y2="20"/><rect x="4" y="9" width="12" height="6"/>', p => { p.x = TS_DESIGN_W - p.w; }],
+    ['Top',    '<line x1="4" y1="4" x2="20" y2="4"/><rect x="9" y="8" width="6" height="12"/>',  p => { p.y = 0; }],
+    ['Middle', '<line x1="4" y1="12" x2="20" y2="12"/><rect x="9" y="5" width="6" height="14"/>', p => { p.y = Math.round((TS_DESIGN_H - tsEffectiveH(layer, p)) / 2); }],
+    ['Bottom', '<line x1="4" y1="20" x2="20" y2="20"/><rect x="9" y="4" width="6" height="12"/>', p => { p.y = TS_DESIGN_H - tsEffectiveH(layer, p); }],
+  ].forEach(([name, icon, act]) => {
+    const btn = document.createElement('button');
+    btn.className = 'ts-align-btn';
+    btn.title = name;
+    btn.innerHTML = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round">${icon}</svg>`;
+    btn.addEventListener('click', () => {
+      const p = ensurePos(layer);
+      act(p);
+      renderPreview();
+      tsSyncPosInputs(layer);
+    });
+    alignWrap.appendChild(btn);
+  });
+
+  const xyRow = document.createElement('div');
+  xyRow.className = 'ts-prop-row'; xyRow.style.gap = '8px';
+  const xl = document.createElement('span'); xl.className = 'ts-prop-label'; xl.textContent = 'X';
+  const yl = document.createElement('span'); yl.className = 'ts-prop-label'; yl.textContent = 'Y';
+  xyRow.appendChild(xl); xyRow.appendChild(posNum('x', -TS_DESIGN_W, TS_DESIGN_W));
+  xyRow.appendChild(yl); xyRow.appendChild(posNum('y', -TS_DESIGN_H, TS_DESIGN_H));
+
+  const whRow = document.createElement('div');
+  whRow.className = 'ts-prop-row'; whRow.style.gap = '8px';
+  const wl = document.createElement('span'); wl.className = 'ts-prop-label'; wl.textContent = 'W';
+  const hl = document.createElement('span'); hl.className = 'ts-prop-label';
+  hl.textContent = layer.type === 'text' ? 'H (0 = auto)' : 'H';
+  whRow.appendChild(wl); whRow.appendChild(posNum('w', 40, TS_DESIGN_W));
+  whRow.appendChild(hl); whRow.appendChild(posNum('h', 0, TS_DESIGN_H));
+
+  const kids = [prop('Align', alignWrap), xyRow, whRow];
+
+  // Escape hatch back to the layout preset once a layer has been freed.
+  if (layer.pos) {
+    const reset = document.createElement('button');
+    reset.className = 'ts-fill-chip';
+    reset.textContent = 'Use layout preset';
+    reset.title = 'Clear free position — this layer follows the theme layout again';
+    reset.addEventListener('click', () => {
+      delete layer.pos;
+      up();
+      renderProps();
+    });
+    kids.push(prop('Position', reset));
+  }
+
+  panel.appendChild(section('Layout', ...kids));
+}
+
 // Background layer properties
 function renderBgProps(panel, layer) {
+  renderLayoutProps(panel, layer);
+
   // Fill type
   panel.appendChild(section('Fill',
     makeFillChips(layer.fill, v => { layer.fill = v; colorRow.style.display = v === 'transparent' ? 'none' : ''; grad2Row.style.display = v === 'gradient' ? '' : 'none'; up(); })
@@ -2428,6 +2879,70 @@ function renderBgProps(panel, layer) {
   panel.appendChild(grad2Row);
 }
 
+// Image layer properties
+function renderImageProps(panel, layer) {
+  const nameInp = document.createElement('input');
+  nameInp.type = 'text'; nameInp.className = 'ts-prop-input';
+  nameInp.value = layer.name; nameInp.placeholder = 'Layer name';
+  nameInp.addEventListener('input', () => { layer.name = nameInp.value; renderLayersList(); });
+  panel.appendChild(section('Layer', prop('Name', nameInp)));
+
+  renderLayoutProps(panel, layer);
+
+  panel.appendChild(section('Image',
+    prop('Fit', makeChips([
+      { label: 'Contain', value: 'contain' },
+      { label: 'Cover',   value: 'cover' },
+      { label: 'Stretch', value: 'fill' },
+    ], layer.fit || 'contain', v => { layer.fit = v; up(); })),
+    prop('Opacity', makeSlider(layer.opacity ?? 100, 0, 100, v => { layer.opacity = v; up(); })),
+    prop('Radius', makeSlider(layer.radius || 0, 0, 200, v => { layer.radius = v; up(); }))
+  ));
+
+  // Background removal — colour key. Keeps the original so it can be undone.
+  const cutBtn = document.createElement('button');
+  cutBtn.className = 'ts-fill-chip';
+  cutBtn.textContent = layer.srcOriginal ? 'Re-cut background' : 'Remove background';
+  cutBtn.title = 'Key out a flat backdrop (logos, graphics, green screen)';
+  cutBtn.addEventListener('click', async () => {
+    cutBtn.disabled = true;
+    cutBtn.textContent = 'Working…';
+    try {
+      const original = layer.srcOriginal || layer.src;
+      const out = await removeImageBackground({ src: original }, layer.cutTolerance || 40);
+      layer.srcOriginal = original;
+      layer.src = out;
+      up(); renderProps();
+      toast('Background removed', 'success');
+    } catch {
+      toast('Could not process that image', 'error');
+      cutBtn.disabled = false;
+      cutBtn.textContent = 'Remove background';
+    }
+  });
+
+  const cutKids = [prop('Cutout', cutBtn)];
+  if (layer.srcOriginal) {
+    cutKids.push(prop('Tolerance', makeSlider(layer.cutTolerance || 40, 5, 160, async v => {
+      layer.cutTolerance = v;
+      try {
+        layer.src = await removeImageBackground({ src: layer.srcOriginal }, v);
+        up();
+      } catch {}
+    })));
+    const undo = document.createElement('button');
+    undo.className = 'ts-fill-chip';
+    undo.textContent = 'Restore original';
+    undo.addEventListener('click', () => {
+      layer.src = layer.srcOriginal;
+      delete layer.srcOriginal;
+      up(); renderProps();
+    });
+    cutKids.push(prop('Undo', undo));
+  }
+  panel.appendChild(section('Background', ...cutKids));
+}
+
 // Text layer properties
 function renderTextProps(panel, layer) {
   // Name + binding
@@ -2444,6 +2959,8 @@ function renderTextProps(panel, layer) {
       { label: 'Custom', value: 'custom' },
     ], layer.binding, v => { layer.binding = v; customRow.style.display = v === 'custom' ? '' : 'none'; up(); }))
   ));
+
+  renderLayoutProps(panel, layer);
 
   const customInp = document.createElement('input');
   customInp.type = 'text'; customInp.className = 'ts-prop-input';
@@ -2463,7 +2980,7 @@ function renderTextProps(panel, layer) {
       const szLabel = document.createElement('span'); szLabel.className = 'ts-prop-label'; szLabel.textContent = 'Size';
       const szInp = makeNumber(layer.font.size, 8, 300, 1, v => { layer.font.size = v; up(); });
       const wtLabel = document.createElement('span'); wtLabel.className = 'ts-prop-label'; wtLabel.textContent = 'Weight';
-      const wtInp = makeNumber(layer.font.weight, 100, 900, 100, v => { layer.font.weight = v; up(); });
+      const wtInp = makeWeightSelect(layer.font.weight, v => { layer.font.weight = v; up(); });
       row.appendChild(szLabel); row.appendChild(szInp);
       row.appendChild(wtLabel); row.appendChild(wtInp);
       return row;
@@ -2544,21 +3061,53 @@ const looksModal   = document.getElementById('looks-modal');
 const closeLooksBtn = document.getElementById('close-looks');
 const newLookBtn   = document.getElementById('new-look-btn');
 const saveLookBtn  = document.getElementById('save-look-btn');
-const applyLookBtn = document.getElementById('apply-look-btn');
+// (No global "apply" button — themes are assigned per output in Settings.)
 const deleteLookBtn = document.getElementById('delete-look-btn');
 const tsAddLayerBtn = document.getElementById('ts-add-layer-btn');
 
-looksBtn?.addEventListener('click', () => {
+// Theme Studio is a full in-window view, not an overlay: opening it swaps the
+// dashboard out so the canvas gets the whole content region.
+function openThemeStudio() {
+  document.querySelector('.main-layout')?.classList.add('hidden-el');
+  // Only one full-window view at a time.
+  document.getElementById('service-view')?.classList.add('hidden');
   looksModal?.classList.remove('hidden');
+  looksBtn?.classList.add('active');
   renderLooksList();
   renderLayersList();
   syncMetaRow();
-  renderPreview();
   renderProps();
+  // Render after layout settles so the stage has real dimensions — the preview
+  // scale and verse auto-fit both measure the stage.
+  requestAnimationFrame(() => renderPreview());
+}
+
+function closeThemeStudio() {
+  looksModal?.classList.add('hidden');
+  looksBtn?.classList.remove('active');
+  document.querySelector('.main-layout')?.classList.remove('hidden-el');
+}
+
+looksBtn?.addEventListener('click', () => {
+  if (looksModal?.classList.contains('hidden')) openThemeStudio();
+  else closeThemeStudio();
 });
 
-closeLooksBtn?.addEventListener('click', () => looksModal?.classList.add('hidden'));
-looksModal?.querySelector('.modal-overlay')?.addEventListener('click', () => looksModal?.classList.add('hidden'));
+closeLooksBtn?.addEventListener('click', closeThemeStudio);
+
+// Esc returns to the dashboard (unless a text field has focus).
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape' || looksModal?.classList.contains('hidden')) return;
+  const t = e.target;
+  if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT')) return;
+  closeThemeStudio();
+});
+
+// Keep the preview honest when the window resizes — pxScale is derived from
+// the live stage width.
+window.addEventListener('resize', () => {
+  if (!looksModal?.classList.contains('hidden')) renderPreview();
+});
 
 // Layout chips
 document.getElementById('ts-layout-picker')?.addEventListener('click', e => {
@@ -2568,6 +3117,133 @@ document.getElementById('ts-layout-picker')?.addEventListener('click', e => {
   btn.classList.add('active');
   activeLook.layout = btn.dataset.layout;
   renderPreview();
+});
+
+// ── Settings split view ───────────────────────────────────────────────────
+// Left nav selects which category pane is shown on the right. The last-viewed
+// category is remembered so reopening Settings lands where you left off.
+(function initSettingsNav() {
+  const nav = document.getElementById('settings-nav');
+  const panes = document.getElementById('settings-panes');
+  if (!nav || !panes) return;
+
+  function show(key) {
+    let matched = false;
+    nav.querySelectorAll('.settings-nav-item').forEach(b => {
+      const on = b.dataset.pane === key;
+      b.classList.toggle('active', on);
+      if (on) matched = true;
+    });
+    if (!matched) return;
+    panes.querySelectorAll('.settings-pane').forEach(p =>
+      p.classList.toggle('active', p.dataset.pane === key));
+    panes.scrollTop = 0;
+    localStorage.setItem('kairo-settings-pane', key);
+  }
+
+  nav.addEventListener('click', (e) => {
+    const btn = e.target.closest('.settings-nav-item');
+    if (btn) show(btn.dataset.pane);
+  });
+
+  show(localStorage.getItem('kairo-settings-pane') || 'audio');
+})();
+
+// ── Resizable Playlist / Transcript split (left sidebar) ──────────────────
+// Same trade-off as the Theme Studio panes: a long running order and a long
+// transcript want opposite amounts of room, so let the operator decide.
+(function initSidebarSplitter() {
+  const splitter = document.getElementById('ls-splitter');
+  const playlist = document.querySelector('.ls-playlist-section');
+  if (!splitter || !playlist) return;
+
+  const MIN_TOP = 110, MIN_BOTTOM = 140;
+  const saved = parseInt(localStorage.getItem('kairo-ls-playlist-h') || '', 10);
+  if (saved > 0) playlist.style.height = saved + 'px';
+
+  let startY = 0, startH = 0, col = null;
+
+  const onMove = (e) => {
+    const maxH = col.clientHeight - splitter.offsetHeight - MIN_BOTTOM;
+    const h = Math.max(MIN_TOP, Math.min(maxH, startH + (e.clientY - startY)));
+    playlist.style.height = h + 'px';
+  };
+  const onUp = () => {
+    document.removeEventListener('mousemove', onMove);
+    document.removeEventListener('mouseup', onUp);
+    splitter.classList.remove('dragging');
+    document.body.style.userSelect = '';
+    localStorage.setItem('kairo-ls-playlist-h', String(playlist.offsetHeight));
+  };
+
+  splitter.addEventListener('mousedown', (e) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    col = splitter.parentElement;
+    startY = e.clientY;
+    startH = playlist.offsetHeight;
+    splitter.classList.add('dragging');
+    document.body.style.userSelect = 'none';
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  });
+})();
+
+// ── Resizable Themes / Layers split ───────────────────────────────────────
+// Drag the divider to trade height between the two left-column panes. The
+// chosen size persists so the operator's working layout survives a restart.
+(function initTsSplitter() {
+  const splitter = document.getElementById('ts-splitter');
+  const themes   = document.getElementById('ts-pane-themes');
+  if (!splitter || !themes) return;
+
+  const MIN_TOP = 90, MIN_BOTTOM = 120;
+  const saved = parseInt(localStorage.getItem('kairo-ts-themes-h') || '', 10);
+  if (saved > 0) themes.style.height = saved + 'px';
+
+  let startY = 0, startH = 0, col = null;
+
+  const onMove = (e) => {
+    const maxH = col.clientHeight - splitter.offsetHeight - MIN_BOTTOM;
+    const h = Math.max(MIN_TOP, Math.min(maxH, startH + (e.clientY - startY)));
+    themes.style.height = h + 'px';
+  };
+  const onUp = () => {
+    document.removeEventListener('mousemove', onMove);
+    document.removeEventListener('mouseup', onUp);
+    splitter.classList.remove('dragging');
+    document.body.style.userSelect = '';
+    localStorage.setItem('kairo-ts-themes-h', String(themes.offsetHeight));
+  };
+
+  splitter.addEventListener('mousedown', (e) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    col = splitter.parentElement;
+    startY = e.clientY;
+    startH = themes.offsetHeight;
+    splitter.classList.add('dragging');
+    document.body.style.userSelect = 'none';
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  });
+})();
+
+// Canvas alpha toggle — flips the base background between its fill and
+// transparent, remembering the previous fill so it round-trips.
+document.getElementById('ts-alpha-toggle')?.addEventListener('click', () => {
+  const bg = baseBgLayer();
+  if (!bg) { toast('This theme has no background layer', 'error'); return; }
+  if (bg.fill === 'transparent') {
+    bg.fill = bg.fillBefore || 'solid';
+    delete bg.fillBefore;
+  } else {
+    bg.fillBefore = bg.fill;
+    bg.fill = 'transparent';
+  }
+  syncMetaRow();
+  up();
+  renderProps();
 });
 
 // Animation chips
@@ -2601,6 +3277,166 @@ tsAddLayerBtn?.addEventListener('click', () => {
   renderLayersList();
   renderPreview();
   renderProps();
+});
+
+// Add shape layer — a positioned background rect (bar, panel, badge…)
+document.getElementById('ts-add-shape-btn')?.addEventListener('click', () => {
+  if (!activeLook) return;
+  const newLayer = {
+    id: 'shape-' + Date.now(), type: 'background', name: 'Shape', visible: true,
+    fill: 'solid', color: '#e8404a', opacity: 90, color2: '#8a2128', angle: 135,
+    radius: 8,
+    pos: { x: 560, y: 800, w: 800, h: 120 },
+  };
+  activeLook.layers.push(newLayer);
+  activeLayer = newLayer;
+  renderLayersList();
+  renderPreview();
+  renderProps();
+});
+
+// ── Image layers ──────────────────────────────────────────────────────────
+// Images are stored inline as data URLs so a theme stays a single portable
+// JSON file (export/import carries the artwork with it). Source files are
+// downscaled to at most IMG_MAX_W so a 4000px photo can't blow past the
+// settings-storage budget. PNG/WebP keep their alpha; everything else is
+// re-encoded as JPEG, which is far smaller for photographs.
+const IMG_MAX_W = 1920;
+
+function loadImageFile(file) {
+  return new Promise((resolve, reject) => {
+    const fr = new FileReader();
+    fr.onerror = () => reject(new Error('read failed'));
+    fr.onload = () => {
+      const img = new Image();
+      img.onerror = () => reject(new Error('decode failed'));
+      img.onload = () => {
+        const scale = Math.min(1, IMG_MAX_W / img.naturalWidth);
+        const w = Math.max(1, Math.round(img.naturalWidth  * scale));
+        const h = Math.max(1, Math.round(img.naturalHeight * scale));
+        const c = document.createElement('canvas');
+        c.width = w; c.height = h;
+        c.getContext('2d').drawImage(img, 0, 0, w, h);
+        const keepAlpha = /png|webp|gif|svg/i.test(file.type);
+        resolve({
+          src: keepAlpha ? c.toDataURL('image/png') : c.toDataURL('image/jpeg', 0.86),
+          w, h,
+        });
+      };
+      img.src = fr.result;
+    };
+    fr.readAsDataURL(file);
+  });
+}
+
+const tsImageFile = document.getElementById('ts-image-file');
+document.getElementById('ts-add-image-btn')?.addEventListener('click', () => tsImageFile?.click());
+tsImageFile?.addEventListener('change', async () => {
+  const file = tsImageFile.files?.[0];
+  tsImageFile.value = '';
+  if (!file || !activeLook) return;
+  try {
+    const { src, w, h } = await loadImageFile(file);
+    // Place it centred, scaled to fit comfortably inside the canvas.
+    const fit = Math.min(TS_DESIGN_W * 0.5 / w, TS_DESIGN_H * 0.5 / h, 1);
+    const pw = Math.round(w * fit), ph = Math.round(h * fit);
+    const layer = {
+      id: 'image-' + Date.now(), type: 'image', name: file.name.replace(/\.[^.]+$/, '').slice(0, 24) || 'Image',
+      visible: true, src, fit: 'contain', opacity: 100, radius: 0,
+      pos: { x: Math.round((TS_DESIGN_W - pw) / 2), y: Math.round((TS_DESIGN_H - ph) / 2), w: pw, h: ph },
+    };
+    activeLook.layers.push(layer);
+    activeLayer = layer;
+    renderLayersList(); renderPreview(); renderProps();
+  } catch {
+    toast('Could not load that image', 'error');
+  }
+});
+
+// ── Background removal (colour key) ───────────────────────────────────────
+// Removes a flat backdrop from an image layer by keying out every pixel within
+// `tolerance` of a sample colour, then feathering the resulting edge. This is
+// the reliable, dependency-free case: logos, graphics and anything shot on a
+// flat/green backdrop. (Full AI subject cutout needs a segmentation model —
+// tracked separately.) Sample colour defaults to the most common edge pixel,
+// which is the backdrop in virtually every real image.
+function removeImageBackground(layer, tolerance = 40) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onerror = () => reject(new Error('decode failed'));
+    img.onload = () => {
+      const w = img.naturalWidth, h = img.naturalHeight;
+      const c = document.createElement('canvas');
+      c.width = w; c.height = h;
+      const ctx = c.getContext('2d', { willReadFrequently: true });
+      ctx.drawImage(img, 0, 0);
+      const imgData = ctx.getImageData(0, 0, w, h);
+      const d = imgData.data;
+
+      // Sample the border: the modal colour around the edge is the backdrop.
+      const counts = new Map();
+      const sample = (x, y) => {
+        const i = (y * w + x) * 4;
+        // Quantise to 8 levels/channel so near-identical pixels group together.
+        const key = ((d[i] >> 5) << 10) | ((d[i + 1] >> 5) << 5) | (d[i + 2] >> 5);
+        counts.set(key, (counts.get(key) || 0) + 1);
+      };
+      for (let x = 0; x < w; x++) { sample(x, 0); sample(x, h - 1); }
+      for (let y = 0; y < h; y++) { sample(0, y); sample(w - 1, y); }
+      let bestKey = 0, bestN = -1;
+      for (const [k, n] of counts) if (n > bestN) { bestN = n; bestKey = k; }
+      const kr = ((bestKey >> 10) & 31) * 8 + 4;
+      const kg = ((bestKey >> 5)  & 31) * 8 + 4;
+      const kb = ( bestKey        & 31) * 8 + 4;
+
+      // Key out matching pixels; feather partial matches so edges don't jag.
+      const hard = tolerance, soft = tolerance * 1.8;
+      for (let i = 0; i < d.length; i += 4) {
+        const dist = Math.sqrt(
+          (d[i] - kr) ** 2 + (d[i + 1] - kg) ** 2 + (d[i + 2] - kb) ** 2
+        );
+        if (dist <= hard) d[i + 3] = 0;
+        else if (dist < soft) d[i + 3] = Math.round(d[i + 3] * ((dist - hard) / (soft - hard)));
+      }
+      ctx.putImageData(imgData, 0, 0);
+      resolve(c.toDataURL('image/png'));   // PNG — alpha must survive
+    };
+    img.src = layer.src;
+  });
+}
+
+// ── Theme import / export ─────────────────────────────────────────────────
+document.getElementById('export-look-btn')?.addEventListener('click', () => {
+  if (!activeLook) return;
+  const blob = new Blob([JSON.stringify(activeLook, null, 2)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = (activeLook.name || 'kairo-theme').replace(/[^\w\- ]+/g, '').trim().replace(/\s+/g, '-').toLowerCase() + '.kairo-theme.json';
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  toast('Theme exported', 'success');
+});
+
+const importLookFile = document.getElementById('import-look-file');
+document.getElementById('import-look-btn')?.addEventListener('click', () => importLookFile?.click());
+importLookFile?.addEventListener('change', async () => {
+  const file = importLookFile.files?.[0];
+  importLookFile.value = '';
+  if (!file) return;
+  try {
+    const look = JSON.parse(await file.text());
+    if (!look || !Array.isArray(look.layers)) throw new Error('not a theme file');
+    look.id   = 'imported-' + Date.now();
+    look.name = (look.name || 'Imported theme') + ' (imported)';
+    looks.push(look);
+    saveLooks();
+    activeLook  = look;
+    activeLayer = null;
+    renderLooksList(); renderLayersList(); syncMetaRow(); renderPreview(); renderProps();
+    toast('Theme imported', 'success');
+  } catch {
+    toast('Not a valid theme file', 'error');
+  }
 });
 
 // Save
@@ -2646,27 +3482,366 @@ deleteLookBtn?.addEventListener('click', () => {
   toast('Theme deleted', 'success');
 });
 
-// Apply to outputs — broadcasts look JSON to display.html via localStorage + WebSocket
-applyLookBtn?.addEventListener('click', async () => {
-  if (!activeLook) return;
+// ── Per-output themes ─────────────────────────────────────────────────────
+// Each destination renders with its own theme — the ProPresenter model where
+// stage and audience screens show different designs from the same source. The
+// assignment lives with the OUTPUT (in Settings), not with the theme.
+// One card per output. The primary external display keeps its own card (its
+// theme picker is injected inline like every other output); any *additional*
+// screens a church drives — stage monitor, foyer — are appended inside that
+// card as extra rows.
+const PRIMARY_DISPLAY = 'display-1';
+const OUTPUT_DEFS = [
+  { key: PRIMARY_DISPLAY, card: 'card-external',     label: 'External Display' },
+  { key: 'ndi',           card: 'card-ndi',          label: 'NDI' },
+  { key: 'syphon',        card: 'card-syphon',       label: 'Syphon' },
+  { key: 'obs',           card: 'card-obs',          label: 'OBS' },
+  { key: 'propresenter',  card: 'card-propresenter', label: 'ProPresenter' },
+];
 
-  // 1. localStorage → same-origin display windows pick it up via storage event
-  localStorage.setItem('kairo-active-look', JSON.stringify(activeLook));
+// Extra screens beyond the primary one. Stored in settings; empty by default.
+function extraDisplays() {
+  const list = settings.extraDisplays;
+  return Array.isArray(list) ? list : [];
+}
+
+// Every screen, primary first — used for theme assignment and broadcasting.
+function displayOutputs() {
+  return [{ id: PRIMARY_DISPLAY, name: 'External Display' }, ...extraDisplays()];
+}
+
+function allOutputKeys() {
+  return [...OUTPUT_DEFS.map(d => d.key), ...extraDisplays().map(d => d.id)];
+}
+
+function outputThemeMap() {
+  const map = settings.outputThemes && typeof settings.outputThemes === 'object'
+    ? { ...settings.outputThemes } : {};
+  // Carry the pre-multi-display assignment onto the first screen.
+  if (map.external && !map['display-1']) map['display-1'] = map.external;
+  // Any output without a valid choice falls back to the first theme.
+  for (const key of allOutputKeys()) {
+    if (!map[key] || !looks.some(l => l.id === map[key])) map[key] = looks[0]?.id;
+  }
+  return map;
+}
+
+// ── Language ──────────────────────────────────────────────────────────────
+// Spoken language drives transcription; scripture language selects which verse
+// corpus detection runs against. Packs are downloaded once and cached locally,
+// same pattern as the offline speech model.
+const LANG_PACKS = [
+  { code: 'en', name: 'English',    translations: 'KJV · NIV · NLT · ESV · NASB · NKJV', bundled: true },
+  { code: 'es', name: 'Spanish',    translations: 'Reina-Valera 1960' },
+  { code: 'pt', name: 'Portuguese', translations: 'Almeida' },
+  { code: 'fr', name: 'French',     translations: 'Louis Segond' },
+  { code: 'de', name: 'German',     translations: 'Luther' },
+  { code: 'yo', name: 'Yoruba',     translations: 'Bíbélì Mímọ́' },
+  { code: 'ig', name: 'Igbo',       translations: 'Baịbụl Nsọ' },
+  { code: 'ha', name: 'Hausa',      translations: 'Littafi Mai Tsarki' },
+  { code: 'sw', name: 'Swahili',    translations: 'Biblia Habari Njema' },
+];
+
+function installedLangs() {
+  const v = settings.installedLangs;
+  return Array.isArray(v) && v.length ? v : ['en'];
+}
+
+function renderLangPacks() {
+  const host = document.getElementById('lang-pack-list');
+  const bibleSel = document.getElementById('bible-language');
+  if (!host) return;
+  const installed = installedLangs();
+
+  host.innerHTML = '';
+  LANG_PACKS.forEach(p => {
+    const row = document.createElement('div');
+    row.className = 'lang-pack-row';
+
+    const meta = document.createElement('div');
+    meta.className = 'lang-pack-meta';
+    meta.innerHTML = `<div class="lang-pack-name">${p.name}</div><div class="lang-pack-sub">${p.translations}</div>`;
+
+    const btn = document.createElement('button');
+    btn.className = 'modal-btn secondary';
+    const isIn = installed.includes(p.code);
+    if (p.bundled) {
+      btn.textContent = 'Included';
+      btn.disabled = true;
+    } else if (isIn) {
+      btn.textContent = 'Remove';
+      btn.classList.add('lang-pack-remove');
+      btn.addEventListener('click', () => {
+        settings.installedLangs = installed.filter(c => c !== p.code);
+        if (settings.bibleLanguage === p.code) settings.bibleLanguage = 'en';
+        saveSettingsPatch({ installedLangs: settings.installedLangs, bibleLanguage: settings.bibleLanguage });
+        renderLangPacks();
+      });
+    } else {
+      btn.textContent = 'Install';
+      btn.addEventListener('click', async () => {
+        btn.disabled = true; btn.textContent = 'Installing…';
+        try {
+          const r = await fetch(`${SERVER}/api/lang/install`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ code: p.code }),
+          });
+          const d = await r.json().catch(() => ({}));
+          if (!r.ok || d.error) throw new Error(d.error || 'install failed');
+          settings.installedLangs = [...installed, p.code];
+          saveSettingsPatch({ installedLangs: settings.installedLangs });
+          renderLangPacks();
+          toast(`${p.name} scripture pack installed`, 'success');
+        } catch (err) {
+          toast(`${p.name} pack unavailable — ${err.message}`, 'error');
+          btn.disabled = false; btn.textContent = 'Install';
+        }
+      });
+    }
+
+    row.appendChild(meta); row.appendChild(btn);
+    host.appendChild(row);
+  });
+
+  // Scripture-language dropdown lists only what's actually installed.
+  if (bibleSel) {
+    const want = settings.bibleLanguage || 'en';
+    bibleSel.innerHTML = '';
+    LANG_PACKS.filter(p => installed.includes(p.code)).forEach(p => {
+      const o = document.createElement('option');
+      o.value = p.code; o.textContent = p.name;
+      if (p.code === want) o.selected = true;
+      bibleSel.appendChild(o);
+    });
+  }
+}
+
+document.getElementById('stt-language')?.addEventListener('change', (e) => {
+  settings.sttLanguage = e.target.value;
+  saveSettingsPatch({ sttLanguage: e.target.value });
+});
+document.getElementById('bible-language')?.addEventListener('change', (e) => {
+  settings.bibleLanguage = e.target.value;
+  saveSettingsPatch({ bibleLanguage: e.target.value });
+});
+
+// ── Extra display rows ────────────────────────────────────────────────────
+function renderDisplayOutputs() {
+  refreshDisplayStatus();
+
+  const host = document.getElementById('extra-displays-list');
+  if (!host) return;
+  const map = outputThemeMap();
+  host.innerHTML = '';
+
+  extraDisplays().forEach((d, i) => {
+    const row = document.createElement('div');
+    row.className = 'display-output-row';
+
+    const name = document.createElement('input');
+    name.type = 'text';
+    name.className = 'setting-input';
+    name.value = d.name || `Display ${i + 2}`;
+    name.placeholder = 'Screen name';
+    name.addEventListener('change', () => {
+      const list = extraDisplays().map(x => x.id === d.id ? { ...x, name: name.value.trim() || x.name } : x);
+      settings.extraDisplays = list;
+      saveSettingsPatch({ extraDisplays: list });
+      renderDisplayOutputs();
+    });
+
+    const sel = document.createElement('select');
+    sel.className = 'setting-input';
+    looks.forEach(l => {
+      const o = document.createElement('option');
+      o.value = l.id; o.textContent = l.name;
+      if (l.id === map[d.id]) o.selected = true;
+      sel.appendChild(o);
+    });
+    sel.addEventListener('change', () => {
+      settings.outputThemes = { ...outputThemeMap(), [d.id]: sel.value };
+      saveSettingsPatch({ outputThemes: settings.outputThemes });
+      applyOutputThemes();
+    });
+
+    const open = document.createElement('button');
+    open.className = 'modal-btn secondary';
+    open.textContent = 'Open';
+    open.addEventListener('click', () => openDisplayOutput(d));
+
+    const del = document.createElement('button');
+    del.className = 'modal-btn secondary display-output-del';
+    del.innerHTML = '&times;';
+    del.title = 'Remove this display';
+    del.addEventListener('click', () => {
+      settings.extraDisplays = extraDisplays().filter(x => x.id !== d.id);
+      saveSettingsPatch({ extraDisplays: settings.extraDisplays });
+      renderDisplayOutputs();
+      applyOutputThemes();
+    });
+
+    row.appendChild(name); row.appendChild(sel); row.appendChild(open); row.appendChild(del);
+    host.appendChild(row);
+  });
+}
+
+// Report whether a second screen is actually attached, so the operator knows
+// whether "Open" will land on a projector or just stack on this monitor.
+async function refreshDisplayStatus() {
+  const hint = document.getElementById('display-status-hint');
+  if (!hint) return;
+  const extras = extraDisplays().length;
+  const configured = 1 + extras;
+  let detected = null;
+  try {
+    if (window.getScreenDetails) {
+      const d = await window.getScreenDetails();
+      detected = (d.screens || []).length;
+    } else if (typeof window.screen?.isExtended === 'boolean') {
+      detected = window.screen.isExtended ? 2 : 1;
+    }
+  } catch { /* permission denied — fall back to isExtended below */ }
+  if (detected == null && typeof window.screen?.isExtended === 'boolean') {
+    detected = window.screen.isExtended ? 2 : 1;
+  }
+
+  if (detected == null) {
+    hint.textContent = `${configured} display output${configured > 1 ? 's' : ''} configured. Open each one and move it to its screen.`;
+    return;
+  }
+  if (detected <= 1) {
+    hint.innerHTML = '<span style="color:var(--orange)">No external display detected.</span> The window will open on this screen — connect a projector or second monitor first.';
+    return;
+  }
+  hint.innerHTML = `<span style="color:var(--blue)">${detected} screens connected.</span> ${configured} output${configured > 1 ? 's' : ''} configured — each opens in its own window with its own theme.`;
+}
+
+// Primary external display keeps its original button.
+document.getElementById('open-external-btn')?.addEventListener('click', () => {
+  openDisplayOutput({ id: PRIMARY_DISPLAY, name: 'External Display' });
+});
+
+// Open a window for one screen. It identifies itself via ?output= so it renders
+// with that screen's assigned theme.
+function openDisplayOutput(d) {
+  const url = `/display.html?output=${encodeURIComponent(d.id)}`;
+  const scr = d.screen || {};
+  const w = scr.width  || window.screen.width;
+  const h = scr.height || window.screen.height;
+  const x = scr.left   != null ? scr.left : window.screen.width;
+  const y = scr.top    != null ? scr.top  : 0;
+  if (typeof openDisplayWindow === 'function') {
+    openDisplayWindow(`kairo-${d.id}`, url, { width: w, height: h, x, y, fullscreen: true });
+  } else {
+    window.open(url, `kairo-${d.id}`, `width=${w},height=${h},left=${x},top=${y}`);
+  }
+}
+
+document.getElementById('add-display-btn')?.addEventListener('click', () => {
+  const list = extraDisplays();
+  const next = [...list, { id: `display-${Date.now().toString(36)}`, name: `Display ${list.length + 2}` }];
+  settings.extraDisplays = next;
+  saveSettingsPatch({ extraDisplays: next });
+  renderDisplayOutputs();
+  applyOutputThemes();
+});
+
+// Inject a Theme picker into each output card body. Rebuilt whenever the theme
+// list changes so newly created themes appear without reopening Settings.
+function renderOutputThemePickers() {
+  const map = outputThemeMap();
+  OUTPUT_DEFS.forEach(({ key, card }) => {
+    const body = document.querySelector(`#${card} .output-card-body`);
+    if (!body) return;
+
+    let group = body.querySelector('.output-theme-group');
+    if (!group) {
+      group = document.createElement('div');
+      group.className = 'setting-group output-theme-group';
+      const lbl = document.createElement('label');
+      lbl.className = 'setting-label';
+      lbl.textContent = 'Theme';
+      const sel = document.createElement('select');
+      sel.className = 'setting-input output-theme-select';
+      sel.dataset.outputKey = key;
+      sel.addEventListener('change', () => {
+        settings.outputThemes = { ...outputThemeMap(), [key]: sel.value };
+        saveSettingsPatch({ outputThemes: settings.outputThemes });
+        applyOutputThemes();
+      });
+      const hint = document.createElement('div');
+      hint.style.cssText = 'font-size:11px;color:var(--text-3);margin-top:4px;';
+      hint.textContent = 'Design this output uses. Edit designs in Theme Studio.';
+      group.appendChild(lbl); group.appendChild(sel); group.appendChild(hint);
+      body.insertBefore(group, body.firstChild);
+    }
+
+    const sel = group.querySelector('select');
+    const want = map[key];
+    sel.innerHTML = '';
+    looks.forEach(l => {
+      const o = document.createElement('option');
+      o.value = l.id; o.textContent = l.name;
+      if (l.id === want) o.selected = true;
+      sel.appendChild(o);
+    });
+
+    // Mirror the assignment into the card header so the output→theme mapping
+    // is readable without expanding every card.
+    const header = document.querySelector(`#${card} .output-card-header`);
+    if (header) {
+      let badge = header.querySelector('.output-theme-badge');
+      if (!badge) {
+        badge = document.createElement('span');
+        badge.className = 'output-theme-badge';
+        const chevron = header.querySelector('.output-card-chevron');
+        header.insertBefore(badge, chevron || null);
+      }
+      badge.textContent = looks.find(l => l.id === want)?.name || '—';
+    }
+  });
+}
+
+// Push the current per-output assignment to every display client.
+async function applyOutputThemes() {
+  const map = outputThemeMap();
+  const themes = {};
+  for (const [key, id] of Object.entries(map)) {
+    const look = looks.find(l => l.id === id);
+    if (look) themes[key] = look;
+  }
+  // Same-origin display windows pick this up via the storage event.
+  localStorage.setItem('kairo-output-themes', JSON.stringify(themes));
   localStorage.setItem('kairo-active-look-ts', Date.now().toString());
+  // Keep the legacy single-look key in sync so any display window opened
+  // without an ?output= tag still shows the primary screen's theme.
+  const primary = themes[displayOutputs()[0]?.id] || themes.external;
+  if (primary) localStorage.setItem('kairo-active-look', JSON.stringify(primary));
 
-  // 2. WebSocket broadcast → all display clients on any origin update immediately
   try {
     await fetch(`${SERVER}/api/look/apply`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ look: activeLook }),
+      body: JSON.stringify({ themes, look: primary || null }),
     });
   } catch (err) {
-    console.warn('[Look] WS broadcast failed:', err.message);
+    console.warn('[Look] per-output broadcast failed:', err.message);
   }
+}
 
-  toast('Theme applied to all outputs', 'success');
-});
+// Persist a partial settings change without clobbering unrelated fields.
+async function saveSettingsPatch(patch) {
+  try {
+    await fetch(`${SERVER}/api/settings`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(patch),
+    });
+  } catch (err) {
+    console.warn('[Settings] save failed:', err.message);
+  }
+}
 
 // ── Auto-update listener (Tauri only) ─────────────────────────────────────
 // The Rust side emits `update-available` after a background check on startup.
@@ -3075,8 +4250,95 @@ applyLookBtn?.addEventListener('click', async () => {
   }
 })();
 
+// ── Startup bootstrap ───────────────────────────────────────────────────────
+// Runs behind the branded overlay before the operator touches the app:
+//   1. Requests microphone permission up front (so the OS prompt appears at
+//      launch, not mid-service when they hit Start).
+//   2. Downloads required resources — the offline speech model — when the
+//      offline engine is selected and it isn't present yet, with progress.
+// Always resolves (and always removes the overlay) so a slow/failed step can
+// never trap the operator on the loading screen.
+async function bootstrapStartup() {
+  const overlay = document.getElementById('bootstrap-overlay');
+  const statusEl = document.getElementById('bootstrap-status');
+  const barFill  = document.getElementById('bootstrap-bar-fill');
+  const setStatus = (t) => { if (statusEl) statusEl.textContent = t; };
+  const setBar = (pct) => {
+    if (!barFill) return;
+    if (pct == null) { barFill.classList.add('indeterminate'); }
+    else { barFill.classList.remove('indeterminate'); barFill.style.width = Math.max(0, Math.min(100, pct)) + '%'; }
+  };
+  const finish = () => {
+    setBar(100);
+    if (overlay) { overlay.classList.add('done'); setTimeout(() => overlay.remove(), 500); }
+  };
+  // Hard safety valve — never keep the overlay up longer than 90s.
+  const safety = setTimeout(finish, 90000);
+
+  try {
+    // 1) Microphone permission
+    setStatus('Requesting microphone access');
+    setBar(15);
+    try {
+      const s = await navigator.mediaDevices.getUserMedia({ audio: true });
+      s.getTracks().forEach(t => t.stop());
+    } catch { /* denied or unavailable — app still works; user can grant later */ }
+    setBar(35);
+
+    // 2) Required resources — offline model when the offline engine is chosen
+    setStatus('Checking resources');
+    let engine = 'deepgram';
+    try {
+      const r = await fetch(`${SERVER}/api/settings`);
+      if (r.ok) { const s = await r.json(); engine = (s.speechEngine || 'deepgram').toLowerCase(); }
+    } catch {}
+
+    if (engine === 'offline' || engine === 'browser') {
+      try {
+        const st = await (await fetch(`${SERVER}/api/whisper/status`)).json();
+        if (!st.installed) {
+          setStatus('Downloading offline model');
+          setBar(null); // indeterminate — the install endpoint doesn't stream byte progress
+          fetch(`${SERVER}/api/whisper/install`, { method: 'POST' }).catch(() => {});
+          for (let i = 0; i < 600; i++) {          // up to ~10 min — the whisper model (~182MB) is bigger than Vosk's was
+            await new Promise(r => setTimeout(r, 1000));
+            const s2 = await (await fetch(`${SERVER}/api/whisper/status`)).json().catch(() => ({}));
+            if (s2.installed) break;
+          }
+        }
+      } catch { /* model status unavailable — proceed; Start will surface any real error */ }
+    }
+
+    setBar(90);
+    setStatus('Ready');
+  } finally {
+    clearTimeout(safety);
+    finish();
+  }
+}
+
 // Init — load the auth token from Tauri FIRST so all subsequent fetch / WS
-// traffic carries the bearer header. Static assets and /health are exempt
-// on the server side, so the page itself loads even before this resolves.
+// traffic carries the bearer header. Static assets and /health are exempt on
+// the server side, so the page itself loads even before this resolves — but
+// bootstrapStartup() and connectWS() both call authenticated endpoints, so
+// they must genuinely wait rather than just being kicked off alongside it
+// (that gap was the actual bug: bootstrapStartup() used to fire in parallel,
+// so its own settings fetch silently 401'd on a cold Tauri launch before the
+// IPC round-trip finished, and if the token never arrived at all, every
+// later action — including "Start Listening" — kept failing all session).
 renderLooksList();
-loadAuthToken().finally(connectWS);
+(async () => {
+  await loadAuthToken();
+  connectWS();
+  bootstrapStartup();
+  // Tell Rust it's safe to reveal the main window now — our CSS is applied
+  // and there's a real frame painted behind it. Rust used to show the window
+  // right after dispatching navigate(), which raced the new page's own load
+  // and could flash WebKit's default white background before this script (and
+  // our dark styles) ever ran. Double rAF waits for an actual paint before
+  // signalling. No-ops harmlessly outside Tauri (plain-browser dev).
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    const inv = window.__TAURI__?.core?.invoke || window.__TAURI__?.invoke;
+    inv?.('signal_main_ready').catch(() => {});
+  }));
+})();

@@ -4,12 +4,49 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>KAIRO</title>
+    <link rel="stylesheet" href="styles.css">
+    <!-- Manrope loads as a non-blocking preload-then-swap so the app paints
+         instantly on its own local styles.css regardless of network state.
+         The old plain <link rel="stylesheet"> here was render-blocking: with
+         no internet — the exact scenario an operator testing the Offline
+         speech engine is in — the browser sat waiting on this fetch before
+         painting anything at all, which is the "black, then white, then
+         finally shows up" delay. Now it degrades to the CSS fallback stack
+         (system-ui) instantly and upgrades to Manrope only once it arrives. -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="styles.css">
+    <link rel="preload" as="style"
+          href="https://fonts.googleapis.com/css2?family=Manrope:wght@300;400;500;600;700;800&display=swap"
+          onload="this.onload=null;this.rel='stylesheet'">
+    <noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Manrope:wght@300;400;500;600;700;800&display=swap"></noscript>
+    <script>
+      // Platform class must land BEFORE first paint: on macOS the window's
+      // traffic lights overlay the top bar, so the logo needs a left inset,
+      // while Windows/Linux draw their controls on the right and the logo sits
+      // flush. Setting this from a deferred script caused a visible jump.
+      (function () {
+        var ua = navigator.userAgent;
+        var os = /Mac|iPhone|iPad/.test(ua) ? 'darwin'
+               : /Win/.test(ua)             ? 'win32'
+               : 'linux';
+        document.documentElement.classList.add('platform-' + os);
+      })();
+    </script>
 </head>
 <body>
+    <!-- ═══════════════════════════════════════════════════════
+         STARTUP BOOTSTRAP OVERLAY
+         Shown on first paint. Requests microphone permission and
+         downloads required resources (offline model) before handing
+         the operator the app. Removed once ready.
+    ═══════════════════════════════════════════════════════ -->
+    <div id="bootstrap-overlay">
+        <div class="bootstrap-wordmark">KAI<span>RO</span></div>
+        <div class="bootstrap-tagline">Live Scripture Detection</div>
+        <div class="bootstrap-bar"><div class="bootstrap-bar-fill" id="bootstrap-bar-fill"></div></div>
+        <div class="bootstrap-status" id="bootstrap-status">Starting&hellip;</div>
+    </div>
+
     <!-- ═══════════════════════════════════════════════════════
          TOP BAR
     ═══════════════════════════════════════════════════════ -->
@@ -30,13 +67,22 @@
         <span id="elapsed-time" style="display:none;"></span>
 
         <div class="top-bar-right">
-            <button id="looks-btn" class="tb-studio-btn" title="Theme Studio — design your output display">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-                    <circle cx="13.5" cy="6.5" r="2.5"/><circle cx="17.5" cy="13.5" r="2.5"/><circle cx="8.5" cy="13.5" r="2.5"/>
-                    <path d="M12 21a9 9 0 1 1 0-18"/>
-                </svg>
-                <span>Theme Studio</span>
-            </button>
+            <!-- Primary controls: the middle column is now a dynamic surface
+                 (Live Queue or Playlist), so what feeds it — songs and themes —
+                 are grouped here as the central, always-visible controls. -->
+            <div class="tb-group">
+                <button id="songs-btn" class="tb-studio-btn" title="Song bank — hymns &amp; lyrics">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
+                    <span>Songs</span>
+                </button>
+                <button id="looks-btn" class="tb-studio-btn" title="Theme Studio — design your output display">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                        <circle cx="13.5" cy="6.5" r="2.5"/><circle cx="17.5" cy="13.5" r="2.5"/><circle cx="8.5" cy="13.5" r="2.5"/>
+                        <path d="M12 21a9 9 0 1 1 0-18"/>
+                    </svg>
+                    <span>Theme Studio</span>
+                </button>
+            </div>
             <button id="output-preview-btn" class="tb-icon-btn" title="Output preview">
                 <!-- monitor icon -->
                 <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
@@ -145,6 +191,28 @@
             </div>
 
             <!-- Transcript body -->
+            <!-- Playlist / service order. Lives beside the transcript so the
+                 operator drives the whole service from one column. -->
+            <div class="ls-playlist-section">
+                <div class="ls-transcript-header">
+                    <button id="playlist-switcher" class="svc-playlist-switcher" title="Switch or create a playlist">
+                        <span id="playlist-switcher-name">Playlist</span>
+                        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><polyline points="6 9 12 15 18 9"/></svg>
+                    </button>
+                    <!-- Folder-level action: makes a new playlist (folder), the
+                         way "New Folder" works in a file browser. Content is
+                         added from INSIDE a playlist via "+ Add section" in
+                         the stack view — see svc-add-section-btn below. -->
+                    <button id="svc-add-menu-btn" class="ls-icon-btn" title="New playlist">
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                    </button>
+                </div>
+                <div id="svc-items-list" class="ls-playlist-body"></div>
+                <input type="file" id="svc-image-file" accept="image/*" multiple style="display:none">
+            </div>
+
+            <div class="ts-splitter" id="ls-splitter" title="Drag to resize"></div>
+
             <div class="ls-transcript-section">
                 <div class="ls-transcript-header">
                     <span class="ls-section-label">Live Transcript Log</span>
@@ -198,8 +266,73 @@
                 </button>
             </div>
 
+            <!-- Playlist STACK — the folder view. Every section (song, slide
+                 deck, scripture, image) that's been added stacks here in the
+                 order it will be presented; drag to reorder. This replaces the
+                 Live Queue while the operator is working the playlist. -->
+            <div class="cs-live-queue-section cs-live-queue-main hidden" id="svc-stack-view">
+                <div class="cs-section-header svc-header">
+                    <span class="cs-section-label">Playlist</span>
+                    <div class="svc-header-right">
+                        <div class="ts-chip-group" id="svc-view-chips" title="View">
+                            <button class="ts-chip active" data-view="grid">Grid</button>
+                            <button class="ts-chip" data-view="list">List</button>
+                        </div>
+                        <input type="range" id="svc-scale" class="svc-scale" min="140" max="360" step="10" value="190" title="Slide size">
+                        <button id="svc-add-section-btn" class="modal-btn secondary svc-edit-btn">+ Add section</button>
+                        <button id="svc-close-stack" class="cs-clear-btn">
+                            <svg width="8" height="8" viewBox="0 0 12 12" fill="none"><path d="M1 1l10 10M11 1L1 11" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+                            Close
+                        </button>
+                    </div>
+                </div>
+                <div class="svc-stack-list" id="svc-stack-list"></div>
+            </div>
+
+            <!-- Full-scale edit — one section, full width. Slides of the
+                 section on the left, WYSIWYG canvas in the middle, style
+                 inspector on the right. -->
+            <div class="cs-live-queue-section cs-live-queue-main hidden" id="svc-fullscreen">
+                <div class="cs-section-header svc-header">
+                    <button id="svc-back-to-stack" class="ts-back-btn svc-back-btn">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><polyline points="15 18 9 12 15 6"/></svg>
+                        <span>Playlist</span>
+                    </button>
+                    <input type="text" id="svc-fs-title" class="ts-name-input svc-fs-title" placeholder="Section title…">
+
+                    <div class="svc-delim" id="svc-delim-group">
+                        <span class="svc-delim-label">Lines</span>
+                        <div class="ts-chip-group" id="svc-delim-chips">
+                            <button class="ts-chip" data-lines="1">1</button>
+                            <button class="ts-chip active" data-lines="2">2</button>
+                            <button class="ts-chip" data-lines="4">4</button>
+                            <button class="ts-chip" data-lines="0">Stanza</button>
+                        </div>
+                    </div>
+
+                    <div class="svc-header-right">
+                        <button id="svc-item-theme-btn" class="ls-icon-btn svc-theme-icon-btn" title="Theme for this section">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="13.5" cy="6.5" r="2.5"/><circle cx="17.5" cy="13.5" r="2.5"/><circle cx="8.5" cy="13.5" r="2.5"/><path d="M12 21a9 9 0 1 1 0-18"/></svg>
+                        </button>
+                    </div>
+                </div>
+
+                <div class="svc-edit-stage" id="svc-edit-stage">
+                    <div class="svc-strip" id="svc-strip"></div>
+                    <div class="svc-canvas-wrap">
+                        <div class="svc-canvas" id="svc-canvas"></div>
+                        <div class="svc-canvas-hint">Click text to edit · Enter for a new line · Shift+Enter or right-click to split into a new slide</div>
+                    </div>
+                    <div class="svc-inspector" id="svc-inspector"></div>
+                </div>
+            </div>
+
+            <!-- Popover used by both the theme icon and per-card theme/line
+                 pickers — positioned under whichever button opened it. -->
+            <div class="svc-popover hidden" id="svc-popover"></div>
+
             <!-- Live Queue — all sent + range verses, fills remaining space -->
-            <div class="cs-live-queue-section cs-live-queue-main">
+            <div class="cs-live-queue-section cs-live-queue-main" id="live-queue-section">
                 <div class="cs-section-header">
                     <span class="cs-section-label">Live Queue</span>
                     <span class="cs-auto-badge"><span class="cs-auto-dot pulse"></span>Auto-Deploy</span>
@@ -260,7 +393,9 @@
                 </div>
             </div>
 
-            <!-- Candidates — verbatim / phrase matches only -->
+            <!-- Candidates — context (fingerprint/IDF) suggestions only.
+                 Auto-deploy (Live Queue) is handled separately via direct
+                 citations + verbatim quotes, never fingerprint. -->
             <div class="rs-section rs-candidates">
                 <div class="rs-section-hdr">
                     <span class="rs-section-title">Candidates</span>
@@ -270,7 +405,7 @@
                     </button>
                 </div>
                 <div class="rs-candidates-body queue-body" id="queue-list">
-                    <div class="display-empty">Phrase matches appear here</div>
+                    <div class="display-empty">Contextual detections appear here</div>
                 </div>
             </div>
 
@@ -294,35 +429,170 @@
     <select id="audio-source" class="hidden-el"><option value="">Select a microphone...</option></select>
     <input type="checkbox" id="show-confidence-checkbox" class="hidden-el" checked>
 
-    <!-- ═══ THEME STUDIO MODAL ═══ -->
-    <div id="looks-modal" class="modal hidden">
+    <!-- Add / import confirmation — every new section passes through here so
+         the operator picks which playlist it lands in, which theme it renders
+         with, and (for lyric/text content) how it splits into slides. -->
+    <div id="add-confirm-modal" class="modal hidden">
         <div class="modal-overlay"></div>
-        <div class="modal-content ts-modal">
+        <div class="modal-content" style="width:460px;">
             <div class="modal-header">
-                <div style="display:flex;align-items:center;gap:10px;">
-                    <h2>Theme Studio</h2>
-                    <span style="font-size:10px;color:var(--text-3);font-weight:400;">Layer-based display design</span>
-                </div>
-                <button id="close-looks" class="modal-close-btn">
+                <h2 id="add-confirm-heading">Add to playlist</h2>
+                <button id="close-add-confirm" class="modal-close-btn">
                     <svg width="16" height="16" viewBox="0 0 16 16"><path d="M3 3l10 10M13 3L3 13" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
                 </button>
+            </div>
+            <div class="modal-body" style="display:block;padding:16px 20px;">
+                <div class="setting-group">
+                    <label class="setting-label">Title</label>
+                    <input type="text" id="ac-title" class="setting-input">
+                </div>
+                <div class="setting-group">
+                    <label class="setting-label">Playlist</label>
+                    <select id="ac-playlist" class="setting-input"></select>
+                </div>
+                <div class="setting-group">
+                    <label class="setting-label">Theme</label>
+                    <select id="ac-theme" class="setting-input"></select>
+                </div>
+                <div class="setting-group" id="ac-delim-group">
+                    <label class="setting-label">Slide delimiter</label>
+                    <div class="ts-chip-group" id="ac-delim-chips">
+                        <button class="ts-chip" data-lines="1">1 line</button>
+                        <button class="ts-chip active" data-lines="2">2 lines</button>
+                        <button class="ts-chip" data-lines="4">4 lines</button>
+                        <button class="ts-chip" data-lines="0">Keep as-is</button>
+                    </div>
+                    <p class="setting-hint">How the text splits across slides. “Keep as-is” uses each imported block/stanza as one slide.</p>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button id="ac-cancel" class="modal-btn secondary">Cancel</button>
+                <button id="ac-confirm" class="modal-btn primary">Add</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Import slides -->
+    <div id="import-modal" class="modal hidden">
+        <div class="modal-overlay"></div>
+        <div class="modal-content" style="width:640px;">
+            <div class="modal-header">
+                <h2>Import slides</h2>
+                <button id="close-import" class="modal-close-btn">
+                    <svg width="16" height="16" viewBox="0 0 16 16"><path d="M3 3l10 10M13 3L3 13" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+                </button>
+            </div>
+            <div class="modal-body" style="display:block;padding:16px 20px;">
+                <div class="setting-group">
+                    <label class="setting-label">Paste text</label>
+                    <textarea id="import-text" class="setting-input" rows="8"
+                        placeholder="Paste lyrics, sermon points or announcements.&#10;&#10;A blank line starts a new slide."></textarea>
+                    <p class="setting-hint">Blank lines separate slides; each remaining line is a line on that slide.</p>
+                </div>
+                <div class="setting-group">
+                    <label class="setting-label">Or import a file</label>
+                    <div style="display:flex;gap:6px;flex-wrap:wrap;">
+                        <button id="import-file-btn" class="modal-btn secondary">Choose file…</button>
+                        <span class="setting-hint" style="align-self:center;">.txt · .md · .docx · .pptx · ProPresenter .pro6/.pro7/.probundle/.proplaylist</span>
+                    </div>
+                    <input type="file" id="import-file" accept=".txt,.md,.docx,.pptx,.pro6,.pro,.pro7,.probundle,.proplaylist,.json" style="display:none">
+                    <p class="setting-hint" id="import-status"></p>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button id="import-cancel" class="modal-btn secondary">Cancel</button>
+                <button id="import-confirm" class="modal-btn primary">Add slides</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Hymn picker -->
+    <div id="hymn-modal" class="modal hidden">
+        <div class="modal-overlay"></div>
+        <div class="modal-content" style="width:620px;height:70vh;">
+            <div class="modal-header">
+                <h2>Hymn bank</h2>
+                <button id="close-hymn" class="modal-close-btn">
+                    <svg width="16" height="16" viewBox="0 0 16 16"><path d="M3 3l10 10M13 3L3 13" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+                </button>
+            </div>
+            <div style="padding:12px 16px 0;">
+                <input type="text" id="hymn-search" class="setting-input" placeholder="Search by title, author or a line…">
+            </div>
+            <div class="hymn-list" id="hymn-list"></div>
+        </div>
+    </div>
+
+    <!-- ═══ THEME STUDIO — full in-window view ═══ -->
+    <div id="looks-modal" class="ts-view hidden">
+        <div class="ts-view-inner">
+            <div class="ts-view-header">
+                <button id="close-looks" class="ts-back-btn" title="Back to dashboard">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><polyline points="15 18 9 12 15 6"/></svg>
+                    <span>Back</span>
+                </button>
+                <div class="ts-view-title">
+                    <h2>Theme Studio</h2>
+                    <input type="text" id="look-name-input" class="ts-name-input" placeholder="Theme name…">
+                </div>
+                <div class="ts-view-actions">
+                    <button id="delete-look-btn" class="modal-btn secondary ts-danger-btn">Delete</button>
+                    <button id="save-look-btn" class="modal-btn primary">Save Theme</button>
+                </div>
             </div>
 
             <div class="ts-body">
 
-                <!-- Col 1: Theme list -->
+                <!-- Col 1: Themes + Layers, each pane resizable -->
                 <div class="ts-themes-col">
+                  <div class="ts-pane" id="ts-pane-themes">
                     <div class="ts-col-header">
                         <span class="ts-col-label">Themes</span>
+                        <button id="import-look-btn" class="ts-icon-btn" title="Import theme (JSON)">
+                            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                        </button>
+                        <button id="export-look-btn" class="ts-icon-btn" title="Export current theme (JSON)">
+                            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+                        </button>
                         <button id="new-look-btn" class="ts-icon-btn" title="New theme">
                             <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
                         </button>
+                        <input type="file" id="import-look-file" accept="application/json,.json" style="display:none">
                     </div>
                     <div class="ts-themes-list" id="looks-list"></div>
+                  </div>
+
+                  <div class="ts-splitter" id="ts-splitter" title="Drag to resize"></div>
+
+                  <div class="ts-pane ts-pane-layers">
+                    <div class="ts-layers-header">
+                        <span class="ts-col-label">Layers</span>
+                        <span class="ts-layers-hint">Drag to reorder</span>
+                    </div>
+                    <div class="ts-layers-list" id="ts-layers-list"></div>
+                  </div>
                 </div>
 
                 <!-- Col 2: Preview + Layers -->
                 <div class="ts-center-col">
+
+                    <!-- Add content bar -->
+                    <div class="ts-add-bar">
+                        <span class="ts-add-label">Add content</span>
+                        <button id="ts-add-layer-btn" class="ts-add-btn" title="Add a text layer">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 7 4 4 20 4 20 7"/><line x1="9" y1="20" x2="15" y2="20"/><line x1="12" y1="4" x2="12" y2="20"/></svg>
+                            <span>Text</span>
+                        </button>
+                        <button id="ts-add-shape-btn" class="ts-add-btn" title="Add a shape / colour block">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="6" width="16" height="12" rx="2"/></svg>
+                            <span>Shape</span>
+                        </button>
+                        <button id="ts-add-image-btn" class="ts-add-btn" title="Add an image">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="8.5" cy="9.5" r="1.5"/><polyline points="21 15 16 10 5 20"/></svg>
+                            <span>Image</span>
+                        </button>
+                        <input type="file" id="ts-image-file" accept="image/*" style="display:none">
+                    </div>
 
                     <!-- Preview stage -->
                     <div class="ts-preview-wrap">
@@ -336,9 +606,10 @@
                         <div class="ts-meta-group">
                             <span class="ts-meta-label">Layout</span>
                             <div class="ts-chip-group" id="ts-layout-picker">
-                                <button class="ts-chip active" data-layout="fullscreen">Fullscreen</button>
+                                <button class="ts-chip active" data-layout="fullscreen">Full</button>
                                 <button class="ts-chip" data-layout="lower-third">Lower Third</button>
-                                <button class="ts-chip" data-layout="ticker">Ticker</button>
+                                <button class="ts-chip" data-layout="split-left">Split L</button>
+                                <button class="ts-chip" data-layout="split-right">Split R</button>
                             </div>
                         </div>
                         <div class="ts-meta-group">
@@ -349,18 +620,10 @@
                                 <button class="ts-chip" data-anim="cut">Cut</button>
                             </div>
                         </div>
-                        <input type="text" id="look-name-input" class="ts-name-input" placeholder="Theme name…">
-                    </div>
-
-                    <!-- Layers panel -->
-                    <div class="ts-layers-panel">
-                        <div class="ts-layers-header">
-                            <span class="ts-col-label">Layers</span>
-                            <button id="ts-add-layer-btn" class="ts-icon-btn" title="Add text layer">
-                                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-                            </button>
+                        <div class="ts-meta-group">
+                            <span class="ts-meta-label">Canvas</span>
+                            <button id="ts-alpha-toggle" class="ts-chip" title="Transparent canvas — for chroma / alpha key setups">Transparent</button>
                         </div>
-                        <div class="ts-layers-list" id="ts-layers-list"></div>
                     </div>
 
                 </div>
@@ -375,14 +638,6 @@
                     <div id="ts-props-panel" style="display:none;"></div>
                 </div>
 
-            </div>
-
-            <div class="modal-footer" style="justify-content:space-between;">
-                <button id="delete-look-btn" class="modal-btn secondary" style="color:var(--red);border-color:rgba(232,64,74,0.3);">Delete Theme</button>
-                <div style="display:flex;gap:8px;">
-                    <button id="apply-look-btn" class="modal-btn secondary">Apply to Outputs</button>
-                    <button id="save-look-btn" class="modal-btn primary">Save Theme</button>
-                </div>
             </div>
         </div>
     </div>
@@ -459,9 +714,36 @@
                     <svg width="16" height="16" viewBox="0 0 16 16"><path d="M3 3l10 10M13 3L3 13" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
                 </button>
             </div>
-            <div class="modal-body">
-            <div class="settings-col-left">
+            <div class="modal-body settings-split">
 
+            <!-- Left: category nav -->
+            <nav class="settings-nav" id="settings-nav">
+                <button class="settings-nav-item active" data-pane="audio">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/></svg>
+                    <span>Audio</span>
+                </button>
+                <button class="settings-nav-item" data-pane="bible">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+                    <span>Bible</span>
+                </button>
+                <button class="settings-nav-item" data-pane="language">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+                    <span>Language</span>
+                </button>
+                <button class="settings-nav-item" data-pane="outputs">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+                    <span>Outputs</span>
+                </button>
+                <button class="settings-nav-item" data-pane="content">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="13" y2="17"/></svg>
+                    <span>Content Studio</span>
+                </button>
+            </nav>
+
+            <!-- Right: the selected category -->
+            <div class="settings-panes" id="settings-panes">
+
+            <section class="settings-pane active" data-pane="audio">
                 <!-- ── AUDIO ─────────────────────────────────────── -->
                 <div class="settings-section">
                     <div class="settings-section-label">Audio</div>
@@ -475,16 +757,18 @@
                         <p class="setting-hint" id="speech-engine-hint">Higher accuracy, requires an API key. 12,000 free minutes/month.</p>
                     </div>
 
-                    <!-- Offline model installer — shown only when "Offline" engine is selected -->
-                    <div class="setting-group" id="vosk-installer-group" style="display:none;">
+                    <!-- Offline model installer — shown only when "Offline" engine is selected.
+                         The startup bootstrap normally fetches this before the operator ever
+                         sees Settings; this panel is the manual fallback. -->
+                    <div class="setting-group" id="whisper-installer-group" style="display:none;">
                         <label class="setting-label">Offline Model</label>
-                        <div id="vosk-status-line" style="font-size:12px;color:var(--text-3);margin-bottom:8px;">Checking…</div>
-                        <button id="vosk-install-btn" class="setting-input" style="cursor:pointer;display:none;">Download offline model (~40MB)</button>
-                        <div id="vosk-progress-wrap" style="display:none;margin-top:6px;">
+                        <div id="whisper-status-line" style="font-size:12px;color:var(--text-3);margin-bottom:8px;">Checking…</div>
+                        <button id="whisper-install-btn" class="setting-input" style="cursor:pointer;display:none;">Download offline model (~182MB)</button>
+                        <div id="whisper-progress-wrap" style="display:none;margin-top:6px;">
                             <div style="background:var(--surface-2);height:6px;border-radius:3px;overflow:hidden;">
-                                <div id="vosk-progress-bar" style="background:var(--accent);height:100%;width:0%;transition:width .2s;"></div>
+                                <div id="whisper-progress-bar" style="background:var(--accent);height:100%;width:0%;transition:width .2s;"></div>
                             </div>
-                            <div id="vosk-progress-text" style="font-size:11px;color:var(--text-3);margin-top:4px;">Starting…</div>
+                            <div id="whisper-progress-text" style="font-size:11px;color:var(--text-3);margin-top:4px;">Starting…</div>
                         </div>
                     </div>
 
@@ -513,6 +797,9 @@
                     </div>
                 </div>
 
+            </section>
+
+            <section class="settings-pane" data-pane="bible">
                 <!-- ── BIBLE ──────────────────────────────────────── -->
                 <div class="settings-section">
                     <div class="settings-section-label">Bible</div>
@@ -541,6 +828,9 @@
                     </div>
                 </div>
 
+            </section>
+
+            <section class="settings-pane" data-pane="content">
                 <!-- ── CONTENT STUDIO (offline LLM) ────────────────── -->
                 <div class="settings-section">
                     <div class="settings-section-label">Content Studio</div>
@@ -581,12 +871,61 @@
                     </div>
                 </div>
 
-            </div><!-- /settings-col-left -->
-            <div class="settings-col-right">
+            </section>
 
+            <section class="settings-pane" data-pane="language">
+                <!-- ── LANGUAGE ───────────────────────────────────── -->
+                <div class="settings-section">
+                    <div class="settings-section-label">Language</div>
+
+                    <div class="setting-group">
+                        <label class="setting-label">Spoken language</label>
+                        <select id="stt-language" class="setting-input">
+                            <option value="en-US">English (US)</option>
+                            <option value="en-GB">English (UK)</option>
+                            <option value="en-AU">English (Australia)</option>
+                            <option value="en-IN">English (India)</option>
+                            <option value="es">Spanish</option>
+                            <option value="pt-BR">Portuguese (Brazil)</option>
+                            <option value="fr">French</option>
+                            <option value="de">German</option>
+                            <option value="it">Italian</option>
+                            <option value="nl">Dutch</option>
+                            <option value="sv">Swedish</option>
+                            <option value="pl">Polish</option>
+                            <option value="uk">Ukrainian</option>
+                            <option value="ru">Russian</option>
+                            <option value="hi">Hindi</option>
+                            <option value="id">Indonesian</option>
+                            <option value="ko">Korean</option>
+                            <option value="ja">Japanese</option>
+                            <option value="zh">Chinese (Mandarin)</option>
+                            <option value="multi">Auto-detect (multilingual)</option>
+                        </select>
+                        <p class="setting-hint">What the preacher speaks. Drives live transcription — set this before the service starts.</p>
+                    </div>
+
+                    <div class="setting-group">
+                        <label class="setting-label">Scripture language</label>
+                        <select id="bible-language" class="setting-input">
+                            <option value="en">English</option>
+                        </select>
+                        <p class="setting-hint" id="bible-language-hint">Which language verses are detected and displayed in. Additional languages install as scripture packs.</p>
+                    </div>
+
+                    <div class="setting-group">
+                        <label class="setting-label">Scripture packs</label>
+                        <div id="lang-pack-list" class="lang-pack-list"></div>
+                        <p class="setting-hint">Each pack adds a language with its translations, downloaded once and stored locally for offline use.</p>
+                    </div>
+                </div>
+            </section>
+
+            <section class="settings-pane" data-pane="outputs">
                 <!-- ── OUTPUTS ────────────────────────────────────── -->
                 <div class="settings-section">
                     <div class="settings-section-label">Outputs</div>
+                    <p class="setting-hint" style="margin:-4px 0 12px;">Enable any number of destinations at once. Each one renders with its own theme — set it per output below.</p>
 
                     <!-- Card 1: ProPresenter -->
                     <div class="output-card" id="card-propresenter">
@@ -717,28 +1056,30 @@
                             <span class="output-card-chevron">▾</span>
                         </div>
                         <div class="output-card-body output-card-body--collapsed">
-                            <div class="setting-group">
-                                <label class="setting-label">Layout</label>
-                                <div class="toggle-group" id="external-layout-toggle">
-                                    <button class="toggle-btn active" data-layout="fullscreen">Fullscreen</button>
-                                    <button class="toggle-btn" data-layout="lower-third">Lower Third</button>
-                                </div>
-                            </div>
-                            <div class="setting-group" id="external-opacity-group" style="display:none;">
-                                <label class="setting-label">Background Opacity</label>
-                                <div style="display:flex;align-items:center;gap:10px;">
-                                    <input type="range" id="external-bg-opacity" min="0" max="100" value="80" style="flex:1;">
-                                    <span id="external-opacity-label" style="font-size:11px;color:var(--text-2);min-width:30px;">80%</span>
-                                </div>
-                            </div>
+                            <!-- Layout and background opacity used to live here.
+                                 They now belong to the assigned theme (Theme
+                                 Studio owns layout, canvas fill and opacity), so
+                                 duplicating them per-output only created two
+                                 competing sources of truth.
+
+                                 Rows are rendered by renderDisplayOutputs() —
+                                 one per physical screen, each with its own
+                                 theme, so a main screen and a stage monitor can
+                                 show different designs at the same time. -->
+                            <p class="setting-hint" id="display-status-hint">Checking connected screens…</p>
                             <button id="open-external-btn" class="modal-btn secondary" style="width:100%;justify-content:center;">Open on External Display</button>
-                            <p class="setting-hint">The display window opens on your secondary screen. Move it there and press F for fullscreen if needed.</p>
+
+                            <!-- Additional screens (stage monitor, foyer, …). Each
+                                 gets its own theme and its own window. -->
+                            <div id="extra-displays-list"></div>
+                            <button id="add-display-btn" class="modal-btn secondary" style="width:100%;justify-content:center;margin-top:8px;">+ Add another display</button>
                         </div>
                     </div>
                 </div>
 
-            </div><!-- /settings-col-right -->
+            </section>
 
+            </div><!-- /settings-panes -->
             </div><!-- /modal-body -->
             <div class="modal-footer">
                 <button id="cancel-settings" class="modal-btn secondary">Cancel</button>
@@ -838,24 +1179,9 @@
             });
         });
 
-        // Layout toggles — show/hide opacity slider for lower-third.
-        // Syphon was removed from this list when we moved to the native
-        // sender (no window = no opacity slider needed).
-        ['external'].forEach(function(prefix) {
-            var group = document.getElementById(prefix + '-layout-toggle');
-            var opacityGroup = document.getElementById(prefix + '-opacity-group');
-            if (group && opacityGroup) {
-                group.addEventListener('toggle-change', function(e) {
-                    opacityGroup.style.display = e.detail.value === 'lower-third' ? '' : 'none';
-                });
-            }
-            // Opacity label sync
-            var slider = document.getElementById(prefix + '-bg-opacity');
-            var label  = document.getElementById(prefix + '-opacity-label');
-            if (slider && label) {
-                slider.addEventListener('input', function() { label.textContent = slider.value + '%'; });
-            }
-        });
+        // (The per-output layout toggle and opacity slider were removed — the
+        // theme assigned to each output now owns layout, canvas fill and
+        // opacity, so there is nothing to sync here.)
 
         // Audio Input mode — update hint text
         (function() {
@@ -873,7 +1199,7 @@
 
         // Speech Engine — swap hint, hide/show Deepgram key field.
         // 'browser' is the UI label kept for backward compat — it actually maps
-        // to the server-side Vosk offline engine (no internet, no API key).
+        // to the server-side whisper.cpp offline engine (no internet, no API key).
         (function() {
             var group   = document.getElementById('speech-engine-toggle');
             var hint    = document.getElementById('speech-engine-hint');
@@ -1169,26 +1495,14 @@
             setTimeout(detectAvailability, 250);
         })();
 
-        // Open External Display window
-        var openExternalBtn = document.getElementById('open-external-btn');
-        if (openExternalBtn) {
-            openExternalBtn.addEventListener('click', function() {
-                var layout  = document.querySelector('#external-layout-toggle .toggle-btn.active')?.dataset.layout || 'fullscreen';
-                var opacity = document.getElementById('external-bg-opacity')?.value || '80';
-                var url = '/display.html?layout=' + layout + '&opacity=' + opacity;
-                // Place the display window on the secondary screen (offset by primary width).
-                var sw = window.screen.width;
-                var sh = window.screen.height;
-                openDisplayWindow('kairo-external', url, {
-                    width: sw, height: sh,
-                    x: sw, y: 0,
-                    fullscreen: true,
-                });
-            });
-        }
+        // Display windows are opened per-screen from the Outputs pane —
+        // see openDisplayOutput() in app.js, which tags each window with
+        // ?output=<display id> so it renders that screen's assigned theme.
     })();
     </script>
 
+    <script src="hymns.js"></script>
+    <script src="service.js"></script>
     <script src="app.js"></script>
 </body>
 </html>

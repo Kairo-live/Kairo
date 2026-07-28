@@ -4,9 +4,15 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>KAIRO Display</title>
+    <!-- Non-blocking preload-then-swap — see index.html for why. This is the
+         projector/output window, so it matters even more here: a stuck render
+         means a blank screen mid-service, not just a slow app launch. -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <link rel="preload" as="style"
+          href="https://fonts.googleapis.com/css2?family=Manrope:wght@300;400;500;600;700;800&display=swap"
+          onload="this.onload=null;this.rel='stylesheet'">
+    <noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Manrope:wght@300;400;500;600;700;800&display=swap"></noscript>
     <style>
         *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
 
@@ -145,6 +151,23 @@
         return `rgba(${r},${g},${b},${(opacity / 100).toFixed(2)})`;
     }
 
+    // ── Free-canvas positioning ────────────────────────────────────────────
+    // A layer may carry `pos: {x, y, w, h}` in 1920×1080 design-space pixels
+    // (the Theme Studio canvas). When present it overrides the layout preset
+    // for that layer: the element is placed absolutely at the equivalent
+    // percentage of the real stage, so positions survive any output size.
+    // h = 0 means "auto height" (text grows downward from y).
+    const DESIGN_W = 1920, DESIGN_H = 1080;
+    function applyPos(div, pos) {
+        div.style.left  = (pos.x / DESIGN_W * 100) + '%';
+        div.style.top   = (pos.y / DESIGN_H * 100) + '%';
+        div.style.width = (pos.w / DESIGN_W * 100) + '%';
+        div.style.right = 'auto';
+        div.style.bottom = 'auto';
+        div.style.inset = '';
+        if (pos.h > 0) div.style.height = (pos.h / DESIGN_H * 100) + '%';
+    }
+
     // ── Build layer DOM from look ──────────────────────────────────────────
     function buildLayerDOM(look, verseText, verseRef) {
         const frag    = document.createDocumentFragment();
@@ -154,9 +177,28 @@
         look.layers.forEach(layer => {
             if (!layer.visible) return;
 
+            // Image layer — always free-positioned, drawn in layer order.
+            if (layer.type === 'image') {
+                if (!layer.src) return;
+                const div = document.createElement('div');
+                div.className = 'display-layer';
+                const p = layer.pos || { x: 0, y: 0, w: DESIGN_W, h: DESIGN_H };
+                div.style.cssText = 'position:absolute;z-index:1;background-repeat:no-repeat;background-position:center;';
+                div.style.backgroundImage = `url('${layer.src}')`;
+                div.style.backgroundSize  = layer.fit === 'fill' ? '100% 100%' : (layer.fit || 'contain');
+                div.style.opacity         = (layer.opacity ?? 100) / 100;
+                if (layer.radius) div.style.borderRadius = (layer.radius / DESIGN_H * 100) + 'vh';
+                applyPos(div, p);
+                div.style.height = (p.h / DESIGN_H * 100) + '%';
+                frag.appendChild(div);
+                return;
+            }
+
             if (layer.type === 'background') {
+                // Only a full-canvas background keys the output transparent —
+                // a positioned shape with a transparent fill is just invisible.
                 if (layer.fill === 'transparent') {
-                    isTransparent = true;
+                    if (!layer.pos) isTransparent = true;
                     return;
                 }
 
@@ -203,6 +245,24 @@
                     // Full-height left rail
                     div.style.inset  = '0 auto 0 0';
                     div.style.width  = '32%';
+                } else if (layout === 'split-left') {
+                    // Full-height left half — verse panel, right half left clean
+                    div.style.inset  = '0 auto 0 0';
+                    div.style.width  = '50%';
+                } else if (layout === 'split-right') {
+                    // Full-height right half — verse panel, left half left clean
+                    div.style.inset  = '0 0 0 auto';
+                    div.style.width  = '50%';
+                }
+
+                // Free-canvas override (shapes / repositioned backgrounds).
+                // Positioned shapes sit above the base background but below
+                // text, interleaving with images by layer order.
+                if (layer.pos) {
+                    applyPos(div, layer.pos);
+                    div.style.height  = (layer.pos.h / DESIGN_H * 100) + '%';
+                    div.style.zIndex  = '1';
+                    if (layer.radius) div.style.borderRadius = (layer.radius / DESIGN_H * 100) + 'vh';
                 }
 
                 frag.appendChild(div);
@@ -320,7 +380,34 @@
                         div.style.top       = '50%';
                         div.style.transform = 'translateY(-50%)';
                     }
+                } else if (layout === 'split-left' || layout === 'split-right') {
+                    // Text centered vertically inside the active half. Split-left
+                    // pins the text column to the left edge; split-right to the right.
+                    div.style.width   = '50%';
+                    div.style.padding = '0 4%';
+                    if (layout === 'split-left') div.style.left = '0'; else div.style.right = '0';
+                    if (layer.binding === 'verse') {
+                        div.style.top       = '50%';
+                        div.style.transform = 'translateY(-58%)';
+                    } else if (layer.binding === 'reference') {
+                        div.style.top       = '50%';
+                        div.style.transform = 'translateY(120%)';
+                    } else {
+                        div.style.top       = '50%';
+                        div.style.transform = 'translateY(-50%)';
+                    }
                 }
+
+                // Free-canvas override: explicit box wins over every layout rule.
+                if (layer.pos) {
+                    applyPos(div, layer.pos);
+                    div.style.transform = 'none';
+                    div.style.padding   = '0';
+                }
+
+                // Remember the designed size so auto-fit always shrinks from the
+                // theme's intended size, never from a previously-shrunk value.
+                div.dataset.baseSize = fs.size;
 
                 div.textContent = content;
                 frag.appendChild(div);
@@ -331,6 +418,68 @@
         });
 
         return { frag, isTransparent };
+    }
+
+    // ── Auto-fit long verses ───────────────────────────────────────────────
+    // Scripture verse length varies enormously — from "Jesus wept" (2 words) to
+    // Esther 8:9 (~90 words, the longest verse in the Bible). A fixed font size
+    // that looks right for a short verse overflows the stage on a long one,
+    // especially inside a half-width split panel. After each render we measure
+    // the verse element and shrink its font size (never grow past the theme's
+    // designed size) until it fits the vertical space its layout allows.
+    function fitVerse() {
+        const el = stage.querySelector('[data-binding="verse"]');
+        if (!el) return;
+        const layout = (activeLook || FALLBACK_LOOK).layout || 'fullscreen';
+        const stageH = stage.clientHeight || window.innerHeight || 0;
+
+        // Not laid out yet (0-size stage during load / detached window). Shrinking
+        // against a bogus size would collapse the text to the floor — bail and let
+        // the next render or the resize handler fit it once dimensions are real.
+        if (stageH < 50 || stage.clientWidth < 50) return;
+
+        // Free-canvas verse box: the budget is its own box height when set, or
+        // the space from its top edge to the bottom of the stage when auto.
+        const look = activeLook || FALLBACK_LOOK;
+        const verseLayer = (look.layers || []).find(l => l.type === 'text' && l.binding === 'verse' && l.visible !== false);
+        if (verseLayer && verseLayer.pos) {
+            const p = verseLayer.pos;
+            const maxHpx = p.h > 0
+                ? stageH * (p.h / 1080)
+                : stageH * Math.max(0.08, 1 - p.y / 1080);
+            const base = parseFloat(el.dataset.baseSize) || parseFloat(el.style.fontSize) || 48;
+            let size = base;
+            el.style.fontSize = size + 'px';
+            // Measure unconstrained — a fixed-height box always reports
+            // scrollHeight >= its height, which would shrink text to nothing.
+            const prevH = el.style.height;
+            el.style.height = 'auto';
+            let guard = 60;
+            while (el.scrollHeight > maxHpx && size > 14 && guard-- > 0) {
+                size = Math.floor(size * 0.94);
+                el.style.fontSize = size + 'px';
+            }
+            el.style.height = prevH;
+            return;
+        }
+
+        // Fraction of stage height the verse is allowed to occupy per layout.
+        const FRAC = {
+            'lower-third': 0.30, 'lower-third-card': 0.24, 'corner-card': 0.20,
+            'ticker': 0.16, 'side-rail': 0.80, 'split-left': 0.84, 'split-right': 0.84,
+        };
+        const maxH = stageH * (FRAC[layout] || 0.72);
+
+        const base = parseFloat(el.dataset.baseSize) || parseFloat(el.style.fontSize) || 48;
+        let size = base;
+        el.style.fontSize = size + 'px';
+
+        // Shrink in ~6% steps until it fits or hits a legibility floor.
+        let guard = 60;
+        while (el.scrollHeight > maxH && size > 14 && guard-- > 0) {
+            size = Math.floor(size * 0.94);
+            el.style.fontSize = size + 'px';
+        }
     }
 
     // ── Default fallback look (used if no look stored yet) ─────────────────
@@ -354,12 +503,40 @@
         ],
     };
 
-    // ── Load look from localStorage ────────────────────────────────────────
+    // ── Which output is this window? ───────────────────────────────────────
+    // Each destination can be assigned its own theme in Settings (the
+    // ProPresenter stage-vs-audience model). A display window declares which
+    // output it represents via ?output=…; the default is the external display.
+    const OUTPUT_KEY = (new URLSearchParams(location.search).get('output') || 'external').toLowerCase();
+
+    // ── Load this output's look from localStorage ──────────────────────────
     function loadActiveLook() {
+        try {
+            const map = JSON.parse(localStorage.getItem('kairo-output-themes') || 'null');
+            if (map && map[OUTPUT_KEY]) return map[OUTPUT_KEY];
+        } catch {}
         try {
             const stored = localStorage.getItem('kairo-active-look');
             return stored ? JSON.parse(stored) : null;
         } catch { return null; }
+    }
+
+    // Pick this output's theme out of a broadcast payload.
+    function pickLook(payload) {
+        if (payload && payload.themes && payload.themes[OUTPUT_KEY]) return payload.themes[OUTPUT_KEY];
+        return payload && payload.look ? payload.look : null;
+    }
+
+    // The theme configured for this output in Settings. Content-level overrides
+    // (a playlist item's own theme) are temporary and revert to this.
+    let assignedLook = null;
+
+    function applyContentLook(look) {
+        if (look) {
+            if (activeLook !== look) applyLook(look, false);
+        } else if (assignedLook && activeLook !== assignedLook) {
+            applyLook(assignedLook, false);
+        }
     }
 
     // ── Render the stage with current look + text ──────────────────────────
@@ -373,6 +550,7 @@
             const { frag, isTransparent } = buildLayerDOM(look, verseText, verseRef);
             if (isTransparent) document.body.classList.add('transparent-bg');
             stage.appendChild(frag);
+            fitVerse();
         };
 
         if (animate) {
@@ -381,6 +559,37 @@
             stage.style.transition = 'opacity 300ms ease';
             stage.style.opacity    = '0';
 
+            setTimeout(() => {
+                doRender();
+                stage.style.opacity = '1';
+                stage.classList.remove('fade-out');
+            }, 320);
+        } else {
+            doRender();
+        }
+    }
+
+    // ── Image slide: full-frame picture, bypassing the theme's text layers ──
+    // Still honours the theme's canvas transparency, so an image slide over a
+    // chroma/alpha rig keys the same way a verse slide would.
+    function renderImageStage(src, animate = true) {
+        const look = activeLook || FALLBACK_LOOK;
+        const bg = (look.layers || []).find(l => l.type === 'background' && !l.pos);
+        const isTransparent = !!(bg && bg.fill === 'transparent');
+
+        const doRender = () => {
+            stage.innerHTML = '';
+            document.body.classList.toggle('transparent-bg', isTransparent);
+            const img = document.createElement('img');
+            img.src = src;
+            img.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;object-fit:contain;';
+            stage.appendChild(img);
+        };
+
+        if (animate) {
+            stage.classList.add('fade-out');
+            stage.style.transition = 'opacity 300ms ease';
+            stage.style.opacity    = '0';
             setTimeout(() => {
                 doRender();
                 stage.style.opacity = '1';
@@ -430,6 +639,7 @@
 
             setTimeout(() => {
                 updateTextContent(text, ref);
+                fitVerse();
                 textEls.forEach(el => { el.style.opacity = ''; });
             }, 260);
         }
@@ -455,13 +665,22 @@
 
     // ── Storage event → look updated from main window ─────────────────────
     window.addEventListener('storage', (e) => {
+        if (e.key === 'kairo-output-themes' && e.newValue) {
+            try {
+                const map = JSON.parse(e.newValue);
+                if (map && map[OUTPUT_KEY]) { assignedLook = map[OUTPUT_KEY]; applyLook(assignedLook, true); return; }
+            } catch {}
+        }
         if (e.key === 'kairo-active-look' && e.newValue) {
             try {
-                const newLook = JSON.parse(e.newValue);
-                applyLook(newLook, true);
+                assignedLook = JSON.parse(e.newValue);
+                applyLook(assignedLook, true);
             } catch {}
         }
     });
+
+    // Re-fit when the output window resizes (projector attach, fullscreen toggle).
+    window.addEventListener('resize', () => { try { fitVerse(); } catch {} });
 
     // ── F key → fullscreen ─────────────────────────────────────────────────
     document.addEventListener('keydown', (e) => {
@@ -520,7 +739,18 @@
         if (msg.type === 'detection' && msg.target === 'viewer') {
             const verse = msg.verses && msg.verses[0];
             if (verse) {
-                showVerse(verse.text || verse.verse || '', verse.reference || verse.ref || '');
+                // A playlist item may carry its own theme (lyrics vs scripture).
+                // Anything without one falls back to this output's assigned theme.
+                applyContentLook(msg.look);
+                if (verse.image) {
+                    // Image slides bypass the text layers entirely — there is no
+                    // verse text to bind, just the picture, full-frame.
+                    currentVerseText = '';
+                    currentVerseRef  = verse.reference || verse.ref || '';
+                    renderImageStage(verse.image, true);
+                } else {
+                    showVerse(verse.text || verse.verse || '', verse.reference || verse.ref || '');
+                }
             }
             return;
         }
@@ -545,9 +775,11 @@
             return;
         }
 
-        // look-update: main window broadcasts the active look
-        if (msg.type === 'look-update' && msg.look) {
-            try { applyLook(msg.look, true); } catch {}
+        // look-update: main window broadcasts theme assignments. Take the entry
+        // for this output, or the single look in the legacy payload shape.
+        if (msg.type === 'look-update') {
+            const mine = pickLook(msg);
+            if (mine) { assignedLook = mine; try { applyLook(mine, true); } catch {} }
             return;
         }
     }
@@ -555,6 +787,7 @@
     // ── Boot ───────────────────────────────────────────────────────────────
     // 1. Load active look from localStorage
     activeLook = loadActiveLook() || FALLBACK_LOOK;
+    assignedLook = activeLook;   // baseline this output reverts to
 
     // 2. Initial render (empty verse/ref)
     renderStage('', '', false);

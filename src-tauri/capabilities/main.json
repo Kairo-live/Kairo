@@ -3,14 +3,31 @@
   "identifier": "main-capability",
   "description": "KAIRO main window capabilities",
   "windows": ["main"],
+  "remote": {
+    "urls": ["http://127.0.0.1:*"]
+  },
   "permissions": [
     "core:default",
+    "core:event:default",
     "updater:default",
     "core:window:allow-create",
     "core:window:allow-show",
     "core:window:allow-set-focus",
     "core:webview:allow-create-webview-window",
     "shell:allow-execute",
-    "shell:allow-open"
+    "shell:allow-open",
+    "allow-get-server-port",
+    "allow-get-server-token",
+    "allow-get-server-config",
+    "allow-signal-main-ready",
+    "allow-install-update",
+    "allow-ndi-available",
+    "allow-ndi-start",
+    "allow-ndi-stop",
+    "allow-ndi-update",
+    "allow-syphon-available",
+    "allow-syphon-start",
+    "allow-syphon-stop",
+    "allow-syphon-update"
   ]
 }
