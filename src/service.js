@@ -24,6 +24,15 @@
   const SERVER = `${location.protocol}//${location.host}`;
   const DESIGN_W = 1920, DESIGN_H = 1080;
 
+  // Kept in sync with server/translate.js's LANGUAGES map by hand — small,
+  // fixed list, not worth a round-trip to /api/translate/languages just to
+  // populate a 3-item picker.
+  const TRANSLATE_LANGUAGES = [
+    { code: 'fr', name: 'French' },
+    { code: 'es', name: 'Spanish' },
+    { code: 'pt', name: 'Portuguese' },
+  ];
+
   // Default chunking for lyrics. Two lines per screen is the church-projection
   // norm — enough to sing ahead, short enough to stay readable at distance.
   const DEFAULT_LINES_PER_SLIDE = 2;
@@ -39,6 +48,7 @@
   let activeItemId = null;     // section expanded in the stack / open in full-edit
   let liveSlideKey = null;
   let editSlideIndex = 0;
+  let dragFlowIndex = null;    // index being dragged in the flow view
   const expanded = new Set(); // section ids currently expanded in the stack
 
   function todayName() {
@@ -189,15 +199,20 @@
         return out;
       }
       case 'slides':
+        // No per-slide reference caption here, unlike scripture/song — an
+        // imported deck's file title repeated under every single slide (e.g.
+        // "FINANCIAL FORTUNE IS MY HERITAGE" under all 181 slides) is just
+        // noise, not information; each slide already carries its own text.
         return (item.blocks || []).map((b, i) => ({
           label: b.label || `Slide ${i + 1}`,
           lines: (b.text || '').split('\n'),
-          text: b.text || '', reference: item.title,
+          text: b.text || '', reference: '',
         }));
       case 'image':
         return [{ label: item.title, image: item.src, text: '', reference: item.title }];
       case 'scripture':
-        return [{ label: item.ref, lines: [item.text || item.ref], text: item.text || '', reference: item.ref }];
+        return [{ label: item.ref, lines: [item.text || item.ref], text: item.text || '', reference: item.ref,
+                  book: item.book || null, chapter: item.chapter || null, verse: item.verse || null }];
       default:
         return [];
     }
@@ -215,12 +230,64 @@
     return list.find(l => l.id === item.themeId) || null;
   }
 
+  // ── Multi-Language translation ────────────────────────────────────────────
+  // Cache is keyed by language + a natural key (book/chapter/verse for
+  // scripture, the raw text otherwise) so re-sending or re-previewing the
+  // same content — or two different items that happen to share a verse —
+  // never re-fetches. Scripture resolves against a real bundled translation
+  // server-side; anything else goes through Claude. See server/translate.js.
+  const translationCache = new Map();
+
+  function themeNeedsTranslation(look) {
+    return !!(look?.layers || []).some(l => l.type === 'text' && l.binding === 'verse_translated');
+  }
+
+  function translationCacheKey(lang, slide) {
+    if (slide.book && slide.chapter && slide.verse) return `${lang}|${slide.book}|${slide.chapter}|${slide.verse}`;
+    return `${lang}|${slide.text || ''}`;
+  }
+
+  // Returns the translation NOW if cached (else ''), and — if a fetch is
+  // needed — kicks it off in the background and calls `onReady(text)` once
+  // it resolves. Callers render immediately with whatever comes back and
+  // re-render on `onReady`, rather than blocking the current paint on a
+  // network round-trip.
+  function getTranslatedText(item, slide, onReady) {
+    if (!item.translateTo || !themeNeedsTranslation(themeForItem(item))) return '';
+    const lang = item.translateTo;
+    const key = translationCacheKey(lang, slide);
+    if (translationCache.has(key)) return translationCache.get(key);
+    if (!slide.text && !(slide.book && slide.chapter && slide.verse)) return '';
+
+    translationCache.set(key, ''); // placeholder so concurrent renders don't double-fetch
+    fetch(`${SERVER}/api/translate`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        text: slide.text || '', lang,
+        book: slide.book, chapter: slide.chapter, verse: slide.verse,
+      }),
+    }).then(r => r.json()).then(d => {
+      if (!d.ok) throw new Error(d.error || 'Translation failed');
+      translationCache.set(key, d.text || '');
+      onReady?.(d.text || '');
+    }).catch(() => {
+      translationCache.delete(key); // let the next render retry rather than sticking on a transient failure
+      // Silent — a translation miss just means that panel stays blank until
+      // the next retry; it's not worth interrupting a live service over.
+    });
+    return '';
+  }
+
   async function sendSlide(item, index) {
     const slide = slidesFor(item)[index];
     if (!slide) return;
     liveSlideKey = `${item.id}:${index}`;
     renderStack();
     if (activeItemId === item.id) renderStrip(item, slidesFor(item));
+    // Resolved (not just kicked off) — this is the actual live output, so it
+    // must carry the real translation rather than sending blank and letting
+    // a later re-render catch up.
+    const translatedText = await awaitTranslatedText(item, slide);
     try {
       await fetch(`${SERVER}/api/service/send`, {
         method: 'POST',
@@ -228,9 +295,10 @@
         body: JSON.stringify({
           look: itemLookOverride(item),
           verse: {
-            reference: slide.reference || item.title || '',
+            reference: slide.reference || '',
             text: slide.text || '',
             nlt_text: slide.text || '',
+            translatedText,
             image: slide.image || null,   // fixes images never reaching the display
             book: 'Service', chapter: 0, verse: index + 1,
             similarity: 1, method: 'service',
@@ -239,6 +307,30 @@
       });
     } catch (err) {
       if (typeof toast === 'function') toast('Send failed: ' + err.message, 'error');
+    }
+  }
+
+  async function awaitTranslatedText(item, slide) {
+    if (!item.translateTo || !themeNeedsTranslation(themeForItem(item))) return '';
+    const lang = item.translateTo;
+    const key = translationCacheKey(lang, slide);
+    const cached = translationCache.get(key);
+    if (cached) return cached;
+    if (!slide.text && !(slide.book && slide.chapter && slide.verse)) return '';
+    try {
+      const r = await fetch(`${SERVER}/api/translate`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: slide.text || '', lang, book: slide.book, chapter: slide.chapter, verse: slide.verse }),
+      });
+      const d = await r.json();
+      if (!d.ok) throw new Error(d.error || 'Translation failed');
+      translationCache.set(key, d.text || '');
+      return d.text || '';
+    } catch {
+      // Silent — same reasoning as getTranslatedText's catch above: a live
+      // service shouldn't get interrupted by a translation miss, it should
+      // just send without the right-hand panel filled in.
+      return '';
     }
   }
 
@@ -486,17 +578,37 @@
     saveService(); renderSidebar(); renderStack();
   }
 
-  // ── Views: live queue ⇄ stack ⇄ full-edit ───────────────────────────────
+  // ── Views: Bible ⇄ stack ⇄ full-edit ⇄ Slides library ⇄ Songs library ───
+  // One dispatcher for every top-level body view so exactly one is ever
+  // visible and the top-bar tab buttons stay in sync with it — previously
+  // each view function toggled its own `.hidden` classes independently,
+  // which is how new views kept getting left showing behind one another.
+  const CENTER_VIEWS = {
+    bible:      'live-queue-section',
+    stack:      'svc-stack-view',
+    fullscreen: 'svc-fullscreen',
+    slides:     'slides-library-view',
+    songs:      'songs-library-view',
+  };
+  function showCenterView(view) {
+    Object.entries(CENTER_VIEWS).forEach(([key, id]) => {
+      document.getElementById(id)?.classList.toggle('hidden', key !== view);
+    });
+    // The scripture search bar only makes sense while on the Bible view or
+    // mid-playlist (stack/full-edit already coexist with it today) — not
+    // while browsing the Slides or Songs libraries.
+    document.querySelector('.cs-lookup')?.classList.toggle('hidden', view === 'slides' || view === 'songs');
+    document.querySelectorAll('#bible-btn, #slides-btn, #songs-btn').forEach(b => b?.classList.remove('active'));
+    const btnId = { bible: 'bible-btn', slides: 'slides-btn', songs: 'songs-btn' }[view];
+    if (btnId) document.getElementById(btnId)?.classList.add('active');
+  }
+
   function openStack() {
-    document.getElementById('live-queue-section')?.classList.add('hidden');
-    document.getElementById('svc-fullscreen')?.classList.add('hidden');
-    document.getElementById('svc-stack-view')?.classList.remove('hidden');
+    showCenterView('stack');
     renderStack();
   }
   function closeStack() {
-    document.getElementById('svc-stack-view')?.classList.add('hidden');
-    document.getElementById('svc-fullscreen')?.classList.add('hidden');
-    document.getElementById('live-queue-section')?.classList.remove('hidden');
+    showCenterView('bible');
     activeItemId = null;
     renderSidebar();
   }
@@ -516,14 +628,11 @@
   function openFullEdit(id) {
     activeItemId = id;
     editSlideIndex = 0;
-    document.getElementById('svc-stack-view')?.classList.add('hidden');
-    document.getElementById('live-queue-section')?.classList.add('hidden');
-    document.getElementById('svc-fullscreen')?.classList.remove('hidden');
+    showCenterView('fullscreen');
     renderFullEdit();
     renderSidebar();
   }
   function closeFullEdit() {
-    document.getElementById('svc-fullscreen')?.classList.add('hidden');
     openStack();
   }
 
@@ -694,11 +803,12 @@
       preview.style.backgroundImage = `url('${s.image}')`;
       preview.classList.add('is-image');
     } else {
-      (s.lines || []).forEach(line => {
-        const ln = document.createElement('div');
-        ln.className = 'svc-slide-line';
-        ln.textContent = line;
-        preview.appendChild(ln);
+      // Same theme-layer renderer the full-edit canvas uses — the thumbnail
+      // is just a smaller container, and the layout math is percentage-based
+      // so it scales down correctly without any special-casing here.
+      paintLookLayers(preview, themeForItem(item), item.style || {}, {
+        verseText: s.text, referenceText: s.reference || '',
+        translatedText: getTranslatedText(item, s, () => renderStack()),
       });
     }
 
@@ -827,24 +937,135 @@
         b.addEventListener('click', () => {
           item.themeId = l.id; saveService(); renderStack();
           if (activeItemId === item.id) renderFullEdit();
-          closePopover();
+          // Multi-Language needs a target language before it's actually
+          // showing anything on the right panel — keep the popover open and
+          // show the picker instead of closing on a half-finished choice.
+          if (l.id === 'multi-language') openThemePopover(anchor, item);
+          else closePopover();
         });
         list.appendChild(b);
       });
       pop.appendChild(list);
+
+      if (item.themeId === 'multi-language') {
+        const langLabel = document.createElement('div');
+        langLabel.className = 'svc-popover-label';
+        langLabel.style.marginTop = '8px';
+        langLabel.textContent = 'Translate to';
+        pop.appendChild(langLabel);
+        const langList = document.createElement('div');
+        langList.className = 'svc-popover-list';
+        TRANSLATE_LANGUAGES.forEach(({ code, name }) => {
+          const b = document.createElement('button');
+          b.className = 'svc-popover-item' + (item.translateTo === code ? ' active' : '');
+          b.textContent = name;
+          b.addEventListener('click', () => {
+            item.translateTo = code; saveService(); renderStack();
+            if (activeItemId === item.id) renderFullEdit();
+            closePopover();
+          });
+          langList.appendChild(b);
+        });
+        pop.appendChild(langList);
+      }
+    });
+  }
+
+  // ── Bible tab theme picker ──────────────────────────────────────────────
+  // Auto-detected and manually-searched scripture carry no per-item theme —
+  // they've always rendered with whichever theme is assigned to the primary
+  // output in Settings (outputThemeMap/applyOutputThemes, defined in app.js).
+  // This just surfaces that same assignment as a one-click shortcut right
+  // next to the search bar, instead of it only being reachable from Settings.
+  function openBibleThemePopover(anchor) {
+    openPopover(anchor, (pop) => {
+      const label = document.createElement('div');
+      label.className = 'svc-popover-label';
+      label.textContent = 'Theme for auto-detect & search';
+      pop.appendChild(label);
+
+      const all = (typeof looks !== 'undefined' && Array.isArray(looks)) ? looks : [];
+      const primaryKey = (typeof PRIMARY_DISPLAY !== 'undefined') ? PRIMARY_DISPLAY : 'display-1';
+      const map = (typeof outputThemeMap === 'function') ? outputThemeMap() : {};
+      const current = map[primaryKey];
+
+      const list = document.createElement('div');
+      list.className = 'svc-popover-list';
+      all.forEach(l => {
+        const b = document.createElement('button');
+        b.className = 'svc-popover-item' + (l.id === current ? ' active' : '');
+        b.textContent = l.name;
+        b.addEventListener('click', () => {
+          if (typeof settings !== 'undefined' && typeof outputThemeMap === 'function') {
+            settings.outputThemes = { ...outputThemeMap(), [primaryKey]: l.id };
+            if (typeof saveSettingsPatch === 'function') saveSettingsPatch({ outputThemes: settings.outputThemes });
+            if (typeof applyOutputThemes === 'function') applyOutputThemes();
+          }
+          // Multi-Language needs a target language before the right panel
+          // shows anything — keep the popover open and show the picker
+          // instead of closing on a half-finished choice (same pattern as
+          // the per-item theme popover above).
+          if (l.id === 'multi-language') openBibleThemePopover(anchor);
+          else closePopover();
+        });
+        list.appendChild(b);
+      });
+      pop.appendChild(list);
+
+      if (current === 'multi-language') {
+        const langLabel = document.createElement('div');
+        langLabel.className = 'svc-popover-label';
+        langLabel.style.marginTop = '8px';
+        langLabel.textContent = 'Translate to';
+        pop.appendChild(langLabel);
+        const langList = document.createElement('div');
+        langList.className = 'svc-popover-list';
+        TRANSLATE_LANGUAGES.forEach(({ code, name }) => {
+          const b = document.createElement('button');
+          b.className = 'svc-popover-item' + ((typeof settings !== 'undefined' && settings.bibleTranslateTo === code) ? ' active' : '');
+          b.textContent = name;
+          b.addEventListener('click', () => {
+            if (typeof settings !== 'undefined') {
+              settings.bibleTranslateTo = code;
+              if (typeof saveSettingsPatch === 'function') saveSettingsPatch({ bibleTranslateTo: code });
+            }
+            closePopover();
+          });
+          langList.appendChild(b);
+        });
+        pop.appendChild(langList);
+      }
     });
   }
 
   // ── Full-scale edit ──────────────────────────────────────────────────────
+  // 'slides' items always edit in Flow — the single-slide canvas+inspector
+  // view was cramped (the inspector's fixed width left barely any room for
+  // the actual preview) and redundant once Flow could show every slide at
+  // once anyway. 'song'/'scripture'/'image' items don't support Flow (a song
+  // block can span multiple slides via linesPerSlide chunking, so reordering
+  // at the slide level would mean reordering partial lines within/across
+  // blocks — not wired up), so they keep the original canvas+inspector view.
   function renderFullEdit() {
     const item = activeItem();
     if (!item) return;
     renderFullEditHeader();
     const slides = slidesFor(item);
     if (editSlideIndex >= slides.length) editSlideIndex = Math.max(0, slides.length - 1);
-    renderStrip(item, slides);
-    renderCanvas(item, slides[editSlideIndex]);
-    renderInspector(item);
+
+    const stage = document.getElementById('svc-edit-stage');
+    const flow  = document.getElementById('svc-flow');
+    if (item.type === 'slides') {
+      stage?.classList.add('hidden');
+      flow?.classList.remove('hidden');
+      renderFlowView(item);
+    } else {
+      flow?.classList.add('hidden');
+      stage?.classList.remove('hidden');
+      renderStrip(item, slides);
+      renderCanvas(item, slides[editSlideIndex]);
+      renderInspector(item);
+    }
   }
 
   function renderFullEditHeader() {
@@ -887,25 +1108,16 @@
     }
   }
 
-  // Render a look + this slide's content into the canvas. Percentages keep it
-  // resolution-independent, matching how display.html lays out.
-  function renderCanvas(item, slide) {
-    const host = document.getElementById('svc-canvas');
-    if (!host) return;
+  // Paint a look's layers into `host` (must be position:relative and sized).
+  // Percentages keep this resolution-independent — the exact same math works
+  // for the full-size editing canvas, a small grid thumbnail, or the top-bar
+  // live preview, just by rendering into containers of different pixel size.
+  // `opts.onCommit`/`opts.onSplit` wire the verse-text layer up for in-place
+  // editing (full-edit canvas only) — omit both to get a read-only render,
+  // which is what thumbnails and previews want.
+  function paintLookLayers(host, look, style, content, opts = {}) {
     host.classList.remove('is-alpha');
     host.innerHTML = '';
-    if (!slide) return;
-
-    if (item.type === 'image') {
-      const img = document.createElement('img');
-      img.src = slide.image;
-      img.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;object-fit:contain;';
-      host.appendChild(img);
-      return;
-    }
-
-    const look = themeForItem(item);
-    const style = item.style || {};
     const scale = (host.clientWidth || 640) / DESIGN_W;
 
     (look?.layers || []).forEach(layer => {
@@ -947,6 +1159,11 @@
       if (layer.type !== 'text') return;
 
       const isVerse = layer.binding === 'verse';
+      // The right-hand panel of Multi-Language — its own fixed layer position/
+      // font, never the item's `style` override (that override targets the
+      // single 'verse' box, and applying it here too would stack both
+      // languages on top of each other).
+      const isTranslated = layer.binding === 'verse_translated';
       const d = document.createElement('div');
       d.className = 'svc-canvas-text' + (isVerse ? ' is-verse' : '');
       const p = layer.pos || { x: 100, y: 400, w: DESIGN_W - 200, h: 0 };
@@ -970,12 +1187,14 @@
       if (layer.shadow?.enabled) {
         d.style.textShadow = `${layer.shadow.x * scale}px ${layer.shadow.y * scale}px ${layer.shadow.blur * scale}px ${hexA(layer.shadow.color, layer.shadow.opacity)}`;
       }
-      d.textContent = isVerse ? slide.text : (slide.reference || item.title || '');
+      d.textContent = isVerse ? content.verseText
+        : isTranslated ? (content.translatedText || '')
+        : (content.referenceText || '');
 
-      if (isVerse && item.type !== 'scripture') {
+      if (isVerse && opts.onCommit) {
         d.contentEditable = 'true';
         d.spellcheck = false;
-        d.addEventListener('blur', () => commitCanvasText(item, slide, d.innerText));
+        d.addEventListener('blur', () => opts.onCommit(d.innerText));
         d.addEventListener('keydown', (e) => {
           if (e.key === 'Escape') { e.preventDefault(); d.blur(); return; }
           // Plain Enter = new line, same slide (default contentEditable
@@ -984,17 +1203,45 @@
           // mouse instead.
           if (e.key === 'Enter' && e.shiftKey) {
             e.preventDefault();
-            splitSlideAtCaret(item, slide, d);
+            opts.onSplit?.(d);
           }
         });
         d.addEventListener('contextmenu', (e) => {
           e.preventDefault();
-          splitSlideAtCaret(item, slide, d);
+          opts.onSplit?.(d);
         });
         d.addEventListener('mousedown', (e) => e.stopPropagation());
       }
       host.appendChild(d);
     });
+  }
+
+  // Render a look + this slide's content into the full-edit canvas.
+  function renderCanvas(item, slide) {
+    const host = document.getElementById('svc-canvas');
+    if (!host) return;
+    host.classList.remove('is-alpha');
+    host.innerHTML = '';
+    if (!slide) return;
+
+    if (item.type === 'image') {
+      const img = document.createElement('img');
+      img.src = slide.image;
+      img.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;object-fit:contain;';
+      host.appendChild(img);
+      return;
+    }
+
+    paintLookLayers(
+      host, themeForItem(item), item.style || {},
+      {
+        verseText: slide.text, referenceText: slide.reference || '',
+        translatedText: getTranslatedText(item, slide, () => renderCanvas(item, slide)),
+      },
+      item.type !== 'scripture'
+        ? { onCommit: (text) => commitCanvasText(item, slide, text), onSplit: (el) => splitSlideAtCaret(item, slide, el) }
+        : {}
+    );
   }
 
   // Write on-canvas edits back into the lines this slide came from.
@@ -1050,6 +1297,165 @@
     block.breaks = (block.breaks || [])
       .map(b => (b >= from ? b + delta : b))
       .filter(b => b > 0 && b < block.lines.length);
+  }
+
+  // ── Flow view: every slide of a 'slides' item, stacked and editable at
+  // once, with drag-to-reorder. Each block already *is* one slide here (no
+  // linesPerSlide chunking the way songs have), so reordering/splitting acts
+  // directly on item.blocks — no lineStart/lineEnd bookkeeping needed.
+  function renderFlowView(item) {
+    const host = document.getElementById('svc-flow');
+    if (!host) return;
+    host.innerHTML = '';
+    const blocks = item.blocks || [];
+    if (!blocks.length) {
+      host.innerHTML = '<div class="svc-flow-hint">No slides yet.</div>';
+      return;
+    }
+    blocks.forEach((b, i) => host.appendChild(flowRow(item, b, i)));
+
+    const add = document.createElement('button');
+    add.className = 'svc-add-line';
+    add.style.margin = '4px auto';
+    add.textContent = '+ slide';
+    add.addEventListener('click', () => {
+      item.blocks.push({ label: `Slide ${item.blocks.length + 1}`, text: '' });
+      saveService(); renderFullEdit(); renderSidebar();
+    });
+    host.appendChild(add);
+
+    const hint = document.createElement('div');
+    hint.className = 'svc-flow-hint';
+    hint.textContent = 'Drag the grip to reorder · Shift+Enter or right-click at the caret splits the rest into a new slide';
+    host.appendChild(hint);
+  }
+
+  function flowRow(item, block, i) {
+    const isLive = liveSlideKey === `${item.id}:${i}`;
+    const row = document.createElement('div');
+    row.className = 'svc-flow-row' + (isLive ? ' live' : '');
+
+    const grip = document.createElement('span');
+    grip.className = 'svc-flow-grip';
+    grip.innerHTML = `<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round"><line x1="4" y1="9" x2="20" y2="9"/><line x1="4" y1="15" x2="20" y2="15"/></svg>`;
+
+    const num = document.createElement('span');
+    num.className = 'svc-flow-num';
+    num.textContent = i + 1;
+
+    const text = document.createElement('div');
+    text.className = 'svc-flow-text';
+    text.contentEditable = 'true';
+    text.spellcheck = false;
+    text.textContent = block.text || '';
+    text.addEventListener('mousedown', (e) => e.stopPropagation());
+    text.addEventListener('blur', () => {
+      block.text = text.innerText.replace(/\r/g, '');
+      saveService(); renderSidebar();
+    });
+    text.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') { e.preventDefault(); text.blur(); return; }
+      if (e.key === 'Enter' && e.shiftKey) {
+        e.preventDefault();
+        splitFlowSlideAtCaret(item, i, text);
+      }
+    });
+    text.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      splitFlowSlideAtCaret(item, i, text);
+    });
+
+    const send = document.createElement('button');
+    send.className = 'svc-flow-send';
+    send.title = 'Send to screen';
+    send.innerHTML = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>`;
+    send.addEventListener('click', (e) => {
+      e.stopPropagation();
+      sendSlide(item, i);
+      renderFlowView(item); // refresh the "live" highlight onto this row
+    });
+
+    const del = document.createElement('button');
+    del.className = 'svc-flow-del';
+    del.innerHTML = '&times;';
+    del.title = 'Delete slide';
+    del.addEventListener('click', () => {
+      if (item.blocks.length <= 1) {
+        if (typeof toast === 'function') toast('A section needs at least one slide', 'error');
+        return;
+      }
+      item.blocks.splice(i, 1);
+      saveService(); renderFullEdit(); renderSidebar();
+    });
+
+    row.appendChild(grip);
+    row.appendChild(num);
+    row.appendChild(text);
+    row.appendChild(send);
+    row.appendChild(del);
+
+    // Reorder by dragging the grip specifically — the row itself hosts an
+    // editable text area, so a drag started from anywhere else would fight
+    // with text selection.
+    row.draggable = true;
+    row.addEventListener('dragstart', (e) => {
+      if (!grip.contains(e.target)) { e.preventDefault(); return; }
+      dragFlowIndex = i;
+      row.classList.add('svc-item-dragging');
+      e.dataTransfer.effectAllowed = 'move';
+      try { e.dataTransfer.setData('text/plain', String(i)); } catch {}
+    });
+    row.addEventListener('dragend', () => {
+      dragFlowIndex = null;
+      document.querySelectorAll('.svc-flow-row').forEach(r =>
+        r.classList.remove('svc-item-dragging', 'svc-drop-before', 'svc-drop-after'));
+    });
+    row.addEventListener('dragover', (e) => {
+      if (dragFlowIndex == null || dragFlowIndex === i) return;
+      e.preventDefault();
+      const r = row.getBoundingClientRect();
+      const after = (e.clientY - r.top) > r.height / 2;
+      row.classList.toggle('svc-drop-after', after);
+      row.classList.toggle('svc-drop-before', !after);
+    });
+    row.addEventListener('dragleave', () => row.classList.remove('svc-drop-before', 'svc-drop-after'));
+    row.addEventListener('drop', (e) => {
+      e.preventDefault();
+      const after = row.classList.contains('svc-drop-after');
+      row.classList.remove('svc-drop-before', 'svc-drop-after');
+      reorderFlowSlide(item, dragFlowIndex, i, after);
+    });
+
+    return row;
+  }
+
+  function reorderFlowSlide(item, fromIndex, toIndex, after) {
+    if (fromIndex == null || fromIndex === toIndex) return;
+    const blocks = item.blocks;
+    const targetBlock = blocks[toIndex];
+    const [moved] = blocks.splice(fromIndex, 1);
+    let to = blocks.indexOf(targetBlock);
+    if (to < 0) to = blocks.length - 1;
+    blocks.splice(after ? to + 1 : to, 0, moved);
+    saveService(); renderFullEdit(); renderSidebar();
+  }
+
+  // Split a 'slides' block at the caret. Unlike splitSlideAtCaret (songs,
+  // where one block chunks across several slides via linesPerSlide), each
+  // block here already *is* one slide — so "splitting" means inserting a
+  // whole new block right after, carrying everything past the caret.
+  function splitFlowSlideAtCaret(item, index, el) {
+    const rel = caretLineIndex(el);
+    const block = item.blocks[index];
+    if (!block) return;
+    const lines = el.innerText.replace(/\r/g, '').split('\n');
+    const before = lines.slice(0, rel).join('\n');
+    const after  = lines.slice(rel).join('\n');
+    if (!after.trim()) return; // nothing past the caret to break off
+    block.text = before;
+    item.blocks.splice(index + 1, 0, { label: `Slide ${index + 2}`, text: after });
+    saveService(); renderFullEdit(); renderSidebar();
+    if (typeof toast === 'function') toast('Slide split', 'success');
   }
 
   function renderInspector(item) {
@@ -1186,6 +1592,10 @@
       const hit = d.result || (d.results || [])[0];
       if (hit) {
         item.text = hit.text || ''; item.title = hit.reference || ref;
+        // Structured book/chapter/verse — needed so the Multi-Language theme
+        // can look up the real verse in the target language instead of
+        // falling back to an AI translation of the English text.
+        item.book = hit.book || null; item.chapter = hit.chapter || null; item.verse = hit.verse || null;
         saveService(); renderSidebar(); renderStack(); renderFullEdit();
       } else if (typeof toast === 'function') {
         toast('No verse found for ' + ref, 'error');
@@ -1375,12 +1785,11 @@
   }
 
   // ── Song bank ───────────────────────────────────────────────────────────
-  function openSongBank() {
-    document.getElementById('hymn-modal')?.classList.remove('hidden');
+  function showSongsLibrary() {
+    showCenterView('songs');
     renderHymnList('');
     document.getElementById('hymn-search')?.focus();
   }
-  function closeSongBank() { document.getElementById('hymn-modal')?.classList.add('hidden'); }
 
   function renderHymnList(query) {
     const host = document.getElementById('hymn-list');
@@ -1399,7 +1808,6 @@
         `<div class="hymn-sub">${escapeHtml(h.author)} · ${h.year} · ${h.blocks.length} stanzas</div></div>` +
         `<span class="hymn-add">Add</span>`;
       row.addEventListener('click', () => {
-        closeSongBank();
         openAddConfirm({
           id: uid('song'), type: 'song',
           title: h.title, author: h.author, year: h.year,
@@ -1408,6 +1816,45 @@
         }, { showDelimiter: true });
       });
       host.appendChild(row);
+    });
+  }
+
+  // ── Slides library ────────────────────────────────────────────────────────
+  // Every 'slides'-type item across every playlist, not just the active one —
+  // a deck built for one service is often reused later, and hunting through
+  // playlists to find it again defeats the point of a dedicated Slides tab.
+  function showSlidesLibrary() {
+    showCenterView('slides');
+    renderSlidesLibrary();
+  }
+
+  function renderSlidesLibrary() {
+    const host = document.getElementById('slides-library-list');
+    if (!host) return;
+    host.innerHTML = '';
+
+    const decks = [];
+    playlists.forEach(p => (p.items || []).forEach(item => {
+      if (item.type === 'slides') decks.push({ item, playlist: p });
+    }));
+
+    if (!decks.length) {
+      host.innerHTML = '<div class="svc-empty">No slide decks yet.<br>Use “+ New” to create one.</div>';
+      return;
+    }
+
+    decks.forEach(({ item, playlist }) => {
+      const count = (item.blocks || []).length;
+      const card = document.createElement('button');
+      card.className = 'slib-card';
+      card.innerHTML =
+        `<div class="slib-card-title">${escapeHtml(item.title || '(untitled)')}</div>` +
+        `<div class="slib-card-sub">${escapeHtml(playlist.name || '')} · ${count} slide${count === 1 ? '' : 's'}</div>`;
+      card.addEventListener('click', () => {
+        if (playlist.id !== activePlaylistId) switchPlaylist(playlist.id);
+        openFullEdit(item.id);
+      });
+      host.appendChild(card);
     });
   }
 
@@ -1562,10 +2009,19 @@
       loadHymnBank().then(n => { if (n) console.log(`[Songs] imported bank loaded: ${n} songs`); });
     }
 
-    document.getElementById('songs-btn')?.addEventListener('click', openSongBank);
-    document.getElementById('close-hymn')?.addEventListener('click', closeSongBank);
-    document.querySelector('#hymn-modal .modal-overlay')?.addEventListener('click', closeSongBank);
+    // The only way back to the Bible/Live Queue view once a playlist/slides
+    // section is open was closing the whole playlist — no obvious exit while
+    // actually inside one. Mirrors Slides/Songs/Theme Studio as an
+    // always-visible top-bar control rather than something buried in the
+    // playlist toolbar.
+    document.getElementById('bible-btn')?.addEventListener('click', () => closeStack());
+    document.getElementById('slides-btn')?.addEventListener('click', showSlidesLibrary);
+    document.getElementById('songs-btn')?.addEventListener('click', showSongsLibrary);
     document.getElementById('hymn-search')?.addEventListener('input', e => renderHymnList(e.target.value));
+    document.getElementById('slides-library-new-btn')?.addEventListener('click', () => {
+      openAddConfirm(MAKERS.slides(), { showDelimiter: false });
+    });
+    document.getElementById('bible-theme-btn')?.addEventListener('click', (e) => openBibleThemePopover(e.currentTarget));
 
     // Folder-level "+": creates a new playlist, Explorer-style — appears
     // immediately with an editable name rather than behind a naming dialog.
@@ -1678,7 +2134,6 @@
       saveService(); renderSidebar(); syncFullEditDelim();
       editSlideIndex = 0; renderFullEdit();
     });
-
     // Space / arrows advance whichever slide is currently live — works from
     // the stack (present mode) as well as full-edit, since that's where an
     // operator actually runs a service from.
@@ -1699,8 +2154,11 @@
   if (document.readyState !== 'loading') init();
 
   // Song auto-detection will want the playlist's lyrics to build its index.
+  // paintLookLayers is also used by app.js to render the top-bar live preview
+  // with the same theme a sent slide actually carries, instead of plain text.
   window.KairoService = {
     get service() { return service; },
     slidesFor, sendSlide, focusInStack, openFullEdit, closeStack, closeFullEdit,
+    paintLookLayers,
   };
 })();

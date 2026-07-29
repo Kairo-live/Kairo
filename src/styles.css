@@ -189,12 +189,20 @@ html, body {
   align-items: center;
   padding: 0 16px;
   gap: 0;
-  -webkit-app-region: drag;
   flex-shrink: 0;
   position: relative;
   z-index: 20;
   box-shadow: 0 1px 0 rgba(0,0,0,0.4);
 }
+
+/* Frameless-window dragging only means anything inside the real Tauri shell
+   (.is-tauri, set in index.html's early inline script via window.__TAURI__).
+   Applying -webkit-app-region: drag unconditionally hit a real Chromium
+   compositing bug when this page loads in an ordinary browser tab (e.g.
+   testing straight against the dev server): the top bar would silently stop
+   being painted after certain reflows — correct in the DOM/computed styles,
+   invisible on screen — until something forced a repaint. */
+.is-tauri .top-bar { -webkit-app-region: drag; }
 
 /* macOS: inset the logo so it clears the traffic lights. Windows/Linux draw
    their controls on the right, so the logo sits flush left and the right side
@@ -960,6 +968,13 @@ html, body {
   width: 100%;
 }
 
+.live-screen-themed {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+}
+.live-screen-themed.hidden { display: none; }
+
 /* The content (Bible text, lyric line, slide body — whatever is bound to
    "verse") is always what the audience is meant to read; the reference
    (citation, song title, slide title — bound to "reference") is a caption.
@@ -1588,6 +1603,7 @@ html, body {
   color: var(--text-3);
 }
 .svc-slide-preview {
+  position: relative;
   aspect-ratio: 16/9;
   background: #000;
   border-radius: 4px;
@@ -1814,6 +1830,88 @@ html, body {
 }
 .svc-edit-stage.hidden { display: none; }
 
+/* Flow view — every slide of the section, stacked and editable at once. */
+.svc-flow {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--space-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.svc-flow.hidden { display: none; }
+.svc-flow-row {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  padding: var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-card);
+}
+.svc-flow-row.live { border-color: var(--red); }
+.svc-flow-grip { color: var(--text-3); flex: none; cursor: grab; padding-top: 6px; }
+.svc-flow-num {
+  flex: none;
+  width: 24px; height: 24px;
+  border-radius: 50%;
+  background: var(--bg-hover);
+  color: var(--text-2);
+  font-size: 11px;
+  display: flex; align-items: center; justify-content: center;
+  margin-top: 4px;
+}
+.svc-flow-text {
+  flex: 1;
+  min-height: 1.4em;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  color: var(--text);
+  white-space: pre-wrap;
+  outline: none;
+}
+.svc-flow-text:focus { box-shadow: inset 0 0 0 1px var(--blue); }
+.svc-flow-send {
+  flex: none;
+  min-width: 22px; height: 22px;
+  padding: 0 5px;
+  margin-top: 2px;
+  display: flex; align-items: center; justify-content: center;
+  background: transparent;
+  border: 1px solid var(--border-md);
+  border-radius: var(--radius-sm);
+  color: var(--text-2);
+  cursor: pointer;
+  transition: var(--trans);
+}
+.svc-flow-send:hover { color: var(--blue); border-color: var(--blue); }
+.svc-flow-del {
+  flex: none;
+  min-width: 22px; height: 22px;
+  padding: 0 5px;
+  margin-top: 2px;
+  display: flex; align-items: center; justify-content: center;
+  background: transparent;
+  border: 1px solid var(--border-md);
+  border-radius: var(--radius-sm);
+  color: var(--text-2);
+  font-size: 15px;
+  cursor: pointer;
+  transition: var(--trans);
+}
+.svc-flow-del:hover { color: var(--red); border-color: var(--red); }
+.svc-flow-row.svc-item-dragging { opacity: 0.4; }
+.svc-flow-row.svc-drop-before { box-shadow: inset 0 2px 0 0 var(--blue); }
+.svc-flow-row.svc-drop-after  { box-shadow: inset 0 -2px 0 0 var(--blue); }
+.svc-flow-hint {
+  text-align: center;
+  color: var(--text-3);
+  font-size: 12px;
+  padding: var(--space-2) 0;
+}
+
 .svc-strip {
   width: 190px;
   flex: none;
@@ -1941,6 +2039,35 @@ html, body {
   border-radius: 999px;
   padding: 3px 10px;
 }
+
+/* Slides library */
+.slib-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 14px 16px 16px;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 10px;
+  align-content: start;
+}
+.slib-card {
+  display: block;
+  width: 100%;
+  padding: 12px 14px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  cursor: pointer;
+  text-align: left;
+  font-family: var(--font);
+  transition: var(--trans);
+}
+.slib-card:hover { background: var(--bg-hover); border-color: var(--blue); }
+.slib-card-title {
+  font-size: var(--fs-md); font-weight: 600; color: var(--text);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.slib-card-sub { font-size: var(--fs-xs); color: var(--text-3); margin-top: 3px; }
 
 /* ── Language packs ── */
 .lang-pack-list {
@@ -3840,6 +3967,15 @@ select {
 .ts-handle-s { left: 50%; bottom: -5px; transform: translateX(-50%); cursor: ns-resize; }
 .ts-handle-w { top: 50%;  left: -5px;   transform: translateY(-50%); cursor: ew-resize; }
 .ts-handle-e { top: 50%;  right: -5px;  transform: translateY(-50%); cursor: ew-resize; }
+
+/* ── Alignment/breakpoint guides — shown only while dragging/resizing a
+   layer, marking canvas breakpoints (edges/quarters/center) or another
+   layer's edge that the current drag just snapped onto. Yellow, same as
+   Photoshop/Illustrator's smart guides — reads clearly against the blue
+   selection outline and handles without being confused for either. ── */
+.ts-guide { position: absolute; background: #ffd60a; pointer-events: none; z-index: 40; }
+.ts-guide-v { top: 0; bottom: 0; width: 1px; }
+.ts-guide-h { left: 0; right: 0; height: 1px; }
 
 /* ── Meta row (layout + animation + name) ── */
 .ts-meta-row {

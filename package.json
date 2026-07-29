@@ -1,6 +1,6 @@
 {
   "name": "kairo",
-  "version": "2.6.0",
+  "version": "2.7.0",
   "description": "KAIRO v2 — Tauri + Logos-powered scripture detection",
   "scripts": {
     "server": "node server/server.js",
@@ -9,6 +9,7 @@
     "tauri": "npx @tauri-apps/cli@latest",
     "test-server": "node server/server.js",
     "whisper:install": "node scripts/download-whisper-model.js",
+    "llm:install": "node scripts/download-llm-model.js",
     "prune-server": "node scripts/prune-server-deps.js"
   },
   "devDependencies": {

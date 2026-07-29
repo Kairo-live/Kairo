@@ -291,6 +291,13 @@ const server = http.createServer(app);
 const wss    = new WebSocketServer({ noServer: true });
 
 app.use(cors());
+// ProPresenter bundle/playlist imports carry their linked media (video,
+// images) along with the presentation and can legitimately run into the
+// hundreds of MB — give that one route its own much larger limit before the
+// app-wide cap below applies. Must be registered first: once a body-parser
+// has parsed the body, later ones (the 4mb one) see it's already done and
+// skip re-enforcing their own smaller limit.
+app.use('/api/service/import', express.json({ limit: '500mb' }));
 // Cap body size — sermon transcripts comfortably fit, but prevents memory
 // exhaustion from a malicious or runaway client posting megabytes of garbage.
 app.use(express.json({ limit: '4mb' }));
@@ -580,6 +587,47 @@ async function submitDeepgramRestFallback() {
 //
 // Manual advance: operator can still click "Next →" at any time (e.g. if the
 // preacher skips a verse or the mic misses a line).
+// Resolved per-output theme objects, mirrored from the client's own
+// applyOutputThemes() broadcast (server.js has no independent notion of
+// "themes" — it just remembers whatever the client last resolved and pushed).
+// Used only to decide whether auto-detected/searched scripture needs a real
+// Bible-translation lookup attached before broadcast — see attachBibleTranslations.
+let currentOutputThemes = {};
+
+// The Bible tab's "Translate to" language (settings.bibleTranslateTo) only
+// does anything when the primary output is actually on the Multi-Language
+// theme — otherwise there's no right-hand panel to fill.
+function primaryOutputTranslateLang() {
+  const primary = currentOutputThemes['display-1'];
+  const lang = settings.bibleTranslateTo;
+  if (!primary || primary.layout !== 'multi-language' || !lang) return null;
+  return lang;
+}
+
+// Real verse text in the target language, looked up from the bundled
+// public-domain translations (no API key needed) — mutates verses in place
+// so every path sharing these object references picks it up once, whichever
+// broadcast fires first. No-ops on anything already translated (e.g. a
+// playlist item that resolved its own translatedText) or lacking book/chapter/
+// verse (search's text/phrase fallback results).
+async function attachBibleTranslations(verses) {
+  const lang = primaryOutputTranslateLang();
+  if (!lang) return verses;
+  await Promise.all(verses.map(async (v) => {
+    if (v.translatedText || !v.book || !v.chapter || !v.verse) return;
+    try {
+      const result = await translateText({
+        text: v.text, lang,
+        ref: { book: v.book, chapter: v.chapter, verse: v.verse },
+      });
+      v.translatedText = result.text || '';
+    } catch (err) {
+      console.warn('[Translate] Bible auto-translate failed:', err.message);
+    }
+  }));
+  return verses;
+}
+
 let rangeQueue        = [];    // remaining verses not yet displayed
 let rangeQueueTotal   = 0;    // total verses in this range (for UI display)
 let rangeAllVerses    = [];   // all verses in range (sent + queued) — for UI display
@@ -610,7 +658,8 @@ function getLastMeaningfulWords(text, n = 2) {
   return words.slice(-n).join(' ');
 }
 
-function setRangeQueue(verses) {
+async function setRangeQueue(verses) {
+  await attachBibleTranslations(verses);
   rangeAllVerses      = verses.slice();
   rangeCurrentVerse   = verses[0] || null;
   rangeQueue          = verses.slice(1);
@@ -914,7 +963,8 @@ app.get('/health', (_, res) => res.json({
 app.get('/api/settings', (_, res) => {
   const s = loadSettings();
   const safe = { ...s };
-  if (safe.deepgramApiKey) safe.deepgramApiKey = safe.deepgramApiKey.slice(0, 8) + '…';
+  if (safe.deepgramApiKey)  safe.deepgramApiKey  = safe.deepgramApiKey.slice(0, 8) + '…';
+  if (safe.anthropicApiKey) safe.anthropicApiKey = safe.anthropicApiKey.slice(0, 8) + '…';
   res.json(safe);
 });
 
@@ -981,6 +1031,28 @@ app.post('/api/service/send', async (req, res) => {
   res.json({ ok: true });
 });
 
+// Multi-language theme support. `ref` (book/chapter/verse) resolves against
+// a real bundled translation; anything else goes to Claude. See translate.js.
+const { translate: translateText, LANGUAGES: TRANSLATE_LANGUAGES } = require('./translate');
+app.get('/api/translate/languages', (_, res) => {
+  res.json({ languages: Object.entries(TRANSLATE_LANGUAGES).map(([code, v]) => ({ code, name: v.name })) });
+});
+app.post('/api/translate', async (req, res) => {
+  const { text, lang, book, chapter, verse } = req.body || {};
+  if (!lang) return res.status(400).json({ error: 'No target language provided' });
+  try {
+    const apiKey = settings.anthropicApiKey || loadSettings().anthropicApiKey;
+    const result = await translateText({
+      text, lang, apiKey,
+      ollamaUrl: ollamaUrl(), ollamaModel: ollamaModel(),
+      ref: (book && chapter && verse) ? { book, chapter: Number(chapter), verse: Number(verse) } : null,
+    });
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    res.status(err.code === 'NO_TRANSLATE_ENGINE' ? 400 : 500).json({ error: err.message, code: err.code || null });
+  }
+});
+
 app.post('/api/propresenter/clear', async (_, res) => {
   await clearProPresenter();
   res.json({ ok: true });
@@ -1036,6 +1108,7 @@ app.post('/api/lang/install', async (req, res) => {
 app.post('/api/look/apply', (req, res) => {
   const { look, themes } = req.body;
   if (themes && typeof themes === 'object') {
+    currentOutputThemes = themes;
     broadcast({ type: 'look-update', themes, look: look || null });
     return res.json({ ok: true, outputs: Object.keys(themes).length });
   }
@@ -1243,6 +1316,48 @@ app.post('/api/whisper/install', async (_req, res) => {
     send({ phase: 'complete', ok: false, error: err.message || String(err) });
   } finally {
     whisperInstallInProgress = false;
+    res.end();
+  }
+});
+
+// ── Local translation-model installer ────────────────────────────────────
+// Same NDJSON progress-bar shape as the Whisper installer above — this is
+// the bundled Qwen2.5 GGUF model translate.js's translateWithLocalLLM() runs
+// via node-llama-cpp, downloaded once on first need rather than baked into
+// the app installer (see llm_installer.js for why).
+const llmInstallerRoute = require('./llm_installer');
+let llmInstallInProgress = false;
+
+app.get('/api/llm/status', (_req, res) => {
+  res.json({
+    installed: llmInstallerRoute.isModelPresent(),
+    modelPath: llmInstallerRoute.modelPath(),
+    installing: llmInstallInProgress,
+  });
+});
+
+app.post('/api/llm/install', async (_req, res) => {
+  if (llmInstallInProgress) {
+    return res.status(409).json({ error: 'install already in progress' });
+  }
+  llmInstallInProgress = true;
+
+  res.setHeader('Content-Type', 'application/x-ndjson');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders?.();
+
+  const send = (obj) => {
+    try { res.write(JSON.stringify(obj) + '\n'); } catch {}
+  };
+
+  try {
+    await llmInstallerRoute.installLLMModel({ onProgress: send });
+    send({ phase: 'complete', ok: true });
+  } catch (err) {
+    send({ phase: 'complete', ok: false, error: err.message || String(err) });
+  } finally {
+    llmInstallInProgress = false;
     res.end();
   }
 });
@@ -2758,6 +2873,11 @@ async function runFingerprintSearch(currentSegment, skipNewTranscriptCheck = fal
     // preacher just explicitly cited.
     // Limit to top-1 only: the noise problem came from all 5 fingerprint results
     // flooding the panel with unrelated verses at similar scores.
+    // Reverted from a brief experiment at 0.80: real transcripts showed it let
+    // through more wrong-verse noise without actually catching the paraphrases
+    // it was meant to rescue — those scored well below even 0.80 (~55%), so the
+    // lower floor bought nothing but noise. 0.85 stays the bar until there's a
+    // smarter lever than "just lower the number" for loose paraphrases.
     if (!recentDirectRef && results[0].similarity >= 0.85) {
       const fpKey   = `${results[0].book}|${results[0].chapter}|${results[0].verse}`;
       const boosted = ensembleScore(fpKey, 'fingerprint', results[0].similarity, results);
@@ -2803,7 +2923,7 @@ function ensembleScore(verseKey, method, score, verses) {
   return score;
 }
 
-function broadcastDetection(verses, method, topScore, target) {
+async function broadcastDetection(verses, method, topScore, target) {
   const now    = Date.now();
   const topKey = verses[0] ? `${verses[0].book}|${verses[0].chapter}|${verses[0].verse}` : null;
 
@@ -2854,6 +2974,7 @@ function broadcastDetection(verses, method, topScore, target) {
     if (topKey) { lastDetectedRef = topKey; lastDetectedTime = now; }
   }
 
+  if (target === 'viewer') await attachBibleTranslations(verses);
   broadcast({ type: 'detection', verses, method, topScore, target, timestamp: now });
 
   // Do NOT clear candidates on viewer send — candidates is now a permanent session log.

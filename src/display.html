@@ -120,6 +120,7 @@
     let reconnectTimer = null;
     let currentVerseText = '';
     let currentVerseRef  = '';
+    let currentTranslatedText = ''; // right-panel text for the Multi-Language theme
     let activeLook       = null;
     let pendingFade      = false;
 
@@ -159,17 +160,20 @@
     // h = 0 means "auto height" (text grows downward from y).
     const DESIGN_W = 1920, DESIGN_H = 1080;
     function applyPos(div, pos) {
+        // `inset` is shorthand for top/right/bottom/left — assigning it
+        // (even '') resets those longhands, which was silently wiping out
+        // the left/top just set two lines above. Clear right/bottom
+        // individually instead of touching the shorthand at all.
         div.style.left  = (pos.x / DESIGN_W * 100) + '%';
         div.style.top   = (pos.y / DESIGN_H * 100) + '%';
         div.style.width = (pos.w / DESIGN_W * 100) + '%';
         div.style.right = 'auto';
         div.style.bottom = 'auto';
-        div.style.inset = '';
         if (pos.h > 0) div.style.height = (pos.h / DESIGN_H * 100) + '%';
     }
 
     // ── Build layer DOM from look ──────────────────────────────────────────
-    function buildLayerDOM(look, verseText, verseRef) {
+    function buildLayerDOM(look, verseText, verseRef, translatedText) {
         const frag    = document.createDocumentFragment();
         const layout  = look.layout || 'fullscreen';
         let   isTransparent = false;
@@ -273,6 +277,7 @@
                 // Pick content for this layer
                 let content = '';
                 if (layer.binding === 'verse')     content = verseText;
+                else if (layer.binding === 'verse_translated') content = translatedText || '';
                 else if (layer.binding === 'reference') content = verseRef;
                 else content = layer.customText || '';
 
@@ -380,6 +385,22 @@
                         div.style.top       = '50%';
                         div.style.transform = 'translateY(-50%)';
                     }
+                } else if (layout === 'multi-language') {
+                    // Both languages share one frame, so — unlike plain
+                    // split-left/right — which half a layer belongs to comes
+                    // from its binding/id, not the layout as a whole.
+                    // 'verse'/'ref' -> left; 'verse_translated'/'ref-translated' -> right.
+                    const isRight = layer.binding === 'verse_translated' || layer.id === 'ref-translated';
+                    div.style.width   = '50%';
+                    div.style.padding = '0 4%';
+                    if (isRight) div.style.right = '0'; else div.style.left = '0';
+                    if (layer.binding === 'verse' || layer.binding === 'verse_translated') {
+                        div.style.top       = '50%';
+                        div.style.transform = 'translateY(-58%)';
+                    } else {
+                        div.style.top       = '50%';
+                        div.style.transform = 'translateY(120%)';
+                    }
                 } else if (layout === 'split-left' || layout === 'split-right') {
                     // Text centered vertically inside the active half. Split-left
                     // pins the text column to the left edge; split-right to the right.
@@ -428,7 +449,12 @@
     // the verse element and shrink its font size (never grow past the theme's
     // designed size) until it fits the vertical space its layout allows.
     function fitVerse() {
-        const el = stage.querySelector('[data-binding="verse"]');
+        fitTextLayer('verse');
+        fitTextLayer('verse_translated');
+    }
+
+    function fitTextLayer(binding) {
+        const el = stage.querySelector(`[data-binding="${binding}"]`);
         if (!el) return;
         const layout = (activeLook || FALLBACK_LOOK).layout || 'fullscreen';
         const stageH = stage.clientHeight || window.innerHeight || 0;
@@ -441,7 +467,7 @@
         // Free-canvas verse box: the budget is its own box height when set, or
         // the space from its top edge to the bottom of the stage when auto.
         const look = activeLook || FALLBACK_LOOK;
-        const verseLayer = (look.layers || []).find(l => l.type === 'text' && l.binding === 'verse' && l.visible !== false);
+        const verseLayer = (look.layers || []).find(l => l.type === 'text' && l.binding === binding && l.visible !== false);
         if (verseLayer && verseLayer.pos) {
             const p = verseLayer.pos;
             const maxHpx = p.h > 0
@@ -467,6 +493,7 @@
         const FRAC = {
             'lower-third': 0.30, 'lower-third-card': 0.24, 'corner-card': 0.20,
             'ticker': 0.16, 'side-rail': 0.80, 'split-left': 0.84, 'split-right': 0.84,
+            'multi-language': 0.84,
         };
         const maxH = stageH * (FRAC[layout] || 0.72);
 
@@ -540,14 +567,14 @@
     }
 
     // ── Render the stage with current look + text ──────────────────────────
-    function renderStage(verseText, verseRef, animate = true) {
+    function renderStage(verseText, verseRef, animate = true, translatedText = '') {
         const look = activeLook || FALLBACK_LOOK;
 
         const doRender = () => {
             stage.innerHTML = '';
             document.body.classList.remove('transparent-bg');
 
-            const { frag, isTransparent } = buildLayerDOM(look, verseText, verseRef);
+            const { frag, isTransparent } = buildLayerDOM(look, verseText, verseRef, translatedText);
             if (isTransparent) document.body.classList.add('transparent-bg');
             stage.appendChild(frag);
             fitVerse();
@@ -601,10 +628,13 @@
     }
 
     // ── Update only the text content in existing layers (no re-render) ──────
-    function updateTextContent(verseText, verseRef) {
+    function updateTextContent(verseText, verseRef, translatedText = '') {
         // Use data-binding attributes to target the right divs
         stage.querySelectorAll('[data-binding="verse"]').forEach(el => {
             el.textContent = verseText;
+        });
+        stage.querySelectorAll('[data-binding="verse_translated"]').forEach(el => {
+            el.textContent = translatedText;
         });
         stage.querySelectorAll('[data-binding="reference"]').forEach(el => {
             el.textContent = verseRef;
@@ -614,15 +644,16 @@
     // ── Apply a new look (re-render with existing text) ────────────────────
     function applyLook(look, animate = true) {
         activeLook = look;
-        renderStage(currentVerseText, currentVerseRef, animate);
+        renderStage(currentVerseText, currentVerseRef, animate, currentTranslatedText);
     }
 
     // ── Show verse (smart update: re-render on first verse, in-place after) ──
-    function showVerse(text, ref, isRangeActive = false) {
+    function showVerse(text, ref, isRangeActive = false, translatedText = '') {
         const wasEmpty = !currentVerseText && !currentVerseRef;
-        const changed  = text !== currentVerseText || ref !== currentVerseRef;
+        const changed  = text !== currentVerseText || ref !== currentVerseRef || translatedText !== currentTranslatedText;
         currentVerseText = text;
         currentVerseRef  = ref;
+        currentTranslatedText = translatedText;
 
         if (!changed) {
             if (isRangeActive) setRangeActive(true);
@@ -631,14 +662,14 @@
 
         if (wasEmpty || stage.children.length === 0) {
             // First verse or blank stage — do a full render with fade
-            renderStage(text, ref, true);
+            renderStage(text, ref, true, translatedText);
         } else {
             // Stage already has layers — fade text, swap, fade back
             const textEls = stage.querySelectorAll('[data-binding]');
             textEls.forEach(el => { el.style.opacity = '0'; el.style.transition = 'opacity 250ms ease'; });
 
             setTimeout(() => {
-                updateTextContent(text, ref);
+                updateTextContent(text, ref, translatedText);
                 fitVerse();
                 textEls.forEach(el => { el.style.opacity = ''; });
             }, 260);
@@ -653,6 +684,7 @@
     function clearDisplay() {
         currentVerseText = '';
         currentVerseRef  = '';
+        currentTranslatedText = '';
         renderStage('', '', true);
     }
 
@@ -749,7 +781,7 @@
                     currentVerseRef  = verse.reference || verse.ref || '';
                     renderImageStage(verse.image, true);
                 } else {
-                    showVerse(verse.text || verse.verse || '', verse.reference || verse.ref || '');
+                    showVerse(verse.text || verse.verse || '', verse.reference || verse.ref || '', false, verse.translatedText || '');
                 }
             }
             return;
@@ -758,7 +790,7 @@
         if (msg.type === 'range-active') {
             const verse = msg.verses && msg.verses[0];
             if (verse) {
-                showVerse(verse.text || verse.verse || '', verse.reference || verse.ref || '', true);
+                showVerse(verse.text || verse.verse || '', verse.reference || verse.ref || '', true, verse.translatedText || '');
             } else {
                 setRangeActive(true);
             }

@@ -30,6 +30,15 @@
                : /Win/.test(ua)             ? 'win32'
                : 'linux';
         document.documentElement.classList.add('platform-' + os);
+        // -webkit-app-region: drag (top-bar dragging the frameless native
+        // window) only makes sense inside the actual Tauri shell — Tauri
+        // injects window.__TAURI__ before any page script runs, so this is
+        // safe to check synchronously here. Applying that property in an
+        // ordinary browser tab (dev testing against the server directly)
+        // hits a real Chromium compositing bug: the top bar silently stops
+        // being painted after certain reflows, even though it's still
+        // correctly laid out and hit-testable in the DOM.
+        if (window.__TAURI__) document.documentElement.classList.add('is-tauri');
       })();
     </script>
 </head>
@@ -71,7 +80,15 @@
                  (Live Queue or Playlist), so what feeds it — songs and themes —
                  are grouped here as the central, always-visible controls. -->
             <div class="tb-group">
-                <button id="songs-btn" class="tb-studio-btn" title="Song bank — hymns &amp; lyrics">
+                <button id="bible-btn" class="tb-studio-btn active" title="Bible — scripture search &amp; Live Queue">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+                    <span>Bible</span>
+                </button>
+                <button id="slides-btn" class="tb-studio-btn" title="Slides — your slide decks">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="12" rx="1.5"/><path d="M7 20h10"/><path d="M12 16v4"/></svg>
+                    <span>Slides</span>
+                </button>
+                <button id="songs-btn" class="tb-studio-btn" title="Songs — hymns &amp; lyrics">
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
                     <span>Songs</span>
                 </button>
@@ -264,6 +281,12 @@
                 <button id="scripture-search-btn" class="cs-search-btn" title="Search or send scripture">
                     <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><circle cx="6.5" cy="6.5" r="5" stroke="currentColor" stroke-width="1.5"/><path d="M10.5 10.5L14 14" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
                 </button>
+                <button id="bible-theme-btn" class="ls-icon-btn" title="Theme for auto-detected &amp; searched scripture">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                        <circle cx="13.5" cy="6.5" r="2.5"/><circle cx="17.5" cy="13.5" r="2.5"/><circle cx="8.5" cy="13.5" r="2.5"/>
+                        <path d="M12 21a9 9 0 1 1 0-18"/>
+                    </svg>
+                </button>
             </div>
 
             <!-- Playlist STACK — the folder view. Every section (song, slide
@@ -325,6 +348,37 @@
                     </div>
                     <div class="svc-inspector" id="svc-inspector"></div>
                 </div>
+
+                <!-- Flow view — every slide at once, in one scrollable column.
+                     Drag the grip to reorder; Shift+Enter at the caret splits
+                     the rest of the text into a new slide right after. -->
+                <div class="svc-flow hidden" id="svc-flow"></div>
+            </div>
+
+            <!-- Slides tab — a library of every slide deck across all
+                 playlists, so a deck can be reopened/re-sent without hunting
+                 through whichever playlist it lives in. -->
+            <div class="cs-live-queue-section cs-live-queue-main hidden" id="slides-library-view">
+                <div class="cs-section-header svc-header">
+                    <span class="cs-section-label">Slides</span>
+                    <div class="svc-header-right">
+                        <button id="slides-library-new-btn" class="modal-btn secondary svc-edit-btn">+ New</button>
+                    </div>
+                </div>
+                <div class="slib-list" id="slides-library-list"></div>
+            </div>
+
+            <!-- Songs tab — hymn/lyric bank, body-embedded (used to be a
+                 modal overlay). Picking one still routes through the same
+                 Add-to-playlist confirmation as every other content source. -->
+            <div class="cs-live-queue-section cs-live-queue-main hidden" id="songs-library-view">
+                <div class="cs-section-header svc-header">
+                    <span class="cs-section-label">Songs</span>
+                    <div class="svc-header-right">
+                        <input type="text" id="hymn-search" class="cs-search-input" style="max-width:280px;" placeholder="Search by title, author or a line…">
+                    </div>
+                </div>
+                <div class="hymn-list" id="hymn-list"></div>
             </div>
 
             <!-- Popover used by both the theme icon and per-card theme/line
@@ -370,6 +424,10 @@
                         <div class="live-screen-text" id="preview-verse-text">Nothing on display</div>
                         <div class="live-screen-ref" id="preview-verse-ref"></div>
                     </div>
+                    <!-- Shown instead of live-screen-inner when the sent item
+                         carries its own theme (e.g. a ProPresenter import) —
+                         paintLookLayers renders straight into this. -->
+                    <div class="live-screen-themed hidden" id="slide-preview-themed"></div>
                     <div class="live-screen-badge">LIVE</div>
                 </div>
                 <!-- Range navigation -->
@@ -506,23 +564,6 @@
         </div>
     </div>
 
-    <!-- Hymn picker -->
-    <div id="hymn-modal" class="modal hidden">
-        <div class="modal-overlay"></div>
-        <div class="modal-content" style="width:620px;height:70vh;">
-            <div class="modal-header">
-                <h2>Hymn bank</h2>
-                <button id="close-hymn" class="modal-close-btn">
-                    <svg width="16" height="16" viewBox="0 0 16 16"><path d="M3 3l10 10M13 3L3 13" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
-                </button>
-            </div>
-            <div style="padding:12px 16px 0;">
-                <input type="text" id="hymn-search" class="setting-input" placeholder="Search by title, author or a line…">
-            </div>
-            <div class="hymn-list" id="hymn-list"></div>
-        </div>
-    </div>
-
     <!-- ═══ THEME STUDIO — full in-window view ═══ -->
     <div id="looks-modal" class="ts-view hidden">
         <div class="ts-view-inner">
@@ -623,6 +664,18 @@
                         <div class="ts-meta-group">
                             <span class="ts-meta-label">Canvas</span>
                             <button id="ts-alpha-toggle" class="ts-chip" title="Transparent canvas — for chroma / alpha key setups">Transparent</button>
+                        </div>
+                        <!-- Only shown for the Multi-Language layout — picks which language
+                             fills the right panel's preview here, and doubles as this
+                             theme's default when nothing else (a playlist item, the Bible
+                             tab) has already chosen one. -->
+                        <div class="ts-meta-group hidden" id="ts-translate-group">
+                            <span class="ts-meta-label">Translate to</span>
+                            <div class="ts-chip-group" id="ts-translate-picker">
+                                <button class="ts-chip" data-lang="fr">French</button>
+                                <button class="ts-chip" data-lang="es">Spanish</button>
+                                <button class="ts-chip" data-lang="pt">Portuguese</button>
+                            </div>
                         </div>
                     </div>
 
@@ -778,6 +831,12 @@
                     </div>
 
                     <div class="setting-group">
+                        <label class="setting-label">Anthropic API Key</label>
+                        <input type="password" id="anthropic-key" class="setting-input" placeholder="sk-ant-...">
+                        <p class="setting-hint">Powers the Multi-Language theme — translates slide/sermon text on the fly. Scripture uses a real bundled translation instead and doesn't need this. Get a key at console.anthropic.com.</p>
+                    </div>
+
+                    <div class="setting-group">
                         <label class="setting-label">Audio Input</label>
                         <div class="toggle-group" id="audio-mode-toggle">
                             <button class="toggle-btn active" data-mode="mic">Mic</button>
@@ -917,6 +976,23 @@
                         <label class="setting-label">Scripture packs</label>
                         <div id="lang-pack-list" class="lang-pack-list"></div>
                         <p class="setting-hint">Each pack adds a language with its translations, downloaded once and stored locally for offline use.</p>
+                    </div>
+
+                    <!-- Bundled Multi-Language translation model. Real Bible verses never
+                         need this — they use the scripture packs above. This is only for
+                         translating non-scripture slide/sermon text, and works with zero
+                         setup once downloaded (no Ollama, no API key). -->
+                    <div class="setting-group" id="llm-installer-group">
+                        <label class="setting-label">Slide Translation Model</label>
+                        <div id="llm-status-line" style="font-size:12px;color:var(--text-3);margin-bottom:8px;">Checking…</div>
+                        <button id="llm-install-btn" class="setting-input" style="cursor:pointer;display:none;">Download translation model (~1GB)</button>
+                        <div id="llm-progress-wrap" style="display:none;margin-top:6px;">
+                            <div style="background:var(--surface-2);height:6px;border-radius:3px;overflow:hidden;">
+                                <div id="llm-progress-bar" style="background:var(--accent);height:100%;width:0%;transition:width .2s;"></div>
+                            </div>
+                            <div id="llm-progress-text" style="font-size:11px;color:var(--text-3);margin-top:4px;">Starting…</div>
+                        </div>
+                        <p class="setting-hint">Translates non-scripture slide text for the Multi-Language theme. Downloads once, then works fully offline.</p>
                     </div>
                 </div>
             </section>

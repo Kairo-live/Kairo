@@ -271,14 +271,20 @@ const UUID_RE = /^[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}$/
 // Fetches fields[num] as a nested message, then that message's fields[1] as a
 // UUID-shaped string. Matches the `{ [N]: { [1]: uuidString } }` identity
 // wrapper ProPresenter uses everywhere (cue refs, arrangement refs, cue's own id).
-function pbNestedUuid(fields, num) {
-  const wrapper = pbFirst(fields, num);
-  if (!wrapper || wrapper.wire !== 2) return null;
-  const inner = pbFields(wrapper.raw);
-  const strField = inner && pbFirst(inner, 1);
+// Decodes `raw` as a message and returns its field-1 string if it's UUID-shaped.
+function pbUuidString(raw) {
+  const fields = pbFields(raw);
+  const strField = fields && pbFirst(fields, 1);
   if (!strField || strField.wire !== 2) return null;
   const s = strField.raw.toString('utf8');
   return UUID_RE.test(s) ? s : null;
+}
+
+// fields[num] is a `{ [1]: uuidString }` wrapper — one level up from pbUuidString.
+function pbNestedUuid(fields, num) {
+  const wrapper = pbFirst(fields, num);
+  if (!wrapper || wrapper.wire !== 2) return null;
+  return pbUuidString(wrapper.raw);
 }
 
 // Order cues should play in, per the presentation's active arrangement.
@@ -292,8 +298,7 @@ function pro7ArrangementOrder(rootFields) {
   const uuids = [];
   for (const f of sub) {
     if (f.wire !== 2 || f.num !== 2) continue; // field 1 is the arrangement's own id, not a cue ref
-    const inner = pbFields(f.raw);
-    const uuid = inner && pbNestedUuid(inner, 1);
+    const uuid = pbUuidString(f.raw);
     if (uuid) uuids.push(uuid);
   }
   return uuids.length ? uuids : null;

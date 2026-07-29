@@ -192,6 +192,7 @@ const translationSelect    = document.getElementById('translation-select');
 
 // Settings inputs
 const deepgramKeyInput    = document.getElementById('deepgram-key');
+const anthropicKeyInput   = document.getElementById('anthropic-key');
 const ppUrlInput          = document.getElementById('propresenter-url');
 const translationSettings = document.getElementById('translation-select-settings');
 const swapPPBtn           = document.getElementById('swap-pp-tokens-btn');
@@ -398,29 +399,76 @@ function handleTranscript(msg) {
 const CLIENT_VIEWER_MIN_SCORE = 0.80;
 
 function handleDetection(msg) {
-  const { verses, method, target, topScore, correctedFrom } = msg;
+  const { verses, method, target, topScore, correctedFrom, look } = msg;
   if (!verses?.length) return;
 
   if (target === 'viewer' && (topScore == null || topScore >= CLIENT_VIEWER_MIN_SCORE)) {
-    showInViewer(verses, method, topScore, correctedFrom);
+    showInViewer(verses, method, topScore, correctedFrom, look);
   } else {
     showInSuggestions(verses, method);
+  }
+}
+
+// Render the live preview screen. A sent item can carry its own theme (e.g. a
+// ProPresenter import via Send/Flow) — when it does, paint it with the exact
+// same layer renderer the playlist editor uses instead of the generic plain
+// text, so the operator sees what the audience is actually about to see.
+// Anything with no per-item theme (ordinary scripture detections/search-sends,
+// or a playlist item explicitly left on "Output default") falls back to the
+// primary output's assigned theme — the same fallback display.html already
+// does for the real output window, so this preview stays truthful to it
+// instead of always showing plain text regardless of that assignment.
+// Guards handlePPSuccess below against clobbering a themed render. Keyed on
+// reference+text (not reference alone) — slides items deliberately carry an
+// empty reference, which used to collapse to the same falsy key for every
+// slide and let the plain-render fallback win the race every time.
+let lastPreviewKey = null;
+let lastPreviewWasThemed = false;
+let lastPreviewHadOwnLook = false; // true only when `look` itself was truthy, not the output-default fallback
+
+function primaryOutputLook() {
+  try {
+    const map = (typeof outputThemeMap === 'function') ? outputThemeMap() : {};
+    const id  = (typeof PRIMARY_DISPLAY !== 'undefined') ? map[PRIMARY_DISPLAY] : null;
+    return (Array.isArray(looks) ? looks.find(l => l.id === id) : null) || null;
+  } catch { return null; }
+}
+
+function renderPreviewScreen(text, reference, look, translatedText = '') {
+  const effectiveLook = look || primaryOutputLook();
+  lastPreviewKey = `${reference || ''} ${text || ''}`;
+  lastPreviewWasThemed = !!effectiveLook;
+  lastPreviewHadOwnLook = !!look;
+  const themed = document.getElementById('slide-preview-themed');
+  const plain  = document.querySelector('#slide-preview .live-screen-inner');
+  // Keep the plain text nodes current even in themed mode (just hidden) — the
+  // NDI/Syphon output bridge (wireNdiBridge, above) watches them via
+  // MutationObserver to know what to render on those outputs, which have no
+  // concept of theme layers of their own.
+  if (previewVerseText) previewVerseText.textContent = text;
+  if (previewVerseRef)  previewVerseRef.textContent  = reference || '';
+
+  if (effectiveLook && themed && window.KairoService?.paintLookLayers) {
+    plain?.classList.add('hidden');
+    themed.classList.remove('hidden');
+    window.KairoService.paintLookLayers(themed, effectiveLook, {}, { verseText: text, referenceText: reference || '', translatedText });
+  } else {
+    themed?.classList.add('hidden');
+    plain?.classList.remove('hidden');
   }
 }
 
 // Update only the viewer display (preview panel) without touching queue order.
 // Use this for dblclick on already-queued cards so they don't reorder.
 function updateViewerDisplay(v) {
-  if (previewVerseText) previewVerseText.textContent = cleanVerseText(v.text);
-  if (previewVerseRef)  previewVerseRef.textContent  = v.reference || '';
+  renderPreviewScreen(cleanVerseText(v.text), v.reference, null, v.translatedText || '');
 }
 
-function showInViewer(verses, method, topScore, correctedFrom = null) {
+function showInViewer(verses, method, topScore, correctedFrom = null, look = null) {
   const v = verses[0];
 
   // Update live preview screen
-  if (previewVerseText) previewVerseText.textContent = cleanVerseText(v.text);
-  if (previewVerseRef)  previewVerseRef.textContent  = v.reference || '';
+  renderPreviewScreen(cleanVerseText(v.text), v.reference, look, v.translatedText || '');
 
   // Auto-correction: strip the mis-cited row so it doesn't linger above the fix.
   if (correctedFrom) {
@@ -728,19 +776,20 @@ function handleRangeVerses({ verses, activeRef }) {
     });
   }
 
-  // Insert all range cards at the top (reversed so first verse ends up first)
+  // Insert all range cards at the top, in their natural order. A single
+  // insertBefore(fragment, firstChild) preserves the fragment's own child
+  // order at the insertion point — unlike prepending nodes one at a time,
+  // this does NOT need reversing to land verse 1 first; reversing here was
+  // what put whole-chapter searches on screen highest-verse-first.
   const fragment = document.createDocumentFragment();
-  for (const v of [...verses].reverse()) {
+  for (const v of verses) {
     fragment.appendChild(buildRangeCard(v, v.reference === activeRef));
   }
   currentDisplayCard.insertBefore(fragment, currentDisplayCard.firstChild);
 
   // Update live preview to the active verse
   const active = verses.find(v => v.reference === activeRef) || verses[0];
-  if (active) {
-    if (previewVerseText) previewVerseText.textContent = cleanVerseText(active.text);
-    if (previewVerseRef)  previewVerseRef.textContent  = active.reference || '';
-  }
+  if (active) renderPreviewScreen(cleanVerseText(active.text), active.reference, null, active.translatedText || '');
 }
 
 function handleRangeActive(activeRef) {
@@ -755,14 +804,14 @@ function handleRangeActive(activeRef) {
   if (activeCard) {
     const refEl  = activeCard.querySelector('.lvc-ref');
     const textEl = activeCard.querySelector('.lvc-text');
-    if (previewVerseText && textEl) previewVerseText.textContent = textEl.textContent;
-    if (previewVerseRef  && refEl)  previewVerseRef.textContent  = refEl.textContent;
+    if (textEl) renderPreviewScreen(textEl.textContent, refEl?.textContent || '', null, activeCard.dataset.translatedText || '');
   }
 }
 
 function buildRangeCard(v, isActive) {
   const card = document.createElement('div');
   card.dataset.ref = v.reference;
+  card.dataset.translatedText = v.translatedText || '';
   card.className   = 'range-verse-card locked-verse-card' + (isActive ? ' range-active' : ' range-queued');
 
   const abbr = refToBadgeAbbr(v.reference);
@@ -799,9 +848,15 @@ function buildRangeCard(v, isActive) {
 function handlePPSuccess(verse) {
   updatePPStatus('Connected', 'connected');
   if (verse) {
-    toast(`Sent: ${verse.reference}`, 'success');
-    if (previewVerseText) previewVerseText.textContent = cleanVerseText(verse.text);
-    if (previewVerseRef)  previewVerseRef.textContent  = verse.reference;
+    toast(`Sent: ${verse.reference || cleanVerseText(verse.text).slice(0, 40)}`, 'success');
+    // This generic ProPresenter confirmation carries no theme/translation
+    // info. If the preview already shows this exact content — almost
+    // always because the 'detection' broadcast (which does carry the theme)
+    // landed moments earlier for the same send — skip re-rendering plain
+    // over it. Only actually update when this is telling us something new.
+    const key = `${verse.reference || ''} ${verse.text || ''}`;
+    if (lastPreviewWasThemed && key === lastPreviewKey) return;
+    renderPreviewScreen(cleanVerseText(verse.text), verse.reference, null);
   }
 }
 
@@ -1024,6 +1079,7 @@ async function loadSettings() {
     settings = await r.json();
     // Populate UI
     if (deepgramKeyInput && settings.deepgramApiKey) deepgramKeyInput.value = settings.deepgramApiKey;
+    if (anthropicKeyInput && settings.anthropicApiKey) anthropicKeyInput.value = settings.anthropicApiKey;
     if (ppUrlInput && settings.proPresenterUrl) ppUrlInput.value = settings.proPresenterUrl;
     if (translationSettings && settings.translation) translationSettings.value = settings.translation;
     if (translationSelect && settings.translation)   translationSelect.value   = settings.translation;
@@ -1108,6 +1164,7 @@ async function saveFirstRunKey() {
 async function saveCurrentSettings() {
   const updated = {
     deepgramApiKey:    deepgramKeyInput?.value    || settings.deepgramApiKey,
+    anthropicApiKey:   anthropicKeyInput?.value   || settings.anthropicApiKey,
     proPresenterUrl:   ppUrlInput?.value          || 'http://localhost:1025',
     translation:       translationSettings?.value || 'KJV',
     ppSwapTokenOrder:  settings.ppSwapTokenOrder  || false,
@@ -1493,8 +1550,7 @@ clearLockedBtn?.addEventListener('click', async () => {
     currentDisplayCard.innerHTML = '<div class="cs-queue-empty">Sent verses and range queues appear here…</div>';
   }
   rangeRefs = new Set();
-  if (previewVerseText) previewVerseText.textContent = 'Nothing on display';
-  if (previewVerseRef)  previewVerseRef.textContent  = '';
+  renderPreviewScreen('Nothing on display', '', null);
   await fetch(`${SERVER}/api/propresenter/clear`, { method: 'POST' }).catch(err => console.warn('[KAIRO] propresenter/clear request failed:', err.message));
 });
 
@@ -1619,6 +1675,103 @@ refreshDevicesBtn?.addEventListener('click', populateAudioDevices);
         } else if (evt.phase === 'extract') {
           progressBar.style.width = '100%';
           progressText.textContent = 'Extracting…';
+        } else if (evt.phase === 'done') {
+          progressText.textContent = evt.already ? 'Already installed.' : 'Done.';
+        } else if (evt.phase === 'complete') {
+          if (evt.ok) {
+            progressText.textContent = 'Installed.';
+            setTimeout(() => { progressWrap.style.display = 'none'; refreshStatus(); }, 1500);
+          } else {
+            progressText.textContent = `Failed: ${evt.error || 'unknown error'}`;
+            installBtn.style.display = '';
+          }
+        }
+      }
+    }
+  });
+})();
+
+// ── Local translation-model installer UI ─────────────────────────────────
+// Same NDJSON-progress pattern as the Whisper installer above, for the
+// bundled Qwen2.5 GGUF model translate.js uses for non-scripture slide text
+// (see llm_installer.js/llm_engine.js). Unlike Whisper this isn't gated
+// behind an engine toggle — every operator can use Multi-Language — and the
+// download can also have been started server-side already (translate.js
+// kicks it off in the background the first time it's actually needed), so
+// this polls for an in-progress install instead of only reacting to its own
+// button click.
+(function wireLLMInstaller() {
+  const statusLine   = document.getElementById('llm-status-line');
+  const installBtn    = document.getElementById('llm-install-btn');
+  const progressWrap  = document.getElementById('llm-progress-wrap');
+  const progressBar   = document.getElementById('llm-progress-bar');
+  const progressText  = document.getElementById('llm-progress-text');
+  if (!statusLine || !installBtn) return;
+
+  let pollTimer = null;
+
+  async function refreshStatus() {
+    try {
+      const r = await fetch(`${SERVER}/api/llm/status`);
+      const s = await r.json();
+      if (s.installed) {
+        statusLine.textContent = '✓ Translation model installed';
+        statusLine.style.color = 'var(--accent)';
+        installBtn.style.display = 'none';
+        progressWrap.style.display = 'none';
+        clearInterval(pollTimer); pollTimer = null;
+      } else if (s.installing) {
+        statusLine.textContent = 'Downloading in the background…';
+        installBtn.style.display = 'none';
+        if (!pollTimer) pollTimer = setInterval(refreshStatus, 2000);
+      } else {
+        statusLine.textContent = 'Not downloaded yet.';
+        statusLine.style.color = '';
+        installBtn.style.display = '';
+        clearInterval(pollTimer); pollTimer = null;
+      }
+    } catch {
+      statusLine.textContent = 'Cannot reach server.';
+    }
+  }
+  refreshStatus();
+
+  installBtn.addEventListener('click', async () => {
+    installBtn.style.display = 'none';
+    progressWrap.style.display = '';
+    progressBar.style.width = '0%';
+    progressText.textContent = 'Connecting…';
+
+    let res;
+    try {
+      res = await fetch(`${SERVER}/api/llm/install`, { method: 'POST' });
+    } catch (err) {
+      progressText.textContent = `Failed: ${err.message}`;
+      installBtn.style.display = '';
+      return;
+    }
+    if (!res.ok || !res.body) {
+      progressText.textContent = `HTTP ${res.status}`;
+      installBtn.style.display = '';
+      return;
+    }
+
+    const reader  = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      const lines = buf.split('\n');
+      buf = lines.pop();
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        let evt;
+        try { evt = JSON.parse(line); } catch { continue; }
+        if (evt.phase === 'download' && typeof evt.pct === 'number') {
+          progressBar.style.width = evt.pct + '%';
+          progressText.textContent = `Downloading… ${evt.pct}%`;
         } else if (evt.phase === 'done') {
           progressText.textContent = evt.already ? 'Already installed.' : 'Done.';
         } else if (evt.phase === 'complete') {
@@ -1800,8 +1953,21 @@ function updateElapsed() {
 }
 
 // ── Toast ──────────────────────────────────────────────────────────────────
+// Auto-deploy and manual "Send" can both fire for the same verse moments
+// apart (e.g. a stream-confirmed match auto-sends it, then the operator also
+// clicks Send on the card before it updates) — dedup identical messages so
+// they don't stack into a pile of repeated toasts.
+let _lastToastMsg  = '';
+let _lastToastTime = 0;
+const TOAST_DEDUP_MS = 4000;
+
 function toast(msg, type = 'info') {
   if (!toastContainer) return;
+  const now = Date.now();
+  if (msg === _lastToastMsg && now - _lastToastTime < TOAST_DEDUP_MS) return;
+  _lastToastMsg = msg;
+  _lastToastTime = now;
+
   const el  = document.createElement('div');
   el.className = `toast toast-${type}`;
   el.textContent = msg;
@@ -2004,6 +2170,48 @@ const DEFAULT_LOOKS = [
         shadow: { ...TXT_SHADOW_NONE }, outline: { ...NO_OUTLINE } },
     ],
   },
+  {
+    // Same left/right split geometry as Split — Left/Right, but both halves
+    // are filled (one screen, two languages) instead of one side keying out.
+    // The right panel is a visibly darker version of the same gradient —
+    // that's the only visual difference between the two sides, by design —
+    // so the source language (left) and translation (right) read as two
+    // distinct panels at a glance. Right side text uses the 'verse_translated'
+    // / (shared) 'reference' bindings; the item's `translateTo` language code
+    // decides what actually fills that binding — see getTranslatedText() in
+    // service.js for the resolution + caching logic.
+    id: 'multi-language', name: 'Multi-Language', layout: 'multi-language', animation: 'fade',
+    layers: [
+      { id: 'bg', type: 'background', name: 'Canvas', visible: true,
+        fill: 'gradient', color: '#0b0b0f', opacity: 100, color2: '#1c1c30', angle: 160 },
+      { id: 'panel-left', type: 'background', name: 'Left Panel', visible: true,
+        fill: 'gradient', color: '#0b0b0f', opacity: 100, color2: '#1c1c30', angle: 160, radius: 0,
+        pos: { x: 0, y: 0, w: 960, h: 1080 } },
+      { id: 'panel-right', type: 'background', name: 'Right Panel (darker)', visible: true,
+        fill: 'gradient', color: '#020203', opacity: 100, color2: '#0a0a12', angle: 160, radius: 0,
+        pos: { x: 960, y: 0, w: 960, h: 1080 } },
+      { id: 'verse', type: 'text', name: 'Verse (source)', visible: true, binding: 'verse', customText: '',
+        pos: { x: 88, y: 300, w: 784, h: 430 },
+        font: { family: 'Manrope', size: 40, weight: 500, italic: false, lineHeight: 1.4, letterSpacing: 0, transform: 'none' },
+        color: '#ffffff', opacity: 100, align: 'left',
+        shadow: { ...TXT_SHADOW_NONE }, outline: { ...NO_OUTLINE } },
+      { id: 'ref', type: 'text', name: 'Reference (source)', visible: true, binding: 'reference', customText: '',
+        pos: { x: 88, y: 762, w: 784, h: 0 },
+        font: { family: 'Manrope', size: 20, weight: 700, italic: false, lineHeight: 1.2, letterSpacing: 5, transform: 'uppercase' },
+        color: '#ffffff', opacity: 65, align: 'left',
+        shadow: { ...TXT_SHADOW_NONE }, outline: { ...NO_OUTLINE } },
+      { id: 'verse-translated', type: 'text', name: 'Verse (translated)', visible: true, binding: 'verse_translated', customText: '',
+        pos: { x: 1048, y: 300, w: 784, h: 430 },
+        font: { family: 'Manrope', size: 40, weight: 500, italic: false, lineHeight: 1.4, letterSpacing: 0, transform: 'none' },
+        color: '#ffffff', opacity: 100, align: 'left',
+        shadow: { ...TXT_SHADOW_NONE }, outline: { ...NO_OUTLINE } },
+      { id: 'ref-translated', type: 'text', name: 'Reference (translated)', visible: true, binding: 'reference', customText: '',
+        pos: { x: 1048, y: 762, w: 784, h: 0 },
+        font: { family: 'Manrope', size: 20, weight: 700, italic: false, lineHeight: 1.2, letterSpacing: 5, transform: 'uppercase' },
+        color: '#ffffff', opacity: 65, align: 'left',
+        shadow: { ...TXT_SHADOW_NONE }, outline: { ...NO_OUTLINE } },
+    ],
+  },
 ];
 
 // Load saved looks from localStorage and back-fill any NEW default-look IDs
@@ -2084,6 +2292,15 @@ function syncMetaRow() {
   if (ni) ni.value = activeLook.name;
   const alphaBtn = document.getElementById('ts-alpha-toggle');
   if (alphaBtn) alphaBtn.classList.toggle('active', isAlphaCanvas());
+
+  // Translate-to language — only meaningful for the Multi-Language layout,
+  // which is the only one with a verse_translated layer to fill.
+  const translateGroup = document.getElementById('ts-translate-group');
+  if (translateGroup) {
+    translateGroup.classList.toggle('hidden', activeLook.layout !== 'multi-language');
+    document.querySelectorAll('#ts-translate-picker .ts-chip').forEach(b =>
+      b.classList.toggle('active', b.dataset.lang === activeLook.translateTo));
+  }
 }
 
 // The canvas is "transparent" when the base background layer is keyed out —
@@ -2237,9 +2454,27 @@ const PREVIEW_TEXT_SAMPLE = 'For God so loved the world, that he gave his only b
 const PREVIEW_REF_SAMPLE  = 'John 3:16 (KJV)';
 const SCALE = 0.14; // preview is ~14% of full display size
 
+// Same John 3:16 the left panel previews, in each supported language — real
+// bundled-Bible wording (databases/i18n/*.json), not a placeholder, so a
+// Multi-Language theme's right panel can actually be designed against text
+// of the length/shape it will really show, not "[Custom Text]".
+const TS_TRANSLATE_LANGUAGES = [
+  { code: 'fr', name: 'French' },
+  { code: 'es', name: 'Spanish' },
+  { code: 'pt', name: 'Portuguese' },
+];
+const TS_TRANSLATE_SAMPLES = {
+  fr: "Car Dieu a tant aimé le monde, qu'il a donné son Fils unique, afin que quiconque croit en lui ne périsse point, mais qu'il ait la vie éternelle.",
+  es: 'Porque de tal manera amó Dios al mundo, que haya dado a su Hijo unigénito; para que todo aquel que en él creyere, no se pierda, mas tenga vida eterna.',
+  pt: 'Porque Deus amou ao mundo de tal maneira, que deu o seu Filho unigênito; para que todo aquele que nele crê não pereça, mas tenha a vida eterna.',
+};
+
 function layerTextContent(layer) {
   if (layer.binding === 'verse')     return PREVIEW_TEXT_SAMPLE;
   if (layer.binding === 'reference') return PREVIEW_REF_SAMPLE;
+  if (layer.binding === 'verse_translated') {
+    return TS_TRANSLATE_SAMPLES[activeLook?.translateTo] || '[Pick a language below]';
+  }
   return layer.customText || '[Custom Text]';
 }
 
@@ -2416,6 +2651,24 @@ function renderPreview() {
   // fit — mirrors the live renderer's fitVerse() so the preview never lies about
   // how a long verse will actually lay out on the output.
   fitPreviewVerse(stage, layout);
+
+  // Alignment guides — only while actively dragging/resizing, so the operator
+  // can see exactly what a snap locked onto (a breakpoint or another layer's
+  // edge) instead of reading it off the Position/Dimension numbers.
+  if (tsDrag) {
+    if (tsSnapGuides.x != null) {
+      const v = document.createElement('div');
+      v.className = 'ts-guide ts-guide-v';
+      v.style.left = (tsSnapGuides.x / TS_DESIGN_W * 100) + '%';
+      stage.appendChild(v);
+    }
+    if (tsSnapGuides.y != null) {
+      const h = document.createElement('div');
+      h.className = 'ts-guide ts-guide-h';
+      h.style.top = (tsSnapGuides.y / TS_DESIGN_H * 100) + '%';
+      stage.appendChild(h);
+    }
+  }
 }
 
 // Preview-side counterpart to display.html's fitVerse(). Same per-layout height
@@ -2491,6 +2744,64 @@ function tsEffectiveH(layer, p) {
 
 let tsDrag = null;   // { layer, mode:'move'|'resize', dir, startX, startY, start, stageRect }
 
+// Active alignment guide, in design px along each axis — null when that axis
+// isn't currently snapped. Read by renderPreview() to draw the guide lines;
+// only ever non-null while tsDrag is set.
+let tsSnapGuides = { x: null, y: null };
+
+const TS_SNAP_TOLERANCE = 14; // design px — same feel as the old center-only snap
+
+// Breakpoints every theme gets for free: canvas edges, quarters, and center —
+// the marks a slide deck's safe margins and balanced layouts actually land on.
+const TS_BREAKPOINT_FRACTIONS = [0, 0.25, 0.5, 0.75, 1];
+
+// Snap targets along one axis: this theme's breakpoints plus every other
+// visible layer's near/center/far edge — so a box can also line up with a
+// sibling (e.g. the reference sitting flush under the verse), not just the
+// canvas itself.
+function tsSnapTargetsX(excludeId) {
+  const targets = TS_BREAKPOINT_FRACTIONS.map(f => f * TS_DESIGN_W);
+  (activeLook?.layers || []).forEach(l => {
+    if (l.id === excludeId || !l.pos || l.visible === false) return;
+    targets.push(l.pos.x, l.pos.x + l.pos.w, l.pos.x + l.pos.w / 2);
+  });
+  return targets;
+}
+function tsSnapTargetsY(excludeId) {
+  const targets = TS_BREAKPOINT_FRACTIONS.map(f => f * TS_DESIGN_H);
+  (activeLook?.layers || []).forEach(l => {
+    if (l.id === excludeId || !l.pos || l.visible === false) return;
+    const h = l.pos.h > 0 ? l.pos.h : tsEffectiveH(l, l.pos);
+    targets.push(l.pos.y, l.pos.y + h, l.pos.y + h / 2);
+  });
+  return targets;
+}
+
+// Nearest target within tolerance, or null if nothing is close enough.
+function tsClosestSnap(value, targets, tol) {
+  let best = null, bestDist = tol;
+  for (const t of targets) {
+    const d = Math.abs(value - t);
+    if (d < bestDist) { bestDist = d; best = t; }
+  }
+  return best;
+}
+
+// Best snap across several candidate edges of the same box (e.g. left/center/
+// right while moving) — picks whichever candidate lands closest to any
+// target, not just the first one checked, so the box always locks onto the
+// single most relevant guide.
+function tsBestSnap(candidates, targets, tol) {
+  let best = null, bestDist = tol;
+  for (const c of candidates) {
+    for (const t of targets) {
+      const d = Math.abs(c.edge - t);
+      if (d < bestDist) { bestDist = d; best = { snap: t, offset: c.offset }; }
+    }
+  }
+  return best;
+}
+
 function tsBeginDrag(e, layer, mode, dir) {
   if (e.button !== 0) return;
   e.preventDefault(); e.stopPropagation();
@@ -2514,14 +2825,32 @@ function tsDragMove(e) {
   const { layer, mode, start, stageRect } = tsDrag;
   const dx = (e.clientX - tsDrag.startX) / stageRect.width  * TS_DESIGN_W;
   const dy = (e.clientY - tsDrag.startY) / stageRect.height * TS_DESIGN_H;
+  const xTargets = tsSnapTargetsX(layer.id);
+  const yTargets = tsSnapTargetsY(layer.id);
+  let snappedX = null, snappedY = null;
 
   if (mode === 'move') {
     let nx = Math.round(start.x + dx);
     let ny = Math.round(start.y + dy);
-    // Center snap — makes "visually centered" effortless, like pro canvases.
     const eh = tsEffectiveH(layer, layer.pos);
-    if (Math.abs(nx + start.w / 2 - TS_DESIGN_W / 2) < 14) nx = Math.round((TS_DESIGN_W - start.w) / 2);
-    if (Math.abs(ny + eh / 2 - TS_DESIGN_H / 2) < 14)      ny = Math.round((TS_DESIGN_H - eh) / 2);
+
+    // Left edge, center, and right edge are all candidate snap points while
+    // moving — whichever is closest to a target wins (Figma-style "smart
+    // guides"), not just the box's center like the old behavior.
+    const xBest = tsBestSnap([
+      { edge: nx, offset: 0 },
+      { edge: nx + start.w / 2, offset: -start.w / 2 },
+      { edge: nx + start.w, offset: -start.w },
+    ], xTargets, TS_SNAP_TOLERANCE);
+    if (xBest) { nx = Math.round(xBest.snap + xBest.offset); snappedX = xBest.snap; }
+
+    const yBest = tsBestSnap([
+      { edge: ny, offset: 0 },
+      { edge: ny + eh / 2, offset: -eh / 2 },
+      { edge: ny + eh, offset: -eh },
+    ], yTargets, TS_SNAP_TOLERANCE);
+    if (yBest) { ny = Math.round(yBest.snap + yBest.offset); snappedY = yBest.snap; }
+
     layer.pos.x = nx; layer.pos.y = ny;
   } else {
     // Resize from whichever handle was grabbed — the opposite edge stays put,
@@ -2542,6 +2871,27 @@ function tsDragMove(e) {
       if (d.includes('n')) { nh = baseH - dy; ny = start.y + dy; }
     }
 
+    // Snap only the edge(s) actually being dragged — the anchored edge on
+    // the opposite side must never move.
+    if (d.includes('e')) {
+      const snap = tsClosestSnap(nx + nw, xTargets, TS_SNAP_TOLERANCE);
+      if (snap != null) { nw = snap - nx; snappedX = snap; }
+    } else if (d.includes('w')) {
+      const rightEdge = start.x + start.w;
+      const snap = tsClosestSnap(nx, xTargets, TS_SNAP_TOLERANCE);
+      if (snap != null) { nx = snap; nw = rightEdge - nx; snappedX = snap; }
+    }
+    if (vertical) {
+      if (d.includes('s')) {
+        const snap = tsClosestSnap(ny + nh, yTargets, TS_SNAP_TOLERANCE);
+        if (snap != null) { nh = snap - ny; snappedY = snap; }
+      } else if (d.includes('n')) {
+        const bottomEdge = start.y + baseH;
+        const snap = tsClosestSnap(ny, yTargets, TS_SNAP_TOLERANCE);
+        if (snap != null) { ny = snap; nh = bottomEdge - ny; snappedY = snap; }
+      }
+    }
+
     // Clamp without letting the anchored edge drift.
     if (nw < MIN_W) { if (d.includes('w')) nx = start.x + (start.w - MIN_W); nw = MIN_W; }
     if (vertical && nh < MIN_H) { if (d.includes('n')) ny = start.y + (baseH - MIN_H); nh = MIN_H; }
@@ -2551,6 +2901,7 @@ function tsDragMove(e) {
     layer.pos.w = Math.round(nw);
     layer.pos.h = Math.round(nh);
   }
+  tsSnapGuides = { x: snappedX, y: snappedY };
   renderPreview();
   tsSyncPosInputs(layer);
 }
@@ -2558,7 +2909,12 @@ function tsDragMove(e) {
 function tsDragEnd() {
   document.removeEventListener('mousemove', tsDragMove);
   document.removeEventListener('mouseup', tsDragEnd);
-  if (tsDrag) { tsDrag = null; renderProps(); }
+  if (tsDrag) {
+    tsDrag = null;
+    tsSnapGuides = { x: null, y: null };
+    renderProps();
+    renderPreview();
+  }
 }
 
 // Live-update the Position/Dimension inputs during a drag without a full
@@ -3116,6 +3472,17 @@ document.getElementById('ts-layout-picker')?.addEventListener('click', e => {
   document.querySelectorAll('#ts-layout-picker .ts-chip').forEach(b => b.classList.remove('active'));
   btn.classList.add('active');
   activeLook.layout = btn.dataset.layout;
+  syncMetaRow();
+  renderPreview();
+});
+
+// Translate-to language chips (Multi-Language layout only)
+document.getElementById('ts-translate-picker')?.addEventListener('click', e => {
+  const btn = e.target.closest('.ts-chip');
+  if (!btn || !activeLook) return;
+  const same = activeLook.translateTo === btn.dataset.lang;
+  activeLook.translateTo = same ? null : btn.dataset.lang; // click again to clear
+  syncMetaRow();
   renderPreview();
 });
 
@@ -3827,6 +4194,15 @@ async function applyOutputThemes() {
     });
   } catch (err) {
     console.warn('[Look] per-output broadcast failed:', err.message);
+  }
+
+  // Whatever's already showing in the in-app preview only carries its own
+  // look when the sent item had one — anything using the output-default
+  // fallback (renderPreviewScreen's primaryOutputLook()) is now stale the
+  // instant the assignment changes. Re-paint it immediately instead of
+  // leaving the operator staring at yesterday's theme until the next send.
+  if (!lastPreviewHadOwnLook && previewVerseText && previewVerseText.textContent !== 'Nothing on display') {
+    renderPreviewScreen(previewVerseText.textContent, previewVerseRef?.textContent || '', null);
   }
 }
 

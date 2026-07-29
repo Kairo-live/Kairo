@@ -40,6 +40,17 @@ jobs:
         with:
           node-version: '22'
 
+      # ── MSVC dev environment (Windows only) ─────────────────────────────
+      # smart-whisper compiles whisper.cpp from source via node-gyp on every
+      # install (unlike the old vosk-koffi, which shipped prebuilt binaries),
+      # and node-gyp's own Visual Studio auto-detection can't identify newer
+      # VS installs on the windows-latest image ("VCINSTALLDIR not set, not
+      # running in VS Command Prompt"). Running inside a proper VS developer
+      # command prompt sidesteps that detection entirely.
+      - name: Setup MSVC dev environment
+        if: matrix.platform == 'windows-latest'
+        uses: ilammy/msvc-dev-cmd@v1
+
       # ── Install server dependencies ────────────────────────────────────
       - name: Install server dependencies
         working-directory: server
