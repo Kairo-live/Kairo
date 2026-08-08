@@ -3960,7 +3960,25 @@ async function broadcastDetection(verses, method, topScore, target) {
       && now - lastSentBookTime < SAME_BOOK_WINDOW_MS
       && topKey !== lastDetectedRef; // only bypass if it's actually a different verse
     const directOverridesWeaker = method === 'direct' && lastDetectedMethod !== 'direct';
-    if (!sameBookContinuation && !directOverridesWeaker) {
+    // Exception 3: a direct multi-verse citation that starts on the SAME verse
+    // as what was already sent, but carries MORE verses than the range
+    // currently queued, is a genuine reconstruction/extension — not a
+    // redundant repeat — and Exception 2 above doesn't cover it, since both
+    // sends are method:'direct'. Real incident: "Luke 10:1-2 and 17" arrives
+    // as its own final segment (a complete-looking but truncated parse — a
+    // trailing bare number always looks like a valid closed citation on its
+    // own) and sends immediately; "to 19" then arrives as a separate final
+    // segment, joins with the previous one, and correctly reconstructs the
+    // full "1-2, 17-19" — but topKey is still "Luke|10|1" either way, so
+    // this widened, corrected version was silently dropped by the dedup
+    // below and 17-19 never reached the viewer at all. Self-limiting: once
+    // this fires, setRangeQueue (called just before broadcastDetection, see
+    // callers) already updated rangeAllVerses to the new wider set, so a
+    // further attempt with the same or narrower verse count no longer
+    // qualifies.
+    const widerRangeExtension = method === 'direct' && verses.length > 1
+      && topKey === lastDetectedRef && verses.length > rangeAllVerses.length;
+    if (!sameBookContinuation && !directOverridesWeaker && !widerRangeExtension) {
       if (topKey && topKey === lastDetectedRef && now - lastDetectedTime < dedupMs) return false;
     }
     if (topKey) { lastDetectedRef = topKey; lastDetectedTime = now; lastDetectedMethod = method; }
