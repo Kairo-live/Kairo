@@ -21,7 +21,7 @@ const { Worker } = require('worker_threads');
 const axios      = require('axios');
 const OBSWebSocket = require('obs-websocket-js/json').default;
 
-const { parseSpokenReference, parseAllSpokenReferences, resolvePartialReference, detectBookMentions, referenceContext, SINGLE_WORD_BOOKS } = require('./reference_parser');
+const { parseSpokenReference, parseAllSpokenReferences, resolvePartialReference, detectBookMentions, referenceContext, SINGLE_WORD_BOOKS, consumeNumber } = require('./reference_parser');
 
 // ── Config ────────────────────────────────────────────────────────────────
 // Tauri picks a free loopback port at launch and passes it via env. In dev
@@ -113,34 +113,98 @@ async function saveSettings(s) {
 }
 let settings = loadSettings();
 
+// ── Debug log ─────────────────────────────────────────────────────────────
+// Temporary diagnostic aid, added at the operator's request: a persistent,
+// file-backed trail of what actually happened (theme resolution, what got
+// sent to the output, from where) — so a bug report can be diagnosed by
+// reading this file directly instead of guessing/re-testing blind against
+// the operator's live session (this server is often shared between the
+// operator's real usage and dev testing, and both hit the same broadcast).
+// Not meant to be permanent — safe to remove once these rendering/theme/
+// send-path bugs are resolved.
+const DEBUG_LOG_PATH = path.join(path.dirname(SETTINGS_PATH), 'debug.log');
+const DEBUG_LOG_MAX_BYTES = 2 * 1024 * 1024; // cap — this is a debugging aid, not an audit log
+// Every call's append + size-check + trim is chained onto this instead of
+// firing its own independent async chain — two logDebug() calls close
+// together used to race (one's readFile-then-writeFile trim could clobber
+// lines the other had just appendFile'd), silently dropping recent entries.
+// Chaining serializes them without making logDebug itself awaitable —
+// callers still fire-and-forget exactly as before.
+let logDebugQueue = Promise.resolve();
+function logDebug(event, data) {
+  let line;
+  try { line = JSON.stringify({ t: new Date().toISOString(), event, ...data }) + '\n'; }
+  catch { return; }
+  logDebugQueue = logDebugQueue.then(async () => {
+    try {
+      await fs.promises.appendFile(DEBUG_LOG_PATH, line);
+      const st = await fs.promises.stat(DEBUG_LOG_PATH);
+      if (st.size > DEBUG_LOG_MAX_BYTES) {
+        // Keep only the newest half — cheap, approximate trim rather than a
+        // real rotation scheme, since this is a short-lived debugging aid.
+        const content = await fs.promises.readFile(DEBUG_LOG_PATH, 'utf8');
+        const lines = content.split('\n');
+        await fs.promises.writeFile(DEBUG_LOG_PATH, lines.slice(Math.floor(lines.length / 2)).join('\n'));
+      }
+    } catch {}
+  });
+}
+
 // ── OBS WebSocket ─────────────────────────────────────────────────────────
-let obsClient    = null;
-let obsConnected = false;
+let obsClient     = null;
+let obsConnected  = false;
+let obsConnecting = false;   // reentrancy guard — connectOBS is called from
+                              // the passive reconnect loop, settings saves,
+                              // and startup; without this a slow/stalled
+                              // handshake accumulates one abandoned client
+                              // per overlapping call.
+const OBS_CONNECT_TIMEOUT_MS = 8000;
+
+// obs-websocket-js's connect() has no built-in timeout — if the TCP connect
+// succeeds but the WS handshake never completes, the await hangs forever.
+function withTimeout(promise, ms, label) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
 
 async function connectOBS() {
-  if (obsClient) { try { await obsClient.disconnect(); } catch {} obsClient = null; }
-  obsConnected = false;
-  const s = loadSettings();
-  if (!s.obsEnabled) return;
-  obsClient = new OBSWebSocket();
-  obsClient.on('ConnectionClosed', () => { obsConnected = false; console.log('[OBS] Disconnected'); });
-  obsClient.on('ConnectionError',  () => { obsConnected = false; });
+  if (obsConnecting) return;
+  obsConnecting = true;
   try {
-    await obsClient.connect(s.obsUrl || 'ws://localhost:4455', s.obsPassword || '');
-    obsConnected = true;
-    console.log('[OBS] Connected to', s.obsUrl || 'ws://localhost:4455');
-  } catch (e) {
+    if (obsClient) { try { await obsClient.disconnect(); } catch {} obsClient = null; }
     obsConnected = false;
-    obsClient = null;
-    console.log('[OBS] Connection failed:', e.message);
+    const s = loadSettings();
+    if (!s.obsEnabled) return;
+    const client = new OBSWebSocket();
+    obsClient = client;
+    client.on('ConnectionClosed', () => { if (obsClient === client) obsConnected = false; console.log('[OBS] Disconnected'); });
+    client.on('ConnectionError',  () => { if (obsClient === client) obsConnected = false; });
+    try {
+      await withTimeout(
+        client.connect(s.obsUrl || 'ws://localhost:4455', s.obsPassword || ''),
+        OBS_CONNECT_TIMEOUT_MS,
+        'OBS connect'
+      );
+      obsConnected = true;
+      console.log('[OBS] Connected to', s.obsUrl || 'ws://localhost:4455');
+    } catch (e) {
+      obsConnected = false;
+      if (obsClient === client) obsClient = null;
+      try { await client.disconnect(); } catch {}
+      console.log('[OBS] Connection failed:', e.message);
+    }
+  } finally {
+    obsConnecting = false;
   }
 }
 
 async function sendToOBS(verse) {
   if (!obsConnected || !obsClient) return false;
-  const s          = loadSettings();
-  const sourceName = s.obsTextSource || 'Scripture';
-  const t          = s.translation || 'KJV';
+  const sourceName = settings.obsTextSource || 'Scripture';
+  const t          = settings.translation || 'KJV';
   const text       = verse.text + '\n' + verse.reference + ' (' + t + ')';
   try {
     await obsClient.call('SetInputSettings', {
@@ -155,10 +219,20 @@ async function sendToOBS(verse) {
   }
 }
 
+async function clearOBSText() {
+  if (!obsConnected || !obsClient) return;
+  const sourceName = settings.obsTextSource || 'Scripture';
+  try {
+    await obsClient.call('SetInputSettings', { inputName: sourceName, inputSettings: { text: '' } });
+  } catch (e) {
+    console.warn('[OBS] Clear failed:', e.message);
+  }
+}
+
 async function testOBSConnection(url, password) {
   const client = new OBSWebSocket();
   try {
-    await client.connect(url || 'ws://localhost:4455', password || '');
+    await withTimeout(client.connect(url || 'ws://localhost:4455', password || ''), OBS_CONNECT_TIMEOUT_MS, 'OBS connect');
     const { obsVersion } = await client.call('GetVersion');
     await client.disconnect();
     return { success: true, version: obsVersion };
@@ -210,6 +284,7 @@ setInterval(async () => {
 // ── Detection Worker ──────────────────────────────────────────────────────
 let detectionWorker  = null;
 let workerBasicReady = false;   // all three layers ready after init
+let workerSemanticReady = false; // embedding model + corpus loaded (background, arrives seconds after workerBasicReady)
 const pendingCallbacks = new Map();
 let workerMsgId = 0;
 
@@ -230,6 +305,11 @@ function spawnDetectionWorker() {
       broadcast({ type: 'worker-error', error: msg.error });
       return;
     }
+    if (msg.type === 'semanticReady') {
+      workerSemanticReady = true;
+      console.log('[Server] Semantic layer ready (embeddinggemma + verse corpus loaded).');
+      return;
+    }
     const cb = pendingCallbacks.get(msg.id);
     if (cb) {
       clearTimeout(cb.timeout);
@@ -238,8 +318,14 @@ function spawnDetectionWorker() {
     }
   });
 
+  // Node always follows a worker 'error' event with 'exit' (the thread is
+  // terminated), which does the actual respawn — but flip the ready flag here
+  // too so no workerCall issued between 'error' and 'exit' is queued against
+  // a worker that's already dead.
   detectionWorker.on('error', (err) => {
     console.error('[Server] Worker error:', err.message);
+    workerBasicReady = false;
+    workerSemanticReady = false;
     for (const [id, cb] of pendingCallbacks) {
       clearTimeout(cb.timeout);
       cb.reject(err);
@@ -254,6 +340,7 @@ function spawnDetectionWorker() {
   detectionWorker.on('exit', (code) => {
     console.warn(`[Server] Detection worker exited (code=${code}) — respawning`);
     workerBasicReady = false;
+    workerSemanticReady = false;
     for (const [id, cb] of pendingCallbacks) {
       clearTimeout(cb.timeout);
       cb.reject(new Error('Worker exited'));
@@ -298,6 +385,22 @@ app.use(cors());
 // has parsed the body, later ones (the 4mb one) see it's already done and
 // skip re-enforcing their own smaller limit.
 app.use('/api/service/import', express.json({ limit: '500mb' }));
+// A live send can carry a slide's image inlined as a base64 data URL — a
+// single high-res church graphic comfortably exceeds the 4mb app-wide cap
+// once base64-inflated, and express silently 413s the request before it
+// ever reaches the route (no exception the client-side fetch would catch),
+// so oversized image sends looked like the image just vanished.
+app.use('/api/service/send', express.json({ limit: '40mb' }));
+// A .protheme bundle carries every image its theme slides reference —
+// same reasoning as the import route above.
+app.use('/api/theme/import-protheme', express.json({ limit: '200mb' }));
+// Media library uploads are raw image/video bytes as base64 — same
+// registration-order reasoning as the routes above (must come before the
+// 4mb catch-all or that one silently wins and caps this at 4mb instead).
+app.use('/api/media', express.json({ limit: '500mb' }));
+// Song Library entries can carry a full multi-stanza song plus metadata —
+// comfortably over 4mb for a large song set pasted in at once.
+app.use('/api/songs', express.json({ limit: '20mb' }));
 // Cap body size — sermon transcripts comfortably fit, but prevents memory
 // exhaustion from a malicious or runaway client posting megabytes of garbage.
 app.use(express.json({ limit: '4mb' }));
@@ -356,7 +459,16 @@ wss.on('connection', (ws) => {
   // - Whisper:  fed to the local recognizer; partial()/final() drive detection
   // Either way we keep a short audio ring buffer for the REST fallback path.
   ws.on('message', (data, isBinary) => {
-    if (!isBinary) return;
+    if (!isBinary) {
+      // The only text messages a client sends are the display window
+      // reporting video playback state back up — relayed as-is so the main
+      // window's media controls can reflect real position without polling.
+      try {
+        const msg = JSON.parse(data.toString());
+        if (msg.type === 'media-status') broadcast(msg);
+      } catch {}
+      return;
+    }
     const chunk = Buffer.isBuffer(data) ? data : Buffer.from(data);
     if (deepgramConnection) {
       try { deepgramConnection.send(chunk); } catch {}
@@ -390,6 +502,14 @@ let deepgramLastTranscriptAt = 0;    // timestamp of last received transcript se
 let transcriptBuffer    = [];
 let lastFingerprintSearch    = 0;
 const FINGERPRINT_INTERVAL_MS = 1000;   // don't run fingerprint search more than once per 1s
+
+// Last "[Context] N citation(s)..." key logged — see runFingerprintSearch.
+// Fingerprint runs up to once per second during continuous speech, and this
+// log used to fire unconditionally on every single pass regardless of
+// whether the nearest citation had actually changed, which meant a normal
+// service produced 1000+ near-identical lines burying the [Guard]/[Direct]/
+// [Verbatim] lines that actually matter when reading logs back.
+let lastLoggedContextKey = null;
 let hasNewTranscript    = false;
 let inBibleMode         = false;
 let bibleModeClearTimer = null;
@@ -399,8 +519,9 @@ let lastSentRef  = null;
 let lastSentTime = 0;
 const SEND_DEDUP_MS = 8000;      // Prevent same verse re-sending within 8 s
 
-let lastDetectedRef  = null;
-let lastDetectedTime = 0;
+let lastDetectedRef    = null;
+let lastDetectedTime   = 0;
+let lastDetectedMethod = null;
 const DETECT_DEDUP_MS = 45000;   // Same verse won't flood SENT list for 45 s
 
 // Explicit citations use a much shorter window: when the preacher calls the
@@ -423,13 +544,90 @@ let lastSentBook = null;
 let lastSentBookTime = 0;
 const SAME_BOOK_WINDOW_MS = 60000;
 
+// Real incident this exists for: a garbled STT citation ("Psalm one one one
+// one zero one to three") got mis-parsed as Psalm 111 instead of the
+// intended 110. Every subsequent genuine, correct detection of the ACTUAL
+// content being read (Psalm 110, sequence-certain, cross-confirmed by
+// verbatim/fingerprint/semantic independently) kept getting blocked by the
+// continuity gate for the rest of the passage, because "Psalms 111" — the
+// wrong chapter — never stopped being "active". A single wrong citation
+// poisoned everything downstream with no way to recover.
+// A one-off coincidental word-overlap match doesn't reproduce itself against
+// an independently-decoded, moving transcript — but the real, correct verse
+// does, repeatedly, regardless of which method notices it each time. So: if
+// the SAME specific non-active verse keeps independently re-surfacing while
+// blocked, that's fundamentally different evidence than any single hit, and
+// after enough repeats it's more reasonable to conclude the "active"
+// context is what's actually stale/wrong.
+let staleOverrideCandidate = null;   // { key, count, lastSeenAt }
+const STALE_OVERRIDE_COUNT     = 3;
+const STALE_OVERRIDE_WINDOW_MS = 20000;
+
 // Minimum confidence score to auto-route a detection to the live viewer/SENT.
 // Anything below this is demoted to suggestions regardless of fingerprint confidence level.
 const VIEWER_MIN_SCORE = 0.80;
 
+// Score for a 'direct-partial' send (a bare "verse N" resolved against
+// context — see resolvePartialReference). Deliberately NOT 1.0 like a true
+// 'direct' explicit citation: this is an inference from context that could
+// be stale or, per a real incident, built on an STT-hallucinated book
+// mention, not something the preacher actually said in full. 1.0 also let
+// it read as "100%" (maximal certainty) in the Candidates panel for what
+// is, structurally, a guess.
+const DIRECT_PARTIAL_SCORE = 0.90;
+
+// Verbatim's OWN, stricter bar for reaching the viewer at all (checked before
+// VIEWER_MIN_SCORE above even applies). Raised from 0.92 → 0.95 at the
+// operator's request after live services showed a wrong verse (different
+// book, different verse) reaching the screen at 0.92-0.93 — fuzzy phrase
+// matching should be conservative about auto-sending; a real quote worth
+// putting up unprompted clears this bar easily, a coincidental overlap
+// mostly won't.
+const VERBATIM_AUTOSEND_MIN = 0.95;
+
+// Second, independent route to auto-send: raw sequential-match evidence
+// strength (matchedIdf), un-diluted by coverage. The score above blends
+// "how identifying is what we matched" WITH "how much of the whole verse
+// did we capture" (sqrt(coverageRatio)) — right for telling a genuine quote
+// from noise, but it means an interrupted or partial-but-still-unambiguous
+// quote can top out well under 95% even when the matched words alone could
+// only be this one verse. Real case: a preacher's rhetorical aside ("what
+// happens to them?") split a Psalm 92:13 quote into two pieces — the
+// matched fragment was long and distinctive enough to be certain, but
+// coverage of the whole verse landed the blended score at 76%, into
+// Candidates instead of the screen it should have reached. This path lets
+// a match through once its RAW identifying evidence alone is strong enough
+// that coincidence is implausible, independent of completeness — same
+// principle as the anchor trie's confirmed-alignment path (ANCHOR_CONFIRM_
+// IDF), just at a higher bar since this is skipping the coverage safety net
+// entirely, not just requiring "some" identifying content.
+// Raised 14 → 18 after a live-service regression: both "Acts 3:6" (raw 51%,
+// matchedIdf=17.5) and "Matthew 20:17" (raw 48%, matchedIdf=14.2) rode this
+// path to auto-send on generic phrase collisions ("in the name of Jesus",
+// "twelve disciples") that happened to repeat — matchedIdf in the 14-17
+// range turned out not to reliably separate that from genuine partial
+// quotes at this site. 18 trades a couple of legitimate low-coverage
+// auto-sends (they still land correctly in Candidates for one manual
+// promote) for closing off the confirmed false-positive cases.
+const VERBATIM_CERTAIN_IDF = 18;
+
+// Mirrors detection_worker.js's ANCHOR_CONFIRM_IDF (kept as a separate
+// constant since the worker runs in its own thread/module — no shared JS
+// scope to import it from). Used to gate the streaming anchor trie's df=1
+// fast-share auto-send path so it requires the same minimum "this could
+// only really be this one verse" evidence as the confirmed-alignment path,
+// instead of trusting word-count/uniqueness alone. Raised 8 → 12 alongside
+// the worker-side constant after "praise the Lord" (filler, not a citation)
+// cleared 8 against Psalms 150:6 and auto-sent to the live screen.
+const STREAM_IDF_FULL_CONFIDENCE = 12;
+
 // Minimum score for a detection to appear in the suggestions panel at all.
-// Keeps low-confidence random verses (e.g. Matthew 17:21 at 42%) off the screen entirely.
-const SUGGESTION_MIN_SCORE = 0.75;
+// Raised 0.75 → 0.87 at the operator's request: real services showed too
+// much noise getting through at 75-85% for it to be a useful signal — the
+// panel is only worth glancing at if a card showing up actually means
+// something. Candidates is meant to work like a confident local model call
+// ("this paraphrase IS this verse"), not a loose maybe-pile.
+const SUGGESTION_MIN_SCORE = 0.87;
 
 // Suggestions dedup. Viewer-bound sends have always been deduped, but
 // suggestions had NO dedup at all — every search pass (~1/s during speech)
@@ -475,15 +673,59 @@ setInterval(() => {
 let lastDirectRefTime = 0;
 const DIRECT_REF_SUPPRESS_MS = 12000;
 
+// Rolling one-segment buffer so a citation split across an STT pause still
+// parses as one phrase. processForReferences only ever sees the CURRENT
+// final segment — real STT breaks a sentence like "Psalm 63 from verse one
+// to three" into separate finals whenever there's a pause, and the parser
+// (correctly) needs the whole phrase in one shot to resolve a compound
+// range. Without this, a spoken citation with any mid-phrase pause never
+// produces a clean 'direct' hit and falls back to the far less reliable
+// verbatim/stream + continuity-gate path for something that should have
+// been unambiguous.
+let prevFinalTranscript   = '';
+let prevFinalTranscriptAt = 0;
+const PREV_FINAL_JOIN_WINDOW_MS = 8000;
+
 // Auto-correction window: if a direct ref was sent and within this window a
 // verbatim match (≥ 0.92 similarity) points at a *different* verse, we assume
 // the preacher mis-cited the reference and then read the correct verse
 // verbatim — replace on-air instead of queueing alongside.
 // Gated by settings.autoCorrect (default on) so the operator can disable.
+let wordsHeard = 0;                // monotonic count of final-transcript words processed this session
 let lastDirectSentVerse = null;    // full verse object of the most recent direct-ref send
 let lastDirectSentTime  = 0;
-const CORRECTION_WINDOW_MS = 15000;
-const CORRECTION_MIN_SIMILARITY = 0.92;
+let lastDirectSentWords = 0;       // wordsHeard watermark at the moment of that send
+// A wall-clock window alone breaks under any non-real-time replay/pacing —
+// tested against a fixed-delay (25ms/utterance) fast replay, 15 real
+// milliseconds covers hundreds of utterances' worth of unrelated sermon
+// content, so nearly every subsequent high-confidence hit (a totally
+// different, independently and correctly cited verse minutes later in the
+// real sermon) got treated as a "correction" of whatever was cited last —
+// wiping legitimate citations off the Live Queue. A genuine self-correction
+// (wrong reference, right verse read immediately after, same breath) is
+// bounded by how much gets SAID before it, not by clock time — so gate on
+// words actually heard since the citation instead, which stays meaningful
+// at any playback/speaking speed. ~35 words is roughly one to two spoken
+// sentences — enough room for "chapter ten verse one, he said, I will lift
+// up mine eyes..." but not enough to reach the sermon's next real point.
+const CORRECTION_WINDOW_WORDS = 35;
+// Correction silently replaces what's already on screen — at least as risky
+// as a plain auto-send, so it holds to the same raised bar (see
+// VERBATIM_AUTOSEND_MIN above).
+const CORRECTION_MIN_SIMILARITY = 0.95;
+// Short dead-zone right after ANY send (explicit citation, "next verse",
+// bare-number continuation — all three set lastDirectSentVerse/Time via
+// broadcastDetection's method:'direct' branch). Found via a real bug: the
+// end-of-segment "buffer sweep" a few lines below re-searches the last ~60
+// words of transcript on every single final segment — including content
+// already fully handled several segments ago. A "51" bare-number trigger
+// advancing 50→51 landed at the same moment the sweep re-matched verse 50's
+// own text (still sitting in that rolling window) and "corrected" 51 right
+// back to 50 milliseconds later. This doesn't fix the sweep's re-scanning —
+// it just stops a correction from undoing an advance that only just landed;
+// a genuine miscitation is a sustained pattern, not something that needs to
+// fire within the first couple seconds.
+const CORRECTION_IMMUNITY_MS = 3000;
 
 // ── Audio ring buffer (REST fallback on WS drop) ──────────────────────────
 // Keeps last 25s of raw PCM so we can submit to Deepgram REST if the
@@ -538,7 +780,7 @@ function resetReadingMode() {
 // mid-sermon. Catches the gap that would otherwise be silently lost.
 async function submitDeepgramRestFallback() {
   if (!audioRingBuffer.length) return;
-  const key = settings.deepgramApiKey || loadSettings().deepgramApiKey;
+  const key = settings.deepgramApiKey;
   if (!key) return;
 
   // Only submit audio captured in the last 20s (avoid re-processing old audio)
@@ -634,7 +876,6 @@ let rangeAllVerses    = [];   // all verses in range (sent + queued) — for UI 
 let rangeCurrentVerse = null; // the verse currently on the live screen
 let rangeAdvancing      = false;
 let rangeLastAdvanceAt  = 0;   // timestamp of last advance — prevents rapid re-fires
-let rangeVerseStartTime = 0;   // when the current range verse was loaded — used for timing advance
 const RANGE_ADVANCE_COOLDOWN_MS = 1200;  // min gap between advances (fast readers)
 
 // ── Last-2-words end-of-verse detection ──────────────────────────────────────
@@ -646,15 +887,28 @@ const SKIP_WORDS = new Set(['a','an','the','and','but','or','in','of','to','is',
   'she','ye','thy','thee','thou','unto','his','her','its','my','our','your','their',
   'was','are','were','that','this','from','with','for','not','i','we','by','at']);
 
-function getLastMeaningfulWords(text, n = 2) {
+// Shared by both sides of the last-2-words check: the verse's own tail AND
+// the live transcript need to be filtered through the SAME stop-word
+// removal, or the check can never match. Found as a real bug: Genesis 1:1
+// ends "...the heaven and the earth" — filtering just the VERSE side gives
+// tail2 = "heaven earth" (adjacent after "and"/"the" drop out), but the raw
+// transcript still has "and the" sitting between "heaven" and "earth", so
+// `transcript.includes("heaven earth")` never matches even a perfect,
+// word-for-word reading. Silently broken for any verse ending in a phrase
+// with a stop word in the middle — which is most of them.
+function meaningfulWords(text) {
   const cleaned = (text || '')
     .replace(/\{[^}]*\}/g, '')   // strip {art} {is} {thirsty: Heb. weary} annotations
     .replace(/\[[^\]]*\]/g, ''); // strip [A Psalm of David…] headings — not spoken
-  const words = cleaned
+  return cleaned
     .toLowerCase()
     .replace(RE_NONALPHA, '')
     .split(RE_SPACES)
     .filter(w => w.length >= 3 && !SKIP_WORDS.has(w));
+}
+
+function getLastMeaningfulWords(text, n = 2) {
+  const words = meaningfulWords(text);
   return words.slice(-n).join(' ');
 }
 
@@ -665,7 +919,6 @@ async function setRangeQueue(verses) {
   rangeQueue          = verses.slice(1);
   rangeQueueTotal     = verses.length;
   rangeAdvancing      = false;
-  rangeVerseStartTime = Date.now();
   broadcastRangeState();
   // Send all verses to UI so the full range is visible in history
   broadcast({ type: 'range-verses', verses: rangeAllVerses, activeRef: rangeCurrentVerse?.reference || null });
@@ -675,13 +928,25 @@ async function advanceRangeQueue() {
   if (!rangeQueue.length) return null;
   const next = rangeQueue.shift();
   rangeCurrentVerse   = next;
-  rangeVerseStartTime = Date.now();
   broadcastRangeState();
   await sendToOutputs(next);
   broadcast({ type: 'detection', verses: [next], method: 'direct', topScore: 1.0, target: 'viewer', timestamp: Date.now() });
   // Update active reference in UI
   broadcast({ type: 'range-active', activeRef: next.reference });
   return next;
+}
+
+// Centralized guarded advance — every trigger path (voice "next verse",
+// timing auto-advance, last-2-words detection, explicit ref match, manual
+// "Next" click) must go through this so concurrent triggers can't both pass
+// the rangeAdvancing check and double-advance the queue.
+function requestRangeAdvance(reason) {
+  if (rangeAdvancing || !rangeQueue.length) return false;
+  rangeAdvancing     = true;
+  rangeLastAdvanceAt = Date.now();
+  if (reason) console.log(`[Range] ${reason} → advancing`);
+  advanceRangeQueue().finally(() => { rangeAdvancing = false; });
+  return true;
 }
 
 function clearRangeQueue() {
@@ -720,11 +985,7 @@ async function maybeHandleNextVerseTrigger(transcript) {
   lastNextVerseAt = now;
 
   if (rangeQueue.length) {
-    if (rangeAdvancing) return;
-    rangeAdvancing     = true;
-    rangeLastAdvanceAt = now;
-    console.log('[Range] "next verse" trigger → advancing');
-    advanceRangeQueue().finally(() => { rangeAdvancing = false; });
+    requestRangeAdvance('"next verse" trigger');
     return;
   }
 
@@ -741,66 +1002,87 @@ async function maybeHandleNextVerseTrigger(transcript) {
   } catch {}
 }
 
-// ── Reading-pace estimator ────────────────────────────────────────────────
-// Looks at the last 15 seconds of finalised transcript segments and computes
-// how many words per second the preacher is currently speaking.
-// Falls back to 2.2 wps (typical sermon read-aloud pace) when there isn't
-// enough data yet.
-function estimateReadingWPS() {
-  const now     = Date.now();
-  const recent  = transcriptBuffer.filter(t => t.time > now - 15000);
-  if (recent.length < 2) return 2.2;
-
-  const totalWords = recent.reduce((sum, t) => {
-    return sum + (t.wordCount || t.text.split(/\s+/).filter(Boolean).length);
-  }, 0);
-  const spanSecs = (recent[recent.length - 1].time - recent[0].time) / 1000;
-  if (spanSecs < 1) return 2.2;
-
-  // Clamp to a sane range — 0.5 wps (very slow/dramatic) to 5 wps (fast reader)
-  return Math.max(0.5, Math.min(5, totalWords / spanSecs));
-}
-
-// ── Auto-advance detector ─────────────────────────────────────────────────
-// Timing-based: measures the preacher's live reading pace (words/sec) from
-// the transcript buffer, estimates how long the current verse should take to
-// read at that pace, then advances when that time has elapsed.
+// ── Spoken bare-number continuation ───────────────────────────────────────
+// Reading a passage aloud, preachers often stop saying "verse" once the
+// book/chapter has been cited — "Acts seven fifty... fifty-one...
+// fifty-two..." with nothing but the bare number between them. Treat a
+// final segment that TRAILS OFF with a number equal to (currently displayed
+// verse) + 1 the same way as the "next verse" keyword.
 //
-// This adapts naturally to the preacher's style — slow dramatic reading gets
-// more time; fast reading advances sooner.  A 15% grace period is added so
-// we never cut off the last word.
+// Checks the tail, not the whole utterance — real STT usually glues a quick
+// "51" onto the end of whatever was just read ("...so do you, 51") rather
+// than giving it its own isolated final segment, so requiring the entire
+// segment to be nothing but the number missed exactly this case in testing.
 //
-// The explicit-reference path (processForReferences) overrides this and fires
-// immediately whenever the preacher calls the next verse number directly.
-function checkRangeAutoAdvance() {
+// Still deliberately narrow so it can't misfire on an unrelated number
+// mentioned mid-sentence ("that's been true for thirty years"): the number
+// must be the LAST thing spoken (nothing trails after it — "thirty years"
+// fails because "years" follows), and it must equal the expected next verse
+// exactly — no jumps, no guessing.
+const BARE_NUMBER_FILLER      = new Set(['and', 'so', 'now', 'okay', 'ok', 'verse', 'verses', 'next']);
+const BARE_NUMBER_COOLDOWN_MS = 2000;
+const BARE_NUMBER_TAIL_WORDS  = 4;   // how far back to look for a trailing number
+let lastBareNumberAt = 0;
+
+function maybeHandleBareVerseNumber(transcript) {
   const now = Date.now();
-  if (!rangeCurrentVerse || !rangeQueue.length || rangeAdvancing) return;
-  if (now - rangeLastAdvanceAt < RANGE_ADVANCE_COOLDOWN_MS) return;
-  if (!rangeVerseStartTime) return;
+  if (now - lastBareNumberAt < BARE_NUMBER_COOLDOWN_MS) return false;
 
-  const verseText      = rangeCurrentVerse.text || rangeCurrentVerse.kjv_text || '';
-  const verseWordCount = verseText.split(/\s+/).filter(Boolean).length;
-  const wps            = estimateReadingWPS();
+  // Keep digits (Deepgram/Whisper often render spoken numbers as "51" in
+  // the transcript, not the words "fifty one") — RE_NONALPHA strips those,
+  // so this uses its own alnum-preserving cleanup instead.
+  const words = transcript.toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(RE_WHITESPACE, ' ')
+    .trim()
+    .split(' ')
+    .filter(Boolean);
+  if (!words.length) return false;
 
-  // How long this verse should take at the current pace.
-  // In reading mode the pastor is reading scripture verbatim — tighten the
-  // grace period so advances feel natural (8% vs 15% for conversational).
-  const graceMultiplier = readingModeActive ? 1.05 : 1.15;
-  const estimatedMs = (verseWordCount / wps) * 1000 * graceMultiplier;
-  // Never advance in under 2s (reading mode) or 3s (normal) regardless of verse length
-  const waitMs      = Math.max(readingModeActive ? 2000 : 3000, estimatedMs);
-  const elapsed     = now - rangeVerseStartTime;
+  const tail = words.slice(-BARE_NUMBER_TAIL_WORDS).filter(w => !BARE_NUMBER_FILLER.has(w));
+  if (!tail.length) return false;
 
-  if (elapsed >= waitMs) {
-    rangeAdvancing     = true;
-    rangeLastAdvanceAt = now;
-    console.log(
-      `[Range] Timing advance: ${verseWordCount} words @ ${wps.toFixed(1)} wps` +
-      ` → estimated ${(estimatedMs/1000).toFixed(1)}s, elapsed ${(elapsed/1000).toFixed(1)}s`
-    );
-    advanceRangeQueue().finally(() => { rangeAdvancing = false; });
+  // Try every starting point in the tail, preferring the longest (earliest)
+  // match — the number must consume all the way to the end of the tail, i.e.
+  // be the very last thing said, with nothing after it.
+  let num = null;
+  for (let start = 0; start < tail.length; start++) {
+    const n = consumeNumber(tail, start);
+    if (n && start + n.consumed === tail.length) { num = n; break; }
   }
+  if (!num) return false;
+
+  const base = rangeCurrentVerse || lastOutputVerse;
+  if (!base?.book || !base.chapter || base.verse == null) return false;
+  if (num.value !== base.verse + 1) return false;
+
+  lastBareNumberAt = now;
+
+  if (rangeQueue.length) {
+    requestRangeAdvance(`Bare-number continuation "${num.value}"`);
+    return true;
+  }
+
+  workerCall('directLookup', { book: base.book, chapter: base.chapter, verse: num.value }, 3000)
+    .then(msg => {
+      if (msg.result) {
+        console.log(`[NextVerse] Bare number "${num.value}" → ${msg.result.reference}`);
+        broadcastDetection([msg.result], 'direct', 1.0, 'viewer');
+      }
+    })
+    .catch(() => {});
+  return true;
 }
+
+// Timing-based range auto-advance (estimated words-per-second × verse length)
+// used to live here. Removed: it measured pace from the last 15s of ALL
+// speech, including tangents — a preacher who reads a verse then spends a
+// minute explaining it talks at a normal (often faster) conversational pace
+// while explaining, which the estimator read as "fast reader" and advanced
+// the display to the next verse mid-explanation of the current one.
+// Last-2-words detection (below) is now the only range auto-advance trigger
+// — it only fires once the preacher has genuinely said the end of the
+// verse, however long that takes to get to.
 
 // ── Topic Accumulator ─────────────────────────────────────────────────────
 // Listens to the rolling speech stream and builds a topic word frequency map.
@@ -828,7 +1110,6 @@ const TOPIC_DECAY_FACTOR       = 0.5;
 
 let topicWordCounts   = new Map();   // Map<word, count> — raw frequency from speech
 let lastTopicBuild    = 0;
-let topicBuildTimer   = null;
 
 // Called on every final transcript — accumulates word frequencies
 function accumulateTopicWords(transcript) {
@@ -898,7 +1179,6 @@ async function maybeRebuildTopicLibrary() {
 function resetTopicAccumulator() {
   topicWordCounts.clear();
   lastTopicBuild = 0;
-  clearTimeout(topicBuildTimer);
 }
 
 // ── Sermon Context Accumulator ────────────────────────────────────────────
@@ -961,16 +1241,25 @@ app.get('/health', (_, res) => res.json({
 }));
 
 app.get('/api/settings', (_, res) => {
-  const s = loadSettings();
-  const safe = { ...s };
-  if (safe.deepgramApiKey)  safe.deepgramApiKey  = safe.deepgramApiKey.slice(0, 8) + '…';
-  if (safe.anthropicApiKey) safe.anthropicApiKey = safe.anthropicApiKey.slice(0, 8) + '…';
+  const safe = { ...settings };
+  if (safe.deepgramApiKey) safe.deepgramApiKey = safe.deepgramApiKey.slice(0, 8) + '…';
   res.json(safe);
 });
 
 app.post('/api/settings', async (req, res) => {
-  const current = loadSettings();
-  const updated = { ...current, ...req.body };
+  const incoming = { ...req.body };
+  // GET /api/settings masks deepgramApiKey to "first8chars…" for display —
+  // defense in depth against that exact masked string ever being round-
+  // tripped back here and overwriting the real key with a truncated, non-
+  // working value. The client no longer sends it unless the user actually
+  // typed a new one (see app.js loadSettings/saveCurrentSettings), but this
+  // guard means a stale client or a future code path can't reintroduce the
+  // same silent-corruption bug.
+  if (incoming.deepgramApiKey && settings.deepgramApiKey
+      && incoming.deepgramApiKey === settings.deepgramApiKey.slice(0, 8) + '…') {
+    delete incoming.deepgramApiKey;
+  }
+  const updated = { ...settings, ...incoming };
   await saveSettings(updated).catch(err => console.warn('[Settings] Save failed:', err.message));
   settings = updated;
   const obsChanged = req.body.obsEnabled !== undefined || req.body.obsUrl !== undefined || req.body.obsPassword !== undefined;
@@ -1013,12 +1302,37 @@ app.post('/api/service/import', (req, res) => {
   }
 });
 
+// Import a ProPresenter Theme bundle (.protheme) — each of its named theme
+// slides becomes its own KAIRO theme. Base64-encoded for the same reason as
+// /api/service/import above (keeps this on the existing JSON transport).
+const themeImport = require('./theme_import');
+app.post('/api/theme/import-protheme', (req, res) => {
+  const { dataBase64 } = req.body || {};
+  if (!dataBase64) return res.status(400).json({ error: 'Nothing to import' });
+  try {
+    const buf = Buffer.from(dataBase64, 'base64');
+    const { themes, warnings } = themeImport.fromProTheme(buf);
+    res.json({ ok: true, themes, warnings });
+  } catch (err) {
+    res.status(422).json({ error: err.message });
+  }
+});
+
 // Send a playlist slide. Unlike /api/propresenter/send this also broadcasts to
 // every display window, and carries an optional per-item `look` so a song can
 // render on the lyrics theme while scripture stays on the output's own theme.
 app.post('/api/service/send', async (req, res) => {
   const { verse, look } = req.body;
   if (!verse) return res.status(400).json({ error: 'No slide provided' });
+  logDebug('service-send', {
+    reference: verse.reference || null,
+    hasImage: !!verse.image,
+    fit: verse.fit || null,
+    hasText: !!(verse.text && verse.text.trim()),
+    hasTranslatedText: !!(verse.translatedText && verse.translatedText.trim()),
+    themeId: look?.id || null,
+    hasLook: !!look,
+  });
   broadcast({
     type: 'detection', target: 'viewer', method: 'service',
     verses: [verse], topScore: 1,
@@ -1031,8 +1345,19 @@ app.post('/api/service/send', async (req, res) => {
   res.json({ ok: true });
 });
 
+// Lets the client (service.js) log a diagnostic event into the same
+// debug.log — e.g. sendSlide's theme resolution, or "this button was
+// clicked but produced no fetch". Fire-and-forget from the client, no
+// response body needed beyond ok.
+app.post('/api/debug-log', (req, res) => {
+  const { event, data } = req.body || {};
+  if (event && typeof event === 'string') logDebug(`client:${event}`, data && typeof data === 'object' ? data : {});
+  res.json({ ok: true });
+});
+
 // Multi-language theme support. `ref` (book/chapter/verse) resolves against
-// a real bundled translation; anything else goes to Claude. See translate.js.
+// a real bundled translation; anything else goes to the bundled local MT
+// model or Ollama. See translate.js.
 const { translate: translateText, LANGUAGES: TRANSLATE_LANGUAGES } = require('./translate');
 app.get('/api/translate/languages', (_, res) => {
   res.json({ languages: Object.entries(TRANSLATE_LANGUAGES).map(([code, v]) => ({ code, name: v.name })) });
@@ -1041,9 +1366,8 @@ app.post('/api/translate', async (req, res) => {
   const { text, lang, book, chapter, verse } = req.body || {};
   if (!lang) return res.status(400).json({ error: 'No target language provided' });
   try {
-    const apiKey = settings.anthropicApiKey || loadSettings().anthropicApiKey;
     const result = await translateText({
-      text, lang, apiKey,
+      text, lang,
       ollamaUrl: ollamaUrl(), ollamaModel: ollamaModel(),
       ref: (book && chapter && verse) ? { book, chapter: Number(chapter), verse: Number(verse) } : null,
     });
@@ -1055,6 +1379,125 @@ app.post('/api/translate', async (req, res) => {
 
 app.post('/api/propresenter/clear', async (_, res) => {
   await clearProPresenter();
+  res.json({ ok: true });
+});
+
+// ── Media library (images/video for the independent output layer) ────────
+// See media.js for the bin-vs-smart-folder split. Folder contents are
+// scanned live and pushed to clients on change via fs.watch, so the Media
+// tab reflects a linked folder without any polling.
+const media = require('./media');
+media.initFolders((folderId) => broadcast({ type: 'media-folder-changed', folderId }));
+
+app.get('/api/media/bin', async (_req, res) => res.json({ ok: true, items: await media.listBinItems() }));
+app.post('/api/media/bin/upload', async (req, res) => {
+  const { filename, dataBase64 } = req.body || {};
+  if (!filename || !dataBase64) return res.status(400).json({ error: 'filename and dataBase64 required' });
+  try {
+    const name = await media.writeToBin(filename, Buffer.from(dataBase64, 'base64'));
+    res.json({ ok: true, name });
+  } catch (err) { res.status(422).json({ error: err.message, code: err.code || null }); }
+});
+app.delete('/api/media/bin/:name', (req, res) => {
+  res.json({ ok: media.deleteBinItem(req.params.name) });
+});
+app.get('/api/media/bin/file/:name', (req, res) => {
+  const full = media.resolveBinFile(req.params.name);
+  if (!full) return res.status(404).end();
+  res.sendFile(full, (err) => { if (err && !res.headersSent) res.status(err.status || 500).end(); });
+});
+
+app.get('/api/media/folders', (_req, res) => res.json({ ok: true, folders: media.listFolders() }));
+// The operator just names the folder — KAIRO creates it under ~/Documents
+// and watches it from the start (see media.createFolder). Linking an
+// existing folder elsewhere on disk is still possible via media.addFolder
+// directly, but isn't exposed in the UI anymore now that creation is the
+// normal path.
+app.post('/api/media/folders', (req, res) => {
+  const { name } = req.body || {};
+  if (!name || !name.trim()) return res.status(400).json({ error: 'name required' });
+  try {
+    const folder = media.createFolder(name.trim(), (folderId) => broadcast({ type: 'media-folder-changed', folderId }));
+    res.json({ ok: true, folder });
+  } catch (err) { res.status(422).json({ error: err.message, code: err.code || null }); }
+});
+app.delete('/api/media/folders/:id', (req, res) => {
+  res.json({ ok: media.removeFolder(req.params.id) });
+});
+app.get('/api/media/folders/:id/items', async (req, res) => {
+  const items = await media.listFolderItems(req.params.id);
+  if (items === null) return res.status(404).json({ error: 'No such folder' });
+  res.json({ ok: true, items });
+});
+app.post('/api/media/folders/:id/upload', async (req, res) => {
+  const { filename, dataBase64 } = req.body || {};
+  if (!filename || !dataBase64) return res.status(400).json({ error: 'filename and dataBase64 required' });
+  try {
+    await media.writeIntoFolder(req.params.id, filename, Buffer.from(dataBase64, 'base64'));
+    res.json({ ok: true });
+  } catch (err) { res.status(422).json({ error: err.message, code: err.code || null }); }
+});
+app.get('/api/media/folders/:id/file/:name', (req, res) => {
+  const full = media.resolveFileInFolder(req.params.id, req.params.name);
+  if (!full) return res.status(404).end();
+  res.sendFile(full, (err) => { if (err && !res.headersSent) res.status(err.status || 500).end(); });
+});
+
+// ── Song Library (persistent song collection) ─────────────────────────────
+// Distinct from the bundled/static hymn bank (src/hymns.js) and from
+// playlists — this is where the operator's own imported/added songs live
+// across services. Filed under one of 3 fixed preset categories (see
+// songs.CATEGORIES), not freeform folders — nothing dynamic to persist
+// beyond the songs themselves.
+const songs = require('./songs');
+songs.init();
+
+app.get('/api/songs', (_req, res) => res.json({ ok: true, songs: songs.listSongs(), categories: songs.CATEGORIES }));
+app.post('/api/songs', (req, res) => res.json({ ok: true, song: songs.addSong(req.body || {}) }));
+app.put('/api/songs/:id', (req, res) => {
+  const song = songs.updateSong(req.params.id, req.body || {});
+  if (!song) return res.status(404).json({ error: 'No such song' });
+  res.json({ ok: true, song });
+});
+app.delete('/api/songs/:id', (req, res) => res.json({ ok: songs.removeSong(req.params.id) }));
+
+// Send a media item (image/video) to the output's independent media layer —
+// separate from /api/service/send, which drives the theme/text slide layer.
+// The two compose on the display: media sits behind, the slide's theme
+// (background/text) renders on top, same as a ProPresenter media+slide pair.
+app.post('/api/service/send-media', (req, res) => {
+  const { src, kind, fit } = req.body || {};
+  if (!src || !kind) return res.status(400).json({ error: 'src and kind required' });
+  broadcast({ type: 'media', target: 'viewer', src, kind, fit: fit || 'contain', timestamp: Date.now() });
+  res.json({ ok: true });
+});
+
+// Clear one output layer independently, or 'all' for the previous
+// whole-stage clear behavior (kept for compatibility with anything still
+// sending bare {type:'clear'}).
+app.post('/api/service/clear-layer', async (req, res) => {
+  const layer = req.body?.layer || 'all';
+  broadcast({ type: 'clear-layer', target: 'viewer', layer });
+  if (layer === 'slide' || layer === 'all') await clearExternalOutputs();
+  res.json({ ok: true });
+});
+
+// Remote-control the media layer's <video> (mute/play/pause/volume/seek) —
+// the output window has no visible native controls (the congregation
+// shouldn't see a scrubber), so every control lives in the operator's window
+// and reaches the video via this same broadcast pipeline.
+app.post('/api/service/media-control', (req, res) => {
+  const { action, value } = req.body || {};
+  if (!action) return res.status(400).json({ error: 'action required' });
+  broadcast({ type: 'media-control', target: 'viewer', action, value });
+  res.json({ ok: true });
+});
+
+// Which system audio device video playback comes out of. Applied via
+// HTMLMediaElement.setSinkId() in display.html; falls back to the system
+// default silently if the platform's WebView doesn't support it.
+app.post('/api/service/audio-output', (req, res) => {
+  broadcast({ type: 'audio-output', target: 'viewer', deviceId: req.body?.deviceId || null });
   res.json({ ok: true });
 });
 
@@ -1139,8 +1582,18 @@ app.get('/api/obs/sources', async (_, res) => {
 
 app.post('/api/range/next', async (_, res) => {
   if (!rangeQueue.length) return res.json({ ok: false, reason: 'no range active' });
-  const verse = await advanceRangeQueue();
-  res.json({ ok: true, verse: verse?.reference });
+  if (rangeAdvancing) return res.json({ ok: false, reason: 'advance already in progress' });
+  rangeAdvancing     = true;
+  rangeLastAdvanceAt = Date.now();
+  try {
+    const verse = await advanceRangeQueue();
+    res.json({ ok: true, verse: verse?.reference });
+  } catch (e) {
+    console.error('[Range] Manual advance failed:', e.message);
+    res.status(500).json({ ok: false, reason: 'advance failed' });
+  } finally {
+    rangeAdvancing = false;
+  }
 });
 
 app.post('/api/range/clear', (_, res) => {
@@ -1246,16 +1699,19 @@ app.post('/api/search', async (req, res) => {
   }
 });
 
+// Routes straight through the SAME pipeline a live mic segment hits
+// (handleTranscriptSegment) rather than replaying a hand-picked subset of
+// it — a prior version only called processForReferences/processVerbatim/
+// runFingerprintSearch directly, which meant the "next verse" keyword, the
+// bare-number continuation trigger, and range auto-advance could never be
+// exercised through this endpoint at all. `isFinal` defaults true (most
+// useful for testing); pass `isFinal: false` to probe interim-only behavior.
 app.post('/api/test-transcript', async (req, res) => {
   const text = req.body?.text;
   if (!text) return res.json({ error: 'no text' });
-  broadcast({ type: 'transcript', text, isFinal: true, confidence: 1.0 });
-  const foundRef = await processForReferences(text, true);
-  if (!foundRef && workerBasicReady) {
-    const foundV = await processVerbatim(text);
-    if (!foundV) runFingerprintSearch(text);
-  }
-  res.json({ ok: true, foundRef });
+  const isFinal = req.body?.isFinal !== false;
+  await handleTranscriptSegment(text, isFinal, 1.0, isFinal);
+  res.json({ ok: true });
 });
 
 // Unified start endpoint — body.engine selects 'deepgram' (cloud) or the local
@@ -1277,6 +1733,18 @@ app.post('/api/stop-listening', async (_, res) => {
   if (deepgramConnection) await stopDeepgram();
   res.json({ ok: true });
 });
+
+// ── Shared NDJSON progress-stream helper ─────────────────────────────────
+// Used by the Whisper installer, translate-model installer, and Ollama pull
+// routes below — all three stream install/download progress to the client
+// as newline-delimited JSON.
+function startNdjsonStream(res) {
+  res.setHeader('Content-Type', 'application/x-ndjson');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders?.();
+  return (obj) => { try { res.write(JSON.stringify(obj) + '\n'); } catch {} };
+}
 
 // ── Whisper offline model installer ──────────────────────────────────────
 // GUI-driven counterpart to `npm run whisper:install`. The settings panel
@@ -1300,14 +1768,7 @@ app.post('/api/whisper/install', async (_req, res) => {
   }
   whisperInstallInProgress = true;
 
-  res.setHeader('Content-Type', 'application/x-ndjson');
-  res.setHeader('Cache-Control', 'no-cache');
-  res.setHeader('X-Accel-Buffering', 'no');
-  res.flushHeaders?.();
-
-  const send = (obj) => {
-    try { res.write(JSON.stringify(obj) + '\n'); } catch {}
-  };
+  const send = startNdjsonStream(res);
 
   try {
     await whisperInstaller.installWhisperModel({ onProgress: send });
@@ -1322,42 +1783,63 @@ app.post('/api/whisper/install', async (_req, res) => {
 
 // ── Local translation-model installer ────────────────────────────────────
 // Same NDJSON progress-bar shape as the Whisper installer above — this is
-// the bundled Qwen2.5 GGUF model translate.js's translateWithLocalLLM() runs
-// via node-llama-cpp, downloaded once on first need rather than baked into
-// the app installer (see llm_installer.js for why).
-const llmInstallerRoute = require('./llm_installer');
-let llmInstallInProgress = false;
+// the bundled Opus-MT model translate.js's translateWithLocalLLM() runs via
+// mt_engine.js (ONNX/@huggingface/transformers), downloaded once on first
+// need rather than baked into the app installer (see mt_installer.js).
+//
+// Routes are named /api/translate-model/* rather than /api/llm/* — the
+// latter was already taken by the Ollama-connectivity check a few hundred
+// lines down (app.get('/api/llm/status', ...) for Content Studio/sermon
+// notes). Both silently registering the same path meant this route always
+// won (Express takes the first match) and the Ollama status check never
+// actually ran. Renaming this one is the fix, since the Ollama endpoint's
+// path is the one already relied on elsewhere.
+// French/Spanish/Portuguese are three independent model downloads (see
+// mt_engine.js) — status/install/in-progress tracking is per-language.
+const mtInstaller = require('./mt_installer');
+const mtInstallInProgress = new Set();
+const MT_LANGS = ['fr', 'es', 'pt'];
 
-app.get('/api/llm/status', (_req, res) => {
-  res.json({
-    installed: llmInstallerRoute.isModelPresent(),
-    modelPath: llmInstallerRoute.modelPath(),
-    installing: llmInstallInProgress,
-  });
+app.get('/api/translate-model/status', async (req, res) => {
+  const lang = req.query.lang;
+  if (lang) {
+    if (!MT_LANGS.includes(lang)) return res.status(400).json({ error: `Unknown language "${lang}"` });
+    return res.json({
+      installed: await mtInstaller.isModelPresent(lang),
+      modelPath: mtInstaller.modelPath(lang),
+      installing: mtInstallInProgress.has(lang),
+      approxMB: mtInstaller.approxMB(lang),
+    });
+  }
+  // No lang given — status for all three at once (Settings panel lists them together).
+  const all = {};
+  for (const l of MT_LANGS) {
+    all[l] = {
+      installed: await mtInstaller.isModelPresent(l),
+      installing: mtInstallInProgress.has(l),
+      approxMB: mtInstaller.approxMB(l),
+    };
+  }
+  res.json(all);
 });
 
-app.post('/api/llm/install', async (_req, res) => {
-  if (llmInstallInProgress) {
+app.post('/api/translate-model/install', async (req, res) => {
+  const lang = req.body?.lang;
+  if (!MT_LANGS.includes(lang)) return res.status(400).json({ error: `Unknown language "${lang}"` });
+  if (mtInstallInProgress.has(lang)) {
     return res.status(409).json({ error: 'install already in progress' });
   }
-  llmInstallInProgress = true;
+  mtInstallInProgress.add(lang);
 
-  res.setHeader('Content-Type', 'application/x-ndjson');
-  res.setHeader('Cache-Control', 'no-cache');
-  res.setHeader('X-Accel-Buffering', 'no');
-  res.flushHeaders?.();
-
-  const send = (obj) => {
-    try { res.write(JSON.stringify(obj) + '\n'); } catch {}
-  };
+  const send = startNdjsonStream(res);
 
   try {
-    await llmInstallerRoute.installLLMModel({ onProgress: send });
+    await mtInstaller.installLLMModel({ lang, onProgress: send });
     send({ phase: 'complete', ok: true });
   } catch (err) {
     send({ phase: 'complete', ok: false, error: err.message || String(err) });
   } finally {
-    llmInstallInProgress = false;
+    mtInstallInProgress.delete(lang);
     res.end();
   }
 });
@@ -1391,13 +1873,13 @@ async function writeSession(s) {
   await fs.promises.writeFile(p, JSON.stringify(s, null, 2));
 }
 
-app.get('/api/sessions', (_req, res) => {
+app.get('/api/sessions', async (_req, res) => {
   ensureSessionsDir();
   let files = [];
-  try { files = fs.readdirSync(SESSIONS_DIR).filter(f => f.endsWith('.json')); } catch {}
-  const list = files.map(f => {
+  try { files = (await fs.promises.readdir(SESSIONS_DIR)).filter(f => f.endsWith('.json')); } catch {}
+  const list = (await Promise.all(files.map(async (f) => {
     try {
-      const s = JSON.parse(fs.readFileSync(path.join(SESSIONS_DIR, f), 'utf8'));
+      const s = JSON.parse(await fs.promises.readFile(path.join(SESSIONS_DIR, f), 'utf8'));
       return {
         id: s.id,
         title: s.title || s.date || s.id,
@@ -1410,7 +1892,7 @@ app.get('/api/sessions', (_req, res) => {
         createdAt: s.createdAt,
       };
     } catch { return null; }
-  }).filter(Boolean);
+  }))).filter(Boolean);
   list.sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
   res.json({ sessions: list });
 });
@@ -1471,8 +1953,8 @@ app.delete('/api/sessions/:id', (req, res) => {
   catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-function ollamaUrl()   { return (loadSettings().ollamaUrl   || 'http://localhost:11434').replace(/\/+$/, ''); }
-function ollamaModel() { return  loadSettings().ollamaModel || 'qwen2.5:7b-instruct'; }
+function ollamaUrl()   { return (settings.ollamaUrl   || 'http://localhost:11434').replace(/\/+$/, ''); }
+function ollamaModel() { return  settings.ollamaModel || 'qwen2.5:7b-instruct'; }
 
 app.get('/api/llm/status', async (_req, res) => {
   const url = ollamaUrl();
@@ -1500,10 +1982,7 @@ app.post('/api/llm/pull', async (req, res) => {
   }
   const url = ollamaUrl();
 
-  res.setHeader('Content-Type', 'application/x-ndjson');
-  res.setHeader('Cache-Control', 'no-cache');
-  res.setHeader('X-Accel-Buffering', 'no');
-  res.flushHeaders?.();
+  startNdjsonStream(res);
 
   let upstream;
   try {
@@ -2018,6 +2497,13 @@ app.get('/api/content/export', async (req, res) => {
 async function handleTranscriptSegment(transcript, isFinal, confidence, speechFinal) {
   broadcast({ type: 'transcript', text: transcript, isFinal, confidence });
 
+  // Monotonic "how much has actually been said" counter — final segments
+  // only (interim resends a growing, overlapping prefix of the same
+  // utterance, so counting those would inflate this per utterance rather
+  // than per word). See CORRECTION_WINDOW_WORDS for why this exists instead
+  // of a wall-clock timer.
+  if (isFinal && transcript) wordsHeard += transcript.trim().split(RE_SPACES).filter(Boolean).length;
+
   // ── Interim transcripts ───────────────────────────────────────
   // Reference parser fires on interim for < 2s explicit citations.
   // Fingerprint also fires on longer interim segments so paraphrase
@@ -2043,7 +2529,15 @@ async function handleTranscriptSegment(transcript, isFinal, confidence, speechFi
           try {
             const msg = await workerCall('directLookup', { book: partial.book, chapter: partial.chapter, verse: partial.verse }, 3000);
             if (msg.result) {
-              broadcastDetection([msg.result], 'direct', 1.0, 'viewer');
+              // 'direct-partial', not 'direct' — this is a bare "verse N"
+              // resolved against a book/chapter cited up to CONTEXT_EXPIRE_MS
+              // ago, not a fresh explicit citation. It goes through the same
+              // continuity gate as verbatim/stream hits instead of bypassing
+              // it, and is logged (previously this whole path was silent —
+              // the exact combination that let a stale-context misfire reach
+              // the live screen with zero trace in the logs).
+              const sent = await broadcastDetection([msg.result], 'direct-partial', DIRECT_PARTIAL_SCORE, 'viewer');
+              if (sent === 'viewer') console.log(`[Context] Interim partial ref "verse ${partial.verse}" → ${msg.result.reference}`);
               foundRef = true;
             }
           } catch {}
@@ -2052,14 +2546,22 @@ async function handleTranscriptSegment(transcript, isFinal, confidence, speechFi
       if (!foundRef) {
         const interimWords = transcript.split(RE_SPACES).filter(Boolean).length;
         const now = Date.now();
-        if (rangeQueue.length) checkRangeAutoAdvance();
-        if (interimWords >= 6 && now - lastInterimVerbatim > INTERIM_VERBATIM_MS) {
+        // Same Whisper caveat as streamNewWords above: onPartial re-transcribes
+        // the whole growing audio window from scratch, so an interim segment
+        // isn't a stable prefix — it can contain revised/hallucinated words
+        // that happen to line up with an unrelated verse. Verbatim/fingerprint
+        // only ever run against Whisper's settled final text below.
+        if (!whisperActive && interimWords >= 6 && now - lastInterimVerbatim > INTERIM_VERBATIM_MS) {
           lastInterimVerbatim = now;
           processVerbatim(transcript).catch(err => console.warn('[Detection] processVerbatim failed:', err.message));
         }
-        if (interimWords >= 6 && now - lastFingerprintSearch > FINGERPRINT_INTERVAL_MS) {
+        if (!whisperActive && interimWords >= 6 && now - lastFingerprintSearch > FINGERPRINT_INTERVAL_MS) {
           lastFingerprintSearch = now;
           runFingerprintSearch(transcript, true);
+        }
+        if (!whisperActive && interimWords >= 6 && now - lastSemanticSearch > SEMANTIC_INTERVAL_MS) {
+          lastSemanticSearch = now;
+          runSemanticSearch(transcript);
         }
       }
     }
@@ -2079,25 +2581,31 @@ async function handleTranscriptSegment(transcript, isFinal, confidence, speechFi
   accumulateTopicWords(transcript);
   maybeRebuildTopicLibrary();
 
-  if (rangeQueue.length) checkRangeAutoAdvance();
-
   // ── Last-2-words end-of-verse detection ──────────────────────────────────
   // If a range is active, check whether this transcript contains the last two
-  // meaningful words of the currently-displayed verse. When matched the preacher
-  // has almost certainly finished reading it — advance immediately rather than
-  // waiting for the timing estimator.
+  // meaningful words of the currently-displayed verse. This is the ONLY range
+  // auto-advance trigger — a timing-based estimator (words-per-second × verse
+  // length) used to run alongside this, but it measured pace from the last
+  // 15s of ALL speech, including tangents. A preacher who reads a verse then
+  // explains it for a minute talks at a normal (often faster) conversational
+  // pace while explaining — the estimator read that as "fast reader" and
+  // advanced the display to the next verse while they were still mid-
+  // explanation of the current one. Matching the last two words the preacher
+  // actually finished reading has no such failure mode: it only fires when
+  // they've genuinely said the end of the verse, however long that takes.
   if (rangeCurrentVerse && rangeQueue.length && !rangeAdvancing
       && now - rangeLastAdvanceAt >= RANGE_ADVANCE_COOLDOWN_MS) {
     const tail2 = getLastMeaningfulWords(
       rangeCurrentVerse.text || rangeCurrentVerse.kjv_text || '', 2
     );
     if (tail2) {
-      const normT = transcript.toLowerCase().replace(RE_NONALPHA, ' ').replace(RE_WHITESPACE, ' ');
-      if (normT.includes(tail2)) {
-        rangeAdvancing     = true;
-        rangeLastAdvanceAt = now;
-        console.log(`[Range] Last-2-words advance: "${tail2}" detected`);
-        advanceRangeQueue().finally(() => { rangeAdvancing = false; });
+      // Filter the transcript through the SAME stop-word removal as tail2
+      // (see meaningfulWords) — a raw substring check would require "heaven"
+      // and "earth" to be literally adjacent, but the actual spoken verse
+      // has "and the" between them, same as the source text does.
+      const transcriptMeaningful = meaningfulWords(transcript).join(' ');
+      if (transcriptMeaningful.includes(tail2)) {
+        requestRangeAdvance(`Last-2-words advance: "${tail2}" detected`);
       }
     }
   }
@@ -2117,16 +2625,24 @@ async function handleTranscriptSegment(transcript, isFinal, confidence, speechFi
           if (msg.result) verses = [msg.result];
         }
         if (verses.length) {
-          console.log(`[Context] Resolved partial ref "verse ${partial.verse || partial.verseStart}" → ${partial.book} ${partial.chapter}:${partial.verse || partial.verseStart}`);
+          // 'direct-partial', not 'direct' — see the interim resolvePartialReference
+          // call above for why this goes through the continuity gate instead of
+          // bypassing it. Logged after the call, gated on the actual landing
+          // target so this can't claim a viewer-send that was really demoted.
           if (verses.length > 1) setRangeQueue(verses);
           else clearRangeQueue();
-          broadcastDetection(verses, 'direct', 1.0, 'viewer');
+          const sent = await broadcastDetection(verses, 'direct-partial', DIRECT_PARTIAL_SCORE, 'viewer');
+          if (sent === 'viewer') console.log(`[Context] Resolved partial ref "verse ${partial.verse || partial.verseStart}" → ${partial.book} ${partial.chapter}:${partial.verse || partial.verseStart}`);
           foundRef = true;
         }
       } catch (err) {
         console.warn('[Context] Partial ref lookup error:', err.message);
       }
     }
+  }
+
+  if (!foundRef) {
+    foundRef = maybeHandleBareVerseNumber(transcript);
   }
 
   if (transcriptBuffer.length) {
@@ -2142,10 +2658,15 @@ async function handleTranscriptSegment(transcript, isFinal, confidence, speechFi
     textForExpensive = transcript;
     const canFingerprint = now - lastFingerprintSearch > FINGERPRINT_INTERVAL_MS;
     lastFingerprintSearch = now;
+    const canSemantic = now - lastSemanticSearch > SEMANTIC_INTERVAL_MS;
+    if (canSemantic) lastSemanticSearch = now;
     await Promise.all([
       processVerbatim(textForExpensive),
       canFingerprint
         ? runFingerprintSearch(textForExpensive, true)
+        : Promise.resolve(),
+      canSemantic
+        ? runSemanticSearch(textForExpensive)
         : Promise.resolve(),
     ]);
   } else {
@@ -2157,10 +2678,15 @@ async function handleTranscriptSegment(transcript, isFinal, confidence, speechFi
     if (workerBasicReady && textForExpensive) {
       const canFingerprint = now - lastFingerprintSearch > FINGERPRINT_INTERVAL_MS;
       lastFingerprintSearch = now;
+      const canSemantic = now - lastSemanticSearch > SEMANTIC_INTERVAL_MS;
+      if (canSemantic) lastSemanticSearch = now;
       await Promise.all([
         processVerbatim(textForExpensive),
         canFingerprint
           ? runFingerprintSearch(textForExpensive, true)
+          : Promise.resolve(),
+        canSemantic
+          ? runSemanticSearch(textForExpensive)
           : Promise.resolve(),
       ]);
     } else if (workerBasicReady && !textForExpensive) {
@@ -2276,7 +2802,7 @@ async function startDeepgram(config = {}) {
   deepgramUserStopped = false;
   deepgramLastConfig  = config;   // save for auto-reconnect
 
-  const key = settings.deepgramApiKey || loadSettings().deepgramApiKey;
+  const key = settings.deepgramApiKey;
   if (!key) {
     broadcast({ type: 'listening-error', error: 'No Deepgram API key configured' });
     return { error: 'No Deepgram API key' };
@@ -2286,6 +2812,11 @@ async function startDeepgram(config = {}) {
   lastFingerprintSearch = 0;
   hasNewTranscript      = false;
   inBibleMode           = false;
+  clearTimeout(bibleModeClearTimer);   // a leftover timer from the previous
+                                        // session could otherwise fire mid-way
+                                        // through this new one and flip
+                                        // inBibleMode off unexpectedly
+  bibleModeClearTimer   = null;
   interimDetectedRef    = null;
   lastInterimVerbatim   = 0;
   lastDirectRefTime     = 0;
@@ -2314,7 +2845,7 @@ async function startDeepgram(config = {}) {
     deepgramConnection = dg.listen.live({
       // Spoken language comes from Settings → Language. 'multi' asks Deepgram
       // to auto-detect, for services that code-switch mid-sentence.
-      model: 'nova-2', language: (loadSettings().sttLanguage || 'en-US'), smart_format: true, punctuate: true,
+      model: 'nova-2', language: (settings.sttLanguage || 'en-US'), smart_format: true, punctuate: true,
       interim_results: true, utterance_end_ms: 1200, endpointing: 300,
       encoding: 'linear16', sample_rate: 16000, channels: 1,
       no_delay: true, filler_words: false, diarize: false,
@@ -2497,11 +3028,7 @@ function tryRangeAdvanceByRef(verses) {
   const nextInQueue = rangeQueue[0];
   if (nextInQueue && verses[0].book === nextInQueue.book &&
       verses[0].chapter === nextInQueue.chapter && verses[0].verse === nextInQueue.verse) {
-    console.log(`[Range] Explicit ref match "${verses[0].reference}" → advancing`);
-    rangeAdvancing = true;
-    rangeLastAdvanceAt = Date.now();
-    advanceRangeQueue().finally(() => { rangeAdvancing = false; });
-    return true;
+    return requestRangeAdvance(`Explicit ref match "${verses[0].reference}"`);
   }
   return false;
 }
@@ -2552,22 +3079,37 @@ async function processStreamText(text) {
 
     if (confirmed.length) {
       const top = confirmed.slice(0, 5);
-      broadcastDetection(top, 'stream', top[0].similarity || 0.90, 'viewer');
+      // Give the mis-citation corrector first look — see maybeCorrectMiscitation
+      // for why this now applies to stream hits too, not just verbatim.
+      const corrected = maybeCorrectMiscitation(top[0], text);
+      if (corrected) return;
+      const sent = await broadcastDetection(top, 'stream', top[0].similarity || 0.90, 'viewer');
+      if (sent === 'viewer') console.log(`[Stream] "${top[0].reference}" confirmed-alignment (matchedIdf=${(top[0].matchedIdf ?? 0).toFixed(1)}) → viewer`);
     }
     if (anchors.length) {
       // ── Unique-phrase fast-share (df === 1) ───────────────────────────────
-      // A df=1 four-gram is unique to exactly ONE verse in the entire Bible, so
-      // an exact (stemmed) hit is as certain as a spoken citation — "God so
-      // loved the world" can only be John 3:16. Sequential confirmation (6
-      // aligned words) is what makes a scrambled or filler-laden reading
-      // ("for God — you know — so loved the world, and he gave his only son")
-      // never reach the viewer: the filler burns the alignment budget and the
-      // quote ends before 6 words line up. Share these the instant the 4th
-      // distinctive word lands. Verified safe against conversational speech —
-      // ordinary sermon prose produces no df=1 anchors.
-      const unique = anchors.filter(r => r.df === 1);
+      // A df=1 four-gram is unique to exactly ONE verse in the entire Bible —
+      // but "unique COMBINATION" doesn't mean the individual words are rare.
+      // Real incident this caught: a preacher praying "our father in the
+      // Lord" fast-shared Genesis 42:32 ("...our father in the land of
+      // Canaan...") straight to the live screen — "our father in the" is 4
+      // completely ordinary words that just happen to combine into a df=1
+      // anchor by accident of that verse's specific wording, not because the
+      // preacher was quoting it. The old comment here claimed this was
+      // "verified safe against conversational speech" — it wasn't; that
+      // claim predates this incident. Same fix as the confirmed-alignment
+      // path below: require real identifying weight (IDF), not just
+      // uniqueness-as-a-combination, before trusting it like a citation.
+      const unique = anchors.filter(r => r.df === 1 && r.idf >= STREAM_IDF_FULL_CONFIDENCE);
       if (unique.length) {
-        broadcastDetection(unique.slice(0, 1), 'stream', Math.max(0.90, unique[0].similarity || 0.90), 'viewer');
+        // df=1 anchors carry their weight as `.idf`, not `.matchedIdf` —
+        // alias it so maybeCorrectMiscitation's check (shared with the
+        // confirmed-alignment path above) applies here too.
+        const corrected = maybeCorrectMiscitation({ ...unique[0], matchedIdf: unique[0].idf }, text);
+        if (!corrected) {
+          const sent = await broadcastDetection(unique.slice(0, 1), 'stream', Math.max(0.90, unique[0].similarity || 0.90), 'viewer');
+          if (sent === 'viewer') console.log(`[Stream] "${unique[0].reference}" df=1 unique-phrase (idf=${unique[0].idf.toFixed(1)}) → viewer`);
+        }
       }
 
       // Anchor-only, shared phrase (df 2, or df 3-5 inside the sermon's active
@@ -2619,9 +3161,47 @@ function rankStreamHits(results) {
 // ── Reference detection ───────────────────────────────────────────────────
 // isFinal: true → normal flow (can auto-send to PP)
 // isFinal: false → from interim → route to suggestions, lighter dedup
+// A segment ending on one of these invites a continuation ("...verse one to
+// two AND", "...verse one TO", a trailing comma) — even though it may parse
+// to a technically-valid reference on its own (e.g. a truncated Luke 10:1-2
+// out of what was actually "...one to two and seventeen to 19"), firing it
+// immediately is exactly the failure mode the join fix below exists to
+// avoid. Worse than just being incomplete: once fired, the NEXT segment's
+// correctly-reconstructed full citation starts with that same verse and
+// gets silently swallowed by broadcastDetection's own viewer dedup ("we
+// just sent this verse a moment ago") — so the truncated version wins and
+// the complete one never reaches the screen at all. Real incident: this
+// exact sequence on "Luke chapter 10 from verse one to two and seventeen
+// to 19" sent only verses 1-2, and the reconstructed 1-2+17-19 never
+// landed.
+const DANGLING_CONTINUATION_WORDS = new Set(['and', 'to', 'through', 'verse', 'verses']);
+
 async function processForReferences(transcript, isFinal) {
   if (!workerBasicReady) return false;
-  const refs = parseAllSpokenReferences(transcript, inBibleMode);
+  let refs = parseAllSpokenReferences(transcript, inBibleMode);
+
+  const tailWord = transcript.trim().replace(/[.,!?]+$/, '').split(RE_SPACES).pop()?.toLowerCase();
+  if (refs.length && isFinal && DANGLING_CONTINUATION_WORDS.has(tailWord)) {
+    refs = [];   // hold off — let the join below (on the NEXT segment) finish it
+  }
+
+  // A citation split across an STT pause ("Psalm 63 from verse one to" |
+  // "three, he said...") won't parse from the current segment alone — retry
+  // against the previous final segment joined with this one before falling
+  // back to weaker methods. Final segments only (interim text isn't a
+  // stable append-only prefix for Whisper — see streamNewWords above), and
+  // only within a short window so an unrelated sentence can't get spliced
+  // into a citation by coincidence.
+  if (!refs.length && isFinal && prevFinalTranscript
+      && Date.now() - prevFinalTranscriptAt < PREV_FINAL_JOIN_WINDOW_MS) {
+    const joinedRefs = parseAllSpokenReferences(`${prevFinalTranscript} ${transcript}`, inBibleMode);
+    if (joinedRefs.length) {
+      console.log(`[Direct] Resolved from joined segments: "${prevFinalTranscript}" + "${transcript}"`);
+      refs = joinedRefs;
+    }
+  }
+  if (isFinal) { prevFinalTranscript = transcript; prevFinalTranscriptAt = Date.now(); }
+
   if (!refs.length) {
     // No full refs, but the preacher may have named a bare book ("Exodus…")
     // ahead of a monologue that ends with "chapter 3 verse 13". Update the
@@ -2686,7 +3266,8 @@ async function processForReferences(transcript, isFinal) {
         // For ranges: first verse goes to viewer immediately, rest queue for operator
         if (verses.length > 1) setRangeQueue(verses);
         else clearRangeQueue();
-        broadcastDetection(verses, 'direct', 1.0, 'viewer');
+        const sent = await broadcastDetection(verses, 'direct', 1.0, 'viewer');
+        if (sent === 'viewer') console.log(`[Direct] "${verses[0].reference}"${verses.length > 1 ? ` (+${verses.length - 1} more in range)` : ''} → viewer`);
       } else {
         // ── Interim range advance via explicit reference ──────────────────────
         if (tryRangeAdvanceByRef(verses)) return true;
@@ -2698,8 +3279,9 @@ async function processForReferences(transcript, isFinal) {
         interimDetectedRef  = topKey;
         interimDetectedTime = now;
         // Also feed through the main dedup so final won't re-fire
-        lastDetectedRef  = topKey;
-        lastDetectedTime = now;
+        lastDetectedRef    = topKey;
+        lastDetectedTime   = now;
+        lastDetectedMethod = 'direct';
         broadcast({
           type: 'detection',
           verses,
@@ -2716,6 +3298,8 @@ async function processForReferences(transcript, isFinal) {
             lastSentBookTime = now;
             lastDirectSentVerse = verses[0];
             lastDirectSentTime  = now;
+            lastDirectSentWords = wordsHeard;
+            console.log(`[Direct] "${verses[0].reference}" (interim) → viewer`);
             sendToOutputs(verses[0]).catch(err => console.warn('[Server] sendToOutputs failed:', err.message));
           }
         }
@@ -2749,22 +3333,51 @@ async function processVerbatim(transcript) {
     const msg     = await workerCall('verbatimSearchBatch', { texts, minWords: 6, limit: 3 }, 4000);
     const results = msg.results || [];
     if (!results.length) return false;
-    const viewer = results.filter(r => r.similarity >= 0.92);
+    const viewer = results.filter(r => r.similarity >= VERBATIM_AUTOSEND_MIN || r.matchedIdf >= VERBATIM_CERTAIN_IDF);
     if (viewer.length) {
-      const top        = viewer[0];
-      const vKey       = `${top.book}|${top.chapter}|${top.verse}`;
-      const corrected  = maybeCorrectMiscitation(top);
+      const top    = viewer[0];
+      const vKey   = `${top.book}|${top.chapter}|${top.verse}`;
+      const corrected = maybeCorrectMiscitation(top, transcript);
       if (corrected) return true;   // replaced on-air, skip the normal viewer broadcast
-      const boosted = ensembleScore(vKey, 'verbatim', top.similarity, viewer);
-      broadcastDetection(viewer, 'verbatim', boosted, 'viewer');
+      const viaIdf = top.similarity < VERBATIM_AUTOSEND_MIN;
+      // top.similarity itself stays coverage-diluted (76% is an honest
+      // reflection of "we only heard part of the verse") — that's still
+      // true and worth keeping for display/logging. But the SEND decision
+      // now runs on identification certainty, not completeness, so the
+      // score actually used for the auto-send gate needs to reflect that
+      // certainty too, or broadcastDetection's own VIEWER_MIN_SCORE check
+      // would just demote it straight back to Candidates and undo this.
+      const effectiveScore = viaIdf ? Math.max(top.similarity, 0.90) : top.similarity;
+      const boosted = ensembleScore(vKey, 'verbatim', effectiveScore, viewer);
+      const sent = await broadcastDetection(viewer, 'verbatim', boosted, 'viewer');
+      // Logged after the call, gated on the ACTUAL landing target —
+      // broadcastDetection returns 'viewer'/'suggestions'/false now, not a
+      // plain boolean. It used to be a boolean, and `if (sent)` was true
+      // whenever the continuity gate demoted this to Candidates too (it
+      // still successfully broadcasts, just to 'suggestions'), which
+      // printed a false "→ viewer" in the same breath as the [Guard]
+      // line reporting it was blocked. Real incident this caused: Matthew
+      // 20:17 logged "boosted=90% → viewer" one line after "[Guard]
+      // Blocked non-sequential auto-send ... demoted to Candidates" for
+      // the exact same detection.
+      if (sent === 'viewer') console.log(`[Verbatim] "${top.reference}" raw=${(top.similarity*100).toFixed(0)}% boosted=${(boosted*100).toFixed(0)}%${viaIdf ? ` (via matchedIdf=${top.matchedIdf.toFixed(1)}, sequence-certain despite partial coverage)` : ''} → viewer`);
       // Feed high-confidence verbatim hits into sermon context + reading mode tracker
       if (top.similarity >= 0.92) {
         updateSermonContext({ book: top.book, chapter: top.chapter, verse: top.verse });
         trackReadingModeHit(top, top.similarity);
       }
+    } else if (results[0]) {
+      // Below the auto-send bar but still worth a human's attention — a 75%+
+      // verbatim near-miss (scoring is IDF-weighted now, so this means
+      // "probably right, missing a bit of the verse's identifying content")
+      // used to just vanish with zero trace. Land it in Candidates instead;
+      // broadcastDetection's own suggestion floor silently drops anything
+      // weaker than that, so the log line reflects which outcome actually
+      // happens rather than always claiming "candidates".
+      const destination = results[0].similarity >= SUGGESTION_MIN_SCORE ? '→ candidates' : 'dropped';
+      console.log(`[Verbatim] "${results[0].reference}" raw=${(results[0].similarity*100).toFixed(0)}% — below ${(VERBATIM_AUTOSEND_MIN*100).toFixed(0)}% auto-send bar, ${destination}`);
+      broadcastDetection(results.slice(0, 1), 'verbatim', results[0].similarity, 'suggestions');
     }
-    // Sub-0.92 verbatim near-misses are dropped entirely — Candidates is
-    // context (fingerprint) suggestions only; auto-deploy is direct + verbatim.
     return true;
   } catch { return false; }
 }
@@ -2774,20 +3387,137 @@ async function processVerbatim(transcript) {
 // Replace on-air with Y and tag it as a correction so the operator sees what
 // happened. Returns true if a correction fired (caller should skip the normal
 // broadcast path).
-function maybeCorrectMiscitation(topMatch) {
+// How much matched IDF weight is trusted to correct an on-screen citation
+// on its own, independent of raw similarity — same principle as
+// VERBATIM_CERTAIN_IDF. Set just above ANCHOR_CONFIRM_IDF (12) — that's
+// already the bar this codebase trusts to auto-send a BRAND NEW verse from
+// a cold, unestablished session; trusting a similar bar to correct WITHIN
+// an already-cited context (a narrower, arguably safer situation) is
+// consistent, not looser. First calibrated at 22 from principle alone, then
+// found empirically too high: a confirmed real mis-citation (cited Luke
+// 6:14, actually reading Luke 4:14) scored matchedIdf=16.7 and got wrongly
+// left uncorrected until this was lowered.
+const CORRECTION_MIN_IDF = 15;
+
+function maybeCorrectMiscitation(topMatch, sourceText) {
   if (settings.autoCorrect === false) return false;
   if (!lastDirectSentVerse) return false;
   const now = Date.now();
-  if (now - lastDirectSentTime > CORRECTION_WINDOW_MS) return false;
-  if (topMatch.similarity < CORRECTION_MIN_SIMILARITY) return false;
+  if (wordsHeard - lastDirectSentWords > CORRECTION_WINDOW_WORDS) return false;
+  if (now - lastDirectSentTime < CORRECTION_IMMUNITY_MS) return false;
+
+  // If the cited book has ALREADY been independently reconfirmed by a
+  // separate viewer-landing detection since the citation went out, the
+  // citation is validated — the preacher really is reading that passage —
+  // so a later, different-book match isn't "the truth behind a garbled
+  // citation," it's just unrelated noise/overlap and shouldn't retroactively
+  // erase a verse that's already been confirmed correct twice over.
+  // lastDetectedRef/Time (not lastSentBook/lastSentBookTime — that pair is
+  // gated behind the OUTPUT dedup, a separate concern, and stayed frozen at
+  // the citation's own send in the exact case this exists for) update
+  // unconditionally whenever a *different* verse lands on viewer, deduped
+  // output or not. Real incident: "Ephesians 3:17-19" cited and its range
+  // actively advancing, "Ephesians 3:18" independently confirmed via stream
+  // moments later — then an unrelated "Psalms 112:3" match (previously
+  // Guard-blocked as noise three times in the same log) "corrected" 3:17
+  // right off the Live Queue mid-range. A genuine mis-citation never gets
+  // this reconfirmation, since nothing else in the wrongly-cited book is
+  // actually being read — lastDetectedTime stays equal to lastDirectSentTime
+  // (same event, the citation itself), so this only screens out the
+  // false-positive pattern.
+  const lastDetectedBook = lastDetectedRef ? lastDetectedRef.split('|')[0] : null;
+  if (lastDetectedBook === lastDirectSentVerse.book && lastDetectedTime > lastDirectSentTime) return false;
+
+  // topMatch itself is already the thing on screen — nothing left to
+  // correct. The Guard's own stale-override (3x independent re-detection)
+  // already promotes a repeatedly-confirmed candidate to viewer on its own;
+  // once that's happened, a LATER, redundant detection pass for that exact
+  // same verse still reaches here (the same candidate keeps getting
+  // re-detected as the preacher keeps reading it) and — since that send
+  // updated lastDetectedRef to the NEW verse, not the original citation's
+  // book — the book-reconfirmation check above no longer protects the
+  // original citation either. Real incident: "Matthew 13:44" cited,
+  // "Proverbs 3:19" independently re-detected 3x and let through by the
+  // stale-override straight to viewer, then a later repeat pass for that
+  // same already-showing "Proverbs 3:19" ran through here too and fired a
+  // second, redundant "correction" — displaying nothing new but retro-
+  // actively erasing "Matthew 13:44" from the Live Queue's history anyway.
+  const topKey = `${topMatch.book}|${topMatch.chapter}|${topMatch.verse}`;
+  if (topKey === lastDetectedRef) return false;
+
+  // If the text driving THIS match itself names the new book out loud, the
+  // preacher is announcing a fresh citation, not silently misquoting one —
+  // let the normal direct-citation path own it (it'll send its own
+  // "[Direct]" a moment later once it finishes parsing chapter/verse) rather
+  // than smashing it into a "correction" of whatever was cited before. Real
+  // incident this caused: preacher explicitly cited "2 Corinthians 4:4",
+  // finished that point, then explicitly cited "Matthew chapter 17 and
+  // verse 21" and began quoting it — the stream detector matched the quoted
+  // content before the direct parser finished joining the split citation
+  // phrase, so this fired first and erased the (correct, unrelated)
+  // 2 Corinthians 4:4 card from the Live Queue under a false "corrected"
+  // label. Only checked when sourceText is actually a fresh citation
+  // attempt; quoted content with no book name (the real mis-citation case —
+  // "John 10:1" cited, Psalm 121:1 actually read) is untouched by this.
+  if (sourceText) {
+    const mentioned = detectBookMentions(sourceText, true);
+    if (mentioned.includes(topMatch.book) && topMatch.book !== lastDirectSentVerse.book) return false;
+  }
+
+  // Two independent ways to qualify: very high raw similarity (verbatim's
+  // own semantics), or very high absolute matched-IDF weight (stream's).
+  // Neither alone should be lowered — this ADDS a second acceptance path
+  // rather than loosening the first.
+  const strongEnough = topMatch.similarity >= CORRECTION_MIN_SIMILARITY
+    || (topMatch.matchedIdf != null && topMatch.matchedIdf >= CORRECTION_MIN_IDF);
+  if (!strongEnough) return false;
 
   const sameVerse = topMatch.book === lastDirectSentVerse.book
                  && topMatch.chapter === lastDirectSentVerse.chapter
                  && topMatch.verse === lastDirectSentVerse.verse;
   if (sameVerse) return false;   // verbatim agrees with what was cited — nothing to correct
 
+  // Never "correct" forward progress within the SAME book+chapter as what
+  // was cited — that isn't a mis-citation, it's the preacher continuing to
+  // read (same principle as the continuity gate's same-chapter fast-path).
+  // This has to hold whether or not the original citation was a formal
+  // multi-verse range: checking membership in rangeAllVerses alone missed
+  // it for a plain single-verse citation ("Ezekiel 47:1") followed by the
+  // preacher just continuing to verse 2, 3... with no re-citation — there's
+  // no range object to check membership against in that case, only
+  // lastDirectSentVerse itself. Real regression this caused: verse 1 of a
+  // genuinely correct citation/range got "corrected" to a later verse in
+  // that SAME passage, which doesn't just mis-score it — showInViewer
+  // removes the correctedFrom card from the Live Queue entirely, silently
+  // erasing a verse that was correctly on screen. Backward moves and any
+  // different book/chapter stay eligible — only same-book-same-chapter
+  // FORWARD is excluded, since that's the one case the normal continuity
+  // path already handles correctly on its own.
+  const forwardWithinCitedChapter = topMatch.book === lastDirectSentVerse.book
+    && topMatch.chapter === lastDirectSentVerse.chapter
+    && topMatch.verse > lastDirectSentVerse.verse;
+  if (forwardWithinCitedChapter) return false;
+  const withinEstablishedRange = rangeAllVerses.some(v =>
+    v.book === topMatch.book && v.chapter === topMatch.chapter);
+  if (withinEstablishedRange) return false;
+
+  // No book/chapter/distance restriction — this app is meant to be a
+  // source of truth for what was actually SAID, not what was CITED. A
+  // preacher citing "John 10:1" but actually reading Psalm 121:1 needs to
+  // self-correct regardless of how far the citation and the real content
+  // are apart; requiring "same chapter, verse ±2" (the old restriction)
+  // only ever catches the narrowest case (a mis-remembered verse number)
+  // and leaves every mis-heard BOOK or CHAPTER — the far more common
+  // failure, since Deepgram garbles chapter/verse digits constantly —
+  // stuck on screen with no way to self-correct. What makes this safe
+  // instead is the confidence bar above: routine isolated phrase overlap
+  // never reaches CORRECTION_MIN_SIMILARITY or CORRECTION_MIN_IDF by
+  // accident — those thresholds are the actual safety net now, not
+  // proximity to the (possibly wrong) citation.
+
   const correctedFrom = lastDirectSentVerse.reference;
-  console.log(`[Correct] Replacing "${correctedFrom}" with verbatim hit "${topMatch.reference}" (${(topMatch.similarity*100).toFixed(0)}%)`);
+  const viaIdf = topMatch.similarity < CORRECTION_MIN_SIMILARITY;
+  console.log(`[Correct] Replacing "${correctedFrom}" with ${topMatch.method || 'verbatim'} hit "${topMatch.reference}" (${(topMatch.similarity*100).toFixed(0)}%${viaIdf ? `, via matchedIdf=${topMatch.matchedIdf.toFixed(1)}` : ''})`);
 
   // Consume the window so we don't repeatedly correct from the same stale ref.
   lastDirectSentVerse = null;
@@ -2797,7 +3527,7 @@ function maybeCorrectMiscitation(topMatch) {
   broadcast({
     type: 'detection',
     verses: [correctedVerse],
-    method: 'verbatim',
+    method: topMatch.method || 'verbatim',
     topScore: topMatch.similarity,
     target: 'viewer',
     corrected: true,
@@ -2807,10 +3537,11 @@ function maybeCorrectMiscitation(topMatch) {
 
   // Push to outputs directly — bypass broadcastDetection's same-key dedup since
   // we specifically want to replace the mis-cited verse on ProPresenter/OBS.
-  lastSentBook     = topMatch.book;
-  lastSentBookTime = now;
-  lastDetectedRef  = `${topMatch.book}|${topMatch.chapter}|${topMatch.verse}`;
-  lastDetectedTime = now;
+  lastSentBook       = topMatch.book;
+  lastSentBookTime   = now;
+  lastDetectedRef    = `${topMatch.book}|${topMatch.chapter}|${topMatch.verse}`;
+  lastDetectedTime   = now;
+  lastDetectedMethod = topMatch.method || 'verbatim';
   sendToOutputs(topMatch).catch(err => console.warn('[Server] sendToOutputs (correction) failed:', err.message));
   return true;
 }
@@ -2856,7 +3587,14 @@ async function runFingerprintSearch(currentSegment, skipNewTranscriptCheck = fal
 
     if (contextHint) {
       const top = contextHint.citations[0];
-      console.log(`[Context] ${contextHint.citations.length} citation(s) — nearest: ${top.book} ${top.chapter}:${top.verse} (${Math.round(top.age / 1000)}s ago)`);
+      // Log only when the nearest citation (or the count) actually changes —
+      // the age-in-seconds ticking up on its own isn't new information worth
+      // a fresh line every second for the whole service.
+      const key = `${contextHint.citations.length}|${top.book}|${top.chapter}|${top.verse}`;
+      if (key !== lastLoggedContextKey) {
+        lastLoggedContextKey = key;
+        console.log(`[Context] ${contextHint.citations.length} citation(s) — nearest: ${top.book} ${top.chapter}:${top.verse}`);
+      }
     }
 
     // Single round-trip — worker iterates all clauses and returns best result
@@ -2871,24 +3609,90 @@ async function runFingerprintSearch(currentSegment, skipNewTranscriptCheck = fal
     // they never auto-deploy. Suppressed briefly after a direct citation so the
     // operator isn't shown a redundant "context" suggestion for a verse the
     // preacher just explicitly cited.
-    // Limit to top-1 only: the noise problem came from all 5 fingerprint results
-    // flooding the panel with unrelated verses at similar scores.
     // Reverted from a brief experiment at 0.80: real transcripts showed it let
     // through more wrong-verse noise without actually catching the paraphrases
     // it was meant to rescue — those scored well below even 0.80 (~55%), so the
-    // lower floor bought nothing but noise. 0.85 stays the bar until there's a
-    // smarter lever than "just lower the number" for loose paraphrases.
-    if (!recentDirectRef && results[0].similarity >= 0.85) {
-      const fpKey   = `${results[0].book}|${results[0].chapter}|${results[0].verse}`;
-      const boosted = ensembleScore(fpKey, 'fingerprint', results[0].similarity, results);
-      broadcastDetection(results.slice(0, 1), 'fingerprint', boosted, 'suggestions');
-      if (boosted >= 0.87) {
-        updateSermonContext({ book: results[0].book, chapter: results[0].chapter, verse: results[0].verse });
+    // lower floor bought nothing but noise. Raised again 0.85 → 0.87 to match
+    // SUGGESTION_MIN_SCORE — the panel-wide floor is what should decide "worth
+    // showing" now, not a fingerprint-specific number that happened to differ
+    // from it by 2 points for no real reason.
+    //
+    // Show every result that clears the bar, not just the single best one
+    // (was hard-capped at top-1 to fight noise, but that meant a genuinely
+    // good second/third match never got a chance to show up either — the
+    // bar itself is what should be doing the noise filtering, not an
+    // arbitrary count cap). Still bounded (3) so a flood of near-tied
+    // results can't overwhelm the panel.
+    if (!recentDirectRef) {
+      const qualifying = results.filter(r => r.similarity >= SUGGESTION_MIN_SCORE).slice(0, 3)
+        .map(r => ({ ...r, similarity: ensembleScore(`${r.book}|${r.chapter}|${r.verse}`, 'fingerprint', r.similarity, results) }));
+      if (qualifying.length) {
+        // Logged AFTER broadcastDetection, gated on its own return value —
+        // this used to log unconditionally before the call, which kept
+        // printing "→ candidates" even on passes broadcastDetection's own
+        // dedup silently swallowed (the same still-lingering verse re-
+        // qualifying on nearly every search pass for a while), making a
+        // single real suggestion look like dozens in the log.
+        const sent = await broadcastDetection(qualifying, 'fingerprint', qualifying[0].similarity, 'suggestions');
+        if (sent) console.log(`[Fingerprint] ${qualifying.map(r => `"${r.reference}" ${(r.similarity*100).toFixed(0)}%`).join(', ')} → candidates`);
+        if (qualifying[0].similarity >= 0.87) {
+          updateSermonContext({ book: qualifying[0].book, chapter: qualifying[0].chapter, verse: qualifying[0].verse });
+        }
       }
     }
   } catch (err) {
     if (!err.message?.includes('timeout')) {
       console.warn('[Server] Fingerprint search error:', err.message);
+    }
+  }
+}
+
+// ── Semantic search (meaning-based Candidates) ─────────────────────────────
+// The "Idea-Matcher" — unlike fingerprint (shared vocabulary) this compares
+// MEANING via embeddinggemma-300m, so a paraphrase that shares almost no
+// literal words with a verse can still surface it. Suggestions-only, same
+// as fingerprint: this never drives an auto-send decision, it only ever
+// populates Candidates for a human to glance at and promote.
+//
+// Started at 0.78 (the gap between 0.83-0.95 genuine-match and 0.65-0.73
+// unrelated-pair scores on held-out test phrases). Raised to match
+// SUGGESTION_MIN_SCORE (0.87) at the operator's request after real services
+// showed too much noise getting through — this does mean some genuine
+// paraphrase matches in the 0.78-0.87 range (a real, correct verse, just
+// not phrased close enough to score higher) now get filtered out too.
+// That's a deliberate precision-over-recall tradeoff, not an oversight: a
+// human always sees the transcript and can act on their own knowledge — a
+// suggestion panel that's wrong often enough to ignore helps no one, even
+// if raising the bar costs a few correct-but-lower-confidence calls.
+const SEMANTIC_MIN_SCORE      = SUGGESTION_MIN_SCORE;
+let lastSemanticSearch        = 0;
+const SEMANTIC_INTERVAL_MS    = 2000;   // heavier than fingerprint (embedding + 31k-vector scan) — don't run more than once per 2s
+
+async function runSemanticSearch(text) {
+  if (!workerSemanticReady) return;
+  const words = text.split(RE_SPACES).filter(Boolean);
+  if (words.length < 5) return;   // too short to embed meaningfully
+
+  try {
+    const recentDirectRef = Date.now() - lastDirectRefTime < DIRECT_REF_SUPPRESS_MS;
+    if (recentDirectRef) return;   // same suppression fingerprint uses — don't second-guess a citation just made
+
+    const msg     = await workerCall('semanticSearch', { text, limit: 5 }, 3000);
+    const results = msg.results || [];
+    if (!results.length) return;
+
+    // Same reasoning as fingerprint above — show everything that clears the
+    // bar (bounded to 3), not just the single top hit.
+    const qualifying = results.filter(r => r.similarity >= SEMANTIC_MIN_SCORE).slice(0, 3)
+      .map(r => ({ ...r, similarity: ensembleScore(`${r.book}|${r.chapter}|${r.verse}`, 'semantic', r.similarity, results) }));
+    if (!qualifying.length) return;
+    // See the matching comment in runFingerprintSearch — logged after the
+    // call, gated on whether anything actually reached the UI.
+    const sent = await broadcastDetection(qualifying, 'semantic', qualifying[0].similarity, 'suggestions');
+    if (sent) console.log(`[Semantic] ${qualifying.map(r => `"${r.reference}" ${(r.similarity*100).toFixed(0)}%`).join(', ')} → candidates`);
+  } catch (err) {
+    if (!err.message?.includes('timeout')) {
+      console.warn('[Server] Semantic search error:', err.message);
     }
   }
 }
@@ -2934,8 +3738,109 @@ async function broadcastDetection(verses, method, topScore, target) {
     target = 'suggestions';
   }
 
+  // ── Continuity gate ────────────────────────────────────────────────────────
+  // A fuzzy (verbatim/fingerprint) hit is only trusted to auto-send while a
+  // book is "active" (something was sent in the last SAME_BOOK_WINDOW_MS) if
+  // it is the *immediate next verse* in that same book/chapter — the one
+  // legitimate case this needs to cover automatically is a preacher reading
+  // straight down a passage. Anything else — a different book, a different
+  // chapter, or a verse that isn't simply current+1 — is far more likely to
+  // be an isolated word-overlap false positive than a real, un-cited jump;
+  // a genuine topic/passage change is always cited explicitly (method
+  // 'direct'), never inferred from a phrase match alone. Demote instead of
+  // drop: the operator still sees it and can promote it manually from
+  // Candidates if it's genuinely right.
+  // ANY non-'direct' method must ALWAYS pass through this gate, including on
+  // the very first detection of a session when lastSentBook isn't set yet —
+  // this used to only apply once a book was already "active" (something
+  // sent within SAME_BOOK_WINDOW_MS), on the reasoning that "nothing to be
+  // non-sequential relative to" meant nothing to guard against. Two separate
+  // real incidents proved that wrong: 'direct-partial' auto-sent "Esther
+  // 6:1" at 100% from an STT-hallucinated book context (fixed by special-
+  // casing that one method), then 'stream' independently did the same thing
+  // to "Acts 3:6" (matchedIdf=13.0, a phrase collision on "in the name of
+  // Jesus Christ of Nazareth") as literally the first detection of a later
+  // session — the special-case for 'direct-partial' alone didn't cover it,
+  // because the free pass was never about which method, it was about
+  // whether lastSentBook existed yet. A single ungated hit — of any kind —
+  // becoming "active" then blocks every correct detection that follows
+  // until it independently re-confirms 3x, which is exactly what turned
+  // this into a visible delay on the genuinely correct Psalms 92:13 right
+  // after Acts 3:6 wrongly went out. isSequential below is already false
+  // whenever lastOutputVerse is null, so removing the outer gate here
+  // doesn't change behavior for anything that WAS legitimately sequential —
+  // it just means a cold-start hit needs the same 3x-independent-
+  // reconfirmation (or an actual 'direct' citation) as any other non-
+  // sequential one, instead of a free pass for being first.
+  if (target === 'viewer' && method !== 'direct' && verses[0]) {
+    const bookActiveRecently = !!lastSentBook && now - lastSentBookTime < SAME_BOOK_WINDOW_MS;
+    // "Next verse" (reading forward) OR the SAME verse already on screen —
+    // the latter matters because two independent methods (e.g. the anchor
+    // trie and verbatim) can both correctly land on the verse that's ALREADY
+    // showing within the same moment; without this, the second, entirely
+    // correct confirmation gets treated as "non-sequential" purely because
+    // verse === current, not current+1, and gets needlessly demoted despite
+    // agreeing with what's already right on screen.
+    // Forward-within-the-same-chapter (verse >= current), not just exactly
+    // current+1 — a preacher skipping ahead a few verses while explaining
+    // (Genesis 41:38 → 44, Daniel 10:3 → 12) is completely normal reading,
+    // and a coincidental word-overlap match landing in the SAME chapter
+    // already-being-read is far less likely than one landing in a
+    // different book entirely. Widening this from strictly +1 measurably
+    // speeds up real sends: batch-testing against real sermon audio showed
+    // 7-18% of correct detections per service were only reaching the
+    // screen via the slower 3x-reconfirm override path purely because they
+    // skipped a few verses ahead within a chapter the preacher was already
+    // reading straight through. Backward jumps are still never trusted
+    // here (see isBackwardInSameBook below) — this only widens forward.
+    const isSequential = bookActiveRecently && lastOutputVerse
+      && verses[0].book    === lastOutputVerse.book
+      && verses[0].chapter === lastOutputVerse.chapter
+      && verses[0].verse   >= lastOutputVerse.verse;
+    // A verse BEHIND the one currently active, in the same book/chapter, is
+    // never eligible for the stale-override below — real incident: reading
+    // forward through a range, a phrase echoing an EARLIER verse in that
+    // same range got independently re-detected 3x (the preacher circling
+    // back to a word, or a plain word-overlap collision) and the override
+    // treated that exactly like the Psalm 110/111 case it exists for,
+    // yanking the display backward to a verse already read. The override's
+    // whole premise — "this keeps reasserting itself against a WRONG active
+    // reference, so it's probably the truth trying to get through" — only
+    // holds for catching up or jumping to a different book; going backward
+    // within a passage you're actively reading forward through is never
+    // that, so it just stays a Candidate no matter how many times it repeats.
+    const isBackwardInSameBook = lastOutputVerse
+      && verses[0].book    === lastOutputVerse.book
+      && verses[0].chapter === lastOutputVerse.chapter
+      && verses[0].verse   <  lastOutputVerse.verse;
+    if (!isSequential) {
+      // Track repeated independent re-detection of this exact non-active
+      // verse — see the comment on staleOverrideCandidate above.
+      if (staleOverrideCandidate && staleOverrideCandidate.key === topKey
+          && now - staleOverrideCandidate.lastSeenAt < STALE_OVERRIDE_WINDOW_MS) {
+        staleOverrideCandidate.count++;
+        staleOverrideCandidate.lastSeenAt = now;
+      } else {
+        staleOverrideCandidate = { key: topKey, count: 1, lastSeenAt: now };
+      }
+
+      if (staleOverrideCandidate.count >= STALE_OVERRIDE_COUNT && !isBackwardInSameBook) {
+        console.log(`[Guard] Overriding stale active reference: "${verses[0].reference}" independently re-detected ${staleOverrideCandidate.count}x while "${lastSentBook || 'nothing'}" (last: ${lastOutputVerse?.reference || '?'}) sat active — letting it through`);
+        staleOverrideCandidate = null;   // consumed
+      } else {
+        const backwardNote = isBackwardInSameBook && staleOverrideCandidate.count >= STALE_OVERRIDE_COUNT
+          ? ` (override count met but blocked — "${verses[0].reference}" is behind "${lastOutputVerse.reference}", never auto-sent)`
+          : '';
+        console.log(`[Guard] Blocked non-sequential auto-send: "${lastSentBook || 'nothing sent yet this session'}" active (last: ${lastOutputVerse?.reference || '?'}), ${method} hit "${verses[0].reference}" (${(topScore*100).toFixed(0)}%) — demoted to Candidates${backwardNote}`);
+        target = 'suggestions';
+      }
+    } else if (staleOverrideCandidate && staleOverrideCandidate.key === topKey) {
+      staleOverrideCandidate = null;   // it went through normally — stop tracking it
+    }
+  }
+
   // Below the suggestions floor → drop entirely. Not useful enough to show anywhere.
-  if (target === 'suggestions' && topScore < SUGGESTION_MIN_SCORE) return;
+  if (target === 'suggestions' && topScore < SUGGESTION_MIN_SCORE) return false;
 
   // ── Suggestions dedup ─────────────────────────────────────────────────────
   // Drop verses already suggested within the window; if nothing new remains,
@@ -2954,24 +3859,34 @@ async function broadcastDetection(verses, method, topScore, target) {
       recentSuggestions.set(key, now);
       return true;
     });
-    if (!verses.length) return;
+    if (!verses.length) return false;
   }
 
   // ── Deduplication (viewer-bound only) ─────────────────────────────────────
   // Prevents the same verse from flooding the SENT panel.
-  // Exception: if the new verse is from the same book as the last sent verse
+  // Exception 1: if the new verse is from the same book as the last sent verse
   // and arrives within SAME_BOOK_WINDOW_MS, always let it through — the preacher
   // is likely correcting or continuing in the same passage.
+  // Exception 2: an explicit citation (method 'direct') is never suppressed by
+  // a same-key send that came from a WEAKER method (verbatim/stream/etc.) —
+  // only by a previous 'direct' send. Real incident: the anchor trie fired
+  // "Luke 10:1" from a mid-citation fragment ("...verse one to two and"),
+  // then moments later the reference parser correctly reconstructed the FULL
+  // "Luke 10:1-2, 17-19" compound range from the joined segments — but
+  // because it starts with the same verse 1, the dedup below silently
+  // dropped the complete, authoritative citation in favor of the incomplete
+  // guess that happened to land first.
   if (target === 'viewer') {
     const dedupMs = method === 'direct' ? DIRECT_DEDUP_MS : DETECT_DEDUP_MS;
     const incomingBook = verses[0]?.book || null;
     const sameBookContinuation = incomingBook && incomingBook === lastSentBook
       && now - lastSentBookTime < SAME_BOOK_WINDOW_MS
       && topKey !== lastDetectedRef; // only bypass if it's actually a different verse
-    if (!sameBookContinuation) {
-      if (topKey && topKey === lastDetectedRef && now - lastDetectedTime < dedupMs) return;
+    const directOverridesWeaker = method === 'direct' && lastDetectedMethod !== 'direct';
+    if (!sameBookContinuation && !directOverridesWeaker) {
+      if (topKey && topKey === lastDetectedRef && now - lastDetectedTime < dedupMs) return false;
     }
-    if (topKey) { lastDetectedRef = topKey; lastDetectedTime = now; }
+    if (topKey) { lastDetectedRef = topKey; lastDetectedTime = now; lastDetectedMethod = method; }
   }
 
   if (target === 'viewer') await attachBibleTranslations(verses);
@@ -2987,19 +3902,29 @@ async function broadcastDetection(verses, method, topScore, target) {
       if (method === 'direct') {
         lastDirectSentVerse = verses[0];
         lastDirectSentTime  = now;
+        lastDirectSentWords = wordsHeard;
       }
       sendToOutputs(verses[0]).catch(err => console.warn('[Server] sendToOutputs failed:', err.message));
     }
   }
+  // Return the actual landing spot ('viewer' or 'suggestions'), not just a
+  // boolean — the continuity gate above can demote target to 'suggestions'
+  // and still reach here successfully, so a plain `true` previously let
+  // callers log "→ viewer" for something that had actually just been
+  // redirected to Candidates in the same call.
+  return target;
 }
 
 // ── Output routing — sends to all enabled destinations ───────────────────
 async function sendToOutputs(verse) {
   lastOutputVerse = verse;
-  const s = loadSettings();
+  // Use the in-memory settings object (kept in sync by POST /api/settings)
+  // rather than re-reading settings.json from disk on every single verse —
+  // this runs on the detection hot path and disk I/O here adds latency
+  // directly to seconds-to-screen.
   const tasks = [];
-  if (s.proPresenterEnabled !== false) tasks.push(sendToProPresenter(verse).catch(err => console.warn('[ProPresenter] send failed:', err.message)));
-  if (s.obsEnabled && obsConnected)    tasks.push(sendToOBS(verse).catch(err => console.warn('[OBS] send failed:', err.message)));
+  if (settings.proPresenterEnabled !== false) tasks.push(sendToProPresenter(verse).catch(err => console.warn('[ProPresenter] send failed:', err.message)));
+  if (settings.obsEnabled && obsConnected)    tasks.push(sendToOBS(verse).catch(err => console.warn('[OBS] send failed:', err.message)));
   await Promise.all(tasks);
 }
 
@@ -3101,6 +4026,17 @@ async function clearProPresenter() {
       await axios.delete(`${url}/v1/message/${_ppCachedMsg.msgId}/trigger`, { timeout: 3000 });
     }
   } catch {}
+}
+
+// Clearing the KAIRO output window alone isn't "the display" for an
+// operator running ProPresenter/OBS alongside it — those only ever receive
+// discrete sendToOutputs() pushes (see above), never a "clear" of their
+// own, so the last slide sent would keep showing there even after the
+// internal display went blank. Both layer-clear routes below call this for
+// the slide layer, matching what actually gets pushed externally today
+// (verse sends only — there's no media-layer equivalent sent out).
+async function clearExternalOutputs() {
+  await Promise.all([clearProPresenter(), clearOBSText()]);
 }
 
 async function testProPresenterConnection() {

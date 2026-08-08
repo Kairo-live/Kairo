@@ -290,17 +290,29 @@ function levenshtein(a, b) {
   return prev[b.length];
 }
 
+const LEVENSHTEIN_CACHE_MAX = 5000;
 const levenshteinCache = new Map();
 function cachedLevenshtein(a, b) {
   const key = a + '|' + b;
   if (levenshteinCache.has(key)) return levenshteinCache.get(key);
   const dist = levenshtein(a, b);
-  if (levenshteinCache.size > 5000) levenshteinCache.clear();
+  // Evict the single oldest entry (Map iteration order = insertion order)
+  // instead of wiping the whole cache — a full clear caused a burst of
+  // misses right after every 5000th call.
+  if (levenshteinCache.size >= LEVENSHTEIN_CACHE_MAX) {
+    levenshteinCache.delete(levenshteinCache.keys().next().value);
+  }
   levenshteinCache.set(key, dist);
   return dist;
 }
 
+// Every exported parse/detect function in this module funnels through here
+// first. The transcript pipeline should only ever pass strings, but a single
+// malformed STT payload (null/undefined/non-string) reaching this function
+// used to throw uncaught and could crash the live-service process — guard
+// it so bad input degrades to "no reference found" instead.
 function cleanReferenceText(text) {
+  if (typeof text !== 'string') return '';
   return text
     .replace(/[.,!?;]/g, ' ')
     .replace(/\bcolon\b/gi, ':')
@@ -394,7 +406,17 @@ function parseSpokenReference(text, inBibleMode = false) {
       if (vKeyword >= 0) {
         const r = consumeNumber(words, vKeyword + 1);
         if (r) { vStart = r.value; consumedTo = vKeyword + 1 + r.consumed; }
-      } else if (!skippedChapterKw) {               // "Jude 9" — first number is the verse
+      } else if (!skippedChapterKw && !AMBIGUOUS_BOOKS.has(words[i])) {
+        // "Jude 9" — first number is the verse, no "verse" keyword needed.
+        // Excluded for ambiguous single-chapter books (Obadiah, Jude,
+        // Philemon) — accepting literally ANY number that happens to
+        // follow, with zero structural cue, is exactly how an STT-
+        // hallucinated "Obadiah" ("...you owe him Obadiah for your desired
+        // change...", nothing to do with scripture) combined with an
+        // unrelated nearby number to compose a full, wrong citation
+        // (Obadiah 1:4). Same principle as the two other AMBIGUOUS_BOOKS
+        // guards above: require the actual word "verse" nearby, don't
+        // infer it from bare proximity alone.
         const r = consumeNumber(words, scan);
         if (r) { vStart = r.value; consumedTo = scan + r.consumed; }
       }
@@ -419,11 +441,26 @@ function parseSpokenReference(text, inBibleMode = false) {
 
     const maxCh = MAX_CHAPTERS[bookName];
     if (maxCh && chapter > maxCh) {
+      // The FIRST number exceeded this book's max chapter — try
+      // reinterpreting it as the verse, with the number right after it as
+      // the real chapter (a "book verse one chapter six"-style reordering).
+      // The "verse" keyword here used to be optional, accepting whatever
+      // number happened to come next even with no reference-shaped
+      // structure at all between the two numbers. Real incident: an STT-
+      // hallucinated "Esther" immediately followed by "twenty one" (from
+      // "21 days of prayer and fasting," nothing to do with scripture)
+      // satisfied this and composed a complete, wrong citation — Esther
+      // 1:20 — out of two coincidentally-adjacent numbers. Requiring the
+      // keyword closes that off while still supporting the genuine
+      // reordering this fallback exists for.
       let peekIdx = idx;
-      if (peekIdx < words.length && ['verse','verses','vers'].includes(words[peekIdx])) peekIdx++;
-      const peekVRes = consumeNumber(words, peekIdx);
-      if (peekVRes && peekVRes.value <= maxCh) {
-        return { book: bookName, chapter: peekVRes.value, verse: chapter };
+      const hasVerseCue = peekIdx < words.length && ['verse','verses','vers'].includes(words[peekIdx]);
+      if (hasVerseCue) {
+        peekIdx++;
+        const peekVRes = consumeNumber(words, peekIdx);
+        if (peekVRes && peekVRes.value <= maxCh) {
+          return { book: bookName, chapter: peekVRes.value, verse: chapter };
+        }
       }
       continue;
     }
@@ -455,7 +492,16 @@ function parseSpokenReference(text, inBibleMode = false) {
     if (!vRes) {
       const rawBookWord = words[i];
       const hadChapterKeyword = (i + consumed < words.length && words[i + consumed] === 'chapter');
-      if (AMBIGUOUS_BOOKS.has(rawBookWord) && !hadChapterKeyword && !inBibleMode) continue;
+      // inBibleMode used to also exempt ambiguous books from needing an
+      // explicit "chapter" keyword nearby — but inBibleMode stays true for
+      // 30s after ANY book mention, which is most of a sermon, so it barely
+      // narrowed anything. Real incident: Deepgram mis-heard "thy father"
+      // (an actual Isaiah 58:14 quote) as "thy Esther" — no "chapter"/
+      // "verse" cue anywhere nearby — and inBibleMode alone let it set
+      // book=Esther/chapter=4 as real context, which a later segment then
+      // fused a verse onto and auto-sent as a genuine 'direct' citation.
+      // Matches the bare-mention path's same rule two functions up.
+      if (AMBIGUOUS_BOOKS.has(rawBookWord) && !hadChapterKeyword) continue;
       return { book: bookName, chapter, verse: null };
     }
 
@@ -586,6 +632,7 @@ const BIBLE_TRIGGER_PHRASES = [
 ];
 
 function detectBookMentions(text, inBibleMode = false) {
+  if (typeof text !== 'string') return [];
   const lowered = text.toLowerCase().replace(/[.,!?;:]/g, ' ').replace(/\s+/g, ' ').trim();
   const books = [];
   const seen  = new Set();
@@ -653,11 +700,16 @@ function detectBookMentions(text, inBibleMode = false) {
 // ── Reference Context ─────────────────────────────────────────────────────
 // Tracks the last cited book/chapter so bare verse references like
 // "verse 17" or "and verse 18 says" can be resolved in context.
-// Context expires after 180 seconds of no explicit citation — long enough
-// to bridge a monologue between a bare book mention ("Exodus") and the
-// eventual chapter/verse call ("chapter 3 verse 13").
-
-const CONTEXT_EXPIRE_MS = 180000;
+// Context expires after 20 seconds of no explicit citation. Used to be 180s
+// ("long enough to bridge a monologue between a bare book mention and the
+// eventual chapter/verse call") — but a bare "verse N" resolved against a
+// book cited up to 3 minutes ago is exactly how a stale, unrelated citation
+// (e.g. a leftover "Acts" context resolving a much-later, unrelated "verse
+// eight") reaches the direct-send path, which — see resolvePartialReference
+// callers in server.js — is now gated (method 'direct-partial'), but keeping
+// the window tight is still the first line of defense: most real follow-up
+// citations land within a few seconds of the book mention, not minutes.
+const CONTEXT_EXPIRE_MS = 20000;
 
 class ReferenceContext {
   constructor() {
@@ -762,4 +814,5 @@ module.exports = {
   AMBIGUOUS_BOOKS,
   NUMBERED_BOOK_VARIANTS,
   WORD_TO_NUM,
+  consumeNumber,
 };
