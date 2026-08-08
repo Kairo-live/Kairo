@@ -1074,6 +1074,75 @@ function maybeHandleBareVerseNumber(transcript) {
   return true;
 }
 
+// ── Verse-end detection → bare-number "jump to verse N" ────────────────────
+// The bare-number continuation above only ever accepts exactly current+1
+// (pure sequential reading). This covers the other real case: a preacher
+// who finishes reading the verse on screen, then calls out a SPECIFIC verse
+// number to jump to ("...so do you. Now go to verse twenty-five!") rather
+// than reading straight through. Since the accepted value isn't constrained
+// to +1 here, a bare number alone isn't enough signal on its own — it's
+// gated on having just genuinely finished the on-screen verse (its own last
+// 3 meaningful words showing up in speech), the same principle the range-
+// advance "last-2-words" check above already uses, just generalized to any
+// currently-displayed verse (not only a formal multi-verse range) and
+// widened from 2 words to 3 for a slightly stronger signal given the wider
+// blast radius (any verse, not just +1).
+let verseEndDetectedAt = 0;
+const VERSE_END_NUMBER_WINDOW_MS = 8000;   // how long a finish-read stays "live" for a follow-up number
+const VERSE_JUMP_MAX_WORDS       = 4;      // "now verse twenty five" — leaves headroom without accepting a whole sentence
+let lastVerseJumpAt = 0;
+const VERSE_JUMP_COOLDOWN_MS = 2000;
+
+function markVerseEndIfJustFinished(transcript) {
+  const base = lastOutputVerse;
+  const text = base?.text || base?.kjv_text;
+  if (!text) return;
+  const tail3 = getLastMeaningfulWords(text, 3);
+  if (!tail3) return;
+  if (meaningfulWords(transcript).join(' ').includes(tail3)) verseEndDetectedAt = Date.now();
+}
+
+async function maybeHandleVerseEndNumberJump(transcript) {
+  if (!verseEndDetectedAt || Date.now() - verseEndDetectedAt > VERSE_END_NUMBER_WINDOW_MS) return false;
+  const now = Date.now();
+  if (now - lastVerseJumpAt < VERSE_JUMP_COOLDOWN_MS) return false;
+
+  const base = lastOutputVerse;
+  if (!base?.book || !base.chapter) return false;
+
+  // The number must be essentially the WHOLE segment (filler words aside) —
+  // not just present somewhere in it. A number buried in unrelated speech
+  // ("that's been true for twenty-five years") is exactly the false-
+  // positive case this guard exists to rule out, even inside the post-
+  // verse window.
+  const words = transcript.toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(RE_WHITESPACE, ' ')
+    .trim()
+    .split(' ')
+    .filter(Boolean)
+    .filter(w => !BARE_NUMBER_FILLER.has(w));
+  if (!words.length || words.length > VERSE_JUMP_MAX_WORDS) return false;
+
+  const num = consumeNumber(words, 0);
+  if (!num || num.consumed !== words.length) return false;
+  if (num.value === base.verse) return false;   // already the verse on screen — nothing to do
+
+  verseEndDetectedAt = 0;   // consume — a second stray number shouldn't jump again off the same finish
+  lastVerseJumpAt = now;
+
+  try {
+    const msg = await workerCall('directLookup', { book: base.book, chapter: base.chapter, verse: num.value }, 3000);
+    if (msg.result) {
+      console.log(`[VerseJump] End-of-verse number "${num.value}" → ${msg.result.reference}`);
+      clearRangeQueue();   // jumping to an arbitrary verse breaks any active sequential range
+      broadcastDetection([msg.result], 'direct', 1.0, 'viewer');
+      return true;
+    }
+  } catch {}
+  return false;
+}
+
 // Timing-based range auto-advance (estimated words-per-second × verse length)
 // used to live here. Removed: it measured pace from the last 15s of ALL
 // speech, including tangents — a preacher who reads a verse then spends a
@@ -2577,6 +2646,7 @@ async function handleTranscriptSegment(transcript, isFinal, confidence, speechFi
 
   streamNewWords(transcript, true);
   maybeHandleNextVerseTrigger(transcript).catch(() => {});
+  markVerseEndIfJustFinished(transcript);
 
   accumulateTopicWords(transcript);
   maybeRebuildTopicLibrary();
@@ -2643,6 +2713,13 @@ async function handleTranscriptSegment(transcript, isFinal, confidence, speechFi
 
   if (!foundRef) {
     foundRef = maybeHandleBareVerseNumber(transcript);
+  }
+
+  // Only tried once the exact +1 continuation above has already had its
+  // shot — that one's narrower match (must equal current+1 exactly) makes
+  // it the safer, more specific read of an ambiguous trailing number.
+  if (!foundRef) {
+    foundRef = await maybeHandleVerseEndNumberJump(transcript);
   }
 
   if (transcriptBuffer.length) {
