@@ -453,6 +453,18 @@ wss.on('connection', (ws) => {
   ws.on('error', () => clients.delete(ws));
   // Send current worker status on connect
   ws.send(JSON.stringify({ type: 'worker-status', ready: workerBasicReady }));
+  // Also send the current listening state — connection-state was previously
+  // only ever broadcast on a CHANGE (start/stop/error), never as a snapshot
+  // to a freshly (re)connected client. A client that reconnects after any
+  // WS drop — a server restart, a network blip, the app losing focus — had
+  // no way to learn the server's actual current state, so it just kept
+  // whatever isListening it had cached from before the drop. Real incident:
+  // restarting the server left a client showing a stale "Stop Listening"
+  // button (from before the drop) against a fresh server process with no
+  // active session at all — clicking it correctly posted to
+  // /api/stop-listening, but there was nothing to stop, so nothing
+  // happened, and the actual "Start" the user needed had no visible way in.
+  ws.send(JSON.stringify({ type: 'connection-state', state: connectionState }));
 
   // Forward binary audio frames to whichever engine is active.
   // - Deepgram: streamed straight to the WS connection (Deepgram does endpointing)
