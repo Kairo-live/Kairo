@@ -1651,7 +1651,7 @@ function updatePPTokenLabel() {
     : 'Token[0] = Verse Text · Token[1] = Reference';
 }
 
-settingsBtn?.addEventListener('click',    () => settingsModal?.classList.remove('hidden'));
+settingsBtn?.addEventListener('click',    () => { settingsModal?.classList.remove('hidden'); showFirstSettingsPane(); });
 closeSettingsBtn?.addEventListener('click', closeModal);
 cancelSettingsBtn?.addEventListener('click', closeModal);
 saveSettingsBtn?.addEventListener('click',  saveCurrentSettings);
@@ -5346,33 +5346,41 @@ document.getElementById('ts-translate-picker')?.addEventListener('click', e => {
 });
 
 // ── Settings split view ───────────────────────────────────────────────────
-// Left nav selects which category pane is shown on the right. The last-viewed
-// category is remembered so reopening Settings lands where you left off.
-(function initSettingsNav() {
+// Left nav selects which category pane is shown on the right. Always opens
+// on the FIRST nav item — previously remembered whichever pane was last
+// viewed (persisted to localStorage), which meant Settings could open
+// showing something like Content Studio at the far bottom of the list
+// with no visible indication of where you actually were, instead of a
+// predictable, consistent landing spot.
+function showSettingsPane(key) {
   const nav = document.getElementById('settings-nav');
   const panes = document.getElementById('settings-panes');
   if (!nav || !panes) return;
+  let matched = false;
+  nav.querySelectorAll('.settings-nav-item').forEach(b => {
+    const on = b.dataset.pane === key;
+    b.classList.toggle('active', on);
+    if (on) matched = true;
+  });
+  if (!matched) return;
+  panes.querySelectorAll('.settings-pane').forEach(p =>
+    p.classList.toggle('active', p.dataset.pane === key));
+  panes.scrollTop = 0;
+}
 
-  function show(key) {
-    let matched = false;
-    nav.querySelectorAll('.settings-nav-item').forEach(b => {
-      const on = b.dataset.pane === key;
-      b.classList.toggle('active', on);
-      if (on) matched = true;
-    });
-    if (!matched) return;
-    panes.querySelectorAll('.settings-pane').forEach(p =>
-      p.classList.toggle('active', p.dataset.pane === key));
-    panes.scrollTop = 0;
-    localStorage.setItem('kairo-settings-pane', key);
-  }
+function showFirstSettingsPane() {
+  const firstKey = document.querySelector('#settings-nav .settings-nav-item')?.dataset.pane;
+  if (firstKey) showSettingsPane(firstKey);
+}
 
+(function initSettingsNav() {
+  const nav = document.getElementById('settings-nav');
+  if (!nav) return;
   nav.addEventListener('click', (e) => {
     const btn = e.target.closest('.settings-nav-item');
-    if (btn) show(btn.dataset.pane);
+    if (btn) showSettingsPane(btn.dataset.pane);
   });
-
-  show(localStorage.getItem('kairo-settings-pane') || 'audio');
+  showFirstSettingsPane();
 })();
 
 // ── Resizable vertical splitters (drag a divider to trade height between two
@@ -6546,7 +6554,7 @@ async function saveSettingsPatch(patch) {
   window.__TAURI__.event.listen('menu-import',        () => clickWhenReady('import-look-btn'));
   window.__TAURI__.event.listen('menu-export-theme',  () => clickWhenReady('export-look-btn'));
   // KAIRO > Settings… (Cmd+,) — same panel the toolbar gear icon opens.
-  window.__TAURI__.event.listen('menu-settings',      () => settingsModal?.classList.remove('hidden'));
+  window.__TAURI__.event.listen('menu-settings',      () => { settingsModal?.classList.remove('hidden'); showFirstSettingsPane(); });
 })();
 
 // ═══════════════════════════════════════════════════════════════════════════
