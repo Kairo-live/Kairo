@@ -1873,7 +1873,6 @@ function startNdjsonStream(res) {
 // One install at a time — second call returns 409 instead of double-downloading.
 const whisperInstaller = require('./whisper_installer');
 let whisperInstallInProgress = false;
-const ollamaInstaller = require('./ollama_installer');
 
 app.get('/api/whisper/status', (_req, res) => {
   res.json({
@@ -2084,29 +2083,7 @@ app.get('/api/llm/status', async (_req, res) => {
     const models = (r.data?.models || []).map(m => m.name);
     res.json({ ok: true, url, models, configuredModel: ollamaModel() });
   } catch (e) {
-    res.json({ ok: false, url, error: e.code || e.message, installSupported: ollamaInstaller.supported() });
-  }
-});
-
-// One-click GUIDED install (macOS + Windows) — see ollama_installer.js for
-// why this can't be fully silent (Gatekeeper / the Windows installer's own
-// dialog both still need one user click through). Same NDJSON progress-bar
-// shape as /api/whisper/install.
-let ollamaInstallInProgress = false;
-app.post('/api/llm/install', async (_req, res) => {
-  if (ollamaInstallInProgress) {
-    return res.status(409).json({ error: 'install already in progress' });
-  }
-  ollamaInstallInProgress = true;
-  const send = startNdjsonStream(res);
-  try {
-    await ollamaInstaller.installOllama({ onProgress: send });
-    send({ phase: 'complete', ok: true });
-  } catch (err) {
-    send({ phase: 'complete', ok: false, error: err.message || String(err) });
-  } finally {
-    ollamaInstallInProgress = false;
-    res.end();
+    res.json({ ok: false, url, error: e.code || e.message });
   }
 });
 
