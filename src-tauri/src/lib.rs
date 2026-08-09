@@ -438,12 +438,27 @@ fn list_monitors(app: AppHandle) -> Result<Vec<serde_json::Value>, String> {
                 .map(|(i, m)| {
                     let pos = m.position();
                     let size = m.size();
+                    // available_monitors()/Monitor::size()/position() are PHYSICAL
+                    // pixels — but WebviewWindowBuilder's x/y/width/height (what
+                    // openDisplayOutput/openDisplayWindow feed straight from this
+                    // command's output) are LOGICAL pixels. On any monitor with a
+                    // scale factor != 1 (any Retina display), using physical values
+                    // unconverted places the window at the wrong coordinates
+                    // entirely — on a 3-monitor span this can easily land off
+                    // every actual screen, so the window opens and content renders
+                    // into it correctly, just somewhere nothing is ever watching.
+                    // Real incident this caused: "I see the displays but nothing
+                    // is sending" — detection was working and content WAS being
+                    // pushed to the window, it was just invisible off-screen.
+                    let scale = m.scale_factor();
+                    let logical_size = size.to_logical::<i32>(scale);
+                    let logical_pos  = pos.to_logical::<i32>(scale);
                     serde_json::json!({
                         "index": i,
-                        "width": size.width,
-                        "height": size.height,
-                        "left": pos.x,
-                        "top": pos.y,
+                        "width": logical_size.width,
+                        "height": logical_size.height,
+                        "left": logical_pos.x,
+                        "top": logical_pos.y,
                         "isPrimary": primary_pos.map(|p| p == *pos).unwrap_or(i == 0),
                     })
                 })
