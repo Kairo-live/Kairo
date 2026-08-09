@@ -2400,6 +2400,18 @@ select {
   flex-shrink: 0;
 }
 
+/* External Display's monitor picker + theme picker, side by side instead of
+   each taking the full card width on its own row — two short dropdowns
+   don't need to stack. */
+.output-picker-row {
+  display: flex;
+  gap: 10px;
+}
+.output-picker-row > .setting-group {
+  flex: 1;
+  min-width: 0;
+}
+
 /* ProPresenter's header sync row — toggle + dot + status, inline with the
    theme badge instead of its own row below (see index.html for why). */
 .pp-header-sync {

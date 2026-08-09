@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Identify</title>
+<style>
+  html, body {
+    margin: 0; padding: 0; width: 100%; height: 100%;
+    background: #0a0a0c;
+    display: flex; align-items: center; justify-content: center;
+    overflow: hidden;
+  }
+  #n {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    font-size: 22vw;
+    font-weight: 700;
+    color: #e8404a;
+    line-height: 1;
+  }
+  #label {
+    position: absolute;
+    bottom: 8vh;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    font-size: 3vw;
+    color: rgba(255,255,255,0.6);
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+  }
+</style>
+</head>
+<body>
+  <div id="n">?</div>
+  <div id="label"></div>
+  <script>
+    // Purely a visual aid — briefly labels each connected screen with its
+    // number so the operator can match "Display 2" in the settings dropdown
+    // to an actual physical monitor, the same way macOS's own System
+    // Settings > Displays "Identify" button works. Opened/closed entirely
+    // by identifyDisplays() in app.js; this page has no other logic.
+    const params = new URLSearchParams(location.search);
+    document.getElementById('n').textContent = params.get('n') || '?';
+    document.getElementById('label').textContent = params.get('label') || '';
+  </script>
+</body>
+</html>

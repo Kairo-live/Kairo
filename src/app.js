@@ -1768,34 +1768,24 @@ async function pollOBSStatus() {
 pollOBSStatus();
 setInterval(pollOBSStatus, 5000);
 
-// ── External Display: toggle persists whether Kairo should auto-open on a
-// connected external display; header status reports whether a physical
-// external display is actually plugged in right now — NOT window-open
-// state, which is a different question (you can have a window open on
-// your laptop's own screen with nothing external connected at all). Reuses
-// the same list_monitors Tauri command refreshDisplayStatus() already
-// calls (see list_monitors in src-tauri/src/lib.rs — real OS-level
-// monitor enumeration, not the Window Management API WebKit doesn't
-// support). ─────────────────────────────────────────────────────────────
-(function wireExternalDisplayOutput() {
-  const toggle    = document.getElementById('external-enabled-toggle');
+// ── External Display: no toggle, no "Open" button — picking a monitor in
+// upsertPrimaryMonitorPicker's dropdown IS the action (see buildScreenSelect).
+// This IIFE just keeps the header status + the dropdown's own option list
+// live while Settings is open: header status reports whether a physical
+// external display is actually plugged in right now (not window-open
+// state — you can have a window open on your own laptop screen with
+// nothing external connected at all). Reuses the same list_monitors Tauri
+// command refreshDisplayStatus() already calls (real OS-level monitor
+// enumeration, not the Window Management API WebKit doesn't support).
+(function wireExternalDisplayStatus() {
   const headerDot = document.getElementById('external-header-dot');
   const headerTxt = document.getElementById('external-header-status');
-  if (!toggle) return;
-  toggle.checked = settings.externalDisplayEnabled !== false;
-  toggle.addEventListener('change', () => {
-    settings.externalDisplayEnabled = toggle.checked;
-    saveSettingsPatch({ externalDisplayEnabled: toggle.checked });
-  });
 
   // Shares refreshDisplayStatus()'s own list_monitors call (and its
-  // cachedScreens result) rather than making a second, separate one here —
-  // one Tauri round-trip per poll instead of two, one source of truth for
-  // "how many screens are there" between this header status and the
-  // Physical Screen dropdown below it.
+  // cachedScreens result) rather than making a second, separate one here.
   async function refresh() {
     await refreshDisplayStatus();
-    upsertPrimaryScreenPicker();
+    upsertPrimaryMonitorPicker();
     const connected = cachedScreens.length > 1;
     if (headerDot) headerDot.className = 'bs-dot' + (connected ? ' connected' : '');
     if (headerTxt) headerTxt.textContent = connected ? 'External display connected' : 'No external display connected';
@@ -1804,10 +1794,8 @@ setInterval(pollOBSStatus, 5000);
   // Real incident this fixes: a display plugged in AFTER the app was
   // already running never got picked up, because nothing re-queried
   // list_monitors once the settings panel's initial render had already
-  // happened — reopening the panel didn't help either, since Physical
-  // Screen's dropdown only ever rebuilt from whatever cachedScreens held
-  // at THAT render, not a fresh check. Polling here keeps both this status
-  // line and the dropdown genuinely live while Settings is open.
+  // happened. Polling here keeps both this status line and the dropdown's
+  // option list genuinely live while Settings is open.
   setInterval(refresh, 3000);
 })();
 
@@ -6184,21 +6172,31 @@ function setOutputScreen(outputId, screen) {
 
 function populateScreenOptions(sel, outputId) {
   const current = outputScreenMap()[outputId];
+  const prevValue = sel.value;
   sel.innerHTML = '';
   const noneOpt = document.createElement('option');
   noneOpt.value = '';
-  noneOpt.textContent = 'Not assigned — defaults to your primary screen';
+  noneOpt.textContent = 'None — don’t output here';
   sel.appendChild(noneOpt);
   cachedScreens.forEach(s => {
     const o = document.createElement('option');
     o.value = String(s.index);
-    o.textContent = `Screen ${s.index + 1}${s.isPrimary ? ' (this computer)' : ''} — ${s.width}×${s.height}`;
+    o.textContent = `${s.isPrimary ? 'This Mac’s screen' : 'Display ' + (s.index + 1)} — ${s.width}×${s.height}`;
     if (current && current.width === s.width && current.height === s.height &&
         current.left === s.left && current.top === s.top) o.selected = true;
     sel.appendChild(o);
   });
+  // Keep whatever was selected a moment ago if it's still a valid option —
+  // this runs on every 3s poll (see wireExternalDisplayOutput), so without
+  // this the dropdown would silently reset selection out from under an
+  // operator mid-interaction every time cachedScreens refreshes.
+  if (prevValue && sel.querySelector(`option[value="${prevValue}"]`)) sel.value = prevValue;
 }
 
+// Picking a monitor here IS the action — no separate "enable" toggle, no
+// "Open" button. Matches every other presentation app: select where it
+// should go, and it goes there immediately. Selecting "None" closes
+// whatever window was open for this output.
 function buildScreenSelect(outputId) {
   const sel = document.createElement('select');
   sel.className = 'setting-input output-screen-select';
@@ -6207,31 +6205,56 @@ function buildScreenSelect(outputId) {
     const s = cachedScreens[Number(sel.value)];
     setOutputScreen(outputId, s ? { width: s.width, height: s.height, left: s.left, top: s.top } : null);
     if (typeof livePreviewOutputId !== 'undefined' && livePreviewOutputId === outputId) applyLivePreviewAspect();
+    const label = `kairo-${outputId}`;
+    if (s) {
+      if (typeof openDisplayOutput === 'function') openDisplayOutput({ id: outputId, name: outputId });
+    } else if (typeof closeDisplayWindow === 'function') {
+      closeDisplayWindow(label);
+    }
   });
   return sel;
 }
 
-// Inserted into the External Display card's body, right after the Theme
-// picker renderOutputThemePickers already placed there.
-function upsertPrimaryScreenPicker() {
-  const body = document.querySelector('#card-external .output-card-body');
-  if (!body) return;
-  let group = body.querySelector('.output-screen-group');
+// Inserted into #external-picker-row, alongside the theme picker
+// (renderOutputThemePickers) — half-width each, see .output-picker-row.
+function upsertPrimaryMonitorPicker() {
+  const row = document.getElementById('external-picker-row');
+  if (!row) return;
+  let group = row.querySelector('.output-screen-group');
   if (!group) {
     group = document.createElement('div');
     group.className = 'setting-group output-screen-group';
     const lbl = document.createElement('label');
     lbl.className = 'setting-label';
-    lbl.textContent = 'Physical screen';
+    lbl.textContent = 'Output Display';
     group.appendChild(lbl);
     group.appendChild(buildScreenSelect(PRIMARY_DISPLAY));
-    const themeGroup = body.querySelector('.output-theme-group');
-    if (themeGroup) themeGroup.insertAdjacentElement('afterend', group);
-    else body.insertBefore(group, body.firstChild);
+    row.insertBefore(group, row.firstChild);
   } else {
     populateScreenOptions(group.querySelector('select'), PRIMARY_DISPLAY);
   }
 }
+
+// Briefly numbers every connected screen (identify.html) so the operator
+// can match "Display 2" in the picker to an actual physical monitor —
+// same idea as macOS's own System Settings > Displays "Identify" button,
+// necessary because macOS's own numbering doesn't necessarily match the
+// order this app's picker lists them in.
+let identifyWindowsOpen = false;
+document.getElementById('identify-displays-btn')?.addEventListener('click', async () => {
+  if (identifyWindowsOpen || typeof openDisplayWindow !== 'function') return;
+  identifyWindowsOpen = true;
+  const labels = cachedScreens.map((s, i) => `kairo-identify-${i}`);
+  await Promise.all(cachedScreens.map((s, i) => openDisplayWindow(
+    labels[i],
+    `/identify.html?n=${i + 1}&label=${encodeURIComponent(s.isPrimary ? 'This Mac’s screen' : `Display ${i + 1}`)}`,
+    { width: s.width, height: s.height, x: s.left, y: s.top, fullscreen: false }
+  )));
+  setTimeout(() => {
+    labels.forEach(label => { if (typeof closeDisplayWindow === 'function') closeDisplayWindow(label); });
+    identifyWindowsOpen = false;
+  }, 3000);
+});
 
 function outputThemeMap() {
   const map = settings.outputThemes && typeof settings.outputThemes === 'object'
@@ -6338,7 +6361,7 @@ document.getElementById('bible-language')?.addEventListener('change', (e) => {
 // ── Extra display rows ────────────────────────────────────────────────────
 async function renderDisplayOutputs() {
   await refreshDisplayStatus();
-  upsertPrimaryScreenPicker();
+  upsertPrimaryMonitorPicker();
 
   const host = document.getElementById('extra-displays-list');
   if (host) {
@@ -6375,12 +6398,10 @@ async function renderDisplayOutputs() {
         applyOutputThemes();
       });
 
+      // buildScreenSelect's own change handler opens/moves/closes the
+      // window immediately — no separate "Open" button needed, same as
+      // the primary External Display picker.
       const screenSel = buildScreenSelect(d.id);
-
-      const open = document.createElement('button');
-      open.className = 'modal-btn secondary';
-      open.textContent = 'Open';
-      open.addEventListener('click', () => openDisplayOutput(d));
 
       const del = document.createElement('button');
       del.className = 'modal-btn secondary display-output-del';
@@ -6395,7 +6416,7 @@ async function renderDisplayOutputs() {
         applyOutputThemes();
       });
 
-      row.appendChild(name); row.appendChild(sel); row.appendChild(screenSel); row.appendChild(open); row.appendChild(del);
+      row.appendChild(name); row.appendChild(sel); row.appendChild(screenSel); row.appendChild(del);
       host.appendChild(row);
     });
   }
@@ -6452,20 +6473,15 @@ async function refreshDisplayStatus() {
   }
 
   if (detected == null) {
-    hint.innerHTML = `${configured} display output${configured > 1 ? 's' : ''} configured. Open each one and move it to its screen, or assign a detected screen to it below.`;
+    hint.innerHTML = `${configured} display output${configured > 1 ? 's' : ''} configured. Pick which screen each one should use below.`;
     return;
   }
   if (detected <= 1) {
     hint.innerHTML = `<span style="color:var(--orange)">No external display detected.</span> Output will show on this screen until a projector or second monitor is connected.`;
     return;
   }
-  hint.innerHTML = `<span style="color:var(--blue)">${detected} screens connected.</span> ${configured} output${configured > 1 ? 's' : ''} configured — assign each to a screen below so Open lands in the right place.`;
+  hint.innerHTML = `<span style="color:var(--blue)">${detected} screens connected.</span> Pick which one each output should use below.`;
 }
-
-// Primary external display keeps its original button.
-document.getElementById('open-external-btn')?.addEventListener('click', () => {
-  openDisplayOutput({ id: PRIMARY_DISPLAY, name: 'External Display' });
-});
 
 // Open a window for one screen. It identifies itself via ?output= so it renders
 // with that screen's assigned theme. The explicitly-assigned physical screen
@@ -6522,7 +6538,12 @@ function renderOutputThemePickers() {
       hint.style.cssText = 'font-size:11px;color:var(--text-3);margin-top:4px;';
       hint.textContent = 'Design this output uses. Edit designs in Theme Studio.';
       group.appendChild(lbl); group.appendChild(sel); group.appendChild(hint);
-      body.insertBefore(group, body.firstChild);
+      // External Display pairs its theme picker half-width with the
+      // monitor picker (populateMonitorPicker) instead of taking the full
+      // card width on its own row — both live in #external-picker-row.
+      const pickerRow = document.getElementById('external-picker-row');
+      if (card === 'card-external' && pickerRow) pickerRow.appendChild(group);
+      else body.insertBefore(group, body.firstChild);
     }
 
     const sel = group.querySelector('select');

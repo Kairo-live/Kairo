@@ -1169,10 +1169,6 @@
                          already put it first for the same reason. -->
                     <div class="output-card" id="card-external">
                         <div class="output-card-header" data-card="external">
-                            <label class="output-toggle" title="Auto-open on a connected external display">
-                                <input type="checkbox" id="external-enabled-toggle">
-                                <span class="output-toggle-track"></span>
-                            </label>
                             <span class="output-card-name">External Display</span>
                             <span class="output-header-status">
                                 <span class="bs-dot" id="external-header-dot"></span>
@@ -1180,22 +1176,23 @@
                             </span>
                             <span class="output-card-chevron">▾</span>
                         </div>
-                        <div class="output-card-body output-card-body--collapsed">
-                            <!-- Layout and background opacity used to live here.
-                                 They now belong to the assigned theme (Theme
-                                 Studio owns layout, canvas fill and opacity), so
-                                 duplicating them per-output only created two
-                                 competing sources of truth.
+                        <div class="output-card-body">
+                            <!-- No enable toggle, no "Open" button — picking a
+                                 monitor here IS the action, same as every other
+                                 presentation app. Selecting one immediately opens/
+                                 moves a fullscreen window there; selecting "None"
+                                 closes it. Theme picker (inserted by
+                                 renderOutputThemePickers) and the monitor picker
+                                 (populateMonitorPicker) share this row, half-width
+                                 each, filled in JS-side in that order. -->
+                            <div class="output-picker-row" id="external-picker-row"></div>
+                            <div style="display:flex;align-items:center;gap:8px;">
+                                <button id="identify-displays-btn" class="modal-btn secondary" style="font-size:11px;padding:4px 10px;">Identify Displays</button>
+                                <span style="font-size:11px;color:var(--text-3);">Briefly numbers each connected screen so you can tell which is which.</span>
+                            </div>
 
-                                 Rows are rendered by renderDisplayOutputs() —
-                                 one per physical screen, each with its own
-                                 theme, so a main screen and a stage monitor can
-                                 show different designs at the same time. -->
-                            <p class="setting-hint" id="display-status-hint">Checking connected screens…</p>
-                            <button id="open-external-btn" class="modal-btn secondary" style="width:100%;justify-content:center;">Open on External Display</button>
-
-                            <!-- Additional screens (stage monitor, foyer, …). Each
-                                 gets its own theme and its own window. -->
+                            <!-- Additional screens (stage monitor, foyer, …) — each
+                                 just its own monitor + theme picker, same as above. -->
                             <div id="extra-displays-list"></div>
                             <button id="add-display-btn" class="modal-btn secondary" style="width:100%;justify-content:center;margin-top:8px;">+ Add another display</button>
                         </div>
@@ -1506,7 +1503,7 @@
                         await existing.navigate(location.origin + url);
                         return;
                     }
-                    new WebviewWindow(label, {
+                    const win = new WebviewWindow(label, {
                         url: location.origin + url,
                         title: 'KAIRO Display',
                         width:  opts.width  || 1280,
@@ -1519,7 +1516,16 @@
                         fullscreen:   opts.fullscreen || false,
                         skipTaskbar:  false,
                     });
+                    win.once('tauri://error', function(e) {
+                      fetch('/api/debug-log', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({
+                        event: 'WebviewWindow creation error', data: { label, error: String(e) },
+                      }) }).catch(function(){});
+                      console.warn('[KAIRO] WebviewWindow creation error:', e);
+                    });
                 } catch (e) {
+                    fetch('/api/debug-log', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({
+                      event: 'openDisplayWindow threw', data: { label, error: String(e), message: e && e.message },
+                    }) }).catch(function(){});
                     console.warn('[KAIRO] Tauri window creation failed, falling back:', e);
                     window.open(url, label, 'width=' + (opts.width||1280) + ',height=' + (opts.height||720));
                 }
@@ -1530,6 +1536,37 @@
                 window.open(url, label, features);
             }
         }
+
+        // Closes a previously-opened display window — used when the monitor
+        // picker is switched to "None" for that output. No-op if nothing by
+        // that label is currently open.
+        async function closeDisplayWindow(label) {
+            if (window.__TAURI__) {
+                try {
+                    const { WebviewWindow } = window.__TAURI__.webviewWindow;
+                    const existing = await WebviewWindow.getByLabel(label);
+                    if (existing) await existing.close();
+                } catch (e) {
+                    console.warn('[KAIRO] closeDisplayWindow failed:', e);
+                }
+            }
+        }
+
+        // THE ACTUAL ROOT CAUSE of every "nothing is sending to the display"
+        // report this session: this whole script block is wrapped in an
+        // outer IIFE (line 1403), so openDisplayWindow/closeDisplayWindow —
+        // despite looking like top-level function declarations — were never
+        // real globals at all. app.js's openDisplayOutput() checks
+        // `typeof openDisplayWindow === 'function'` expecting a global and
+        // always got undefined, silently falling through to its
+        // window.open() fallback — which in a Tauri webview just opens the
+        // system browser, not a proper positioned native window. No error,
+        // no console warning, nothing to notice — it just quietly did the
+        // wrong thing every single time. Explicit attachment instead of
+        // unwrapping the whole 400-line IIFE (touches a lot of unrelated
+        // logic — this is the minimal, safe fix for exactly what's broken).
+        window.openDisplayWindow  = openDisplayWindow;
+        window.closeDisplayWindow = closeDisplayWindow;
 
         // Syphon: NATIVE sender driven through Tauri commands defined in
         // src-tauri/src/syphon.rs. Syphon.framework is bundled with the app,
