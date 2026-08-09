@@ -1101,14 +1101,35 @@ async function checkPP() {
   } catch { updatePPStatus('Offline', ''); }
 }
 
-async function sendVerseToServer(verse) {
+// Despite the name, this is the shared "push this verse everywhere" call
+// for every manual send in the app (Candidates, Live Queue, range cards,
+// direct search hits — 6 call sites). It used to hit ONLY
+// /api/propresenter/send, which — true to its name — only ever pushes to
+// ProPresenter. Nothing about a manual send ever reached KAIRO's own
+// external display window (display.html), which only updates via the
+// server's 'detection' WS broadcast — the exact thing this endpoint never
+// sent. Real incident: double-clicking a verse (or clicking Send) updated
+// the operator's own local preview and ProPresenter, but the actual output
+// screen just sat on whatever the last automatic detection or Next/
+// Previous range-advance had put there, because those are the only paths
+// that were ever wired to /api/service/send's broadcast.
+//
+// /api/service/send does the full job (broadcasts 'detection' with
+// method:'service' AND calls sendToOutputs, which covers ProPresenter +
+// OBS together) — same endpoint the Playlist/Send-slide flow already used
+// correctly. method:'service' is deliberate: showInViewer() skips its
+// Live-Queue-list bookkeeping for that method, since the caller here
+// already did that update directly and locally before this call — the
+// broadcast only needs to reach OTHER surfaces (the real display window),
+// not redundantly re-touch the panel that triggered the send.
+async function sendVerseToServer(verse, look = null) {
   try {
-    await fetch(`${SERVER}/api/propresenter/send`, {
+    await fetch(`${SERVER}/api/service/send`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ verse }),
+      body: JSON.stringify({ verse, look }),
     });
-  } catch (err) { toast('ProPresenter send failed: ' + err.message, 'error'); }
+  } catch (err) { toast('Send failed: ' + err.message, 'error'); }
 }
 
 // ── Listening / Audio ──────────────────────────────────────────────────────
