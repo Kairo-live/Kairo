@@ -101,6 +101,7 @@ function refToBadgeAbbr(reference) {
 // ── State ──────────────────────────────────────────────────────────────────
 let ws             = null;
 let wsReconnectTimer = null;
+let wsReconnectAttempts = 0;
 let isListening    = false;
 let mediaStream    = null;
 let audioContext   = null;
@@ -113,7 +114,12 @@ let wordCount      = 0;
 let verseCount     = 0;
 let sessionVerses  = [];
 let sessionTranscriptParts = [];   // [{ time: HH:MM:SS, text }] — final fragments only
-let allConfidences = [];
+// Running sum/count rather than an ever-growing array of every confidence
+// score — this is only ever used for the live average display, so an array
+// just meant recomputing an O(n) reduce (over a growing n) on every single
+// verse detection for the whole service.
+let confidenceSum   = 0;
+let confidenceCount = 0;
 let rangeRefs      = new Set(); // references belonging to the active verse range
 
 // ── DOM ────────────────────────────────────────────────────────────────────
@@ -192,7 +198,6 @@ const translationSelect    = document.getElementById('translation-select');
 
 // Settings inputs
 const deepgramKeyInput    = document.getElementById('deepgram-key');
-const anthropicKeyInput   = document.getElementById('anthropic-key');
 const ppUrlInput          = document.getElementById('propresenter-url');
 const translationSettings = document.getElementById('translation-select-settings');
 const swapPPBtn           = document.getElementById('swap-pp-tokens-btn');
@@ -216,6 +221,7 @@ function connectWS() {
   ws.onopen = () => {
     console.log('[WS] Connected');
     clearTimeout(wsReconnectTimer);
+    wsReconnectAttempts = 0;
     updatePPStatus('Checking…', '');
     loadSettings();
     initCustomSelects();
@@ -229,10 +235,17 @@ function connectWS() {
   };
 
   ws.onclose = () => {
-    console.warn('[WS] Disconnected — reconnecting in 2s…');
+    // Exponential backoff with jitter, capped low — this is a local sidecar
+    // process, not a remote network hop, so a long ceiling would just make a
+    // brief server restart feel sluggish to recover from. The cap mainly
+    // exists so a genuinely dead server doesn't get hammered by a reconnect
+    // every 2s indefinitely.
+    const delay = Math.min(1000 * 1.6 ** wsReconnectAttempts, 8000) + Math.random() * 300;
+    wsReconnectAttempts++;
+    console.warn(`[WS] Disconnected — reconnecting in ${Math.round(delay / 1000)}s…`);
     // Drop any prior timer so back-to-back close events can't stack reconnects.
     clearTimeout(wsReconnectTimer);
-    wsReconnectTimer = setTimeout(connectWS, 2000);
+    wsReconnectTimer = setTimeout(connectWS, delay);
   };
 
   ws.onerror = () => ws.close();
@@ -302,6 +315,28 @@ function handleServerMessage(msg) {
       handleRangeActive(msg.activeRef);
       break;
 
+    // Display window reporting media <video> playback state back up, and
+    // a watched smart folder's contents having changed on disk — both just
+    // forward into service.js, which owns the Media tab's DOM.
+    case 'media-status':
+      window.KairoService?.onMediaStatus?.(msg);
+      break;
+
+    case 'media-folder-changed':
+      window.KairoService?.onMediaFolderChanged?.(msg.folderId);
+      break;
+
+    // Same broadcast the real output window renders (see display.html) —
+    // mirroring it in this window's own preview so a media send has some
+    // visible confirmation here too, not just on the actual output.
+    case 'media':
+      if (msg.target === 'viewer') renderMediaPreview(msg.src, msg.kind);
+      break;
+
+    case 'clear-layer':
+      if (msg.layer === 'media' || msg.layer === 'all') clearMediaPreview();
+      break;
+
   }
 }
 
@@ -368,6 +403,19 @@ function showEmptyTranscript(show) {
 // frozen. Full text is still captured in sessionTranscriptParts for export.
 const TRANSCRIPT_LOG_MAX_SPANS = 400;
 
+// Interim transcript updates can arrive several times a second during
+// continuous speech; forcing a scrollHeight reflow on every single one adds
+// up. Coalesce into at most one scroll per rendered frame.
+let _transcriptScrollScheduled = false;
+function scheduleTranscriptScroll() {
+  if (_transcriptScrollScheduled) return;
+  _transcriptScrollScheduled = true;
+  requestAnimationFrame(() => {
+    _transcriptScrollScheduled = false;
+    if (transcriptContent) transcriptContent.scrollTop = transcriptContent.scrollHeight;
+  });
+}
+
 function handleTranscript(msg) {
   if (!transcriptDiv) showEmptyTranscript(false);
   if (msg.isFinal) {
@@ -386,10 +434,10 @@ function handleTranscript(msg) {
     wordCount += msg.text.split(/\s+/).length;
     if (wordCountEl) wordCountEl.textContent = wordCount.toLocaleString();
     // Auto-scroll
-    transcriptContent.scrollTop = transcriptContent.scrollHeight;
+    scheduleTranscriptScroll();
   } else {
     if (interimSpan) { interimSpan.textContent = msg.text; interimSpan.style.opacity = '0.5'; }
-    transcriptContent.scrollTop = transcriptContent.scrollHeight;
+    scheduleTranscriptScroll();
   }
 }
 
@@ -426,17 +474,82 @@ let lastPreviewKey = null;
 let lastPreviewWasThemed = false;
 let lastPreviewHadOwnLook = false; // true only when `look` itself was truthy, not the output-default fallback
 
+// Bumped on every renderPreviewScreen() call so a delayed setTimeout paint()
+// from an earlier call can tell it's been superseded and bail instead of
+// flashing stale content over whatever the latest call already painted —
+// two sends within one transition window used to race their own delayed
+// paints, briefly showing the older (already-replaced) verse.
+let previewRenderGen = 0;
+
+// Which output the Live preview panel (right sidebar) is currently
+// monitoring — matches ProPresenter's Preview Window, which has its own
+// screen-selector dropdown independent of what's being edited. Defaults to
+// the primary/External Display output.
+let livePreviewOutputId = 'display-1';
+
 function primaryOutputLook() {
   try {
     const map = (typeof outputThemeMap === 'function') ? outputThemeMap() : {};
-    const id  = (typeof PRIMARY_DISPLAY !== 'undefined') ? map[PRIMARY_DISPLAY] : null;
+    const id  = map[livePreviewOutputId] ?? ((typeof PRIMARY_DISPLAY !== 'undefined') ? map[PRIMARY_DISPLAY] : null);
     return (Array.isArray(looks) ? looks.find(l => l.id === id) : null) || null;
   } catch { return null; }
 }
 
-function renderPreviewScreen(text, reference, look, translatedText = '') {
+// Shapes the Live preview box to whichever output it's currently monitoring
+// — its assigned physical screen's aspect ratio if one's been set (see
+// outputScreenMap), otherwise the shared fixed 16:9 default.
+function applyLivePreviewAspect() {
+  const el = document.getElementById('slide-preview');
+  if (!el) return;
+  const s = (typeof outputScreenMap === 'function') ? outputScreenMap()[livePreviewOutputId] : null;
+  el.style.aspectRatio = s ? `${s.width} / ${s.height}` : '';
+}
+
+// Keeps the panel's output dropdown in sync with configured outputs
+// (renamed/added/removed extra displays) — called from renderDisplayOutputs.
+function renderLivePreviewOutputSelect() {
+  const sel = document.getElementById('live-preview-output-select');
+  if (!sel || typeof displayOutputs !== 'function') return;
+  const outputs = displayOutputs();
+  if (!outputs.some(d => d.id === livePreviewOutputId)) livePreviewOutputId = outputs[0]?.id || 'display-1';
+  sel.innerHTML = '';
+  outputs.forEach(d => {
+    const o = document.createElement('option');
+    o.value = d.id; o.textContent = d.name;
+    if (d.id === livePreviewOutputId) o.selected = true;
+    sel.appendChild(o);
+  });
+  applyLivePreviewAspect();
+}
+
+document.getElementById('live-preview-output-select')?.addEventListener('change', (e) => {
+  livePreviewOutputId = e.target.value;
+  applyLivePreviewAspect();
+  // Only the output-default fallback (no item-specific theme) is stale when
+  // switching which output we're monitoring — an item with its own theme
+  // stays exactly as sent, same guard applyOutputThemes() already uses.
+  if (!lastPreviewHadOwnLook && previewVerseText) {
+    renderPreviewScreen(
+      previewVerseText.textContent === 'Nothing on display' ? '' : previewVerseText.textContent,
+      previewVerseRef?.textContent || '',
+      null
+    );
+  }
+});
+
+function renderPreviewScreen(text, reference, look, translatedText = '', image = null, fit = 'contain', styleByLayerId = {}) {
+  const myGen = ++previewRenderGen;
   const effectiveLook = look || primaryOutputLook();
-  lastPreviewKey = `${reference || ''} ${text || ''}`;
+  const newPreviewKey = `${reference || ''} ${text || ''}`;
+  // This panel (the sidebar Live Preview, not a separate display.html output
+  // window) is what an operator watches while testing right in the main
+  // window — it used to repaint instantly on every send regardless of the
+  // theme's own animation/animationSpeed, which is exactly why a theme like
+  // Lyrics — Motion looked completely inert unless you had a real output
+  // window open elsewhere. Mirrors the same cut/fade/slide-up + speed
+  // handling display.html's renderStage/showVerse already do.
+  const contentChanged = newPreviewKey !== lastPreviewKey;
+  lastPreviewKey = newPreviewKey;
   lastPreviewWasThemed = !!effectiveLook;
   lastPreviewHadOwnLook = !!look;
   const themed = document.getElementById('slide-preview-themed');
@@ -444,19 +557,129 @@ function renderPreviewScreen(text, reference, look, translatedText = '') {
   // Keep the plain text nodes current even in themed mode (just hidden) — the
   // NDI/Syphon output bridge (wireNdiBridge, above) watches them via
   // MutationObserver to know what to render on those outputs, which have no
-  // concept of theme layers of their own.
-  if (previewVerseText) previewVerseText.textContent = text;
+  // concept of theme layers of their own. An image slide has no text to
+  // bind (mirrors display.html's renderImageStage), so blank it here too.
+  if (previewVerseText) previewVerseText.textContent = image ? '' : text;
   if (previewVerseRef)  previewVerseRef.textContent  = reference || '';
 
-  if (effectiveLook && themed && window.KairoService?.paintLookLayers) {
-    plain?.classList.add('hidden');
-    themed.classList.remove('hidden');
-    window.KairoService.paintLookLayers(themed, effectiveLook, {}, { verseText: text, referenceText: reference || '', translatedText });
+  const animType = (effectiveLook && effectiveLook.animation) || 'fade';
+  const speedMs = Math.round(300 * ((effectiveLook && typeof effectiveLook.animationSpeed === 'number' && effectiveLook.animationSpeed > 0) ? effectiveLook.animationSpeed : 1));
+  // Only animate an actual slide-to-slide change, on an already-painted
+  // panel, when the theme asks for it — not the first paint (nothing to
+  // transition from), not a same-content re-broadcast, not 'cut'. Text
+  // Animation (Word/Activate/Karaoke/etc — a separate field from this
+  // Transition, see KairoWordSplit's file header) runs independently
+  // inside paintLookLayers regardless of what happens here; a theme is
+  // free to combine a real Transition with a Text Animation on top.
+  const shouldAnimate = contentChanged && animType !== 'cut' && themed && themed.hasChildNodes();
+
+  const paint = () => {
+    // Image slides bypass the theme's text layers entirely, full-frame — same
+    // rule display.html's handleMessage applies before calling renderImageStage.
+    // This preview panel never had that branch: it only ever called
+    // paintLookLayers with the (empty, for an image slide) verse text, so a
+    // sent image never appeared here even though the real output showed it.
+    if (image && themed) {
+      plain?.classList.add('hidden');
+      themed.classList.remove('hidden');
+      themed.innerHTML = '';
+      const img = document.createElement('img');
+      img.src = image;
+      img.style.cssText = `position:absolute;inset:0;width:100%;height:100%;object-fit:${fit};`;
+      themed.appendChild(img);
+    } else if (effectiveLook && themed && window.KairoService?.paintLookLayers) {
+      plain?.classList.add('hidden');
+      themed.classList.remove('hidden');
+      window.KairoService.paintLookLayers(themed, effectiveLook, styleByLayerId, { verseText: text, referenceText: reference || '', translatedText });
+    } else {
+      themed?.classList.add('hidden');
+      plain?.classList.remove('hidden');
+    }
+  };
+
+  if (!shouldAnimate) {
+    paint();
+    // Guards against a real, intermittent bug: if a PRIOR call was mid-fade
+    // (opacity already animating toward 0, see below) and got preempted by
+    // THIS one before its own setTimeout fired, that prior call's callback
+    // bails via the myGen check below and never gets to restore opacity —
+    // leaving it stuck at 0 forever, since paint() itself never touches
+    // opacity. Content is correctly painted underneath, it's just invisible.
+    // Only reproduces when a fast second send interrupts an in-flight themed
+    // transition and the second one *doesn't* itself animate (e.g. a 'cut'
+    // theme, or unchanged content) — intermittent by nature, which matches
+    // "the preview sometimes goes blank" exactly. Cheap and always correct
+    // to force opacity back to 1 here regardless of whether it was actually
+    // orphaned.
+    if (themed) themed.style.opacity = '1';
+    return;
+  }
+
+  themed.style.transition = `opacity ${speedMs}ms ease, transform ${speedMs}ms ease`;
+  themed.style.opacity    = '0';
+  if (animType === 'slide-up') themed.style.transform = 'translateY(-10px)';
+
+  setTimeout(() => {
+    // A newer renderPreviewScreen() call landed while this one was still
+    // mid-transition — that call already painted (or scheduled) the current
+    // content; applying this stale one now would flash it back briefly.
+    if (myGen !== previewRenderGen) return;
+    paint();
+    if (animType === 'slide-up') {
+      // Double-rAF instead of a synchronous offsetHeight read to commit the
+      // "jump to start" state before animating back to place. A forced
+      // synchronous layout read here (the previous approach) is a documented
+      // WebKit trigger for stale-compositor-layer bugs on unrelated stacked
+      // siblings in the same document — this panel lives in the same page as
+      // .top-bar (z-index:20), which is exactly the bug that kept reproducing
+      // regardless of any CSS mitigation tried on .top-bar itself. rAF waits
+      // for an actual committed frame instead of forcing one synchronously.
+      themed.style.transition = 'none';
+      themed.style.transform  = 'translateY(10px)';
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          themed.style.transition = `opacity ${speedMs}ms ease, transform ${speedMs}ms ease`;
+          themed.style.transform  = 'none';
+          themed.style.opacity    = '1';
+        });
+      });
+    } else {
+      themed.style.opacity = '1';
+    }
+  }, speedMs + 10);
+}
+
+// Mirrors the real output's independent media layer in this window's own
+// preview — sending media had no feedback anywhere in the operator's own
+// UI before this (nothing here ever changed on a media send), which made a
+// working send look identical to a failed one.
+function renderMediaPreview(src, kind) {
+  const host = document.getElementById('slide-preview-media');
+  if (!host) return;
+  host.innerHTML = '';
+  if (!src) {
+    host.classList.add('hidden');
+    // Restore the placeholder only if there's no real verse text either —
+    // it's a stand-in for "nothing at all", not just "no media".
+    if (previewVerseText && !previewVerseText.textContent) previewVerseText.textContent = 'Nothing on display';
+    return;
+  }
+  host.classList.remove('hidden');
+  // The placeholder was only ever covering for "nothing sent yet" — with
+  // real media now showing, it would just sit as stray text over the
+  // image/video. Actual verse text (if any is genuinely live) is untouched.
+  if (previewVerseText?.textContent === 'Nothing on display') previewVerseText.textContent = '';
+  if (kind === 'video') {
+    const v = document.createElement('video');
+    v.src = src; v.autoplay = true; v.loop = true; v.muted = true; v.playsInline = true;
+    host.appendChild(v);
   } else {
-    themed?.classList.add('hidden');
-    plain?.classList.remove('hidden');
+    const img = document.createElement('img');
+    img.src = src;
+    host.appendChild(img);
   }
 }
+function clearMediaPreview() { renderMediaPreview(null); }
 
 // Update only the viewer display (preview panel) without touching queue order.
 // Use this for dblclick on already-queued cards so they don't reorder.
@@ -468,7 +691,14 @@ function showInViewer(verses, method, topScore, correctedFrom = null, look = nul
   const v = verses[0];
 
   // Update live preview screen
-  renderPreviewScreen(cleanVerseText(v.text), v.reference, look, v.translatedText || '');
+  renderPreviewScreen(cleanVerseText(v.text), v.reference, look, v.translatedText || '', v.image || null, v.fit || 'contain', v.slideStyle || {});
+
+  // A playlist send (song/slide deck/announcement/scripture item run from
+  // the service) isn't a scripture detection — the Bible tab's Live Queue,
+  // Candidates panel, and session stats below all exist to track auto-
+  // detect/search activity specifically, not "whatever got sent from the
+  // playlist". The live preview above still updates either way.
+  if (method === 'service') return;
 
   // Auto-correction: strip the mis-cited row so it doesn't linger above the fix.
   if (correctedFrom) {
@@ -512,32 +742,27 @@ function showInViewer(verses, method, topScore, correctedFrom = null, look = nul
   verseCount++;
   if (verseCountEl) verseCountEl.textContent = verseCount;
   if (v.similarity) {
-    allConfidences.push(v.similarity);
-    const avg = allConfidences.reduce((a, b) => a + b, 0) / allConfidences.length;
+    confidenceSum += v.similarity;
+    confidenceCount++;
+    const avg = confidenceSum / confidenceCount;
     if (avgConfidenceEl) avgConfidenceEl.textContent = (avg * 100).toFixed(0) + '%';
   }
   sessionVerses.push({ ref: v.reference, text: v.text, time: new Date().toLocaleTimeString() });
 
-  // ── Candidates panel — log every sent verse, upgrade existing cards to sent ──
+  // ── Candidates panel stays candidates-only — auto-sent verses don't get
+  // logged there. Previously every sent verse ALSO got written into the
+  // Candidates panel (new record, or upgrading an existing suggestion card
+  // green in place) as a permanent session log — the two panels showed
+  // overlapping information and it wasn't clear which one to check for
+  // "what's actually live" vs. "what's awaiting a decision". If this verse
+  // was already sitting there as an unpromoted suggestion, it's no longer
+  // a candidate now that it's live — remove it rather than leave a stale
+  // (or now-misleading) card behind.
   if (queueList) {
-    queueList.querySelector('.display-empty')?.remove();
     const existing = queueList.querySelector(`[data-ref="${CSS.escape(v.reference)}"]`);
-    if (existing) {
-      // Already in panel — mark green in place, no reorder
-      existing.classList.add('cand-sent');
-    } else {
-      // New verse — prepend as a sent record
-      const record = buildCandidateCard(v, method, true);
-      queueList.insertBefore(record, queueList.firstChild);
-    }
+    if (existing) existing.remove();
     updateSuggestionCount();
   }
-}
-
-function clearSuggestionsPanel() {
-  if (!queueList) return;
-  queueList.innerHTML = '<div class="display-empty">Listening…</div>';
-  updateSuggestionCount();
 }
 
 function showInSuggestions(verses, method) {
@@ -561,13 +786,44 @@ function showInSuggestions(verses, method) {
 }
 
 // Purpose-built compact card for the Candidates panel
+// Native 'dblclick' requires both clicks to land within the platform's own
+// tight time+distance window — reliable in a plain browser tab, but real
+// double-clicks in the packaged Tauri/WKWebView app were landing as two
+// separate single clicks instead of one dblclick (same class of WebKit
+// quirk as the drag-region compositing bug found earlier this session).
+// This is a manual, more forgiving stand-in: two clicks on the SAME element
+// within 500ms count as a double-click, regardless of the platform's own
+// (stricter) dblclick detection. Ignores clicks on nested buttons — those
+// already have their own single-click handlers.
+function wireDoubleClickSend(el, handler) {
+  let lastClickAt = 0;
+  el.addEventListener('click', (e) => {
+    if (e.target.closest('button')) return;
+    const now = Date.now();
+    if (now - lastClickAt < 500) {
+      lastClickAt = 0;
+      handler(e);
+    } else {
+      lastClickAt = now;
+    }
+  });
+}
+
+// method 'text' = a phrase/keyword search hit — the engine found the closest
+// match(es) but isn't confident enough to call it a direct reference, so it
+// lands here as a suggestion rather than auto-sending. Marked distinctly
+// (amber) so it reads as "pick one of these", not "here's what's live" —
+// visually different from fingerprint/context candidates, which are a
+// passive by-product of the transcript rather than something explicitly
+// searched for.
 function buildCandidateCard(v, method, isSent = false) {
   const pct  = v.similarity != null ? Math.round(v.similarity * 100) : null;
   const conf = pct != null ? pct + '%' : '';
   const tier = pct == null ? '' : pct >= 90 ? 'conf-high' : pct >= 80 ? 'conf-good' : pct >= 60 ? 'conf-mid' : 'conf-low';
+  const isSearchHit = method === 'text' || method === 'search';
 
   const card = document.createElement('div');
-  card.className = 'cand-card' + (isSent ? ' cand-sent' : '');
+  card.className = 'cand-card' + (isSent ? ' cand-sent' : '') + (isSearchHit ? ' cand-search' : '');
   card.dataset.ref = v.reference;
   card.innerHTML = `
     <div class="cand-row">
@@ -582,17 +838,24 @@ function buildCandidateCard(v, method, isSent = false) {
   `;
   const sendBtn = card.querySelector('.cand-send');
   const promoteBtn = card.querySelector('.cand-promote');
-  sendBtn?.addEventListener('click', () => {
-    card.classList.add('cand-sent'); // mark green in place — no reorder
+  const sendThis = () => {
+    // showInViewer now removes this card outright (Candidates is
+    // candidates-only, no sent-item log) — no in-place "mark green" step
+    // needed here anymore.
     showInViewer([v], method || 'direct', 1.0);
     sendVerseToServer(v);
-  });
+  };
+  sendBtn?.addEventListener('click', sendThis);
   promoteBtn?.addEventListener('click', () => {
     // Promote = send to viewer only (no PP), remove from candidates
     showInViewer([v], method || 'direct', 1.0);
     card.remove();
     updateSuggestionCount();
   });
+  // Double-click anywhere on the card → same action as "Send to Air", so
+  // Candidates matches the Live Queue/range-card shortcut instead of being
+  // the one surface where you have to hit the button precisely.
+  wireDoubleClickSend(card, sendThis);
   return card;
 }
 
@@ -623,87 +886,13 @@ function buildQueueRow(v, method, correctedFrom = null) {
     sendVerseToServer(v);
   });
   // Double-click anywhere on card → send to screen (no reorder)
-  card.addEventListener('dblclick', (e) => {
-    e.preventDefault();
+  wireDoubleClickSend(card, () => {
     updateViewerDisplay(v);   // update preview only — card stays in place
     sendVerseToServer(v);
     // Flash feedback
     card.classList.add('sent-pulse');
     setTimeout(() => card.classList.remove('sent-pulse'), 600);
   });
-  return card;
-}
-
-function buildVerseCard(v, method, role) {
-  const card = document.createElement('div');
-  card.dataset.ref = v.reference;
-
-  const pct         = v.similarity != null ? Math.round(v.similarity * 100) : null;
-  const conf        = pct != null ? pct + '%' : '';
-  const isSent      = role === 'sent';
-  const showConf    = settings.showConfidence !== false;
-  const statusLabel = method === 'direct' ? 'Reference' : method === 'fingerprint' ? 'Context' : 'Phrase';
-
-  const badgeTier = pct == null  ? '' :
-                    pct >= 90    ? 'conf-high' :
-                    pct >= 80    ? 'conf-good' :
-                    pct >= 60    ? 'conf-mid'  : 'conf-low';
-
-  // Short book abbreviation for history grid badge: "Matthew 17:21" → "MT·17",
-  // "1 Chronicles 6:18" → "1CH·6". Without the numbered-book branch the pill
-  // overflows with the full book name.
-  const abbr = refToBadgeAbbr(v.reference);
-
-  card.className = isSent ? 'locked-verse-card' : 'suggestion-card';
-
-  if (isSent) {
-    // Compact history layout: abbreviation badge | reference + text | send button
-    card.innerHTML = `
-      <div class="history-book-badge">${abbr}</div>
-      <div class="history-card-content">
-        <div class="lvc-ref">${v.reference}</div>
-        <div class="lvc-text">${cleanVerseText(v.text)}</div>
-      </div>
-      <div class="lvc-actions">
-        <button class="lvc-send-btn" title="Resend to ProPresenter">Send</button>
-      </div>
-    `;
-  } else {
-    // Full suggestion card: method label + conf badge + reference + verse + actions
-    const detBadgeClass = method === 'direct' ? 'det-badge--direct' :
-                          method === 'verbatim' ? 'det-badge--verbatim' :
-                          method === 'fingerprint' ? 'det-badge--fingerprint' : '';
-    const detBadgeLabel = method === 'direct' ? 'DIRECT' :
-                          method === 'verbatim' ? 'QUOTE' :
-                          method === 'fingerprint' ? 'PHRASE' : method || '';
-    const topScorePct = v.similarity != null ? Math.round(v.similarity * 100) + '%' : '';
-    card.innerHTML = `
-      <div style="display:flex;align-items:center;gap:6px;margin-bottom:2px;">
-        ${detBadgeClass ? `<span class="det-badge ${detBadgeClass}">${detBadgeLabel}</span>` : ''}
-        ${topScorePct ? `<span style="font-size:10px;color:var(--text-3);">${topScorePct}</span>` : ''}
-      </div>
-      ${showConf && conf ? `<span class="conf-badge ${badgeTier}">${conf}</span>` : ''}
-      <div class="lvc-status">${statusLabel}</div>
-      <div class="lvc-ref">${v.reference}</div>
-      <div class="lvc-text">&ldquo;${cleanVerseText(v.text)}&rdquo;</div>
-      <div class="lvc-actions">
-        <button class="lvc-send-btn">Send to Air</button>
-        <button class="lvc-promote-btn">Promote</button>
-      </div>
-    `;
-  }
-
-  const sendBtn = card.querySelector('.lvc-send-btn');
-  const promoteBtn = card.querySelector('.lvc-promote-btn');
-  sendBtn?.addEventListener('click', () => {
-    sendVerseToServer(v);
-  });
-  promoteBtn?.addEventListener('click', () => {
-    showInViewer([v], method);
-    card.remove();
-    updateSuggestionCount();
-  });
-
   return card;
 }
 
@@ -722,10 +911,16 @@ const rangeNavRef   = document.getElementById('range-nav-ref');
 
 // Wire the nav buttons once (they live in the HTML, not rebuilt per state)
 document.getElementById('range-next-btn')?.addEventListener('click', async () => {
-  await fetch(`${SERVER}/api/range/next`, { method: 'POST' });
+  try {
+    const r = await fetch(`${SERVER}/api/range/next`, { method: 'POST' });
+    const d = await r.json();
+    if (!d.ok) toast(d.reason || 'Could not advance', 'error');
+  } catch (err) { toast('Cannot reach server — is it running?', 'error'); }
 });
 document.getElementById('range-clear-btn')?.addEventListener('click', async () => {
-  await fetch(`${SERVER}/api/range/clear`, { method: 'POST' });
+  try {
+    await fetch(`${SERVER}/api/range/clear`, { method: 'POST' });
+  } catch (err) { toast('Cannot reach server — is it running?', 'error'); }
 });
 
 function handleRangeState({ remaining, total, next }) {
@@ -906,7 +1101,8 @@ async function startListening() {
   // timers are reset in handleConnectionState when we actually connect.
   sessionVerses = [];
   sessionTranscriptParts = [];
-  allConfidences = [];
+  confidenceSum   = 0;
+  confidenceCount = 0;
   const engine = (settings.speechEngine || 'deepgram').toLowerCase();
   // Both the current 'offline' value and the legacy 'browser' value (the
   // Settings toggle's data-engine, kept as an alias for anyone with an old
@@ -1073,13 +1269,43 @@ function readToggleGroup(groupId, dataKey) {
 }
 
 // ── Settings ───────────────────────────────────────────────────────────────
+// Generic thumbnail/preview boxes (Stack/Grid cards, Media library cards,
+// Full-scale edit's slide list — see var(--kairo-output-aspect, 16/9) in
+// styles.css) always render at a fixed 16:9 (1920x1080) design default now,
+// the same way ProPresenter's document canvas defaults to 1920x1080
+// regardless of what's connected — they used to mirror whatever screen
+// KAIRO's own UI happened to be running on, which made them misleading the
+// moment a real projector or an odd-aspect LED wall was actually plugged in.
+// The Live preview panel and Theme Studio's own canvas are the two places an
+// operator legitimately wants to see a *specific* output's real shape — see
+// applyLivePreviewAspect() and renderPreview()'s canvas-size handling, which
+// set their own inline aspect-ratio rather than touching this shared
+// default. Deliberately NOT the same thing as KAIRO_DESIGN_W/H
+// (design_space.js) — that's the fixed 1920x1080 canvas Theme Studio
+// authors layer positions against, and must stay fixed or every existing
+// theme's layout would silently shift; this is purely the CSS box shape.
+
 async function loadSettings() {
   try {
     const r = await fetch(`${SERVER}/api/settings`);
     settings = await r.json();
     // Populate UI
-    if (deepgramKeyInput && settings.deepgramApiKey) deepgramKeyInput.value = settings.deepgramApiKey;
-    if (anthropicKeyInput && settings.anthropicApiKey) anthropicKeyInput.value = settings.anthropicApiKey;
+    // The server sends deepgramApiKey MASKED ("abcd1234…") for display, never
+    // the real key. It used to go straight into the input's editable .value —
+    // which meant ANY settings save (even for an unrelated field) round-
+    // tripped that masked string back to the server and silently clobbered
+    // the real stored key with 8 characters + an ellipsis, permanently
+    // breaking Deepgram until the user re-entered it from scratch. Leaving
+    // the field empty with a placeholder is the standard secret-field
+    // pattern: shows a key is set without making the masked text itself
+    // editable/save-able. saveCurrentSettings only sends deepgramApiKey when
+    // this field is actually non-empty (i.e. the user typed a real one).
+    if (deepgramKeyInput) {
+      deepgramKeyInput.value = '';
+      deepgramKeyInput.placeholder = settings.deepgramApiKey
+        ? `Key saved (${settings.deepgramApiKey}) — leave blank to keep`
+        : 'Paste your Deepgram API key';
+    }
     if (ppUrlInput && settings.proPresenterUrl) ppUrlInput.value = settings.proPresenterUrl;
     if (translationSettings && settings.translation) translationSettings.value = settings.translation;
     if (translationSelect && settings.translation)   translationSelect.value   = settings.translation;
@@ -1111,7 +1337,10 @@ async function loadSettings() {
     renderLangPacks();
     // First-run: no Deepgram key → show a nudge banner so the user knows what to do.
     showFirstRunBannerIfNeeded(settings);
-  } catch {}
+  } catch (err) {
+    console.warn('[Settings] Load failed:', err);
+    toast('Could not load settings from server', 'error');
+  }
 }
 
 // ── First-run onboarding modal ─────────────────────────────────────────────
@@ -1163,8 +1392,12 @@ async function saveFirstRunKey() {
 
 async function saveCurrentSettings() {
   const updated = {
-    deepgramApiKey:    deepgramKeyInput?.value    || settings.deepgramApiKey,
-    anthropicApiKey:   anthropicKeyInput?.value   || settings.anthropicApiKey,
+    // Only include deepgramApiKey when the (now-blank-by-default) field
+    // actually has something typed into it — an empty field means "keep
+    // whatever's already saved", not "erase the key". See loadSettings for
+    // why this field starts empty instead of pre-filled with the masked
+    // value.
+    ...(deepgramKeyInput?.value ? { deepgramApiKey: deepgramKeyInput.value } : {}),
     proPresenterUrl:   ppUrlInput?.value          || 'http://localhost:1025',
     translation:       translationSettings?.value || 'KJV',
     ppSwapTokenOrder:  settings.ppSwapTokenOrder  || false,
@@ -1180,11 +1413,16 @@ async function saveCurrentSettings() {
     ollamaUrl:           document.getElementById('ollama-url')?.value || 'http://localhost:11434',
     ollamaModel:         document.getElementById('ollama-model')?.value || settings.ollamaModel || 'qwen2.5:7b-instruct',
   };
-  await fetch(`${SERVER}/api/settings`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(updated),
-  });
+  try {
+    await fetch(`${SERVER}/api/settings`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(updated),
+    });
+  } catch (err) {
+    toast('Could not save settings: ' + err.message, 'error');
+    return;
+  }
   settings = { ...settings, ...updated };
   if (translationSelect && updated.translation) translationSelect.value = updated.translation;
   // Dismiss first-run banner now that a key may have been entered.
@@ -1460,17 +1698,21 @@ testObsBtn?.addEventListener('click', async () => {
 swapPPBtn?.addEventListener('click', async () => {
   settings.ppSwapTokenOrder = !settings.ppSwapTokenOrder;
   updatePPTokenLabel();
-  await fetch(`${SERVER}/api/settings`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ ppSwapTokenOrder: settings.ppSwapTokenOrder }),
-  });
+  try {
+    await fetch(`${SERVER}/api/settings`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ppSwapTokenOrder: settings.ppSwapTokenOrder }),
+    });
+  } catch (err) { toast('Could not save setting: ' + err.message, 'error'); }
 });
 
 autoSendCheckbox?.addEventListener('change', async () => {
   settings.autoSend = autoSendCheckbox.checked;
   if (autoSendSettings) autoSendSettings.checked = autoSendCheckbox.checked;
-  await fetch(`${SERVER}/api/settings`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ autoSend: settings.autoSend }) });
+  try {
+    await fetch(`${SERVER}/api/settings`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ autoSend: settings.autoSend }) });
+  } catch (err) { toast('Could not save setting: ' + err.message, 'error'); }
 });
 
 function closeModal() { settingsModal?.classList.add('hidden'); }
@@ -1559,6 +1801,43 @@ clearSuggestionsBtn?.addEventListener('click', () => {
   if (suggestionCount) suggestionCount.textContent = '0';
 });
 
+// ── Per-layer output clear ──────────────────────────────────────────────
+// The output composites two independent layers (see display.html); each
+// clears on its own without touching the other or the ProPresenter/NDI/
+// Syphon outputs, which have their own clear via the Live Queue's button.
+// A genuine clear, not "nothing sent yet" — renderPreviewScreen(text, ref,
+// null) falls back to the output's own assigned theme (primaryOutputLook()),
+// so the operator's status card kept showing that theme's background/layout
+// behind "Nothing on display" instead of reading as unambiguously blank.
+// This bypasses that fallback entirely: plain text, theme layer hidden, full
+// stop — matching what "cleared" is supposed to communicate.
+function clearPreviewScreen() {
+  const themed = document.getElementById('slide-preview-themed');
+  const plain  = document.querySelector('#slide-preview .live-screen-inner');
+  themed?.classList.add('hidden');
+  plain?.classList.remove('hidden');
+  // Only show the placeholder if media isn't covering for it — otherwise
+  // it'd sit as stray text over whatever image/video is currently showing.
+  const mediaShowing = !document.getElementById('slide-preview-media')?.classList.contains('hidden');
+  if (previewVerseText) previewVerseText.textContent = mediaShowing ? '' : 'Nothing on display';
+  if (previewVerseRef)  previewVerseRef.textContent  = '';
+  lastPreviewKey = ' ';
+  lastPreviewWasThemed = false;
+  lastPreviewHadOwnLook = false;
+}
+
+function clearOutputLayer(layer) {
+  fetch(`${SERVER}/api/service/clear-layer`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ layer }),
+  }).catch(err => console.warn('[KAIRO] clear-layer request failed:', err.message));
+  if (layer === 'slide' || layer === 'all') clearPreviewScreen();
+  if (layer === 'media' || layer === 'all') clearMediaPreview();
+}
+document.getElementById('clear-slide-layer-btn')?.addEventListener('click', () => clearOutputLayer('slide'));
+document.getElementById('clear-media-layer-btn')?.addEventListener('click', () => clearOutputLayer('media'));
+document.getElementById('clear-all-layers-btn')?.addEventListener('click', () => clearOutputLayer('all'));
+
 clearTranscriptBtn?.addEventListener('click', () => {
   showEmptyTranscript(true);
   wordCount = 0;
@@ -1583,6 +1862,56 @@ async function populateAudioDevices() {
 }
 
 refreshDevicesBtn?.addEventListener('click', populateAudioDevices);
+
+// ── Media layer audio output device ─────────────────────────────────────
+// Applied in display.html via HTMLMediaElement.setSinkId() — this picker
+// just enumerates 'audiooutput' devices and tells the display which one to
+// use; the display falls back to the system default if setSinkId isn't
+// supported by its WebView (e.g. WebKit doesn't implement it as of writing).
+const mediaOutputSettings   = document.getElementById('media-output-settings');
+const refreshOutputDevicesBtn = document.getElementById('refresh-output-devices-settings');
+const MEDIA_OUTPUT_KEY = 'kairo-media-output-device';
+
+async function populateAudioOutputDevices() {
+  if (!mediaOutputSettings) return;
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const outputs = devices.filter(d => d.kind === 'audiooutput');
+    const saved = localStorage.getItem(MEDIA_OUTPUT_KEY) || '';
+    mediaOutputSettings.innerHTML = '';
+    const dflt = document.createElement('option');
+    dflt.value = ''; dflt.textContent = 'System default';
+    mediaOutputSettings.appendChild(dflt);
+    outputs.forEach(d => {
+      const o = document.createElement('option');
+      o.value = d.deviceId;
+      o.textContent = d.label || `Output ${d.deviceId.slice(0, 6)}`;
+      if (d.deviceId === saved) o.selected = true;
+      mediaOutputSettings.appendChild(o);
+    });
+  } catch {}
+}
+refreshOutputDevicesBtn?.addEventListener('click', populateAudioOutputDevices);
+mediaOutputSettings?.addEventListener('change', () => {
+  const deviceId = mediaOutputSettings.value || '';
+  localStorage.setItem(MEDIA_OUTPUT_KEY, deviceId);
+  fetch(`${SERVER}/api/service/audio-output`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ deviceId: deviceId || null }),
+  }).catch(() => {});
+});
+populateAudioOutputDevices();
+// Re-apply the saved device to a freshly (re)connected display window —
+// otherwise it only ever learns the choice from a change event, not on
+// its own (re)connect.
+(function reapplySavedAudioOutput() {
+  const deviceId = localStorage.getItem(MEDIA_OUTPUT_KEY) || '';
+  if (!deviceId) return;
+  fetch(`${SERVER}/api/service/audio-output`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ deviceId }),
+  }).catch(() => {});
+})();
 
 // ── Offline (whisper.cpp) model installer UI ─────────────────────────────
 // Shown only when the Speech Engine toggle is set to "Offline". Streams
@@ -1693,100 +2022,132 @@ refreshDevicesBtn?.addEventListener('click', populateAudioDevices);
 
 // ── Local translation-model installer UI ─────────────────────────────────
 // Same NDJSON-progress pattern as the Whisper installer above, for the
-// bundled Qwen2.5 GGUF model translate.js uses for non-scripture slide text
-// (see llm_installer.js/llm_engine.js). Unlike Whisper this isn't gated
-// behind an engine toggle — every operator can use Multi-Language — and the
-// download can also have been started server-side already (translate.js
-// kicks it off in the background the first time it's actually needed), so
-// this polls for an in-progress install instead of only reacting to its own
-// button click.
-(function wireLLMInstaller() {
-  const statusLine   = document.getElementById('llm-status-line');
-  const installBtn    = document.getElementById('llm-install-btn');
-  const progressWrap  = document.getElementById('llm-progress-wrap');
-  const progressBar   = document.getElementById('llm-progress-bar');
-  const progressText  = document.getElementById('llm-progress-text');
-  if (!statusLine || !installBtn) return;
+// bundled Opus-MT/NLLB models translate.js uses for non-scripture slide text
+// (see mt_engine.js/mt_installer.js). French/Spanish/Portuguese are three
+// independent downloads — a French-only operator never pays for Portuguese
+// — so this renders one row per language, each with its own status/button,
+// mirroring the Scripture Packs list just above it in the same pane.
+// Downloads can also have been started server-side already (translate.js
+// kicks one off in the background the first time that language is actually
+// needed), so each row polls while its own install is in progress instead
+// of only reacting to its own button click.
+const MT_LANGUAGES = [
+  { code: 'fr', name: 'French' },
+  { code: 'es', name: 'Spanish' },
+  { code: 'pt', name: 'Portuguese' },
+];
+const _mtPollTimers = {};
 
-  let pollTimer = null;
+function renderMtModelList() {
+  const host = document.getElementById('mt-model-list');
+  if (!host) return;
+  host.innerHTML = '';
+  MT_LANGUAGES.forEach(({ code, name }) => {
+    const row = document.createElement('div');
+    row.className = 'lang-pack-row';
 
-  async function refreshStatus() {
-    try {
-      const r = await fetch(`${SERVER}/api/llm/status`);
-      const s = await r.json();
-      if (s.installed) {
-        statusLine.textContent = '✓ Translation model installed';
-        statusLine.style.color = 'var(--accent)';
-        installBtn.style.display = 'none';
-        progressWrap.style.display = 'none';
-        clearInterval(pollTimer); pollTimer = null;
-      } else if (s.installing) {
-        statusLine.textContent = 'Downloading in the background…';
-        installBtn.style.display = 'none';
-        if (!pollTimer) pollTimer = setInterval(refreshStatus, 2000);
-      } else {
-        statusLine.textContent = 'Not downloaded yet.';
-        statusLine.style.color = '';
-        installBtn.style.display = '';
-        clearInterval(pollTimer); pollTimer = null;
-      }
-    } catch {
-      statusLine.textContent = 'Cannot reach server.';
+    const meta = document.createElement('div');
+    meta.className = 'lang-pack-meta';
+    meta.innerHTML = `<div class="lang-pack-name">${name}</div><div class="lang-pack-sub" id="mt-sub-${code}">Checking…</div>`;
+
+    const btn = document.createElement('button');
+    btn.className = 'modal-btn secondary';
+    btn.id = `mt-btn-${code}`;
+    btn.style.display = 'none';
+    btn.addEventListener('click', () => installMtModel(code));
+
+    row.appendChild(meta);
+    row.appendChild(btn);
+    host.appendChild(row);
+
+    refreshMtStatus(code);
+  });
+}
+
+async function refreshMtStatus(code) {
+  const sub = document.getElementById(`mt-sub-${code}`);
+  const btn = document.getElementById(`mt-btn-${code}`);
+  if (!sub || !btn) return;
+  try {
+    const r = await fetch(`${SERVER}/api/translate-model/status?lang=${code}`);
+    const s = await r.json();
+    if (s.installed) {
+      sub.textContent = '✓ Installed';
+      sub.style.color = 'var(--accent)';
+      btn.style.display = 'none';
+      clearInterval(_mtPollTimers[code]); delete _mtPollTimers[code];
+    } else if (s.installing) {
+      sub.textContent = 'Downloading in the background…';
+      sub.style.color = '';
+      btn.style.display = 'none';
+      if (!_mtPollTimers[code]) _mtPollTimers[code] = setInterval(() => refreshMtStatus(code), 2000);
+    } else {
+      sub.textContent = `Not downloaded${s.approxMB ? ` (~${s.approxMB}MB)` : ''}`;
+      sub.style.color = '';
+      btn.textContent = 'Download';
+      btn.style.display = '';
+      clearInterval(_mtPollTimers[code]); delete _mtPollTimers[code];
     }
+  } catch {
+    sub.textContent = 'Cannot reach server.';
   }
-  refreshStatus();
+}
 
-  installBtn.addEventListener('click', async () => {
-    installBtn.style.display = 'none';
-    progressWrap.style.display = '';
-    progressBar.style.width = '0%';
-    progressText.textContent = 'Connecting…';
+async function installMtModel(code) {
+  const sub = document.getElementById(`mt-sub-${code}`);
+  const btn = document.getElementById(`mt-btn-${code}`);
+  if (!sub || !btn) return;
+  btn.style.display = 'none';
+  sub.textContent = 'Connecting…';
 
-    let res;
-    try {
-      res = await fetch(`${SERVER}/api/llm/install`, { method: 'POST' });
-    } catch (err) {
-      progressText.textContent = `Failed: ${err.message}`;
-      installBtn.style.display = '';
-      return;
-    }
-    if (!res.ok || !res.body) {
-      progressText.textContent = `HTTP ${res.status}`;
-      installBtn.style.display = '';
-      return;
-    }
+  let res;
+  try {
+    res = await fetch(`${SERVER}/api/translate-model/install`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ lang: code }),
+    });
+  } catch (err) {
+    sub.textContent = `Failed: ${err.message}`;
+    btn.style.display = '';
+    return;
+  }
+  if (!res.ok || !res.body) {
+    sub.textContent = `HTTP ${res.status}`;
+    btn.style.display = '';
+    return;
+  }
 
-    const reader  = res.body.getReader();
-    const decoder = new TextDecoder();
-    let buf = '';
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      buf += decoder.decode(value, { stream: true });
-      const lines = buf.split('\n');
-      buf = lines.pop();
-      for (const line of lines) {
-        if (!line.trim()) continue;
-        let evt;
-        try { evt = JSON.parse(line); } catch { continue; }
-        if (evt.phase === 'download' && typeof evt.pct === 'number') {
-          progressBar.style.width = evt.pct + '%';
-          progressText.textContent = `Downloading… ${evt.pct}%`;
-        } else if (evt.phase === 'done') {
-          progressText.textContent = evt.already ? 'Already installed.' : 'Done.';
-        } else if (evt.phase === 'complete') {
-          if (evt.ok) {
-            progressText.textContent = 'Installed.';
-            setTimeout(() => { progressWrap.style.display = 'none'; refreshStatus(); }, 1500);
-          } else {
-            progressText.textContent = `Failed: ${evt.error || 'unknown error'}`;
-            installBtn.style.display = '';
-          }
+  const reader  = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = '';
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    const lines = buf.split('\n');
+    buf = lines.pop();
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      let evt;
+      try { evt = JSON.parse(line); } catch { continue; }
+      if (evt.phase === 'download' && typeof evt.pct === 'number') {
+        sub.textContent = `Downloading… ${evt.pct}%`;
+      } else if (evt.phase === 'done') {
+        sub.textContent = evt.already ? 'Already installed.' : 'Done.';
+      } else if (evt.phase === 'complete') {
+        if (evt.ok) {
+          setTimeout(() => refreshMtStatus(code), 800);
+        } else {
+          sub.textContent = `Failed: ${evt.error || 'unknown error'}`;
+          btn.style.display = '';
         }
       }
     }
-  });
-})();
+  }
+}
+
+renderMtModelList();
 
 // Auto-refresh the mic list when a USB headset / interface is plugged in or
 // out. The OS fires a single `devicechange` for the event but Chromium often
@@ -1873,19 +2234,27 @@ function downloadTranscriptTxt() {
 }
 
 // AI content lives on saved sessions. Resolve the most recent saved session
-// that has the requested type generated; if none, send the user into Content
-// Studio so they can generate one.
-async function downloadAIContent(type) {
+// that has the requested type ('note'|'points') generated. Shared by both the
+// PDF and Word export paths below, which otherwise repeated this fetch+find
+// block verbatim. Returns { error: true } on a reachability failure (caller
+// should just return — the toast is already shown), or { candidate } where
+// candidate is null if nothing's been generated yet.
+async function resolveGeneratedSession(type) {
   let sessions = [];
   try {
     const r = await fetch(`${SERVER}/api/sessions`);
     sessions = (await r.json()).sessions || [];
   } catch {
     toast('Could not reach Kairo server', 'error');
-    return;
+    return { error: true };
   }
   const want = type === 'note' ? 'hasNote' : 'hasPoints';
-  const candidate = sessions.find(s => s[want]);
+  return { candidate: sessions.find(s => s[want]) || null };
+}
+
+async function downloadAIContent(type) {
+  const { error, candidate } = await resolveGeneratedSession(type);
+  if (error) return;
   if (!candidate) {
     toast(`No saved sermon ${type === 'note' ? 'note' : 'points'} yet — opening Content Studio`, 'info');
     document.getElementById('settings-modal')?.classList.add('hidden');
@@ -1911,16 +2280,8 @@ async function downloadAIContent(type) {
 // as a real .docx (headings, scripture lines, quotes). Same session
 // resolution as the PDF path.
 async function downloadAIContentDocx(type) {
-  let sessions = [];
-  try {
-    const r = await fetch(`${SERVER}/api/sessions`);
-    sessions = (await r.json()).sessions || [];
-  } catch {
-    toast('Could not reach Kairo server', 'error');
-    return;
-  }
-  const want = type === 'note' ? 'hasNote' : 'hasPoints';
-  const candidate = sessions.find(s => s[want]);
+  const { error, candidate } = await resolveGeneratedSession(type);
+  if (error) return;
   if (!candidate) {
     toast(`No saved sermon ${type === 'note' ? 'note' : 'points'} yet — opening Content Studio`, 'info');
     document.getElementById('settings-modal')?.classList.add('hidden');
@@ -1953,28 +2314,12 @@ function updateElapsed() {
 }
 
 // ── Toast ──────────────────────────────────────────────────────────────────
-// Auto-deploy and manual "Send" can both fire for the same verse moments
-// apart (e.g. a stream-confirmed match auto-sends it, then the operator also
-// clicks Send on the card before it updates) — dedup identical messages so
-// they don't stack into a pile of repeated toasts.
-let _lastToastMsg  = '';
-let _lastToastTime = 0;
-const TOAST_DEDUP_MS = 4000;
-
-function toast(msg, type = 'info') {
-  if (!toastContainer) return;
-  const now = Date.now();
-  if (msg === _lastToastMsg && now - _lastToastTime < TOAST_DEDUP_MS) return;
-  _lastToastMsg = msg;
-  _lastToastTime = now;
-
-  const el  = document.createElement('div');
-  el.className = `toast toast-${type}`;
-  el.textContent = msg;
-  toastContainer.appendChild(el);
-  setTimeout(() => el.classList.add('visible'), 10);
-  setTimeout(() => { el.classList.remove('visible'); setTimeout(() => el.remove(), 300); }, 3500);
-}
+// Disabled by explicit preference — every call site (~55+ of them, across
+// app.js and service.js) still calls toast(msg, type) exactly as before,
+// this just no-ops instead of rendering anything. Kept as a real function
+// rather than deleting every call site so none of that surrounding logic
+// needs touching.
+function toast() {}
 
 // ── Platform class ─────────────────────────────────────────────────────────
 // Platform class is set on <html> by an inline script in index.html (before
@@ -1983,6 +2328,27 @@ function toast(msg, type = 'info') {
 if (document.documentElement.classList.contains('platform-darwin')) {
   document.body.classList.add('platform-darwin');
 }
+
+// ── Frameless-window dragging (JS-driven, not CSS app-region) ────────────
+// See styles.css's comment on .top-bar-center for the history here: CSS
+// `-webkit-app-region: drag` repeatedly caused the whole top bar to stop
+// painting (a real WebKit/Chromium compositing bug), even after narrowing
+// the region to a permanently-empty element. Driving the drag from Tauri's
+// own startDragging() sidesteps the app-region/compositing path entirely —
+// there's nothing left for that bug class to trigger on.
+(function wireWindowDrag() {
+  const region = document.querySelector('.top-bar-center');
+  if (!region) return;
+  region.addEventListener('mousedown', (e) => {
+    if (e.button !== 0) return; // left-click only — matches native drag-region behavior
+    // .top-bar-center now also hosts the Bible/Slides/Songs/Media/Theme
+    // Studio tabs (centering them in the bar) — only start a window drag
+    // when the empty space itself was clicked, not a tab button.
+    if (e.target !== region) return;
+    const win = window.__TAURI__?.window?.getCurrentWindow?.();
+    win?.startDragging?.().catch(() => {});
+  });
+})();
 
 // ── Boot ───────────────────────────────────────────────────────────────────
 populateAudioDevices();
@@ -2043,16 +2409,17 @@ const NO_OUTLINE      = { enabled: false, color: '#000000', width: 2 };
 const DEFAULT_LOOKS = [
   {
     id: 'full-bg', name: 'Full — Background', layout: 'fullscreen', animation: 'fade',
+    groupId: 'grp-bible', groupName: 'Bible',
     layers: [
       { id: 'bg', type: 'background', name: 'Canvas', visible: true,
         fill: 'gradient', color: '#0b0b0f', opacity: 100, color2: '#1c1c30', angle: 160 },
       { id: 'verse', type: 'text', name: 'Verse', visible: true, binding: 'verse', customText: '',
-        pos: { x: 210, y: 300, w: 1500, h: 440 },
+        pos: { x: 210, y: 80, w: 1500, h: 440 },
         font: { family: 'Manrope', size: 64, weight: 500, italic: false, lineHeight: 1.35, letterSpacing: 0, transform: 'none' },
         color: '#ffffff', opacity: 100, align: 'center',
         shadow: { ...TXT_SHADOW_SOFT }, outline: { ...NO_OUTLINE } },
       { id: 'ref', type: 'text', name: 'Reference', visible: true, binding: 'reference', customText: '',
-        pos: { x: 210, y: 790, w: 1500, h: 0 },
+        pos: { x: 210, y: 560, w: 1500, h: 0 },
         font: { family: 'Manrope', size: 28, weight: 600, italic: false, lineHeight: 1.2, letterSpacing: 4, transform: 'uppercase' },
         color: '#ffffff', opacity: 60, align: 'center',
         shadow: { ...TXT_SHADOW_NONE }, outline: { ...NO_OUTLINE } },
@@ -2062,17 +2429,18 @@ const DEFAULT_LOOKS = [
     // Identical geometry to Full — Background, but the canvas is keyed out.
     // Heavier shadow + outline so the text survives over any live source.
     id: 'full-alpha', name: 'Full — Transparent', layout: 'fullscreen', animation: 'fade',
+    groupId: 'grp-bible', groupName: 'Bible',
     layers: [
       { id: 'bg', type: 'background', name: 'Canvas', visible: true,
         fill: 'transparent', fillBefore: 'solid', color: '#000000', opacity: 100, color2: '#1c1c30', angle: 160 },
       { id: 'verse', type: 'text', name: 'Verse', visible: true, binding: 'verse', customText: '',
-        pos: { x: 210, y: 300, w: 1500, h: 440 },
+        pos: { x: 210, y: 80, w: 1500, h: 440 },
         font: { family: 'Manrope', size: 64, weight: 600, italic: false, lineHeight: 1.35, letterSpacing: 0, transform: 'none' },
         color: '#ffffff', opacity: 100, align: 'center',
         shadow: { enabled: true, color: '#000000', opacity: 85, blur: 18, x: 0, y: 4 },
         outline: { enabled: true, color: '#000000', width: 2 } },
       { id: 'ref', type: 'text', name: 'Reference', visible: true, binding: 'reference', customText: '',
-        pos: { x: 210, y: 790, w: 1500, h: 0 },
+        pos: { x: 210, y: 560, w: 1500, h: 0 },
         font: { family: 'Manrope', size: 28, weight: 700, italic: false, lineHeight: 1.2, letterSpacing: 4, transform: 'uppercase' },
         color: '#ffffff', opacity: 85, align: 'center',
         shadow: { enabled: true, color: '#000000', opacity: 85, blur: 10, x: 0, y: 2 },
@@ -2083,6 +2451,7 @@ const DEFAULT_LOOKS = [
     // Two independent bands so the verse section and the reference section can
     // be recoloured separately — select either band layer and change its fill.
     id: 'lower-third', name: 'Lower Third', layout: 'lower-third', animation: 'slide-up',
+    groupId: 'grp-bible', groupName: 'Bible',
     layers: [
       { id: 'bg', type: 'background', name: 'Canvas', visible: true,
         fill: 'transparent', fillBefore: 'solid', color: '#000000', opacity: 100, color2: '#000000', angle: 0 },
@@ -2110,6 +2479,7 @@ const DEFAULT_LOOKS = [
     // the playlist produces — big, centred, no panel behind it. The reference
     // line doubles as the song title.
     id: 'lyrics-block', name: 'Lyrics — Block', layout: 'fullscreen', animation: 'fade',
+    groupId: 'grp-lyrics', groupName: 'Lyrics',
     layers: [
       { id: 'bg', type: 'background', name: 'Canvas', visible: true,
         fill: 'transparent', fillBefore: 'solid', color: '#000000', opacity: 100, color2: '#000000', angle: 0 },
@@ -2119,7 +2489,7 @@ const DEFAULT_LOOKS = [
         color: '#ffffff', opacity: 100, align: 'center',
         shadow: { enabled: true, color: '#000000', opacity: 85, blur: 22, x: 0, y: 4 },
         outline: { enabled: true, color: '#000000', width: 2 } },
-      { id: 'ref', type: 'text', name: 'Song Title', visible: true, binding: 'reference', customText: '',
+      { id: 'ref', type: 'text', name: 'Song Title', visible: false, binding: 'reference', customText: '',
         pos: { x: 140, y: 880, w: 1640, h: 0 },
         font: { family: 'Montserrat', size: 26, weight: 600, italic: false, lineHeight: 1.2, letterSpacing: 6, transform: 'uppercase' },
         color: '#ffffff', opacity: 55, align: 'center',
@@ -2131,6 +2501,7 @@ const DEFAULT_LOOKS = [
     // Filled left half, fully transparent right half — the right side keys out
     // so a camera / lyric feed shows through on a chroma or alpha rig.
     id: 'split-left', name: 'Split — Left', layout: 'split-left', animation: 'slide-up',
+    groupId: 'grp-bible', groupName: 'Bible',
     layers: [
       { id: 'bg', type: 'background', name: 'Canvas', visible: true,
         fill: 'transparent', fillBefore: 'solid', color: '#000000', opacity: 100, color2: '#000000', angle: 0 },
@@ -2152,6 +2523,7 @@ const DEFAULT_LOOKS = [
   {
     // Mirror of Split — Left: filled right half, transparent left half.
     id: 'split-right', name: 'Split — Right', layout: 'split-right', animation: 'slide-up',
+    groupId: 'grp-bible', groupName: 'Bible',
     layers: [
       { id: 'bg', type: 'background', name: 'Canvas', visible: true,
         fill: 'transparent', fillBefore: 'solid', color: '#000000', opacity: 100, color2: '#000000', angle: 0 },
@@ -2181,6 +2553,7 @@ const DEFAULT_LOOKS = [
     // decides what actually fills that binding — see getTranslatedText() in
     // service.js for the resolution + caching logic.
     id: 'multi-language', name: 'Multi-Language', layout: 'multi-language', animation: 'fade',
+    groupId: 'grp-bible', groupName: 'Bible',
     layers: [
       { id: 'bg', type: 'background', name: 'Canvas', visible: true,
         fill: 'gradient', color: '#0b0b0f', opacity: 100, color2: '#1c1c30', angle: 160 },
@@ -2212,6 +2585,245 @@ const DEFAULT_LOOKS = [
         shadow: { ...TXT_SHADOW_NONE }, outline: { ...NO_OUTLINE } },
     ],
   },
+  {
+    // Transparent lower-third for keying over a live camera/backdrop, stacked
+    // two-language reading: up to two lines of the source language on top,
+    // one line of the translated language directly beneath it. Unlike
+    // Multi-Language's side-by-side split, both languages share one lower
+    // band so a single congregation display can read both at once. The
+    // translated line only ever populates when the item's own Multi-Language
+    // translateTo is set (see themeNeedsTranslation/getTranslatedText in
+    // service.js) — with no target language chosen it just renders empty.
+    id: 'lyrics-bilingual', name: 'Lyrics — Bilingual', layout: 'lower-third', animation: 'slide-up',
+    groupId: 'grp-lyrics', groupName: 'Lyrics',
+    layers: [
+      { id: 'bg', type: 'background', name: 'Canvas', visible: true,
+        fill: 'transparent', fillBefore: 'solid', color: '#000000', opacity: 100, color2: '#000000', angle: 0 },
+      { id: 'verse', type: 'text', name: 'Lyrics (source)', visible: true, binding: 'verse', customText: '',
+        pos: { x: 96, y: 750, w: 1728, h: 180 },
+        font: { family: 'Manrope', size: 44, weight: 600, italic: false, lineHeight: 1.3, letterSpacing: 0, transform: 'none' },
+        color: '#ffffff', opacity: 100, align: 'center',
+        shadow: { enabled: true, color: '#000000', opacity: 85, blur: 18, x: 0, y: 4 },
+        outline: { enabled: true, color: '#000000', width: 2 } },
+      { id: 'verse-translated', type: 'text', name: 'Lyrics (translated)', visible: true, binding: 'verse_translated', customText: '',
+        pos: { x: 96, y: 945, w: 1728, h: 90 },
+        font: { family: 'Manrope', size: 32, weight: 500, italic: false, lineHeight: 1.25, letterSpacing: 0, transform: 'none' },
+        color: '#ffffff', opacity: 85, align: 'center',
+        shadow: { enabled: true, color: '#000000', opacity: 85, blur: 14, x: 0, y: 3 },
+        outline: { enabled: true, color: '#000000', width: 2 } },
+    ],
+  },
+  {
+    // News-style scrolling banner along the bottom — for announcements/
+    // prayer requests running continuously under whatever else is on
+    // screen, same idea as a news channel's chyron. The band and text sit
+    // at the same free-canvas box; speed lives on the text layer itself
+    // (Properties panel → Scroll), not the theme, so it's tunable per
+    // service without duplicating the whole theme.
+    id: 'ticker', name: 'Ticker', layout: 'ticker', animation: 'cut',
+    groupId: 'grp-slides', groupName: 'Slides',
+    layers: [
+      { id: 'bg', type: 'background', name: 'Canvas', visible: true,
+        fill: 'transparent', fillBefore: 'solid', color: '#000000', opacity: 100, color2: '#000000', angle: 0 },
+      { id: 'band', type: 'background', name: 'Ticker Band', visible: true,
+        fill: 'solid', color: '#c0272d', opacity: 100, color2: '#c0272d', angle: 0, radius: 0,
+        pos: { x: 0, y: 990, w: 1920, h: 90 } },
+      { id: 'text', type: 'text', name: 'Ticker Text', visible: true, binding: 'custom', customText: 'Type your announcement here…',
+        pos: { x: 0, y: 990, w: 1920, h: 90 },
+        font: { family: 'Manrope', size: 36, weight: 700, italic: false, lineHeight: 1.2, letterSpacing: 1, transform: 'uppercase' },
+        color: '#ffffff', opacity: 100, align: 'left',
+        shadow: { ...TXT_SHADOW_NONE }, outline: { ...NO_OUTLINE },
+        scroll: { enabled: true, speed: 20 } },
+    ],
+  },
+  {
+    // Large scrolling text filling most of the screen — a bigger, more
+    // dramatic marquee than Ticker's thin strip, for a single bold
+    // announcement/alert meant to dominate the display rather than run
+    // quietly under something else.
+    id: 'scroll-fill', name: 'Scroll — Fill Screen', layout: 'scroll-fill', animation: 'cut',
+    groupId: 'grp-slides', groupName: 'Slides',
+    layers: [
+      { id: 'bg', type: 'background', name: 'Canvas', visible: true,
+        fill: 'gradient', color: '#0b0b0f', opacity: 100, color2: '#1c1c30', angle: 160 },
+      { id: 'text', type: 'text', name: 'Scroll Text', visible: true, binding: 'custom', customText: 'Type your announcement here…',
+        font: { family: 'Manrope', size: 140, weight: 800, italic: false, lineHeight: 1, letterSpacing: 0, transform: 'none' },
+        color: '#ffffff', opacity: 100, align: 'left',
+        shadow: { ...TXT_SHADOW_SOFT }, outline: { ...NO_OUTLINE },
+        scroll: { enabled: true, speed: 14 } },
+    ],
+  },
+  {
+    // The animated/dynamic lyrics option — same transparent, keyable design
+    // as Lyrics — Block, but each word of the verse leans in individually,
+    // bold and punchy (see word_split.js's buildWordSpans and the
+    // @keyframes kairo-word-in reveal in styles.css), instead of the plain
+    // whole-block Fade/Slide/Cut every other theme uses — a broadcast/LED-
+    // wall style cascade rather than a lower-third-style transition. Speed
+    // is adjustable per-theme via the slider next to the Transition chips
+    // (scales both each word's own reveal duration and the stagger between
+    // words). Multi-part lyrics (verse/chorus/bridge…) need nothing special
+    // here — they're just successive sends through the same binding:'verse'
+    // text every other lyrics theme already uses, so each new part gets the
+    // same word-by-word treatment automatically.
+    id: 'lyrics-motion', name: 'Lyrics — Motion', layout: 'fullscreen', animation: 'cut', animationSpeed: 1, textAnimation: 'word-in', textAnimationSpeed: 1,
+    groupId: 'grp-lyrics', groupName: 'Lyrics',
+    layers: [
+      { id: 'bg', type: 'background', name: 'Canvas', visible: true,
+        fill: 'transparent', fillBefore: 'solid', color: '#000000', opacity: 100, color2: '#000000', angle: 0 },
+      { id: 'verse', type: 'text', name: 'Lyrics', visible: true, binding: 'verse', customText: '',
+        pos: { x: 160, y: 700, w: 1600, h: 280 },
+        font: { family: 'Manrope', size: 58, weight: 700, italic: false, lineHeight: 1.3, letterSpacing: 0, transform: 'none' },
+        color: '#ffffff', opacity: 100, align: 'center',
+        shadow: { enabled: true, color: '#000000', opacity: 80, blur: 16, x: 0, y: 4 },
+        outline: { enabled: true, color: '#000000', width: 2 } },
+      { id: 'ref', type: 'text', name: 'Song Title', visible: false, binding: 'reference', customText: '',
+        pos: { x: 160, y: 980, w: 1600, h: 0 },
+        font: { family: 'Manrope', size: 24, weight: 700, italic: false, lineHeight: 1.2, letterSpacing: 4, transform: 'uppercase' },
+        color: '#ffffff', opacity: 70, align: 'center',
+        shadow: { enabled: true, color: '#000000', opacity: 70, blur: 8, x: 0, y: 2 },
+        outline: { ...NO_OUTLINE } },
+    ],
+  },
+  {
+    // LED-wall preset: the verse box spans nearly the entire 1920×1080
+    // canvas (not Lyrics — Motion's lower-anchored band) — for a video wall
+    // where the whole screen IS the lyric display, not a caption over a
+    // camera feed. Pairs that full-bleed geometry with 'activate' (see
+    // @keyframes kairo-word-activate in styles.css): each word flashes from
+    // dim to fully lit with a brief glow, inspired by Final Cut Pro's
+    // "Activate" title.
+    id: 'lyrics-activate', name: 'Lyrics — Activate', layout: 'fullscreen', animation: 'cut', animationSpeed: 1, textAnimation: 'activate', textAnimationSpeed: 1,
+    groupId: 'grp-lyrics', groupName: 'Lyrics',
+    layers: [
+      { id: 'bg', type: 'background', name: 'Canvas', visible: true,
+        fill: 'transparent', fillBefore: 'solid', color: '#000000', opacity: 100, color2: '#000000', angle: 0 },
+      { id: 'verse', type: 'text', name: 'Lyrics', visible: true, binding: 'verse', customText: '',
+        pos: { x: 80, y: 60, w: 1760, h: 900 },
+        font: { family: 'Manrope', size: 72, weight: 800, italic: false, lineHeight: 1.25, letterSpacing: 0, transform: 'none' },
+        color: '#ffffff', opacity: 100, align: 'center',
+        shadow: { enabled: true, color: '#000000', opacity: 80, blur: 20, x: 0, y: 4 },
+        outline: { enabled: true, color: '#000000', width: 2 } },
+      { id: 'ref', type: 'text', name: 'Song Title', visible: false, binding: 'reference', customText: '',
+        pos: { x: 80, y: 990, w: 1760, h: 0 },
+        font: { family: 'Manrope', size: 22, weight: 700, italic: false, lineHeight: 1.2, letterSpacing: 4, transform: 'uppercase' },
+        color: '#ffffff', opacity: 65, align: 'center',
+        shadow: { enabled: true, color: '#000000', opacity: 70, blur: 8, x: 0, y: 2 },
+        outline: { ...NO_OUTLINE } },
+    ],
+  },
+  {
+    // LED-wall preset, same full-bleed geometry as Lyrics — Activate, paired
+    // with 'karaoke' (see @keyframes kairo-word-karaoke in styles.css): each
+    // word sits dim ("unsung") until its turn, then snaps instantly to
+    // fully lit and stays that way — the classic sing-along chase. Gold
+    // reads as the traditional karaoke color at both the dim and lit ends
+    // of that opacity range, unlike white (which would look closer to grey
+    // scrim than "not yet sung" at 32% opacity).
+    id: 'lyrics-karaoke', name: 'Lyrics — Karaoke', layout: 'fullscreen', animation: 'cut', animationSpeed: 1, textAnimation: 'karaoke', textAnimationSpeed: 1,
+    groupId: 'grp-lyrics', groupName: 'Lyrics',
+    layers: [
+      { id: 'bg', type: 'background', name: 'Canvas', visible: true,
+        fill: 'transparent', fillBefore: 'solid', color: '#000000', opacity: 100, color2: '#000000', angle: 0 },
+      { id: 'verse', type: 'text', name: 'Lyrics', visible: true, binding: 'verse', customText: '',
+        pos: { x: 80, y: 60, w: 1760, h: 900 },
+        font: { family: 'Manrope', size: 72, weight: 800, italic: false, lineHeight: 1.25, letterSpacing: 0, transform: 'none' },
+        color: '#ffd23f', opacity: 100, align: 'center',
+        shadow: { enabled: true, color: '#000000', opacity: 80, blur: 20, x: 0, y: 4 },
+        outline: { enabled: true, color: '#000000', width: 2 } },
+      { id: 'ref', type: 'text', name: 'Song Title', visible: false, binding: 'reference', customText: '',
+        pos: { x: 80, y: 990, w: 1760, h: 0 },
+        font: { family: 'Manrope', size: 22, weight: 700, italic: false, lineHeight: 1.2, letterSpacing: 4, transform: 'uppercase' },
+        color: '#ffffff', opacity: 65, align: 'center',
+        shadow: { enabled: true, color: '#000000', opacity: 70, blur: 8, x: 0, y: 2 },
+        outline: { ...NO_OUTLINE } },
+    ],
+  },
+  {
+    // LED-wall preset, same full-bleed geometry again, paired with
+    // 'typewriter' (see @keyframes kairo-char-type/kairo-caret-blink in
+    // styles.css): one character at a time, finishing with a blinking
+    // caret. Courier Prime (a real monospace Google Font, not just a system
+    // fallback) sells the "being typed" read far better than Manrope would —
+    // proportional fonts visibly reflow width as each character lands.
+    id: 'lyrics-typewriter', name: 'Lyrics — Typewriter', layout: 'fullscreen', animation: 'cut', animationSpeed: 1, textAnimation: 'typewriter', textAnimationSpeed: 1,
+    groupId: 'grp-lyrics', groupName: 'Lyrics',
+    layers: [
+      { id: 'bg', type: 'background', name: 'Canvas', visible: true,
+        fill: 'transparent', fillBefore: 'solid', color: '#000000', opacity: 100, color2: '#000000', angle: 0 },
+      { id: 'verse', type: 'text', name: 'Lyrics', visible: true, binding: 'verse', customText: '',
+        pos: { x: 80, y: 60, w: 1760, h: 900 },
+        font: { family: 'Courier Prime', size: 62, weight: 700, italic: false, lineHeight: 1.3, letterSpacing: 0, transform: 'none' },
+        color: '#ffffff', opacity: 100, align: 'center',
+        shadow: { enabled: true, color: '#000000', opacity: 80, blur: 16, x: 0, y: 4 },
+        outline: { enabled: true, color: '#000000', width: 2 } },
+      { id: 'ref', type: 'text', name: 'Song Title', visible: false, binding: 'reference', customText: '',
+        pos: { x: 80, y: 990, w: 1760, h: 0 },
+        font: { family: 'Manrope', size: 22, weight: 700, italic: false, lineHeight: 1.2, letterSpacing: 4, transform: 'uppercase' },
+        color: '#ffffff', opacity: 65, align: 'center',
+        shadow: { enabled: true, color: '#000000', opacity: 70, blur: 8, x: 0, y: 2 },
+        outline: { ...NO_OUTLINE } },
+    ],
+  },
+  {
+    // LED-wall preset, same full-bleed geometry again, paired with 'impact'
+    // (see @keyframes kairo-word-in / .kairo-word-impact-hit in styles.css)
+    // — the "Hormozi preset"/CapCut dynamic-caption look: most words pop in
+    // at normal size, a handful of keyword words (picked by isImpactHit in
+    // word_split.js) run bigger, bolder, and gold. Base size is smaller
+    // than the other Lyrics — * presets since hit words scale up ~1.22×
+    // from it — sized so even the enlarged words stay comfortably inside
+    // the verse box instead of needing headroom baked into every layout.
+    id: 'lyrics-impact', name: 'Lyrics — Impact', layout: 'fullscreen', animation: 'cut', animationSpeed: 1, textAnimation: 'impact', textAnimationSpeed: 1, textHighlightColor: '#ffd23f', textAnimationIntensity: 1,
+    groupId: 'grp-lyrics', groupName: 'Lyrics',
+    layers: [
+      { id: 'bg', type: 'background', name: 'Canvas', visible: true,
+        fill: 'transparent', fillBefore: 'solid', color: '#000000', opacity: 100, color2: '#000000', angle: 0 },
+      { id: 'verse', type: 'text', name: 'Lyrics', visible: true, binding: 'verse', customText: '',
+        pos: { x: 80, y: 60, w: 1760, h: 900 },
+        font: { family: 'Manrope', size: 60, weight: 800, italic: false, lineHeight: 1.35, letterSpacing: 0, transform: 'none' },
+        color: '#ffffff', opacity: 100, align: 'center',
+        shadow: { enabled: true, color: '#000000', opacity: 80, blur: 20, x: 0, y: 4 },
+        outline: { enabled: true, color: '#000000', width: 2 } },
+      { id: 'ref', type: 'text', name: 'Song Title', visible: false, binding: 'reference', customText: '',
+        pos: { x: 80, y: 990, w: 1760, h: 0 },
+        font: { family: 'Manrope', size: 22, weight: 700, italic: false, lineHeight: 1.2, letterSpacing: 4, transform: 'uppercase' },
+        color: '#ffffff', opacity: 65, align: 'center',
+        shadow: { enabled: true, color: '#000000', opacity: 70, blur: 8, x: 0, y: 2 },
+        outline: { ...NO_OUTLINE } },
+    ],
+  },
+  {
+    // LED-wall preset, same full-bleed geometry again, paired with
+    // 'bold-caption' (see @keyframes kairo-word-boldcap-in / .kairo-word-
+    // boldcap in styles.css) — the bold-caption style from viral short-form
+    // editing: verse text breaks into short stacked lines, every word runs
+    // at a flat heavy weight, and an occasional word explodes much bigger
+    // with tight kerning. Base size (64px, bigger than the other
+    // Lyrics — * presets' ~52-60px) plus buildBoldCapSpans' own
+    // space-evenly vertical distribution across the full verse box is what
+    // makes this "fill" the box regardless of a verse's length, rather
+    // than sitting as a small cluster in the middle. Weight is left at the
+    // layer's own default since .kairo-word-boldcap hardcodes 900 anyway.
+    id: 'lyrics-bold-caption', name: 'Lyrics — Bold Caption', layout: 'fullscreen', animation: 'cut', animationSpeed: 1, textAnimation: 'bold-caption', textAnimationSpeed: 1, textAnimationIntensity: 1,
+    groupId: 'grp-lyrics', groupName: 'Lyrics',
+    layers: [
+      { id: 'bg', type: 'background', name: 'Canvas', visible: true,
+        fill: 'transparent', fillBefore: 'solid', color: '#000000', opacity: 100, color2: '#000000', angle: 0 },
+      { id: 'verse', type: 'text', name: 'Lyrics', visible: true, binding: 'verse', customText: '',
+        pos: { x: 80, y: 60, w: 1760, h: 900 },
+        font: { family: 'Manrope', size: 64, weight: 800, italic: false, lineHeight: 1.35, letterSpacing: 0, transform: 'none' },
+        color: '#ffffff', opacity: 100, align: 'center',
+        shadow: { enabled: true, color: '#000000', opacity: 80, blur: 20, x: 0, y: 4 },
+        outline: { enabled: true, color: '#000000', width: 2 } },
+      { id: 'ref', type: 'text', name: 'Song Title', visible: false, binding: 'reference', customText: '',
+        pos: { x: 80, y: 990, w: 1760, h: 0 },
+        font: { family: 'Manrope', size: 22, weight: 700, italic: false, lineHeight: 1.2, letterSpacing: 4, transform: 'uppercase' },
+        color: '#ffffff', opacity: 65, align: 'center',
+        shadow: { enabled: true, color: '#000000', opacity: 70, blur: 8, x: 0, y: 2 },
+        outline: { ...NO_OUTLINE } },
+    ],
+  },
 ];
 
 // Load saved looks from localStorage and back-fill any NEW default-look IDs
@@ -2230,17 +2842,111 @@ const LEGACY_BUILTIN_IDS = new Set([
 let looks = (function loadLooks() {
   const stored = JSON.parse(localStorage.getItem(LOOKS_KEY) || 'null');
   if (Array.isArray(stored) && stored.length) {
+    // Renamed BEFORE knownIds/missing below are computed from stored's ids —
+    // otherwise the new id ('lyrics-bold-caption') still reads as entirely
+    // missing at that point and the back-fill appends a second, fresh copy
+    // alongside this renamed one instead of this being an in-place rename.
+    stored.forEach(l => {
+      if (l.id === 'lyrics-collage') { l.id = 'lyrics-bold-caption'; l.name = 'Lyrics — Bold Caption'; }
+    });
     const knownIds = new Set(stored.map(l => l.id));
     const missing  = DEFAULT_LOOKS.filter(d => !knownIds.has(d.id));
+    // Built-in themes saved before category grouping (Lyrics/Bible/Slides)
+    // was introduced won't carry a groupId/groupName of their own — the
+    // back-fill above only adds ids that are entirely missing, so an
+    // existing stored copy of e.g. 'lyrics-block' needs those two fields
+    // retrofitted from its current DEFAULT_LOOKS entry. Idempotent: once set,
+    // this is a no-op on every later load.
+    const defaultsById = new Map(DEFAULT_LOOKS.map(d => [d.id, d]));
+    const SONGTITLE_MIGRATION_KEY = 'kairo-migrated-songtitle-default-off';
+    const runSongTitleMigration = !localStorage.getItem(SONGTITLE_MIGRATION_KEY);
+    if (runSongTitleMigration) localStorage.setItem(SONGTITLE_MIGRATION_KEY, '1');
+    stored.forEach(l => {
+      const def = defaultsById.get(l.id);
+      if (def && def.groupId && !l.groupId) { l.groupId = def.groupId; l.groupName = def.groupName; }
+      // Word/Activate/Karaoke/Typewriter/Impact/Bold Caption/Bounce/Highlight Box/
+      // Shimmer used to be crammed into the same `animation` field as the
+      // real Fade/Slide/Cut transitions — every install saved before that
+      // was split into its own `textAnimation` field still has one of those
+      // values sitting in `animation`. Migrate in place: move it to
+      // textAnimation, carry the old animationSpeed over as
+      // textAnimationSpeed (that field WAS controlling the text reveal's
+      // pace for these themes), and reset animation to 'cut' — the
+      // no-redundant-container-fade pairing every Lyrics — * preset above
+      // already uses. Only touches looks that still have the OLD shape; an
+      // operator who's since picked a real transition keeps that choice.
+      if (window.KairoWordSplit?.isPerElementMotion(l.animation)) {
+        l.textAnimation = l.animation;
+        l.textAnimationSpeed = l.animationSpeed ?? 1;
+        l.animation = 'cut';
+        l.animationSpeed = 1;
+      }
+      // Renamed from 'collage' once the actual chaotic-rotation design was
+      // reworked into the bold-caption style it is now — an install saved
+      // under the old name during that redesign still needs to resolve.
+      if (l.textAnimation === 'collage') l.textAnimation = 'bold-caption';
+      // The built-in Lyrics presets' "Song Title" layer used to default on,
+      // so it could paint alone (just the song title, no lyric line) on an
+      // otherwise-empty canvas — e.g. before any stanza is sent. Now off by
+      // default in DEFAULT_LOOKS; an install saved before that still has its
+      // own copy of the layer with the old visible:true baked in, so this
+      // in-place flip is needed too. Gated on SONGTITLE_MIGRATION_KEY below
+      // (checked once, outside this per-look loop) so it runs exactly once —
+      // without that gate this would re-run on every load and stomp an
+      // operator's own later choice to turn the layer back on.
+      if (runSongTitleMigration && def?.groupId === 'grp-lyrics') {
+        const ref = (l.layers || []).find(ly => ly.id === 'ref' && ly.binding === 'reference');
+        if (ref) ref.visible = false;
+      }
+    });
     return missing.length ? [...stored, ...missing] : stored;
   }
   // First run on v3 — carry over the operator's own themes from v2, if any.
+  // Also mark the Song Title migration as already applied: DEFAULT_LOOKS
+  // already ships with that layer off, so a genuinely fresh install has
+  // nothing to retroactively flip — without this, the FIRST save an operator
+  // makes (e.g. deliberately turning Song Title back on) would look like a
+  // pre-migration install on the next launch and get silently reverted by
+  // the migration above.
+  localStorage.setItem('kairo-migrated-songtitle-default-off', '1');
   const legacy = JSON.parse(localStorage.getItem('kairo-looks-v2') || 'null');
   const custom = Array.isArray(legacy) ? legacy.filter(l => l && !LEGACY_BUILTIN_IDS.has(l.id)) : [];
   return [...DEFAULT_LOOKS, ...custom];
 })();
 let activeLook  = looks[0];
 let activeLayer = null; // currently selected layer object
+
+// Themes imported from one multi-slide bundle (a .protheme file's several
+// named theme-slides — HYMN 1, NOTES, CALL TO WORSHIP, etc.) share a
+// groupId/groupName rather than becoming unrelated flat entries in the same
+// list as every built-in/custom theme. Deliberately NOT a nested container
+// object (Theme { slides: [...] }) — each slide stays a normal, independent
+// look, so output assignment (outputThemeMap), Full-scale edit's theme
+// picker, saveLooks, import/export — none of that needs to know groups
+// exist at all. Only the browsing list groups them visually. Session-only;
+// resets to "all expanded" on reload, same as the output cards' own
+// collapse state elsewhere in this file.
+let collapsedThemeGroups = new Set();
+
+// Select-all/copy/paste for layers (Cmd/Ctrl+A/C/V while Theme Studio has
+// focus, mirroring the same gesture on native files/text) — lets an operator
+// pull layers from one theme into another instead of only ever duplicating
+// the whole theme. multiSelectedLayerIds is select-all's visual footprint;
+// a plain single click still only ever sets activeLayer, so Copy after a
+// normal click copies just that one layer.
+let multiSelectedLayerIds = new Set();
+let layerClipboard = [];
+
+// "Full Edit" — a second use of this same canvas engine, pointed at a
+// specific playlist item's specific slide instead of a real theme, so an
+// operator can override that slide's text-layer position/font/color/shadow/
+// outline/visibility without touching the theme itself (see item.slideStyles
+// in service.js). tsMode gates every place the engine would otherwise assume
+// "activeLook is a real theme in the looks array" — Theme Studio's own
+// behavior in tsMode === 'theme' must stay byte-for-byte unchanged.
+let tsMode = 'theme'; // 'theme' | 'item'
+let tsItemCtx = null; // { item, slideIndex, baseLook } — set only while tsMode === 'item'
+let itemUndoStack = [], itemRedoStack = [], itemPendingCheckpoint = null, itemAutosaveTimer = null;
 
 function saveLooks() {
   localStorage.setItem(LOOKS_KEY, JSON.stringify(looks));
@@ -2249,55 +2955,380 @@ function saveLooks() {
 }
 function deepClone(o) { return JSON.parse(JSON.stringify(o)); }
 
-// ── Hex ↔ rgba helpers ────────────────────────────────────────────────────
-function hexToRgb(hex) {
-  const r = parseInt(hex.slice(1,3),16), g = parseInt(hex.slice(3,5),16), b = parseInt(hex.slice(5,7),16);
-  return { r, g, b };
-}
-function hexOpacity(hex, opacity) {
-  const { r, g, b } = hexToRgb(hex);
-  return `rgba(${r},${g},${b},${(opacity/100).toFixed(2)})`;
+// hexToRgb/hexOpacity now live in color_utils.js (shared with service.js and
+// display.html — see that file for why).
+
+// Small live preview of a look's layers for a theme-list row — see
+// renderLookThumbnail in service.js (shared with the Slides/Bible theme
+// popovers so every theme picker in the app shows the same thumbnail).
+function renderLookThumbnail(container, look) {
+  window.KairoService?.renderLookThumbnail(container, look);
 }
 
 // ── Render themes list ────────────────────────────────────────────────────
+// Renaming and deleting both live here now — there's no top header anymore,
+// so the selected theme's own row is the one place both happen. Renaming is
+// a double-click (same gesture used throughout the app); delete needs a
+// real confirm since there's no undo for losing the WHOLE theme, just for
+// edits within one.
+function buildLookRow(look, indented) {
+  const item = document.createElement('div');
+  item.className = 'ts-theme-item' + (look.id === activeLook?.id ? ' active' : '') + (indented ? ' ts-theme-item-grouped' : '');
+
+  const thumb = document.createElement('div');
+  thumb.className = 'ts-theme-thumb';
+  renderLookThumbnail(thumb, look);
+
+  const name = document.createElement('span');
+  name.className = 'ts-theme-name';
+  name.textContent = look.name;
+  name.title = 'Double-click to rename';
+  name.addEventListener('dblclick', (e) => {
+    e.stopPropagation();
+    startRenamingLook(name, look);
+  });
+
+  const dup = document.createElement('button');
+  dup.className = 'ts-theme-del';
+  dup.innerHTML = `<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="1.5"/><path d="M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1"/></svg>`;
+  dup.title = 'Duplicate theme';
+  dup.addEventListener('click', (e) => {
+    e.stopPropagation();
+    duplicateLook(look);
+  });
+
+  item.appendChild(thumb);
+  item.appendChild(name);
+  item.appendChild(dup);
+
+  // Built-ins have no delete affordance at all — duplicate is the only
+  // way to build on one, matching how the Default playlist hides its own
+  // delete button rather than just erroring after the fact on click.
+  if (!isBuiltInLook(look)) {
+    const del = document.createElement('button');
+    del.className = 'ts-theme-del';
+    del.innerHTML = `<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>`;
+    del.title = 'Delete theme';
+    del.addEventListener('click', (e) => {
+      e.stopPropagation();
+      deleteLook(look);
+    });
+    item.appendChild(del);
+  }
+
+  item.addEventListener('click', () => selectLook(look));
+  return item;
+}
+
+// A collapsible header for one imported bundle's set of theme-slides — see
+// collapsedThemeGroups above for why this is a visual grouping only, not a
+// real container in the data model.
+function buildGroupHeader(groupId, groupName, groupLooks) {
+  const header = document.createElement('div');
+  header.className = 'ts-theme-group-header' + (collapsedThemeGroups.has(groupId) ? ' collapsed' : '');
+
+  const chevron = document.createElement('span');
+  chevron.className = 'ts-theme-group-chevron';
+  chevron.textContent = '▾';
+
+  const thumb = document.createElement('div');
+  thumb.className = 'ts-theme-thumb';
+  renderLookThumbnail(thumb, groupLooks[0]);
+
+  const name = document.createElement('span');
+  name.className = 'ts-theme-group-name';
+  name.textContent = groupName;
+  name.title = 'Double-click to rename this theme';
+  name.addEventListener('dblclick', (e) => {
+    e.stopPropagation();
+    startRenamingThemeGroup(name, groupId, groupLooks);
+  });
+
+  const count = document.createElement('span');
+  count.className = 'ts-theme-group-count';
+  count.textContent = String(groupLooks.length);
+
+  header.appendChild(chevron);
+  header.appendChild(thumb);
+  header.appendChild(name);
+  header.appendChild(count);
+  // Built-in groups (Lyrics/Bible/Slides) get no delete affordance, same as
+  // an individual built-in look's row never getting one — without this, an
+  // operator could delete a whole built-in category outright, which the
+  // per-look guard was specifically written to prevent for a single look.
+  if (!groupLooks.every(isBuiltInLook)) {
+    const del = document.createElement('button');
+    del.className = 'ts-theme-del';
+    del.title = 'Delete this whole theme (all its slides)';
+    del.innerHTML = `<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>`;
+    del.addEventListener('click', (e) => {
+      e.stopPropagation();
+      deleteThemeGroup(groupId, groupName, groupLooks);
+    });
+    header.appendChild(del);
+  }
+  header.addEventListener('click', () => {
+    if (collapsedThemeGroups.has(groupId)) collapsedThemeGroups.delete(groupId);
+    else collapsedThemeGroups.add(groupId);
+    renderLooksList();
+  });
+  return header;
+}
+
+function startRenamingThemeGroup(nameEl, groupId, groupLooks) {
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.className = 'ts-theme-name-input';
+  input.value = groupLooks[0]?.groupName || '';
+  nameEl.replaceWith(input);
+  input.focus();
+  input.select();
+  let settled = false;
+  const commit = () => {
+    if (settled) return;
+    settled = true;
+    const newName = input.value.trim();
+    if (newName) groupLooks.forEach(l => { l.groupName = newName; });
+    saveLooks();
+    renderLooksList();
+  };
+  input.addEventListener('click', e => e.stopPropagation());
+  input.addEventListener('blur', commit);
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); commit(); }
+    else if (e.key === 'Escape') { e.preventDefault(); settled = true; renderLooksList(); }
+  });
+}
+
+async function deleteThemeGroup(groupId, groupName, groupLooks) {
+  // Same guard as deleteLook's built-in check — the button that calls this
+  // is already hidden for an all-built-in group, but guard here too in case
+  // this is ever reached another way.
+  if (groupLooks.every(isBuiltInLook)) { toast("Default themes can't be deleted — duplicate a slide to make an editable copy.", 'error'); return; }
+  if (looks.length <= groupLooks.length) { toast('Cannot delete every theme', 'error'); return; }
+  const ok = await confirmDialog(`Delete the theme "${groupName}" and all ${groupLooks.length} of its slides? This can't be undone.`, { title: 'Delete theme', confirmLabel: 'Delete', danger: true });
+  if (!ok) return;
+  const ids = new Set(groupLooks.map(l => l.id));
+  looks = looks.filter(l => !ids.has(l.id));
+  if (ids.has(activeLook?.id)) {
+    activeLook  = looks[0];
+    activeLayer = null;
+    resetThemeHistory();
+  }
+  saveLooks();
+  renderLooksList(); renderLayersList(); syncMetaRow(); renderPreview(); renderProps();
+}
+
 function renderLooksList() {
   const el = document.getElementById('looks-list');
   if (!el) return;
   el.innerHTML = '';
+  const renderedGroups = new Set();
   looks.forEach(look => {
-    const item = document.createElement('div');
-    item.className = 'ts-theme-item' + (look.id === activeLook?.id ? ' active' : '');
-    item.innerHTML = `<div class="ts-theme-dot"></div><span>${look.name}</span>`;
-    item.addEventListener('click', () => {
-      activeLook  = look;
-      activeLayer = null;
-      renderLooksList();
-      renderLayersList();
-      syncMetaRow();
-      renderPreview();
-      renderProps();
-    });
-    el.appendChild(item);
+    if (look.groupId) {
+      if (renderedGroups.has(look.groupId)) return; // this group's block already rendered
+      renderedGroups.add(look.groupId);
+      const groupLooks = looks.filter(l => l.groupId === look.groupId);
+      el.appendChild(buildGroupHeader(look.groupId, look.groupName || 'Imported theme', groupLooks));
+      if (!collapsedThemeGroups.has(look.groupId)) {
+        groupLooks.forEach(gl => el.appendChild(buildLookRow(gl, true)));
+      }
+      return;
+    }
+    el.appendChild(buildLookRow(look, false));
   });
 }
 
+function selectLook(look) {
+  activeLook  = look;
+  activeLayer = null;
+  resetThemeHistory();
+  renderLooksList();
+  renderLayersList();
+  syncMetaRow();
+  renderPreview();
+  renderProps();
+}
+
+function startRenamingLook(nameEl, look) {
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.className = 'ts-theme-name-input';
+  input.value = look.name;
+  nameEl.replaceWith(input);
+  input.focus();
+  input.select();
+
+  let settled = false;
+  const commit = () => {
+    if (settled) return;
+    settled = true;
+    look.name = input.value.trim() || look.name;
+    scheduleThemeAutosave();
+    renderLooksList();
+  };
+  input.addEventListener('click', e => e.stopPropagation());
+  input.addEventListener('blur', commit);
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); commit(); }
+    else if (e.key === 'Escape') { e.preventDefault(); settled = true; renderLooksList(); }
+  });
+}
+
+// A built-in is any theme whose id matches the canonical DEFAULT_LOOKS set —
+// even if the operator has since renamed/restyled it in place, the id never
+// changes, so this is the one reliable test regardless of edits.
+function isBuiltInLook(look) {
+  return DEFAULT_LOOKS.some(d => d.id === look.id);
+}
+
+function duplicateLook(look) {
+  const copy = deepClone(look);
+  copy.id = 'look-' + Date.now();
+  copy.name = look.name + ' Copy';
+  // A duplicate is a fresh standalone theme, not another slide belonging to
+  // the original's imported bundle (if it had one).
+  delete copy.groupId;
+  delete copy.groupName;
+  looks.push(copy);
+  activeLook  = copy;
+  activeLayer = null;
+  resetThemeHistory();
+  saveLooks();
+  renderLooksList(); renderLayersList(); syncMetaRow(); renderPreview(); renderProps();
+}
+
+async function deleteLook(look) {
+  // Built-ins can't be deleted — duplicate makes an editable copy instead,
+  // so "start from a built-in" always has somewhere safe to land back on.
+  if (isBuiltInLook(look)) { toast("Default themes can't be deleted — duplicate it to make an editable copy.", 'error'); return; }
+  if (looks.length <= 1) { toast('Cannot delete the last theme', 'error'); return; }
+  const ok = await confirmDialog(`Delete the theme "${look.name}"? This can't be undone.`, { title: 'Delete theme', confirmLabel: 'Delete', danger: true });
+  if (!ok) return;
+  looks = looks.filter(l => l.id !== look.id);
+  if (activeLook?.id === look.id) {
+    activeLook  = looks[0];
+    activeLayer = null;
+    resetThemeHistory();
+  }
+  saveLooks();
+  renderLooksList();
+  renderLayersList();
+  syncMetaRow();
+  renderPreview();
+  renderProps();
+}
+
 // ── Sync layout + animation + name row ───────────────────────────────────
+// A theme's canvas size is purely a preview-shape hint (see renderPreview) —
+// layer positions stay percentages of the fixed KAIRO_DESIGN_W/H, so this
+// never affects how an existing theme lays out. Defaults to 1920x1080, same
+// as ProPresenter's document default, until someone deliberately picks a
+// configured output to design against instead.
+function themeCanvasSize(look) {
+  return (look && look.canvasSize && look.canvasSize.w && look.canvasSize.h)
+    ? look.canvasSize : { w: 1920, h: 1080 };
+}
+
+// Builds the Size dropdown's options: the 1920x1080 default plus every
+// configured display output that has a real physical screen assigned (see
+// outputScreenMap) — mirrors ProPresenter's per-slide Size field listing
+// configured device resolutions (e.g. "Atem: 1440 x 900") as presets.
+function renderThemeCanvasSizeSelect() {
+  const sel = document.getElementById('ts-canvas-size-select');
+  if (!sel || !activeLook) return;
+  const size = themeCanvasSize(activeLook);
+  sel.innerHTML = '';
+  const def = document.createElement('option');
+  def.value = '1920x1080';
+  def.textContent = '1920 × 1080 (Default)';
+  sel.appendChild(def);
+
+  if (typeof displayOutputs === 'function' && typeof outputScreenMap === 'function') {
+    const screens = outputScreenMap();
+    displayOutputs().forEach(d => {
+      const s = screens[d.id];
+      if (!s) return;
+      const o = document.createElement('option');
+      o.value = `${s.width}x${s.height}`;
+      o.textContent = `${d.name}: ${s.width} × ${s.height}`;
+      sel.appendChild(o);
+    });
+  }
+
+  const wantValue = `${size.w}x${size.h}`;
+  if (![...sel.options].some(o => o.value === wantValue)) {
+    const custom = document.createElement('option');
+    custom.value = wantValue;
+    custom.textContent = `${size.w} × ${size.h} (Custom)`;
+    sel.appendChild(custom);
+  }
+  sel.value = wantValue;
+}
+
+document.getElementById('ts-canvas-size-select')?.addEventListener('change', (e) => {
+  if (!activeLook) return;
+  const [w, h] = e.target.value.split('x').map(Number);
+  if (!w || !h) return;
+  activeLook.canvasSize = { w, h };
+  scheduleThemeAutosave();
+  renderPreview();
+});
+
 function syncMetaRow() {
   if (!activeLook) return;
   document.querySelectorAll('#ts-layout-picker .ts-chip').forEach(b =>
     b.classList.toggle('active', b.dataset.layout === activeLook.layout));
   document.querySelectorAll('#ts-anim-picker .ts-chip').forEach(b =>
     b.classList.toggle('active', b.dataset.anim === activeLook.animation));
-  const ni = document.getElementById('look-name-input');
-  if (ni) ni.value = activeLook.name;
+  const speedSlider = document.getElementById('ts-anim-speed');
+  if (speedSlider) {
+    speedSlider.value = activeLook.animationSpeed || 1;
+    speedSlider.classList.toggle('hidden', (activeLook.animation || 'fade') === 'cut');
+  }
   const alphaBtn = document.getElementById('ts-alpha-toggle');
   if (alphaBtn) alphaBtn.classList.toggle('active', isAlphaCanvas());
+  renderThemeCanvasSizeSelect();
 
-  // Translate-to language — only meaningful for the Multi-Language layout,
-  // which is the only one with a verse_translated layer to fill.
+  // Text Animation — how the verse text itself reveals, independent of the
+  // Transition above (which is how the whole slide swaps). See
+  // KairoWordSplit's file header for why these are two separate settings
+  // rather than the single overloaded `animation` field this used to be.
+  const textAnim = activeLook.textAnimation || 'none';
+  const textAnimSelect = document.getElementById('ts-text-anim-select');
+  if (textAnimSelect) textAnimSelect.value = textAnim;
+  const textAnimSpeed = document.getElementById('ts-text-anim-speed');
+  if (textAnimSpeed) {
+    textAnimSpeed.value = activeLook.textAnimationSpeed || 1;
+    textAnimSpeed.closest('.ts-prop-row')?.classList.toggle('hidden', textAnim === 'none');
+  }
+  // Highlight Color only means something to the animations that actually
+  // read opts.color (see applyMotionText in word_split.js) — hidden for
+  // every other choice rather than shown-but-inert.
+  const colorRow = document.getElementById('ts-text-anim-color-row');
+  if (colorRow) {
+    colorRow.classList.toggle('hidden', !['impact', 'karaoke', 'highlight-box'].includes(textAnim));
+    const colorInput = document.getElementById('ts-text-anim-color');
+    if (colorInput) colorInput.value = activeLook.textHighlightColor || '#ffd23f';
+  }
+  // Same reasoning for Intensity — only Impact/Bold Caption read opts.intensity.
+  const intensityRow = document.getElementById('ts-text-anim-intensity-row');
+  if (intensityRow) {
+    intensityRow.classList.toggle('hidden', !['impact', 'bold-caption'].includes(textAnim));
+    const intensityInput = document.getElementById('ts-text-anim-intensity');
+    if (intensityInput) intensityInput.value = activeLook.textAnimationIntensity ?? 1;
+  }
+
+  // Translate-to language — meaningful for ANY theme with a verse_translated
+  // layer, not just the one built-in preset whose layout happens to be
+  // literally named 'multi-language'. A custom theme built from scratch (or
+  // duplicated and restyled) with its own translated-text layer needs this
+  // picker just as much, so gate on the layer actually being present instead
+  // of a hardcoded layout-name check that only ever matched that one preset.
   const translateGroup = document.getElementById('ts-translate-group');
   if (translateGroup) {
-    translateGroup.classList.toggle('hidden', activeLook.layout !== 'multi-language');
+    const needsTranslation = (activeLook.layers || []).some(l => l.type === 'text' && l.binding === 'verse_translated');
+    translateGroup.classList.toggle('hidden', !needsTranslation);
     document.querySelectorAll('#ts-translate-picker .ts-chip').forEach(b =>
       b.classList.toggle('active', b.dataset.lang === activeLook.translateTo));
   }
@@ -2313,16 +3344,52 @@ function isAlphaCanvas() {
 }
 
 // ── Render layers list ────────────────────────────────────────────────────
+// Whether `layer` is an item/slide-specific layer the operator added in
+// Full-scale edit — i.e. it has no id match in the item's actual base theme
+// — as opposed to a real theme layer (text, always overridable per-slide;
+// background/image, fixed and read-only per-slide). Only meaningful in item
+// mode; always false in theme mode, where every layer belongs to the theme.
+function isItemCustomLayer(layer) {
+  if (tsMode !== 'item' || !tsItemCtx) return false;
+  return !(tsItemCtx.baseLook.layers || []).some(l => l.id === layer.id);
+}
+
+// Shared by the layers-list row's own delete button and the keyboard
+// Delete/Backspace shortcut (see the keydown handler near selectAllLayers)
+// so there's one implementation of "can this layer even be deleted" instead
+// of two that could drift. Same guard as the button always had: the base
+// canvas background never goes (every theme needs one), and in item mode
+// only this slide's own custom layers can be removed, never a theme layer.
+function deleteLayer(layer) {
+  if (!layer) return;
+  const isBg = layer.type === 'background' && !layer.pos;
+  const isCustom = isItemCustomLayer(layer);
+  if (isBg || (tsMode === 'item' && !isCustom)) return;
+  activeLook.layers = activeLook.layers.filter(l => l.id !== layer.id);
+  if (activeLayer?.id === layer.id) activeLayer = null;
+  renderLayersList();
+  renderPreview();
+  renderProps();
+  if (tsMode === 'item') tsSave(); else scheduleThemeAutosave();
+}
+
 function renderLayersList() {
   const el = document.getElementById('ts-layers-list');
   if (!el) return;
   el.innerHTML = '';
   if (!activeLook) return;
-  // Render in reverse so background is at bottom visually (like PP)
-  const rev = [...activeLook.layers].reverse();
+  // Render in reverse so background is at bottom visually (like PP). Item
+  // mode only ever lets an operator override TEXT layers of the theme for
+  // one slide — the theme's own background/image stays fixed, so those
+  // never appear in this list while tsMode === 'item' (still visible
+  // read-only on the canvas itself, see renderPreview) — but a custom layer
+  // the operator added to this slide (isItemCustomLayer) shows regardless
+  // of its type, since it's the operator's own, not the theme's.
+  const layers = tsMode === 'item' ? activeLook.layers.filter(l => l.type === 'text' || isItemCustomLayer(l)) : activeLook.layers;
+  const rev = [...layers].reverse();
   rev.forEach(layer => {
     const row = document.createElement('div');
-    row.className = 'ts-layer-row' + (layer.id === activeLayer?.id ? ' active' : '');
+    row.className = 'ts-layer-row' + (layer.id === activeLayer?.id ? ' active' : '') + (multiSelectedLayerIds.has(layer.id) ? ' multi-selected' : '');
     row.dataset.layerId = layer.id;
 
     const isText = layer.type === 'text';
@@ -2340,6 +3407,11 @@ function renderLayersList() {
       layer.visible = !layer.visible;
       renderLayersList();
       renderPreview();
+      // Pre-existing gap in theme mode: visibility toggles never called
+      // scheduleThemeAutosave() either — out of scope to fix here (see
+      // plan's "don't touch theme mode's behavior" note). Item mode needs
+      // this, though — it's how a slide's visible:false override gets set.
+      if (tsMode === 'item') tsSave();
     });
 
     // Type icon
@@ -2359,19 +3431,25 @@ function renderLayersList() {
     delBtn.className = 'ts-layer-del';
     delBtn.title = 'Delete layer';
     delBtn.innerHTML = `<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>`;
-    if (isBg) delBtn.style.display = 'none';
+    // No add/delete/reorder of a theme's own layers in item mode — an
+    // override slide can only ever restyle EXISTING theme layers, never
+    // restructure the theme's layer stack. A custom layer the operator
+    // added to this slide is the exception — it's the operator's own, not
+    // the theme's, so it can be deleted here.
+    const isCustom = isItemCustomLayer(layer);
+    if (isBg || (tsMode === 'item' && !isCustom)) delBtn.style.display = 'none';
     delBtn.addEventListener('click', e => {
       e.stopPropagation();
-      if (isBg) return;
-      activeLook.layers = activeLook.layers.filter(l => l.id !== layer.id);
-      if (activeLayer?.id === layer.id) activeLayer = null;
-      renderLayersList();
-      renderPreview();
-      renderProps();
+      deleteLayer(layer);
     });
 
     // Drag handle — reordering changes paint order (top of the list paints
-    // last / in front, matching how the rows are shown).
+    // last / in front, matching how the rows are shown). Works in item mode
+    // too now: only text/custom layers ever show as rows there (the theme's
+    // own background/image stay fixed, see the filter above), so this only
+    // ever reorders this slide's own content — persisted per-slide via
+    // __layerOrder (see writeItemSlideStyleFromSynthetic/buildSyntheticLook)
+    // rather than touching the theme's order.
     const grip = document.createElement('div');
     grip.className = 'ts-layer-grip';
     grip.title = 'Drag to reorder';
@@ -2417,9 +3495,24 @@ function renderLayersList() {
 
     row.addEventListener('click', () => {
       activeLayer = layer;
+      multiSelectedLayerIds = new Set(); // a plain click always narrows back to one
       renderLayersList();
       renderProps();
       renderPreview();
+    });
+    // Right-click menu for the same Select All/Copy/Paste shortcut already
+    // wired above — discoverability for an operator who's never found
+    // Cmd/Ctrl+A/C/V. Same item-mode restriction: a pasted layer has no
+    // counterpart on the base theme to diff into item.slideStyles.
+    row.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      if (tsMode === 'item') return;
+      const sections = [[
+        { label: 'Select All', onClick: selectAllLayers },
+        { label: 'Copy', onClick: () => { activeLayer = layer; copyLayers(); } },
+      ]];
+      if (layerClipboard.length) sections[0].push({ label: 'Paste', onClick: pasteLayers });
+      window.KairoService.openContextMenu(e.clientX, e.clientY, sections);
     });
 
     el.appendChild(row);
@@ -2447,6 +3540,29 @@ function reorderLayer(draggedId, targetId, after) {
 
   renderLayersList();
   renderPreview();
+  // Was a silent no-op before — mutated activeLook.layers in place but never
+  // told either save path about it, so a reorder with no other edit
+  // afterward quietly reverted on reload/theme-switch. tsSave() routes to
+  // scheduleItemStyleAutosave (which now also records __layerOrder, see
+  // writeItemSlideStyleFromSynthetic) in item mode, scheduleThemeAutosave otherwise.
+  tsSave();
+}
+
+// Reconciles a stored id order against the layers actually present — any id
+// no longer present is dropped, any layer not mentioned (added since the
+// order was last saved) keeps its natural relative position, appended after
+// the ones the order does cover. Used by buildSyntheticLook to replay a
+// per-slide reorder recorded in item.slideStyles[slideIndex].__layerOrder.
+function applyLayerOrder(layers, orderIds) {
+  if (!orderIds || !orderIds.length) return layers;
+  const byId = new Map(layers.map(l => [l.id, l]));
+  const ordered = [];
+  orderIds.forEach(id => {
+    const l = byId.get(id);
+    if (l) { ordered.push(l); byId.delete(id); }
+  });
+  layers.forEach(l => { if (byId.has(l.id)) ordered.push(l); });
+  return ordered;
 }
 
 // ── Render preview ────────────────────────────────────────────────────────
@@ -2470,6 +3586,21 @@ const TS_TRANSLATE_SAMPLES = {
 };
 
 function layerTextContent(layer) {
+  // Item mode edits a REAL slide's layout — the canvas has to show that
+  // slide's actual text, not Theme Studio's generic sample, or positioning/
+  // auto-fit decisions made here wouldn't match what's really being edited.
+  if (tsMode === 'item' && tsItemCtx) {
+    const slides = window.KairoService?.slidesFor?.(tsItemCtx.item) || [];
+    const s = slides[tsItemCtx.slideIndex];
+    if (s) {
+      if (layer.binding === 'verse') return s.text || '(empty slide)';
+      if (layer.binding === 'reference') return s.reference || '';
+      if (layer.binding === 'verse_translated') {
+        return TS_TRANSLATE_SAMPLES[tsItemCtx.item.translateTo] || '[No translation language set for this item]';
+      }
+      return layer.customText || '[Custom Text]';
+    }
+  }
   if (layer.binding === 'verse')     return PREVIEW_TEXT_SAMPLE;
   if (layer.binding === 'reference') return PREVIEW_REF_SAMPLE;
   if (layer.binding === 'verse_translated') {
@@ -2478,12 +3609,52 @@ function layerTextContent(layer) {
   return layer.customText || '[Custom Text]';
 }
 
+// Computes the largest box matching a w:h ratio that fits inside
+// .ts-preview-wrap's real padded content area, and sets it as explicit px
+// inline styles on the stage. Two pure-CSS auto-sizing techniques were tried
+// first and each failed differently: `position:absolute; inset:0; margin:auto`
+// with width/height:auto measured as stretching to fill one axis exactly
+// regardless of aspect-ratio/max-width (confirmed via getBoundingClientRect —
+// a real 0px gap on that axis, not just visually looking full); switching to
+// a single-point anchor (top:50%;left:50%;transform) to avoid that removed
+// the stretch but ALSO removed anything driving the box to actually grow —
+// with no intrinsic content size (every layer inside renders position:absolute,
+// contributing nothing to auto-sizing), it collapsed to near-zero. Measuring
+// the real available space and setting explicit pixel dimensions sidesteps
+// both failure modes entirely.
+function fitPreviewStage(stage, w, h) {
+  const wrap = stage.parentElement;
+  if (!wrap) return;
+  const cs = getComputedStyle(wrap);
+  const availW = wrap.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
+  const availH = wrap.clientHeight - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom);
+  if (availW <= 0 || availH <= 0) return;
+  const ratio = w / h;
+  let stageW = availW, stageH = stageW / ratio;
+  if (stageH > availH) { stageH = availH; stageW = stageH * ratio; }
+  stage.style.width  = Math.round(stageW) + 'px';
+  stage.style.height = Math.round(stageH) + 'px';
+}
+// Re-fit on window resize — the stage's size is now computed once per
+// render, not left to the browser to keep recomputing on its own the way a
+// pure-CSS approach would.
+window.addEventListener('resize', () => {
+  const stage = document.getElementById('looks-preview-stage');
+  if (stage && activeLook) fitPreviewStage(stage, themeCanvasSize(activeLook).w, themeCanvasSize(activeLook).h);
+});
+
 function renderPreview() {
   const stage = document.getElementById('looks-preview-stage');
   if (!stage || !activeLook) return;
 
   stage.innerHTML = '';
   stage.className = 'ts-preview-stage';
+  // Preview-shape only (see themeCanvasSize) — layer positions below still
+  // work entirely in percentages of the fixed TS_DESIGN_W/H, unaffected by
+  // whatever shape this box actually renders at.
+  const size = themeCanvasSize(activeLook);
+  stage.style.aspectRatio = `${size.w} / ${size.h}`;
+  fitPreviewStage(stage, size.w, size.h);
 
   const layout = activeLook.layout;
   // Dynamic preview scale — real stage width over design width, so fonts and
@@ -2547,11 +3718,18 @@ function renderPreview() {
         div.style.right  = 'auto';
         div.style.bottom = 'auto';
         if (layer.radius) div.style.borderRadius = (layer.radius * pxScale).toFixed(1) + 'px';
+        if (layer.rotation) div.style.transform = `rotate(${layer.rotation}deg)`;
       }
 
       stage.appendChild(div);
       // Full-stage backgrounds are select-only; positioned shapes are draggable.
-      tsDecorateLayerEl(div, layer, !!layer.pos);
+      // Item mode still renders the theme's background for visual context
+      // (contrast/positioning reference) but it belongs to the theme, not
+      // the item — no selection/drag wiring at all in that mode. A custom
+      // background-type layer the operator added to this slide is the
+      // exception (isItemCustomLayer) — it's the operator's own, so it gets
+      // full interactivity same as in theme mode.
+      if (tsMode !== 'item' || isItemCustomLayer(layer)) tsDecorateLayerEl(div, layer, !!layer.pos);
       return;
     }
 
@@ -2570,9 +3748,12 @@ function renderPreview() {
         background-repeat:no-repeat;
         opacity:${(layer.opacity ?? 100) / 100};
         border-radius:${((layer.radius || 0) * pxScale).toFixed(1)}px;
+        ${layer.rotation ? `transform: rotate(${layer.rotation}deg);` : ''}
       `;
       stage.appendChild(div);
-      tsDecorateLayerEl(div, layer, true);
+      // Same exception as the background branch above — a custom image
+      // layer added to this slide gets full interactivity even in item mode.
+      if (tsMode !== 'item' || isItemCustomLayer(layer)) tsDecorateLayerEl(div, layer, true);
       return;
     }
 
@@ -2580,6 +3761,9 @@ function renderPreview() {
       const div = document.createElement('div');
       div.style.cssText = `
         position: absolute;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
         color: ${hexOpacity(layer.color, layer.opacity)};
         font-family: '${layer.font.family}', system-ui, sans-serif;
         font-size: ${(layer.font.size * pxScale).toFixed(1)}px;
@@ -2616,6 +3800,15 @@ function renderPreview() {
         div.style.overflow = 'hidden';
         div.style.textOverflow = 'ellipsis';
         div.style.padding = '0 3%';
+      } else if (layout === 'scroll-fill') {
+        // Large scrolling text that fills the whole screen — same marquee
+        // mechanism as the ticker layer below, just a taller/bigger band
+        // instead of a thin strip at the bottom.
+        div.style.left = '0'; div.style.right = '0'; div.style.top = '0'; div.style.bottom = '0';
+        div.style.display = 'flex'; div.style.alignItems = 'center';
+        div.style.whiteSpace = 'nowrap';
+        div.style.overflow = 'hidden';
+        div.style.padding = '0';
       } else if (layout === 'split-left' || layout === 'split-right') {
         div.style.width = '50%';
         div.style.padding = '0 4%';
@@ -2638,7 +3831,30 @@ function renderPreview() {
 
       if (layer.binding) div.dataset.binding = layer.binding;
       div.dataset.baseSize = (layer.font.size * pxScale).toFixed(1);
-      div.textContent = layerTextContent(layer);
+      // Marquee scroll — an inner span pushed fully off the right edge
+      // (padding-left:100%) and animated to translateX(-100%) so it crosses
+      // the whole band and loops, without needing to measure text width.
+      // Independent of layout: works on the Ticker preset's bottom strip or
+      // a free-canvas "Scroll — Fill Screen" band just as well.
+      if (layer.scroll?.enabled) {
+        div.style.whiteSpace = 'nowrap';
+        div.style.overflow = 'hidden';
+        div.style.textOverflow = 'clip';
+        const span = document.createElement('span');
+        span.style.display = 'inline-block';
+        span.style.paddingLeft = '100%';
+        span.style.animation = `kairo-marquee ${Math.max(1, layer.scroll.speed || 15)}s linear infinite`;
+        span.textContent = layerTextContent(layer);
+        div.textContent = '';
+        div.appendChild(span);
+      } else if (layer.binding === 'verse' && window.KairoWordSplit?.applyMotionText(div, activeLook.textAnimation, layerTextContent(layer), activeLook.textAnimationSpeed || 1, { color: activeLook.textHighlightColor, intensity: activeLook.textAnimationIntensity })) {
+        // Theme Studio's own canvas — same per-element motion rendering as
+        // the Live Preview panel/real output (see renderPreviewScreen/
+        // buildLayerDOM), so a Motion theme actually shows the effect while
+        // it's being designed, not just once sent live.
+      } else {
+        div.textContent = layerTextContent(layer);
+      }
       stage.appendChild(div);
       tsDecorateLayerEl(div, layer, true);
 
@@ -2707,7 +3923,8 @@ function fitPreviewVerse(stage, layout) {
 // convention as the live renderer in display.html). A layer without pos follows
 // its layout preset; the first drag (or a Position/Dimension edit) converts it
 // by measuring where the preset actually put it, so nothing jumps.
-const TS_DESIGN_W = 1920, TS_DESIGN_H = 1080;
+// Shared with service.js/display.html — see design_space.js.
+const TS_DESIGN_W = window.KAIRO_DESIGN_W, TS_DESIGN_H = window.KAIRO_DESIGN_H;
 
 function tsStageEl() { return document.getElementById('looks-preview-stage'); }
 
@@ -2914,6 +4131,12 @@ function tsDragEnd() {
     tsSnapGuides = { x: null, y: null };
     renderProps();
     renderPreview();
+    // Pre-existing gap in theme mode: a drag never called
+    // scheduleThemeAutosave() either — out of scope to fix here (see plan's
+    // "don't touch theme mode's behavior" note). Item mode needs this,
+    // additively, since dragging IS the primary way to set a position
+    // override.
+    if (tsMode === 'item') tsSave();
   }
 }
 
@@ -3136,7 +4359,251 @@ function makeChips(options, current, onChange) {
   return wrap;
 }
 
-function up() { renderPreview(); renderLayersList(); }
+// Autosave, debounced — edits already mutate activeLook in place (it's a
+// direct reference into the `looks` array), so there's no separate "commit"
+// step; this just needs to persist that to localStorage without hammering
+// it on every slider-drag tick. Also where undo history gets its
+// checkpoints: activeLook is mutated BEFORE this runs (every call site edits
+// then calls up()/scheduleThemeAutosave()), so there's no "before" state left
+// to grab at commit time — instead, whichever edit is first in a burst is
+// captured by snapshotting once at the START of a fresh debounce window
+// (see the `pendingCheckpoint` flag), then the checkpoint is pushed once the
+// burst actually settles. That groups rapid changes (a slider drag, fast
+// typing) into one undo step, the same granularity most editors use.
+let autosaveTimer = null;
+let pendingCheckpoint = null; // snapshot taken at the start of the current burst, or null between bursts
+// The state activeLook was in as of the last committed edit (or theme
+// switch/undo/redo) — always taken BEFORE any mutation, unlike
+// pendingCheckpoint below which used to be deepClone'd lazily on first call
+// here. Every real call site mutates the layer/look in place and only THEN
+// calls up()/scheduleThemeAutosave(), so a lazy clone at that point had
+// already baked the change in — a single click (the Transparent canvas
+// toggle, a chip picker) had no earlier mutation in the same burst to
+// "recover" a pre-change state from, so its own undo was a silent no-op.
+// Kept in sync by resetThemeHistory() and restoreLookSnapshot() — the only
+// two places activeLook's *committed* identity actually changes.
+let lastThemeSnapshot = null;
+function scheduleThemeAutosave() {
+  if (!activeLook) return;
+  if (!pendingCheckpoint) pendingCheckpoint = lastThemeSnapshot || deepClone(activeLook);
+  clearTimeout(autosaveTimer);
+  autosaveTimer = setTimeout(() => {
+    if (pendingCheckpoint) {
+      themeUndoStack.push(pendingCheckpoint);
+      if (themeUndoStack.length > 50) themeUndoStack.shift();
+      themeRedoStack = [];
+      pendingCheckpoint = null;
+      updateUndoRedoButtons();
+    }
+    lastThemeSnapshot = deepClone(activeLook); // burst settled — this is now the baseline for the next one
+    saveLooks();
+    renderLooksList();
+  }, 500);
+}
+
+function up() { renderPreview(); renderLayersList(); tsSave(); }
+function tsSave() { if (tsMode === 'item') scheduleItemStyleAutosave(); else scheduleThemeAutosave(); }
+
+// ── Item-mode save/undo (mirrors scheduleThemeAutosave/themeUndo/themeRedo
+// below, but diffs the synthetic look's text layers against the base theme
+// and writes only the differences into item.slideStyles, instead of
+// persisting a whole theme to `looks`) ──────────────────────────────────────
+function diffSubObject(base, cur, keys) {
+  if (!cur) return undefined;
+  const out = {};
+  let any = false;
+  keys.forEach(k => {
+    if (cur[k] !== undefined && cur[k] !== base?.[k]) { out[k] = cur[k]; any = true; }
+  });
+  return any ? out : undefined;
+}
+function diffLayerOverride(baseLayer, curLayer) {
+  const ov = {};
+  if (curLayer.pos && JSON.stringify(curLayer.pos) !== JSON.stringify(baseLayer?.pos)) ov.pos = { ...curLayer.pos };
+  const fontDiff = diffSubObject(baseLayer?.font, curLayer.font, ['size', 'family', 'weight', 'italic', 'lineHeight', 'letterSpacing', 'transform']);
+  if (fontDiff) ov.font = fontDiff;
+  if (curLayer.align !== baseLayer?.align) ov.align = curLayer.align;
+  if (curLayer.color !== baseLayer?.color) ov.color = curLayer.color;
+  if (curLayer.opacity !== baseLayer?.opacity) ov.opacity = curLayer.opacity;
+  const shadowDiff = diffSubObject(baseLayer?.shadow, curLayer.shadow, ['enabled', 'color', 'opacity', 'blur', 'x', 'y']);
+  if (shadowDiff) ov.shadow = shadowDiff;
+  const outlineDiff = diffSubObject(baseLayer?.outline, curLayer.outline, ['enabled', 'color', 'width']);
+  if (outlineDiff) ov.outline = outlineDiff;
+  if (curLayer.visible === false) ov.visible = false; // only the hidden case is ever stored; visible is the assumed default
+  return ov;
+}
+// Recomputes item.slideStyles[slideIndex] from scratch by diffing the
+// synthetic look's current text layers against tsItemCtx.baseLook's
+// originals — sparse at both levels per the data-model rules (see plan):
+// an unchanged layer or slide with zero overrides simply isn't stored. Any
+// layer with no id match in baseLook wasn't part of the theme at all — an
+// item/slide-specific layer the operator added here — so there's nothing to
+// diff it against; it's stored whole under __customLayers instead. A layer
+// removed from activeLook (deleted via the Layers panel) simply isn't seen
+// by this pass, so it drops out with no separate tombstone needed.
+function writeItemSlideStyleFromSynthetic() {
+  if (!tsItemCtx || !activeLook) return;
+  const { item, slideIndex, baseLook } = tsItemCtx;
+  const overrides = {};
+  const customLayers = [];
+  (activeLook.layers || []).forEach(layer => {
+    const baseLayer = (baseLook.layers || []).find(l => l.id === layer.id);
+    if (!baseLayer) { customLayers.push(deepClone(layer)); return; }
+    if (layer.type !== 'text') return;
+    const ov = diffLayerOverride(baseLayer, layer);
+    if (Object.keys(ov).length) overrides[layer.id] = ov;
+  });
+  if (customLayers.length) overrides.__customLayers = customLayers;
+  // Layer order (z-order — see reorderLayer) is per-slide too. Sparse like
+  // everything else here: only stored when it actually differs from the
+  // natural order (base theme layers in their original order, then custom
+  // layers in the order they were added), so a slide nobody reordered
+  // carries no override at all.
+  const naturalOrder = [...(baseLook.layers || []).map(l => l.id), ...customLayers.map(l => l.id)];
+  const currentOrder = (activeLook.layers || []).map(l => l.id);
+  if (currentOrder.join('|') !== naturalOrder.join('|')) overrides.__layerOrder = currentOrder;
+  if (Object.keys(overrides).length) {
+    item.slideStyles = item.slideStyles || {};
+    item.slideStyles[slideIndex] = overrides;
+  } else if (item.slideStyles) {
+    delete item.slideStyles[slideIndex];
+  }
+}
+function scheduleItemStyleAutosave() {
+  if (tsMode !== 'item' || !tsItemCtx) return;
+  if (!itemPendingCheckpoint) itemPendingCheckpoint = deepClone(tsItemCtx.item.slideStyles || {});
+  clearTimeout(itemAutosaveTimer);
+  itemAutosaveTimer = setTimeout(() => {
+    if (itemPendingCheckpoint) {
+      itemUndoStack.push(itemPendingCheckpoint);
+      if (itemUndoStack.length > 50) itemUndoStack.shift();
+      itemRedoStack = [];
+      itemPendingCheckpoint = null;
+    }
+    writeItemSlideStyleFromSynthetic();
+    window.KairoService?.saveService?.();
+  }, 500);
+}
+function resetItemHistory() {
+  itemUndoStack = [];
+  itemRedoStack = [];
+  itemPendingCheckpoint = null;
+  clearTimeout(itemAutosaveTimer);
+}
+// Restores a whole item.slideStyles snapshot (not per-slide — matches how
+// themeUndo restores the whole look, since a single burst of edits can touch
+// more than one layer's override at once) then rebuilds the synthetic look
+// so the canvas reflects the restored state immediately.
+function itemUndo() {
+  if (!tsItemCtx || !itemUndoStack.length) return;
+  itemRedoStack.push(deepClone(tsItemCtx.item.slideStyles || {}));
+  const snapshot = itemUndoStack.pop();
+  tsItemCtx.item.slideStyles = snapshot;
+  window.KairoService?.saveService?.();
+  activeLook = buildSyntheticLook(tsItemCtx.item, tsItemCtx.slideIndex);
+  activeLayer = null;
+  renderLayersList(); renderPreview(); renderProps();
+}
+function itemRedo() {
+  if (!tsItemCtx || !itemRedoStack.length) return;
+  itemUndoStack.push(deepClone(tsItemCtx.item.slideStyles || {}));
+  const snapshot = itemRedoStack.pop();
+  tsItemCtx.item.slideStyles = snapshot;
+  window.KairoService?.saveService?.();
+  activeLook = buildSyntheticLook(tsItemCtx.item, tsItemCtx.slideIndex);
+  activeLayer = null;
+  renderLayersList(); renderPreview(); renderProps();
+}
+
+// ── Undo / redo ────────────────────────────────────────────────────────────
+// Scoped to whichever theme is currently open — switching themes, creating
+// one, or deleting one all reset this, since "undo" across two different
+// themes' edit histories wouldn't mean anything coherent.
+let themeUndoStack = [];
+let themeRedoStack = [];
+
+function resetThemeHistory() {
+  themeUndoStack = [];
+  themeRedoStack = [];
+  pendingCheckpoint = null;
+  lastThemeSnapshot = activeLook ? deepClone(activeLook) : null;
+  clearTimeout(autosaveTimer);
+  updateUndoRedoButtons();
+}
+
+function updateUndoRedoButtons() {
+  const undoBtn = document.getElementById('ts-undo-btn');
+  const redoBtn = document.getElementById('ts-redo-btn');
+  if (undoBtn) undoBtn.disabled = !themeUndoStack.length;
+  if (redoBtn) redoBtn.disabled = !themeRedoStack.length;
+}
+
+// Replaces activeLook's contents in place (same object reference — other
+// code holds onto `activeLook`/`looks[idx]` as that exact reference) rather
+// than swapping in a new object, so nothing downstream goes stale.
+function restoreLookSnapshot(snapshot) {
+  const idx = looks.findIndex(l => l.id === activeLook.id);
+  Object.keys(activeLook).forEach(k => delete activeLook[k]);
+  Object.assign(activeLook, deepClone(snapshot));
+  if (idx >= 0) looks[idx] = activeLook;
+  activeLayer = null;
+  lastThemeSnapshot = deepClone(activeLook); // the just-restored state is the new baseline
+  saveLooks();
+  renderLooksList(); renderLayersList(); syncMetaRow(); renderPreview(); renderProps();
+}
+
+function themeUndo() {
+  if (!activeLook) return;
+  clearTimeout(autosaveTimer);
+  let prev;
+  if (pendingCheckpoint) {
+    // An uncommitted burst is still in flight (debounce hasn't fired) — undo
+    // reverts to just before THIS burst started, without touching or
+    // needing anything already on the committed undo stack.
+    prev = pendingCheckpoint;
+    pendingCheckpoint = null;
+  } else {
+    if (!themeUndoStack.length) return;
+    prev = themeUndoStack.pop();
+  }
+  themeRedoStack.push(deepClone(activeLook));
+  restoreLookSnapshot(prev);
+  updateUndoRedoButtons();
+}
+
+function themeRedo() {
+  if (!themeRedoStack.length || !activeLook) return;
+  clearTimeout(autosaveTimer);
+  themeUndoStack.push(deepClone(activeLook));
+  pendingCheckpoint = null;
+  const next = themeRedoStack.pop();
+  restoreLookSnapshot(next);
+  updateUndoRedoButtons();
+}
+
+document.getElementById('ts-undo-btn')?.addEventListener('click', themeUndo);
+document.getElementById('ts-redo-btn')?.addEventListener('click', themeRedo);
+
+// Cmd/Ctrl+Z and Cmd/Ctrl+Shift+Z (or Ctrl+Y) — only while Theme Studio is
+// open, and never while a text field has focus (its own native undo takes
+// that instead, same guard the Escape-to-close handler already uses).
+document.addEventListener('keydown', (e) => {
+  if (looksModal?.classList.contains('hidden')) return;
+  const t = e.target;
+  if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+  const mod = e.metaKey || e.ctrlKey;
+  // Item mode reuses this same modal but has its own, separately-scoped
+  // undo/redo stack (item.slideStyles, not a whole theme) — route there
+  // instead whenever it's the one open.
+  const undo = tsMode === 'item' ? itemUndo : themeUndo;
+  const redo = tsMode === 'item' ? itemRedo : themeRedo;
+  if (!mod || e.key.toLowerCase() !== 'z') {
+    if (mod && e.key.toLowerCase() === 'y') { e.preventDefault(); redo(); }
+    return;
+  }
+  e.preventDefault();
+  if (e.shiftKey) redo(); else undo();
+});
 
 // ── Layout (free-canvas) props — Alignment / Position / Dimension ─────────
 function renderLayoutProps(panel, layer) {
@@ -3146,12 +4613,17 @@ function renderLayoutProps(panel, layer) {
     const inp = makeNumber(cur[key], min, max, 1, v => {
       ensurePos(layer)[key] = Math.round(v);
       renderPreview();
+      // Pre-existing gap in theme mode: these inputs never called
+      // scheduleThemeAutosave() either — out of scope to fix here. Item
+      // mode needs this, additively — typing an exact position is one of
+      // the two ways (with drag) to set a position override.
+      if (tsMode === 'item') tsSave();
     });
     inp.dataset.posInput = key;
     return inp;
   };
 
-  // Alignment: snap the box to canvas edges/center, Pewbeam-style.
+  // Alignment: snap the box to canvas edges/center.
   const alignWrap = document.createElement('div');
   alignWrap.className = 'ts-align-group';
   [
@@ -3171,6 +4643,7 @@ function renderLayoutProps(panel, layer) {
       act(p);
       renderPreview();
       tsSyncPosInputs(layer);
+      if (tsMode === 'item') tsSave(); // same pre-existing-gap note as posNum above
     });
     alignWrap.appendChild(btn);
   });
@@ -3409,26 +4882,57 @@ function renderTextProps(panel, layer) {
   outlineHeader.appendChild(olLabel); outlineHeader.appendChild(olToggle);
   panel.appendChild(section('Outline', outlineHeader));
   panel.appendChild(outlineDetails);
+
+  // Scroll — continuous horizontal marquee (news-ticker / large-scroll
+  // layers, see the Ticker and Scroll — Fill Screen presets). Independent of
+  // layout: works on the Ticker preset's bottom strip or a free-canvas box
+  // just as well. Speed is seconds per full loop — lower is faster.
+  if (!layer.scroll) layer.scroll = { enabled: false, speed: 15 };
+  const scrollDetails = section(null,
+    prop('Speed', makeSlider(layer.scroll.speed, 3, 60, v => { layer.scroll.speed = v; up(); }))
+  );
+  scrollDetails.style.display = layer.scroll.enabled ? '' : 'none';
+
+  const scrollHeader = document.createElement('div');
+  scrollHeader.className = 'ts-prop-row';
+  const scLabel = document.createElement('span'); scLabel.className = 'ts-prop-label'; scLabel.textContent = 'Scroll';
+  const scToggle = makeToggle(layer.scroll.enabled, v => { layer.scroll.enabled = v; scrollDetails.style.display = v ? '' : 'none'; up(); });
+  scrollHeader.appendChild(scLabel); scrollHeader.appendChild(scToggle);
+  panel.appendChild(section('Scroll', scrollHeader));
+  panel.appendChild(scrollDetails);
 }
 
 // ── Wire modal open/close ─────────────────────────────────────────────────
 const looksBtn     = document.getElementById('looks-btn');
 const looksModal   = document.getElementById('looks-modal');
-const closeLooksBtn = document.getElementById('close-looks');
 const newLookBtn   = document.getElementById('new-look-btn');
-const saveLookBtn  = document.getElementById('save-look-btn');
-// (No global "apply" button — themes are assigned per output in Settings.)
-const deleteLookBtn = document.getElementById('delete-look-btn');
+// (No global "apply" button — themes are assigned per output in Settings.
+// No delete button here either — deleting a theme happens on its own row
+// in the themes list now, see renderLooksList/deleteLook.)
 const tsAddLayerBtn = document.getElementById('ts-add-layer-btn');
 
 // Theme Studio is a full in-window view, not an overlay: opening it swaps the
 // dashboard out so the canvas gets the whole content region.
 function openThemeStudio() {
+  // The top-nav "Theme Studio" tab stays clickable even while item mode's
+  // modal is showing (same modal, both reachable independent of each
+  // other) — without this, tsMode would stay 'item' while the left panel
+  // switched back to the themes list below, desyncing every mode-aware
+  // check (renderLayersList's text-only filter, undo/redo routing, etc.)
+  // from what's actually on screen.
+  if (tsMode === 'item') { tsMode = 'theme'; tsItemCtx = null; toggleItemModeChrome(false); }
   document.querySelector('.main-layout')?.classList.add('hidden-el');
   // Only one full-window view at a time.
   document.getElementById('service-view')?.classList.add('hidden');
   looksModal?.classList.remove('hidden');
   looksBtn?.classList.add('active');
+  resetThemeHistory();
+  // Every group starts collapsed on each fresh visit to Theme Studio — a
+  // long theme list (Bible/Lyrics/Slides plus every imported bundle) reading
+  // as one tall wall of slides otherwise. Toggling a group back open still
+  // sticks for the rest of this Theme Studio session (renderLooksList's own
+  // re-renders, e.g. after import/delete, don't touch this set).
+  collapsedThemeGroups = new Set(looks.filter(l => l.groupId).map(l => l.groupId));
   renderLooksList();
   renderLayersList();
   syncMetaRow();
@@ -3444,19 +4948,372 @@ function closeThemeStudio() {
   document.querySelector('.main-layout')?.classList.remove('hidden-el');
 }
 
-looksBtn?.addEventListener('click', () => {
-  if (looksModal?.classList.contains('hidden')) openThemeStudio();
-  else closeThemeStudio();
+// Item mode reuses this same modal shell (left/center/right three-pane
+// layout) but has no use for whole-theme concerns: creating/importing/
+// exporting/renaming/deleting themes, or the layout/transition/canvas/
+// translate-to row. Hiding these wholesale (plain classList toggles, no
+// per-control changes) is simpler and safer than threading tsMode checks
+// into each of those unrelated render paths. Adding new layers IS supported
+// in item mode (per-slide custom text/shape/image layers, stored on the
+// item) — Text, Shape, Image and Library all stay visible; only the
+// whole-theme meta row (layout/transition/canvas/translate-to) is hidden.
+function toggleItemModeChrome(isItem) {
+  document.querySelector('#ts-pane-themes .ts-col-header')?.classList.toggle('hidden', isItem);
+  document.getElementById('ts-item-mode-header')?.classList.toggle('hidden', !isItem);
+  document.getElementById('ts-item-theme-header')?.classList.toggle('hidden', !isItem);
+  document.querySelector('.ts-meta-row')?.classList.toggle('hidden', isItem);
+  // Canvas size is a whole-theme concern (like Layout/Transition/Canvas,
+  // which the line above already hides) — floats over the preview instead
+  // of living in that row, so it needs its own toggle here.
+  document.querySelector('.ts-canvas-size-group')?.classList.toggle('hidden', isItem);
+  const hint = document.querySelector('.ts-layers-hint');
+  if (hint) hint.style.visibility = isItem ? 'hidden' : '';
+  if (isItem) updateItemThemeLabel();
+}
+document.getElementById('ts-item-back-btn')?.addEventListener('click', () => closeItemStyleEditor());
+
+// Shows which theme this item is currently resolving to (its own override,
+// or the output default) on the right-panel theme picker button — same
+// label text openThemePopover's own rows use ("Output default" vs a theme's
+// name).
+function updateItemThemeLabel() {
+  const label = document.getElementById('ts-item-theme-picker-label');
+  if (!label || !tsItemCtx) return;
+  const resolved = window.KairoService.themeForItem(tsItemCtx.item);
+  label.textContent = tsItemCtx.item.themeId ? (resolved?.name || 'Theme') : 'Output default';
+}
+document.getElementById('ts-item-theme-picker-btn')?.addEventListener('click', (e) => {
+  if (!tsItemCtx) return;
+  window.KairoService.openThemePopover(e.currentTarget, tsItemCtx.item);
 });
 
-closeLooksBtn?.addEventListener('click', closeThemeStudio);
+// Small duplicate of service.js's themeForItem resolution logic (item.themeId
+// lookup, else the primary output's assigned theme, else the first theme) —
+// matches this codebase's existing precedent of each context owning its own
+// small layer-renderer/resolver rather than cross-file exporting one.
+function resolveItemBaseLook(item) {
+  const explicit = item.themeId ? looks.find(l => l.id === item.themeId) : null;
+  return explicit || primaryOutputLook() || looks[0] || null;
+}
 
-// Esc returns to the dashboard (unless a text field has focus).
+// Builds the synthetic "look" item mode points activeLook at: a deep clone
+// of the item's real base theme, namespaced so it can never collide with an
+// actual theme id, with this specific slide's stored overrides (if any)
+// merged field-by-field onto each text layer — a partial override (say, just
+// font.size) must not blow away the rest of the base theme's settings.
+function buildSyntheticLook(item, slideIndex) {
+  const base = resolveItemBaseLook(item);
+  const clone = deepClone(base) || { layers: [] };
+  clone.id = `item-edit:${item.id}:${slideIndex}`;
+  const overrides = item.slideStyles?.[slideIndex] || {};
+  (clone.layers || []).forEach(layer => {
+    if (layer.type !== 'text') return;
+    const ov = overrides[layer.id];
+    if (!ov) return;
+    if (ov.pos) layer.pos = { ...ov.pos };
+    if (ov.font) layer.font = { ...layer.font, ...ov.font };
+    if (ov.align) layer.align = ov.align;
+    if (ov.color) layer.color = ov.color;
+    if (ov.opacity !== undefined) layer.opacity = ov.opacity;
+    if (ov.shadow) layer.shadow = { ...layer.shadow, ...ov.shadow };
+    if (ov.outline) layer.outline = { ...layer.outline, ...ov.outline };
+    if (ov.visible === false) layer.visible = false;
+  });
+  // Item/slide-specific layers the operator added in Full-scale edit — not
+  // part of the theme, so they're stored whole (see writeItemSlideStyleFromSynthetic)
+  // rather than diffed. Appended last so they paint on top, matching Theme
+  // Studio's own "new layer always goes on top" convention — reordered next
+  // if this slide has its own saved z-order.
+  (overrides.__customLayers || []).forEach(l => clone.layers.push(deepClone(l)));
+  if (overrides.__layerOrder) clone.layers = applyLayerOrder(clone.layers, overrides.__layerOrder);
+  return clone;
+}
+
+// ── Item mode's left panel: this item's slides instead of the themes list ──
+// Renders into the same #looks-list container renderLooksList() uses — the
+// two are mutually exclusive by mode, never both rendered for the same open
+// modal, so reusing the element is simpler than adding a parallel one.
+function renderItemSlidesList() {
+  const el = document.getElementById('looks-list');
+  if (!el || !tsItemCtx || !window.KairoService) return;
+  el.innerHTML = '';
+  const { item, slideIndex, baseLook } = tsItemCtx;
+  const slides = window.KairoService.slidesFor(item);
+  slides.forEach((s, i) => {
+    const row = document.createElement('div');
+    row.className = 'ts-item-slide-row'
+      + (i === slideIndex ? ' active' : '')
+      + (window.KairoService.isSlideSelected(i) ? ' selected' : '');
+
+    const thumb = document.createElement('div');
+    thumb.className = 'ts-item-slide-thumb';
+    if (s.image) {
+      thumb.style.backgroundImage = `url('${s.image}')`;
+      thumb.style.backgroundSize = 'cover';
+      thumb.style.backgroundPosition = 'center';
+    } else {
+      // paintLookLayers reads host.clientWidth to compute its scale — thumb
+      // is still detached here, so clientWidth would read 0 and fall back
+      // to a hardcoded 640px guess, rendering text far too large for this
+      // 64px-wide thumbnail (same bug already fixed for stack-card previews
+      // via __pendingPaint). Tag it and paint in one pass after every row is
+      // attached below, instead of forcing a per-thumb synchronous reflow.
+      thumb.__pendingPaint = { s, i };
+    }
+
+    row.appendChild(thumb);
+    // Cmd/Ctrl+Click toggle / Shift+Click range-select — same gesture as
+    // Quick Edit and the Stack/Grid view, via the shared selection state
+    // service.js owns. A plain click clears the selection and picks this
+    // slide, same as always.
+    row.addEventListener('click', (e) => {
+      if (e.metaKey || e.ctrlKey || e.shiftKey) {
+        window.KairoService.handleSlideRowClick(i, e, renderItemSlidesList);
+        return;
+      }
+      window.KairoService.clearSlideSelection();
+      selectItemSlide(i);
+    });
+    row.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      const sections = [];
+      const editGroup = [];
+      if (window.KairoService.canDuplicateSlide(item, s)) {
+        editGroup.push({ label: 'Duplicate', onClick: () => window.KairoService.duplicateSlide(item, i) });
+      }
+      const selection = window.KairoService.selectedSlideIndices.size
+        ? window.KairoService.selectedSlideIndices : new Set([i]);
+      if (window.KairoService.anySlidesDuplicable(item, selection)) {
+        editGroup.push({
+          label: selection.size > 1 ? `Copy ${selection.size} slides` : 'Copy',
+          onClick: () => window.KairoService.copySlides(item, selection),
+        });
+      }
+      if (window.KairoService.slideClipboard && item.type === 'slides') {
+        editGroup.push({ label: 'Paste', onClick: () => window.KairoService.pasteSlides(item, i) });
+      }
+      if (editGroup.length) sections.push(editGroup);
+      if (sections.length) window.KairoService.openContextMenu(e.clientX, e.clientY, sections);
+    });
+    el.appendChild(row);
+  });
+
+  el.querySelectorAll('.ts-item-slide-thumb').forEach(thumb => {
+    const pending = thumb.__pendingPaint;
+    if (!pending) return;
+    const { s, i } = pending;
+    window.KairoService.paintLookLayers(thumb, baseLook, item.slideStyles?.[i] || {}, {
+      verseText: s.text, referenceText: s.reference || '', translatedText: '',
+    }, { hideReference: true });
+  });
+
+  // Added last, after paintLookLayers' host.innerHTML = '' pass above — doing
+  // this any earlier would just get wiped out along with everything else it
+  // clears on text slides (image slides don't hit that path, but running
+  // this uniformly afterward for every thumb is simpler than branching).
+  el.querySelectorAll('.ts-item-slide-thumb').forEach((thumb, i) => {
+    const label = document.createElement('span');
+    label.className = 'ts-item-slide-label';
+    label.textContent = String(i + 1) + '.';
+    thumb.appendChild(label);
+  });
+}
+
+// Mirrors selectLook()'s fan-out (swap the data-source, reset history, then
+// the same five renders) — the established idiom in this file for "point
+// the whole engine at something else."
+function selectItemSlide(index) {
+  if (!tsItemCtx) return;
+  tsItemCtx.slideIndex = index;
+  resetItemHistory();
+  activeLayer = null;
+  activeLook = buildSyntheticLook(tsItemCtx.item, index);
+  renderItemSlidesList(); renderLayersList(); renderPreview(); renderProps();
+}
+
+// ── Item mode open/close (mirrors openThemeStudio/closeThemeStudio above) ──
+function openItemStyleEditor(itemId, slideIndex = 0) {
+  const item = window.KairoService?.service?.items.find(i => i.id === itemId);
+  if (!item) return;
+  tsMode = 'item';
+  tsItemCtx = { item, slideIndex, baseLook: resolveItemBaseLook(item) };
+  document.querySelector('.main-layout')?.classList.add('hidden-el');
+  document.getElementById('service-view')?.classList.add('hidden');
+  looksModal?.classList.remove('hidden');
+  toggleItemModeChrome(true);
+  resetItemHistory();
+  activeLayer = null;
+  activeLook = buildSyntheticLook(item, slideIndex);
+  renderItemSlidesList(); renderLayersList(); renderProps();
+  // Render after layout settles so the stage has real dimensions — same
+  // reason openThemeStudio defers its own first paint.
+  requestAnimationFrame(() => renderPreview());
+}
+function closeItemStyleEditor() {
+  // Called unconditionally from showCenterView() on every top-nav tab
+  // switch (mirroring window.KairoThemeStudio.close's own call site) — must
+  // be a safe no-op when item mode isn't actually open, otherwise it would
+  // reset activeLook/activeLayer and clobber whatever theme the operator
+  // has open in ordinary Theme Studio.
+  if (tsMode !== 'item') return;
+  looksModal?.classList.add('hidden');
+  toggleItemModeChrome(false);
+  document.querySelector('.main-layout')?.classList.remove('hidden-el');
+  tsMode = 'theme';
+  tsItemCtx = null;
+  activeLook = looks[0];
+  activeLayer = null;
+  resetThemeHistory(); // otherwise item mode's undo stack would carry over onto whichever theme this lands back on
+}
+// Exposed so service.js's sectionCard() icon and showCenterView() (top-nav
+// tab switch) can open/close this — same pattern as window.KairoThemeStudio.
+// Called by service.js's refreshAfterSlideEdit after any slide-level
+// duplicate/copy/paste/bulk-delete — item.blocks may have shifted under
+// whichever slide index was open, so the synthetic look and both left/right
+// panels need rebuilding from scratch, same as switching slides normally.
+// A safe no-op when Full-scale edit isn't open, or open for a different item.
+function refreshItemStyleEditorSlides(itemId) {
+  if (tsMode !== 'item' || !tsItemCtx || tsItemCtx.item.id !== itemId) return;
+  const slides = window.KairoService.slidesFor(tsItemCtx.item);
+  tsItemCtx.slideIndex = Math.max(0, Math.min(tsItemCtx.slideIndex, slides.length - 1));
+  activeLayer = null;
+  activeLook = buildSyntheticLook(tsItemCtx.item, tsItemCtx.slideIndex);
+  renderItemSlidesList(); renderLayersList(); renderPreview(); renderProps();
+}
+// Called by service.js's openThemePopover after the operator picks a new
+// theme (or "Output default") for this item from the right-panel button
+// above — item.themeId changing means resolveItemBaseLook(item) now
+// resolves differently, so baseLook itself needs re-resolving too, not just
+// the slide/synthetic-look rebuild refreshItemStyleEditorSlides already does.
+function refreshItemStyleEditorTheme(itemId) {
+  if (tsMode !== 'item' || !tsItemCtx || tsItemCtx.item.id !== itemId) return;
+  tsItemCtx.baseLook = resolveItemBaseLook(tsItemCtx.item);
+  updateItemThemeLabel();
+  refreshItemStyleEditorSlides(itemId);
+}
+window.KairoItemStyleEditor = {
+  open: openItemStyleEditor,
+  close: closeItemStyleEditor,
+  isOpen: () => tsMode === 'item',
+  getItem: () => tsItemCtx?.item || null,
+  refreshSlides: refreshItemStyleEditorSlides,
+  refreshTheme: refreshItemStyleEditorTheme,
+  addMediaToCurrentSlide,
+};
+
+// A tab like Bible/Slides/Songs/Media, not a toggle — leaving happens by
+// clicking a different top-nav tab (which calls closeThemeStudio via
+// window.KairoThemeStudio, see service.js's showCenterView), not by
+// re-clicking this same button or a separate "Back" control.
+looksBtn?.addEventListener('click', openThemeStudio);
+
+// Exposed so service.js's showCenterView() can close this out when the
+// operator switches to Bible/Slides/Songs/Media — the top nav is the one
+// master controller for the whole body, Theme Studio included.
+window.KairoThemeStudio = {
+  close: closeThemeStudio,
+  isOpen: () => !looksModal?.classList.contains('hidden'),
+};
+
+// Esc returns to the dashboard (unless a text field has focus). Item mode
+// reuses this same modal, so route to its own close function instead.
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape' || looksModal?.classList.contains('hidden')) return;
   const t = e.target;
   if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT')) return;
-  closeThemeStudio();
+  if (tsMode === 'item') closeItemStyleEditor(); else closeThemeStudio();
+});
+
+// Select-all/copy/paste for layers — the same gesture as copying files or
+// text, applied to a theme's layer stack. Copy works on whatever's selected
+// (select-all's whole set, or otherwise just the single clicked layer);
+// paste always lands in whichever theme is currently open, so this is how a
+// layer moves from one theme into another — build a look from pieces of
+// others instead of only ever duplicating a whole theme.
+// Disabled entirely in item mode: a pasted layer has no counterpart on the
+// base theme to diff against, so it could never be written into
+// item.slideStyles — there's nothing sensible for paste to do there.
+// Extracted into standalone functions so both the keydown shortcut below and
+// the layer row's right-click menu (renderLayersList) call one
+// implementation each, not two.
+function selectAllLayers() {
+  multiSelectedLayerIds = new Set(activeLook.layers.map(l => l.id));
+  renderLayersList();
+}
+function copyLayers() {
+  const toCopy = multiSelectedLayerIds.size
+    ? activeLook.layers.filter(l => multiSelectedLayerIds.has(l.id))
+    : (activeLayer ? [activeLayer] : []);
+  if (!toCopy.length) return;
+  layerClipboard = deepClone(toCopy);
+  toast(`Copied ${toCopy.length} layer${toCopy.length === 1 ? '' : 's'}`, 'success');
+}
+function pasteLayers() {
+  if (!layerClipboard.length) return;
+  const pasted = deepClone(layerClipboard).map((l, i) => {
+    l.id = `layer-${Date.now()}-${i}-${Math.random().toString(36).slice(2, 7)}`;
+    return l;
+  });
+  activeLook.layers.push(...pasted);
+  multiSelectedLayerIds = new Set(pasted.map(l => l.id));
+  activeLayer = pasted[pasted.length - 1];
+  saveLooks();
+  renderLayersList(); renderPreview(); renderProps(); syncMetaRow();
+  toast(`Pasted ${pasted.length} layer${pasted.length === 1 ? '' : 's'}`, 'success');
+}
+document.addEventListener('keydown', (e) => {
+  if (looksModal?.classList.contains('hidden') || !activeLook || tsMode === 'item') return;
+  const t = e.target;
+  if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT')) return;
+  if (!(e.metaKey || e.ctrlKey)) return;
+  const key = e.key.toLowerCase();
+
+  if (key === 'a') { e.preventDefault(); selectAllLayers(); }
+  else if (key === 'c') { if (multiSelectedLayerIds.size || activeLayer) { e.preventDefault(); copyLayers(); } }
+  else if (key === 'v') { if (layerClipboard.length) { e.preventDefault(); pasteLayers(); } }
+});
+
+// Delete/Backspace for the selected layer(s) — same gesture as removing a
+// file in Finder or a shape in Figma. Not folded into the Cmd/Ctrl block
+// above since this needs no modifier key, and (unlike select-all/copy/paste)
+// works in item mode too — deleteLayer already only allows that for a
+// slide's own custom layers, never a theme layer, so no separate item-mode
+// exclusion is needed here.
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Delete' && e.key !== 'Backspace') return;
+  if (looksModal?.classList.contains('hidden') || !activeLook) return;
+  const t = e.target;
+  if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return;
+  if (multiSelectedLayerIds.size) {
+    e.preventDefault();
+    const ids = [...multiSelectedLayerIds];
+    multiSelectedLayerIds = new Set();
+    ids.forEach(id => deleteLayer(activeLook.layers.find(l => l.id === id)));
+  } else if (activeLayer) {
+    e.preventDefault();
+    deleteLayer(activeLayer);
+  }
+});
+
+// Deselect on a click that lands outside any layer — the grey margin around
+// the stage, or empty space within the stage itself not covered by a layer
+// (e.g. padding around a text box). .ts-preview-wrap is a static element
+// (not recreated per render, only the stage's own children are), so this is
+// wired once here rather than re-attached on every renderPreview() call.
+// Checks the click's literal target rather than relying on stopPropagation
+// timing — layer elements stop propagation on 'mousedown', not 'click', so
+// a same-type 'mousedown' listener here would still fire (a separate click
+// event isn't blocked by a mousedown-phase stopPropagation) unless gated on
+// exactly which element was actually hit.
+document.querySelector('.ts-preview-wrap')?.addEventListener('mousedown', (e) => {
+  const stage = tsStageEl();
+  if (!activeLayer && !multiSelectedLayerIds.size) return;
+  if (e.target !== e.currentTarget && e.target !== stage) return;
+  activeLayer = null;
+  multiSelectedLayerIds = new Set();
+  renderLayersList();
+  renderProps();
+  renderPreview();
 });
 
 // Keep the preview honest when the window resizes — pxScale is derived from
@@ -3474,6 +5331,7 @@ document.getElementById('ts-layout-picker')?.addEventListener('click', e => {
   activeLook.layout = btn.dataset.layout;
   syncMetaRow();
   renderPreview();
+  scheduleThemeAutosave();
 });
 
 // Translate-to language chips (Multi-Language layout only)
@@ -3484,6 +5342,7 @@ document.getElementById('ts-translate-picker')?.addEventListener('click', e => {
   activeLook.translateTo = same ? null : btn.dataset.lang; // click again to clear
   syncMetaRow();
   renderPreview();
+  scheduleThemeAutosave();
 });
 
 // ── Settings split view ───────────────────────────────────────────────────
@@ -3516,85 +5375,62 @@ document.getElementById('ts-translate-picker')?.addEventListener('click', e => {
   show(localStorage.getItem('kairo-settings-pane') || 'audio');
 })();
 
-// ── Resizable Playlist / Transcript split (left sidebar) ──────────────────
+// ── Resizable vertical splitters (drag a divider to trade height between two
+// stacked panes, size persisted per-splitter) ─────────────────────────────
+// Shared by the Playlist/Transcript split (left sidebar) and the Theme
+// Studio Themes/Layers split — same drag-resize behavior, only the target
+// element, size bounds, and storage key differ.
+function initVerticalSplitter({ splitterId, paneSelector, minTop, minBottom, storageKey }) {
+  const splitter = document.getElementById(splitterId);
+  const pane      = typeof paneSelector === 'string' && paneSelector.startsWith('#')
+    ? document.getElementById(paneSelector.slice(1))
+    : document.querySelector(paneSelector);
+  if (!splitter || !pane) return;
+
+  const saved = parseInt(localStorage.getItem(storageKey) || '', 10);
+  if (saved > 0) pane.style.height = saved + 'px';
+
+  let startY = 0, startH = 0, col = null;
+
+  const onMove = (e) => {
+    const maxH = col.clientHeight - splitter.offsetHeight - minBottom;
+    const h = Math.max(minTop, Math.min(maxH, startH + (e.clientY - startY)));
+    pane.style.height = h + 'px';
+  };
+  const onUp = () => {
+    document.removeEventListener('mousemove', onMove);
+    document.removeEventListener('mouseup', onUp);
+    splitter.classList.remove('dragging');
+    document.body.style.userSelect = '';
+    localStorage.setItem(storageKey, String(pane.offsetHeight));
+  };
+
+  splitter.addEventListener('mousedown', (e) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    col = splitter.parentElement;
+    startY = e.clientY;
+    startH = pane.offsetHeight;
+    splitter.classList.add('dragging');
+    document.body.style.userSelect = 'none';
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  });
+}
+
 // Same trade-off as the Theme Studio panes: a long running order and a long
 // transcript want opposite amounts of room, so let the operator decide.
-(function initSidebarSplitter() {
-  const splitter = document.getElementById('ls-splitter');
-  const playlist = document.querySelector('.ls-playlist-section');
-  if (!splitter || !playlist) return;
+initVerticalSplitter({
+  splitterId: 'ls-splitter', paneSelector: '.ls-playlist-section',
+  minTop: 110, minBottom: 140, storageKey: 'kairo-ls-playlist-h',
+});
 
-  const MIN_TOP = 110, MIN_BOTTOM = 140;
-  const saved = parseInt(localStorage.getItem('kairo-ls-playlist-h') || '', 10);
-  if (saved > 0) playlist.style.height = saved + 'px';
-
-  let startY = 0, startH = 0, col = null;
-
-  const onMove = (e) => {
-    const maxH = col.clientHeight - splitter.offsetHeight - MIN_BOTTOM;
-    const h = Math.max(MIN_TOP, Math.min(maxH, startH + (e.clientY - startY)));
-    playlist.style.height = h + 'px';
-  };
-  const onUp = () => {
-    document.removeEventListener('mousemove', onMove);
-    document.removeEventListener('mouseup', onUp);
-    splitter.classList.remove('dragging');
-    document.body.style.userSelect = '';
-    localStorage.setItem('kairo-ls-playlist-h', String(playlist.offsetHeight));
-  };
-
-  splitter.addEventListener('mousedown', (e) => {
-    if (e.button !== 0) return;
-    e.preventDefault();
-    col = splitter.parentElement;
-    startY = e.clientY;
-    startH = playlist.offsetHeight;
-    splitter.classList.add('dragging');
-    document.body.style.userSelect = 'none';
-    document.addEventListener('mousemove', onMove);
-    document.addEventListener('mouseup', onUp);
-  });
-})();
-
-// ── Resizable Themes / Layers split ───────────────────────────────────────
 // Drag the divider to trade height between the two left-column panes. The
 // chosen size persists so the operator's working layout survives a restart.
-(function initTsSplitter() {
-  const splitter = document.getElementById('ts-splitter');
-  const themes   = document.getElementById('ts-pane-themes');
-  if (!splitter || !themes) return;
-
-  const MIN_TOP = 90, MIN_BOTTOM = 120;
-  const saved = parseInt(localStorage.getItem('kairo-ts-themes-h') || '', 10);
-  if (saved > 0) themes.style.height = saved + 'px';
-
-  let startY = 0, startH = 0, col = null;
-
-  const onMove = (e) => {
-    const maxH = col.clientHeight - splitter.offsetHeight - MIN_BOTTOM;
-    const h = Math.max(MIN_TOP, Math.min(maxH, startH + (e.clientY - startY)));
-    themes.style.height = h + 'px';
-  };
-  const onUp = () => {
-    document.removeEventListener('mousemove', onMove);
-    document.removeEventListener('mouseup', onUp);
-    splitter.classList.remove('dragging');
-    document.body.style.userSelect = '';
-    localStorage.setItem('kairo-ts-themes-h', String(themes.offsetHeight));
-  };
-
-  splitter.addEventListener('mousedown', (e) => {
-    if (e.button !== 0) return;
-    e.preventDefault();
-    col = splitter.parentElement;
-    startY = e.clientY;
-    startH = themes.offsetHeight;
-    splitter.classList.add('dragging');
-    document.body.style.userSelect = 'none';
-    document.addEventListener('mousemove', onMove);
-    document.addEventListener('mouseup', onUp);
-  });
-})();
+initVerticalSplitter({
+  splitterId: 'ts-splitter', paneSelector: '#ts-pane-themes',
+  minTop: 90, minBottom: 120, storageKey: 'kairo-ts-themes-h',
+});
 
 // Canvas alpha toggle — flips the base background between its fill and
 // transparent, remembering the previous fill so it round-trips.
@@ -3620,11 +5456,52 @@ document.getElementById('ts-anim-picker')?.addEventListener('click', e => {
   document.querySelectorAll('#ts-anim-picker .ts-chip').forEach(b => b.classList.remove('active'));
   btn.classList.add('active');
   activeLook.animation = btn.dataset.anim;
+  document.getElementById('ts-anim-speed')?.classList.toggle('hidden', btn.dataset.anim === 'cut');
+  scheduleThemeAutosave();
 });
 
-// Name input
-document.getElementById('look-name-input')?.addEventListener('input', e => {
-  if (activeLook) { activeLook.name = e.target.value; renderLooksList(); }
+// Transition speed — a multiplier on display.html's base 300ms (see
+// renderStage there), not a raw duration, so "1" always means exactly the
+// original hardcoded speed regardless of what that baseline happens to be.
+document.getElementById('ts-anim-speed')?.addEventListener('input', e => {
+  if (!activeLook) return;
+  activeLook.animationSpeed = parseFloat(e.target.value);
+  scheduleThemeAutosave();
+});
+
+// Text Animation dropdown — a separate setting from the Transition chips
+// above (see KairoWordSplit's file header for why these were split out of
+// one overloaded `animation` field). A plain <select>, not a chip row like
+// Transition/Layout — 10 options wrapped across rows of pill buttons read
+// as a wall of buttons, a dropdown is the normal control once a list gets
+// this long. 'none' clears it back to plain text.
+document.getElementById('ts-text-anim-select')?.addEventListener('change', e => {
+  if (!activeLook) return;
+  activeLook.textAnimation = e.target.value === 'none' ? null : e.target.value;
+  syncMetaRow();
+  scheduleThemeAutosave();
+  renderPreview();
+});
+
+document.getElementById('ts-text-anim-speed')?.addEventListener('input', e => {
+  if (!activeLook) return;
+  activeLook.textAnimationSpeed = parseFloat(e.target.value);
+  scheduleThemeAutosave();
+  renderPreview();
+});
+
+document.getElementById('ts-text-anim-color')?.addEventListener('input', e => {
+  if (!activeLook) return;
+  activeLook.textHighlightColor = e.target.value;
+  scheduleThemeAutosave();
+  renderPreview();
+});
+
+document.getElementById('ts-text-anim-intensity')?.addEventListener('input', e => {
+  if (!activeLook) return;
+  activeLook.textAnimationIntensity = parseFloat(e.target.value);
+  scheduleThemeAutosave();
+  renderPreview();
 });
 
 // Add text layer
@@ -3641,8 +5518,10 @@ tsAddLayerBtn?.addEventListener('click', () => {
   };
   activeLook.layers.push(newLayer);
   activeLayer = newLayer;
-  renderLayersList();
-  renderPreview();
+  // up() (not a bare render) so a brand-new layer is actually persisted
+  // immediately — in item mode, switching slides right after adding one
+  // must not silently drop it before any other edit triggers the first save.
+  up();
   renderProps();
 });
 
@@ -3657,8 +5536,10 @@ document.getElementById('ts-add-shape-btn')?.addEventListener('click', () => {
   };
   activeLook.layers.push(newLayer);
   activeLayer = newLayer;
-  renderLayersList();
-  renderPreview();
+  // up() (not a bare render), same reason as the Text button — persist
+  // immediately so switching slides right after adding one in Full-scale
+  // edit doesn't silently drop it before any other edit triggers a save.
+  up();
   renderProps();
 });
 
@@ -3696,6 +5577,147 @@ function loadImageFile(file) {
   });
 }
 
+// Same decode/downscale/re-encode as loadImageFile, just sourced from a URL
+// (the Media tab's library, e.g. /api/media/bin/file/xxx.jpg) instead of a
+// freshly-picked File — used by the media-card "Add to Slide" context menu
+// item. Re-encoding to a data URI (rather than storing item.url directly)
+// keeps this consistent with every other image source in the app: the
+// layer survives the source file later being renamed/moved/deleted from its
+// smart folder or the bin, same as a picked file already does.
+function loadImageFromUrl(url) {
+  return fetch(url).then(r => {
+    if (!r.ok) throw new Error('fetch failed');
+    return r.blob();
+  }).then(blob => new Promise((resolve, reject) => {
+    const objectUrl = URL.createObjectURL(blob);
+    const img = new Image();
+    img.onerror = () => { URL.revokeObjectURL(objectUrl); reject(new Error('decode failed')); };
+    img.onload = () => {
+      URL.revokeObjectURL(objectUrl);
+      const scale = Math.min(1, IMG_MAX_W / img.naturalWidth);
+      const w = Math.max(1, Math.round(img.naturalWidth  * scale));
+      const h = Math.max(1, Math.round(img.naturalHeight * scale));
+      const c = document.createElement('canvas');
+      c.width = w; c.height = h;
+      c.getContext('2d').drawImage(img, 0, 0, w, h);
+      const keepAlpha = /png|webp|gif|svg/i.test(blob.type);
+      resolve({ src: keepAlpha ? c.toDataURL('image/png') : c.toDataURL('image/jpeg', 0.86), w, h });
+    };
+    img.src = objectUrl;
+  }));
+}
+
+// Pushes a new image layer sourced from a media-library URL onto whatever
+// activeLook currently is — identical to the Add Image button above (theme
+// mode: the open theme; item mode: the current slide), just sourced from
+// the media library instead of a file picker. No tsMode branching needed:
+// up() already dispatches the right autosave for whichever mode is active,
+// same as every other layer mutation in this file.
+async function addMediaToCurrentSlide(url, nameHint) {
+  if (!activeLook) return false;
+  try {
+    const { src, w, h } = await loadImageFromUrl(url);
+    const fit = Math.min(TS_DESIGN_W * 0.5 / w, TS_DESIGN_H * 0.5 / h, 1);
+    const pw = Math.round(w * fit), ph = Math.round(h * fit);
+    const layer = {
+      id: 'image-' + Date.now(), type: 'image', name: (nameHint || 'Image').replace(/\.[^.]+$/, '').slice(0, 24),
+      visible: true, src, fit: 'contain', opacity: 100, radius: 0,
+      pos: { x: Math.round((TS_DESIGN_W - pw) / 2), y: Math.round((TS_DESIGN_H - ph) / 2), w: pw, h: ph },
+    };
+    activeLook.layers.push(layer);
+    activeLayer = layer;
+    up();
+    renderProps();
+    return true;
+  } catch {
+    toast('Could not load that image', 'error');
+    return false;
+  }
+}
+
+// "Library" button — a lightweight thumbnail picker over the Media tab's
+// bin + smart folders, so an operator can add one of their own church media
+// files as a layer without leaving Theme Studio / Full-scale edit (the
+// Media tab is a separate top-level view — switching to it would close this
+// editor first, per showCenterView's "close it out rather than leaving it
+// showing underneath" — so browsing has to happen from in here instead).
+async function fetchAllMediaItems() {
+  const items = [];
+  try {
+    const bin = await fetch('/api/media/bin').then(r => r.json());
+    (bin.items || []).forEach(it => items.push(it));
+  } catch {}
+  try {
+    const foldersRes = await fetch('/api/media/folders').then(r => r.json());
+    for (const folder of (foldersRes.folders || [])) {
+      try {
+        const res = await fetch(`/api/media/folders/${folder.id}/items`).then(r => r.json());
+        (res.items || []).forEach(it => items.push(it));
+      } catch {}
+    }
+  } catch {}
+  return items;
+}
+
+let mediaLibPickerEl = null;
+function closeMediaLibraryPicker() { mediaLibPickerEl?.remove(); mediaLibPickerEl = null; }
+
+async function openMediaLibraryPicker() {
+  closeMediaLibraryPicker();
+  const overlay = document.createElement('div');
+  overlay.className = 'ts-media-picker-overlay';
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) closeMediaLibraryPicker(); });
+
+  const panel = document.createElement('div');
+  panel.className = 'ts-media-picker-panel';
+  const header = document.createElement('div');
+  header.className = 'ts-media-picker-header';
+  header.innerHTML = '<span>Add from Media Library</span>';
+  const closeBtn = document.createElement('button');
+  closeBtn.className = 'modal-close-btn';
+  closeBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 16 16"><path d="M3 3l10 10M13 3L3 13" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg><span>Close</span>';
+  closeBtn.addEventListener('click', closeMediaLibraryPicker);
+  header.appendChild(closeBtn);
+  panel.appendChild(header);
+
+  const grid = document.createElement('div');
+  grid.className = 'ts-media-picker-grid';
+  grid.textContent = 'Loading…';
+  panel.appendChild(grid);
+  overlay.appendChild(panel);
+  document.body.appendChild(overlay);
+  mediaLibPickerEl = overlay;
+
+  const items = (await fetchAllMediaItems()).filter(it => it.kind === 'image');
+  grid.innerHTML = '';
+  if (!items.length) {
+    grid.innerHTML = '<div class="svc-empty">No images in your Media Library yet.</div>';
+    return;
+  }
+  items.forEach(item => {
+    const card = document.createElement('button');
+    card.className = 'media-card';
+    const img = document.createElement('img');
+    img.src = item.url;
+    card.appendChild(img);
+    const label = document.createElement('div');
+    label.className = 'media-card-label';
+    label.textContent = item.name;
+    card.appendChild(label);
+    card.addEventListener('click', async () => {
+      card.disabled = true;
+      const ok = await addMediaToCurrentSlide(item.url, item.name);
+      if (ok) closeMediaLibraryPicker(); else card.disabled = false;
+    });
+    grid.appendChild(card);
+  });
+}
+
+document.getElementById('ts-add-media-lib-btn')?.addEventListener('click', () => {
+  if (!activeLook) return;
+  openMediaLibraryPicker();
+});
+
 const tsImageFile = document.getElementById('ts-image-file');
 document.getElementById('ts-add-image-btn')?.addEventListener('click', () => tsImageFile?.click());
 tsImageFile?.addEventListener('change', async () => {
@@ -3714,7 +5736,9 @@ tsImageFile?.addEventListener('change', async () => {
     };
     activeLook.layers.push(layer);
     activeLayer = layer;
-    renderLayersList(); renderPreview(); renderProps();
+    // up() (not a bare render) — see the Add Text handler above for why.
+    up();
+    renderProps();
   } catch {
     toast('Could not load that image', 'error');
   }
@@ -3727,11 +5751,16 @@ tsImageFile?.addEventListener('change', async () => {
 // flat/green backdrop. (Full AI subject cutout needs a segmentation model —
 // tracked separately.) Sample colour defaults to the most common edge pixel,
 // which is the backdrop in virtually every real image.
+// Pixels processed per chunk before yielding back to the event loop — keeps
+// a large background image (e.g. 4000x3000) from visibly freezing the whole
+// UI for the entire duration of the keying pass.
+const BG_REMOVE_CHUNK_PIXELS = 200_000;
+
 function removeImageBackground(layer, tolerance = 40) {
   return new Promise((resolve, reject) => {
     const img = new Image();
     img.onerror = () => reject(new Error('decode failed'));
-    img.onload = () => {
+    img.onload = async () => {
       const w = img.naturalWidth, h = img.naturalHeight;
       const c = document.createElement('canvas');
       c.width = w; c.height = h;
@@ -3757,13 +5786,17 @@ function removeImageBackground(layer, tolerance = 40) {
       const kb = ( bestKey        & 31) * 8 + 4;
 
       // Key out matching pixels; feather partial matches so edges don't jag.
+      // Chunked with a yield every BG_REMOVE_CHUNK_PIXELS pixels rather than
+      // one uninterrupted pass over the whole buffer.
       const hard = tolerance, soft = tolerance * 1.8;
+      const chunkStride = BG_REMOVE_CHUNK_PIXELS * 4;
       for (let i = 0; i < d.length; i += 4) {
         const dist = Math.sqrt(
           (d[i] - kr) ** 2 + (d[i + 1] - kg) ** 2 + (d[i + 2] - kb) ** 2
         );
         if (dist <= hard) d[i + 3] = 0;
         else if (dist < soft) d[i + 3] = Math.round(d[i + 3] * ((dist - hard) / (soft - hard)));
+        if (i % chunkStride === 0) await new Promise(r => setTimeout(r, 0));
       }
       ctx.putImageData(imgData, 0, 0);
       resolve(c.toDataURL('image/png'));   // PNG — alpha must survive
@@ -3773,16 +5806,101 @@ function removeImageBackground(layer, tolerance = 40) {
 }
 
 // ── Theme import / export ─────────────────────────────────────────────────
+// .kairotheme is KAIRO's own real, distinct file type — a small envelope
+// (format marker + version) wrapping a theme, rather than a bare .json blob
+// with a naming convention pretending to be an extension. Bumping
+// KAIROTHEME_FORMAT_VERSION only ever matters if the envelope shape itself
+// changes; the theme payload inside can evolve without it.
+const KAIROTHEME_FORMAT_VERSION = 1;
+
 document.getElementById('export-look-btn')?.addEventListener('click', () => {
   if (!activeLook) return;
-  const blob = new Blob([JSON.stringify(activeLook, null, 2)], { type: 'application/json' });
+  const envelope = {
+    kairoTheme: true,
+    formatVersion: KAIROTHEME_FORMAT_VERSION,
+    app: 'KAIRO',
+    exportedAt: new Date().toISOString(),
+    theme: activeLook,
+  };
+  const blob = new Blob([JSON.stringify(envelope, null, 2)], { type: 'application/json' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
-  a.download = (activeLook.name || 'kairo-theme').replace(/[^\w\- ]+/g, '').trim().replace(/\s+/g, '-').toLowerCase() + '.kairo-theme.json';
+  a.download = (activeLook.name || 'kairo-theme').replace(/[^\w\- ]+/g, '').trim().replace(/\s+/g, '-').toLowerCase() + '.kairotheme';
   a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 5000);
   toast('Theme exported', 'success');
 });
+
+// Adds one imported look to the list and selects it — shared by every import
+// path below (.kairotheme, plain .json, and each theme pulled out of a
+// .protheme bundle) so they all land the same way.
+function addImportedLook(look, nameSuffix = ' (imported)') {
+  look.id   = 'imported-' + Date.now() + '-' + Math.random().toString(36).slice(2, 7);
+  look.name = (look.name || 'Imported theme') + nameSuffix;
+  looks.push(look);
+  return look;
+}
+
+function finishLookImport(look) {
+  activeLook  = look;
+  activeLayer = null;
+  resetThemeHistory(); // a freshly-imported theme has no undo history of its own to inherit
+  saveLooks();
+  renderLooksList(); renderLayersList(); syncMetaRow(); renderPreview(); renderProps();
+}
+
+// In-app replacement for window.confirm() — Tauri's webview doesn't
+// reliably show native JS dialogs (confirm/alert just resolve instantly
+// with no UI), which silently broke every delete confirmation that used to
+// call confirm() directly. Same overlay-click-to-cancel convention as
+// #add-confirm-modal / confirmProthemeSizeConversion below.
+function confirmDialog(message, { title = 'Confirm', confirmLabel = 'Confirm', cancelLabel = 'Cancel', danger = false } = {}) {
+  return new Promise(resolve => {
+    const modal = document.getElementById('generic-confirm-modal');
+    const confirmBtn = document.getElementById('gc-confirm');
+    document.getElementById('gc-title').textContent = title;
+    document.getElementById('gc-message').textContent = message;
+    confirmBtn.textContent = confirmLabel;
+    document.getElementById('gc-cancel').textContent = cancelLabel;
+    confirmBtn.style.cssText = danger ? 'background:var(--red);' : '';
+    modal.classList.remove('hidden');
+    const close = (result) => { modal.classList.add('hidden'); cleanup(); resolve(result); };
+    const onConfirm = () => close(true);
+    const onCancel  = () => close(false);
+    function cleanup() {
+      confirmBtn.removeEventListener('click', onConfirm);
+      document.getElementById('gc-cancel').removeEventListener('click', onCancel);
+      modal.querySelector('.modal-overlay').removeEventListener('click', onCancel);
+    }
+    confirmBtn.addEventListener('click', onConfirm);
+    document.getElementById('gc-cancel').addEventListener('click', onCancel);
+    modal.querySelector('.modal-overlay').addEventListener('click', onCancel);
+  });
+}
+
+// In-app replacement for the native confirm() previously used to ask whether
+// a .protheme bundle's non-default slide size should convert to 1920x1080 or
+// stay as-is — same overlay-click-to-cancel convention as #add-confirm-modal.
+function confirmProthemeSizeConversion(bundleName, sizes) {
+  return new Promise(resolve => {
+    const modal = document.getElementById('protheme-size-modal');
+    document.getElementById('pts-message').textContent =
+      `"${bundleName}" includes slide size(s) other than the default 1920×1080 (${sizes}). Convert those to 1920×1080, or keep their original size?`;
+    modal.classList.remove('hidden');
+    const close = (result) => { modal.classList.add('hidden'); cleanup(); resolve(result); };
+    const onConvert = () => close(true);
+    const onKeep = () => close(false);
+    const onOverlay = () => close(false);
+    function cleanup() {
+      document.getElementById('pts-convert').removeEventListener('click', onConvert);
+      document.getElementById('pts-keep-original').removeEventListener('click', onKeep);
+      modal.querySelector('.modal-overlay').removeEventListener('click', onOverlay);
+    }
+    document.getElementById('pts-convert').addEventListener('click', onConvert);
+    document.getElementById('pts-keep-original').addEventListener('click', onKeep);
+    modal.querySelector('.modal-overlay').addEventListener('click', onOverlay);
+  });
+}
 
 const importLookFile = document.getElementById('import-look-file');
 document.getElementById('import-look-btn')?.addEventListener('click', () => importLookFile?.click());
@@ -3790,34 +5908,84 @@ importLookFile?.addEventListener('change', async () => {
   const file = importLookFile.files?.[0];
   importLookFile.value = '';
   if (!file) return;
+  const ext = file.name.toLowerCase().split('.').pop();
+
+  // .protheme is a binary (zip + protobuf) ProPresenter theme bundle — needs
+  // the server's zip/protobuf reader, so it's parsed there rather than here.
+  // Base64-encoded over the same JSON transport /api/service/import already
+  // uses for binary presentation files, rather than a one-off raw-body route.
+  if (ext === 'protheme') {
+    try {
+      const buf = await file.arrayBuffer();
+      const bytes = new Uint8Array(buf);
+      let bin = '';
+      for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+      const dataBase64 = btoa(bin);
+      const res = await fetch(`${SERVER}/api/theme/import-protheme`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ dataBase64 }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error || 'import failed');
+      if (!Array.isArray(data.themes) || !data.themes.length) throw new Error('no theme slides found');
+      const bundleName = file.name.replace(/\.protheme$/i, '');
+
+      // Layer positions are always rescaled into KAIRO's fixed 1920x1080
+      // design space regardless of canvasSize (see boundsFromFields in
+      // theme_import.js) — that part isn't optional, it's how every layer
+      // renders correctly at all. canvasSize itself, though, is just the
+      // Size-picker/preview-shape hint (see themeCanvasSize), and a slide
+      // that wasn't authored at 1920x1080 gets a real, meaningful choice
+      // there: preview it as its own original shape (useful if there's an
+      // actual matching-shaped screen), or fold it into the plain 16:9
+      // default like every built-in theme.
+      const nonDefaultSizes = data.themes.some(t => t.canvasSize && (t.canvasSize.w !== 1920 || t.canvasSize.h !== 1080));
+      if (nonDefaultSizes) {
+        const sizes = [...new Set(data.themes
+          .filter(t => t.canvasSize && (t.canvasSize.w !== 1920 || t.canvasSize.h !== 1080))
+          .map(t => `${t.canvasSize.w}×${t.canvasSize.h}`))].join(', ');
+        const convert = await confirmProthemeSizeConversion(bundleName, sizes);
+        if (convert) data.themes.forEach(t => { t.canvasSize = { w: 1920, h: 1080 }; });
+      }
+
+      // Every slide from this one bundle shares a group so Theme Studio's
+      // list browses them together (see collapsedThemeGroups) instead of as
+      // unrelated flat entries — matches how the bundle itself is one named
+      // theme containing several slides, not several independent themes.
+      const groupId = 'ptheme-' + Date.now();
+      let last = null;
+      data.themes.forEach(look => {
+        look.groupId = groupId;
+        look.groupName = bundleName;
+        last = addImportedLook(look, '');
+      });
+      finishLookImport(last);
+      toast(`Imported ${data.themes.length} theme${data.themes.length > 1 ? 's' : ''} from "${bundleName}"` +
+        (data.warnings?.length ? ' — some details are best-effort, see console' : ''), 'success');
+      if (data.warnings?.length) console.warn('[Theme import]', data.warnings);
+    } catch (err) {
+      toast(`Could not import that ProPresenter theme: ${err.message}`, 'error');
+    }
+    return;
+  }
+
   try {
-    const look = JSON.parse(await file.text());
+    const parsed = JSON.parse(await file.text());
+    // .kairotheme wraps the theme in an envelope; a bare .json (the old
+    // export shape, still readable) IS the theme.
+    const look = (parsed && parsed.kairoTheme && parsed.theme) ? parsed.theme : parsed;
     if (!look || !Array.isArray(look.layers)) throw new Error('not a theme file');
-    look.id   = 'imported-' + Date.now();
-    look.name = (look.name || 'Imported theme') + ' (imported)';
-    looks.push(look);
-    saveLooks();
-    activeLook  = look;
-    activeLayer = null;
-    renderLooksList(); renderLayersList(); syncMetaRow(); renderPreview(); renderProps();
+    finishLookImport(addImportedLook(look));
     toast('Theme imported', 'success');
   } catch {
     toast('Not a valid theme file', 'error');
   }
 });
 
-// Save
-saveLookBtn?.addEventListener('click', () => {
-  if (!activeLook) return;
-  const idx = looks.findIndex(l => l.id === activeLook.id);
-  if (idx >= 0) looks[idx] = activeLook;
-  else looks.push(activeLook);
-  saveLooks();
-  renderLooksList();
-  toast('Theme saved', 'success');
-});
 
-// New theme
+// New theme — lands straight into rename mode on its own row, since that's
+// the only place a theme gets named now.
 newLookBtn?.addEventListener('click', () => {
   const base = deepClone(DEFAULT_LOOKS[0]);
   base.id   = 'look-' + Date.now();
@@ -3825,28 +5993,14 @@ newLookBtn?.addEventListener('click', () => {
   looks.push(base);
   activeLook  = base;
   activeLayer = null;
+  resetThemeHistory();
   saveLooks();
   renderLooksList();
   renderLayersList();
   syncMetaRow();
   renderPreview();
   renderProps();
-  document.getElementById('look-name-input')?.focus();
-});
-
-// Delete
-deleteLookBtn?.addEventListener('click', () => {
-  if (looks.length <= 1) { toast('Cannot delete the last theme', 'error'); return; }
-  looks = looks.filter(l => l.id !== activeLook?.id);
-  activeLook  = looks[0];
-  activeLayer = null;
-  saveLooks();
-  renderLooksList();
-  renderLayersList();
-  syncMetaRow();
-  renderPreview();
-  renderProps();
-  toast('Theme deleted', 'success');
+  document.querySelector('.ts-theme-item.active .ts-theme-name')?.dispatchEvent(new Event('dblclick', { bubbles: true }));
 });
 
 // ── Per-output themes ─────────────────────────────────────────────────────
@@ -3879,6 +6033,80 @@ function displayOutputs() {
 
 function allOutputKeys() {
   return [...OUTPUT_DEFS.map(d => d.key), ...extraDisplays().map(d => d.id)];
+}
+
+// ── Physical screen assignment ───────────────────────────────────────────
+// Which real, detected screen each display output (External Display, extra
+// display rows — NOT the broadcast-only outputs like NDI/Syphon) has been
+// deliberately pointed at, keyed by output id. Populated from the Window
+// Management API (see refreshDisplayStatus) and chosen explicitly per
+// output, the same way ProPresenter's Hardware tab has the operator pick a
+// device/resolution per screen rather than guessing from whatever's first
+// in the OS's list. Used both to open a display window on the right
+// physical screen (openDisplayOutput) and to shape the Live preview panel
+// when it's monitoring that output (applyLivePreviewAspect).
+let cachedScreens = [];
+
+function outputScreenMap() {
+  return (settings.outputScreens && typeof settings.outputScreens === 'object') ? settings.outputScreens : {};
+}
+
+function setOutputScreen(outputId, screen) {
+  const map = { ...outputScreenMap() };
+  if (screen) map[outputId] = screen; else delete map[outputId];
+  settings.outputScreens = map;
+  saveSettingsPatch({ outputScreens: map });
+}
+
+function populateScreenOptions(sel, outputId) {
+  const current = outputScreenMap()[outputId];
+  sel.innerHTML = '';
+  const noneOpt = document.createElement('option');
+  noneOpt.value = '';
+  noneOpt.textContent = 'Not assigned — opens on this window’s screen';
+  sel.appendChild(noneOpt);
+  cachedScreens.forEach(s => {
+    const o = document.createElement('option');
+    o.value = String(s.index);
+    o.textContent = `Screen ${s.index + 1}${s.isPrimary ? ' (this computer)' : ''} — ${s.width}×${s.height}`;
+    if (current && current.width === s.width && current.height === s.height &&
+        current.left === s.left && current.top === s.top) o.selected = true;
+    sel.appendChild(o);
+  });
+}
+
+function buildScreenSelect(outputId) {
+  const sel = document.createElement('select');
+  sel.className = 'setting-input output-screen-select';
+  populateScreenOptions(sel, outputId);
+  sel.addEventListener('change', () => {
+    const s = cachedScreens[Number(sel.value)];
+    setOutputScreen(outputId, s ? { width: s.width, height: s.height, left: s.left, top: s.top } : null);
+    if (typeof livePreviewOutputId !== 'undefined' && livePreviewOutputId === outputId) applyLivePreviewAspect();
+  });
+  return sel;
+}
+
+// Inserted into the External Display card's body, right after the Theme
+// picker renderOutputThemePickers already placed there.
+function upsertPrimaryScreenPicker() {
+  const body = document.querySelector('#card-external .output-card-body');
+  if (!body) return;
+  let group = body.querySelector('.output-screen-group');
+  if (!group) {
+    group = document.createElement('div');
+    group.className = 'setting-group output-screen-group';
+    const lbl = document.createElement('label');
+    lbl.className = 'setting-label';
+    lbl.textContent = 'Physical screen';
+    group.appendChild(lbl);
+    group.appendChild(buildScreenSelect(PRIMARY_DISPLAY));
+    const themeGroup = body.querySelector('.output-theme-group');
+    if (themeGroup) themeGroup.insertAdjacentElement('afterend', group);
+    else body.insertBefore(group, body.firstChild);
+  } else {
+    populateScreenOptions(group.querySelector('select'), PRIMARY_DISPLAY);
+  }
 }
 
 function outputThemeMap() {
@@ -3945,26 +6173,16 @@ function renderLangPacks() {
         renderLangPacks();
       });
     } else {
-      btn.textContent = 'Install';
-      btn.addEventListener('click', async () => {
-        btn.disabled = true; btn.textContent = 'Installing…';
-        try {
-          const r = await fetch(`${SERVER}/api/lang/install`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ code: p.code }),
-          });
-          const d = await r.json().catch(() => ({}));
-          if (!r.ok || d.error) throw new Error(d.error || 'install failed');
-          settings.installedLangs = [...installed, p.code];
-          saveSettingsPatch({ installedLangs: settings.installedLangs });
-          renderLangPacks();
-          toast(`${p.name} scripture pack installed`, 'success');
-        } catch (err) {
-          toast(`${p.name} pack unavailable — ${err.message}`, 'error');
-          btn.disabled = false; btn.textContent = 'Install';
-        }
-      });
+      // /api/lang/install has never had a real source wired up (it 503s
+      // without KAIRO_LANG_PACK_BASE_URL, which nothing ever sets) — and
+      // even a successful install wouldn't do anything yet, since the
+      // detection worker never reads settings.bibleLanguage to switch which
+      // verse corpus it indexes against. Showing "Install" as if this
+      // already worked was misleading; be honest that it's not built yet
+      // rather than leaving a button that always fails.
+      btn.textContent = 'Coming soon';
+      btn.disabled = true;
+      btn.title = 'Live detection in this language isn’t available yet.';
     }
 
     row.appendChild(meta); row.appendChild(btn);
@@ -3994,67 +6212,80 @@ document.getElementById('bible-language')?.addEventListener('change', (e) => {
 });
 
 // ── Extra display rows ────────────────────────────────────────────────────
-function renderDisplayOutputs() {
-  refreshDisplayStatus();
+async function renderDisplayOutputs() {
+  await refreshDisplayStatus();
+  upsertPrimaryScreenPicker();
 
   const host = document.getElementById('extra-displays-list');
-  if (!host) return;
-  const map = outputThemeMap();
-  host.innerHTML = '';
+  if (host) {
+    const map = outputThemeMap();
+    host.innerHTML = '';
 
-  extraDisplays().forEach((d, i) => {
-    const row = document.createElement('div');
-    row.className = 'display-output-row';
+    extraDisplays().forEach((d, i) => {
+      const row = document.createElement('div');
+      row.className = 'display-output-row';
 
-    const name = document.createElement('input');
-    name.type = 'text';
-    name.className = 'setting-input';
-    name.value = d.name || `Display ${i + 2}`;
-    name.placeholder = 'Screen name';
-    name.addEventListener('change', () => {
-      const list = extraDisplays().map(x => x.id === d.id ? { ...x, name: name.value.trim() || x.name } : x);
-      settings.extraDisplays = list;
-      saveSettingsPatch({ extraDisplays: list });
-      renderDisplayOutputs();
+      const name = document.createElement('input');
+      name.type = 'text';
+      name.className = 'setting-input';
+      name.value = d.name || `Display ${i + 2}`;
+      name.placeholder = 'Screen name';
+      name.addEventListener('change', () => {
+        const list = extraDisplays().map(x => x.id === d.id ? { ...x, name: name.value.trim() || x.name } : x);
+        settings.extraDisplays = list;
+        saveSettingsPatch({ extraDisplays: list });
+        renderDisplayOutputs();
+      });
+
+      const sel = document.createElement('select');
+      sel.className = 'setting-input';
+      looks.forEach(l => {
+        const o = document.createElement('option');
+        o.value = l.id; o.textContent = l.name;
+        if (l.id === map[d.id]) o.selected = true;
+        sel.appendChild(o);
+      });
+      sel.addEventListener('change', () => {
+        settings.outputThemes = { ...outputThemeMap(), [d.id]: sel.value };
+        saveSettingsPatch({ outputThemes: settings.outputThemes });
+        applyOutputThemes();
+      });
+
+      const screenSel = buildScreenSelect(d.id);
+
+      const open = document.createElement('button');
+      open.className = 'modal-btn secondary';
+      open.textContent = 'Open';
+      open.addEventListener('click', () => openDisplayOutput(d));
+
+      const del = document.createElement('button');
+      del.className = 'modal-btn secondary display-output-del';
+      del.innerHTML = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>`;
+      del.title = 'Remove this display';
+      del.addEventListener('click', () => {
+        settings.extraDisplays = extraDisplays().filter(x => x.id !== d.id);
+        const map2 = { ...outputScreenMap() }; delete map2[d.id];
+        settings.outputScreens = map2;
+        saveSettingsPatch({ extraDisplays: settings.extraDisplays, outputScreens: map2 });
+        renderDisplayOutputs();
+        applyOutputThemes();
+      });
+
+      row.appendChild(name); row.appendChild(sel); row.appendChild(screenSel); row.appendChild(open); row.appendChild(del);
+      host.appendChild(row);
     });
+  }
 
-    const sel = document.createElement('select');
-    sel.className = 'setting-input';
-    looks.forEach(l => {
-      const o = document.createElement('option');
-      o.value = l.id; o.textContent = l.name;
-      if (l.id === map[d.id]) o.selected = true;
-      sel.appendChild(o);
-    });
-    sel.addEventListener('change', () => {
-      settings.outputThemes = { ...outputThemeMap(), [d.id]: sel.value };
-      saveSettingsPatch({ outputThemes: settings.outputThemes });
-      applyOutputThemes();
-    });
-
-    const open = document.createElement('button');
-    open.className = 'modal-btn secondary';
-    open.textContent = 'Open';
-    open.addEventListener('click', () => openDisplayOutput(d));
-
-    const del = document.createElement('button');
-    del.className = 'modal-btn secondary display-output-del';
-    del.innerHTML = '&times;';
-    del.title = 'Remove this display';
-    del.addEventListener('click', () => {
-      settings.extraDisplays = extraDisplays().filter(x => x.id !== d.id);
-      saveSettingsPatch({ extraDisplays: settings.extraDisplays });
-      renderDisplayOutputs();
-      applyOutputThemes();
-    });
-
-    row.appendChild(name); row.appendChild(sel); row.appendChild(open); row.appendChild(del);
-    host.appendChild(row);
-  });
+  renderLivePreviewOutputSelect();
 }
 
 // Report whether a second screen is actually attached, so the operator knows
 // whether "Open" will land on a projector or just stack on this monitor.
+// Also refreshes cachedScreens from the Window Management API when
+// available, which the per-output screen pickers (upsertPrimaryScreenPicker,
+// buildScreenSelect) read synchronously once this resolves — resolution
+// itself is no longer captured here; each output's screen is chosen
+// explicitly instead (see outputScreenMap).
 async function refreshDisplayStatus() {
   const hint = document.getElementById('display-status-hint');
   if (!hint) return;
@@ -4064,24 +6295,28 @@ async function refreshDisplayStatus() {
   try {
     if (window.getScreenDetails) {
       const d = await window.getScreenDetails();
-      detected = (d.screens || []).length;
+      const screens = d.screens || [];
+      cachedScreens = screens.map((s, i) => ({
+        index: i, width: s.width, height: s.height, left: s.left, top: s.top, isPrimary: !!s.isPrimary,
+      }));
+      detected = screens.length;
     } else if (typeof window.screen?.isExtended === 'boolean') {
       detected = window.screen.isExtended ? 2 : 1;
     }
-  } catch { /* permission denied — fall back to isExtended below */ }
+  } catch { /* permission denied — leave cachedScreens as last known, fall back below */ }
   if (detected == null && typeof window.screen?.isExtended === 'boolean') {
     detected = window.screen.isExtended ? 2 : 1;
   }
 
   if (detected == null) {
-    hint.textContent = `${configured} display output${configured > 1 ? 's' : ''} configured. Open each one and move it to its screen.`;
+    hint.innerHTML = `${configured} display output${configured > 1 ? 's' : ''} configured. Open each one and move it to its screen, or assign a detected screen to it below.`;
     return;
   }
   if (detected <= 1) {
-    hint.innerHTML = '<span style="color:var(--orange)">No external display detected.</span> The window will open on this screen — connect a projector or second monitor first.';
+    hint.innerHTML = `<span style="color:var(--orange)">No external display detected.</span> The window will open on this screen — connect a projector or second monitor first.`;
     return;
   }
-  hint.innerHTML = `<span style="color:var(--blue)">${detected} screens connected.</span> ${configured} output${configured > 1 ? 's' : ''} configured — each opens in its own window with its own theme.`;
+  hint.innerHTML = `<span style="color:var(--blue)">${detected} screens connected.</span> ${configured} output${configured > 1 ? 's' : ''} configured — assign each to a screen below so Open lands in the right place.`;
 }
 
 // Primary external display keeps its original button.
@@ -4090,10 +6325,13 @@ document.getElementById('open-external-btn')?.addEventListener('click', () => {
 });
 
 // Open a window for one screen. It identifies itself via ?output= so it renders
-// with that screen's assigned theme.
+// with that screen's assigned theme. The explicitly-assigned physical screen
+// (outputScreenMap) always wins over the old d.screen/window.screen guesses,
+// which only apply when nothing's been assigned yet.
 function openDisplayOutput(d) {
   const url = `/display.html?output=${encodeURIComponent(d.id)}`;
-  const scr = d.screen || {};
+  const assigned = outputScreenMap()[d.id];
+  const scr = assigned || d.screen || {};
   const w = scr.width  || window.screen.width;
   const h = scr.height || window.screen.height;
   const x = scr.left   != null ? scr.left : window.screen.width;
@@ -4231,6 +6469,15 @@ async function saveSettingsPatch(patch) {
     showUpdateBanner(version, notes);
   });
 
+  // Only fired for an explicit "Check for Updates…" (Help menu) — the
+  // silent startup check never emits this event, so there's no risk of an
+  // unprompted "you're up to date" toast on every launch.
+  window.__TAURI__.event.listen('update-check-result', (event) => {
+    const { upToDate, error } = event.payload || {};
+    if (upToDate) toast('KAIRO is up to date.', 'success');
+    else if (error) toast('Could not check for updates: ' + error, 'error');
+  });
+
   function showUpdateBanner(version, notes) {
     const existing = document.getElementById('update-banner');
     if (existing) existing.remove();
@@ -4261,6 +6508,26 @@ async function saveSettingsPatch(patch) {
 
     document.getElementById('upd-snooze-btn').addEventListener('click', () => banner.remove());
   }
+})();
+
+// ── Native app menu bridge (Tauri only) ───────────────────────────────────
+// File > New Theme/Import…/Export Current Theme dispatch here as plain
+// window events (see build_app_menu/on_menu_event in src-tauri/src/lib.rs)
+// rather than Rust reimplementing any of those flows — every one of them
+// already exists as a toolbar button in Theme Studio (file pickers,
+// unsaved-state handling, toasts and all), so the menu just opens Theme
+// Studio if it isn't already open and clicks that same button.
+(function initNativeMenuBridge() {
+  if (!window.__TAURI__) return;
+  const clickWhenReady = (btnId) => {
+    if (looksModal?.classList.contains('hidden')) openThemeStudio();
+    document.getElementById(btnId)?.click();
+  };
+  window.__TAURI__.event.listen('menu-new-theme',     () => clickWhenReady('new-look-btn'));
+  window.__TAURI__.event.listen('menu-import',        () => clickWhenReady('import-look-btn'));
+  window.__TAURI__.event.listen('menu-export-theme',  () => clickWhenReady('export-look-btn'));
+  // KAIRO > Settings… (Cmd+,) — same panel the toolbar gear icon opens.
+  window.__TAURI__.event.listen('menu-settings',      () => settingsModal?.classList.remove('hidden'));
 })();
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -4536,7 +6803,7 @@ async function saveSettingsPatch(patch) {
 
   deleteBtn2?.addEventListener('click', async () => {
     if (!activeSessionId) return;
-    if (!confirm('Delete this session? This cannot be undone.')) return;
+    if (!(await confirmDialog('Delete this session? This cannot be undone.', { title: 'Delete session', confirmLabel: 'Delete', danger: true }))) return;
     try {
       await fetch(`${SERVER}/api/sessions/${encodeURIComponent(activeSessionId)}`, { method: 'DELETE' });
       activeSessionId = null;
@@ -4711,10 +6978,22 @@ renderLooksList();
   // and there's a real frame painted behind it. Rust used to show the window
   // right after dispatching navigate(), which raced the new page's own load
   // and could flash WebKit's default white background before this script (and
-  // our dark styles) ever ran. Double rAF waits for an actual paint before
-  // signalling. No-ops harmlessly outside Tauri (plain-browser dev).
-  requestAnimationFrame(() => requestAnimationFrame(() => {
+  // our dark styles) ever ran.
+  //
+  // This used to wait on a double requestAnimationFrame instead of the
+  // setTimeout below — reads as more "correct" (wait for an actual paint,
+  // not just a fixed delay), but it deadlocked every single launch: the
+  // window is created with `visible: false`, and WebKit never runs a
+  // compositing/paint pass for a surface that was never made visible — so
+  // rAF's callback had nothing to synchronize against and simply never
+  // fired. Confirmed via a boot trace: execution reached this exact point
+  // every time, then nothing — the app only ever appeared via Rust's 12s
+  // "frontend never signalled ready" fallback. A short timer doesn't depend
+  // on compositing/visibility at all, so it can't deadlock the same way;
+  // ~50ms is plenty for the DOM/CSSOM to settle after bootstrapStartup()
+  // returns. No-ops harmlessly outside Tauri (plain-browser dev).
+  setTimeout(() => {
     const inv = window.__TAURI__?.core?.invoke || window.__TAURI__?.invoke;
     inv?.('signal_main_ready').catch(() => {});
-  }));
+  }, 50);
 })();
