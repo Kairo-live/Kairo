@@ -1515,6 +1515,18 @@
                         resizable:    true,
                         fullscreen:   opts.fullscreen || false,
                         skipTaskbar:  false,
+                        // Same fix as the main window's own splash->show
+                        // sequence (see signal_main_ready in app.js): a
+                        // newly-created window is visible immediately by
+                        // default, showing WebKit's default WHITE
+                        // background before display.html's own dark CSS
+                        // has painted — on the actual output screen this
+                        // read as a black/white/black flash every time a
+                        // display opened. Created hidden; display.html/
+                        // identify.html call show() themselves once their
+                        // own CSS has settled (see the script at the
+                        // bottom of each).
+                        visible: false,
                     });
                     win.once('tauri://error', function(e) {
                       fetch('/api/debug-log', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({

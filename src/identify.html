@@ -42,6 +42,14 @@
     const params = new URLSearchParams(location.search);
     document.getElementById('n').textContent = params.get('n') || '?';
     document.getElementById('label').textContent = params.get('label') || '';
+
+    // Reveal now that this page's own dark CSS has settled — openDisplayWindow
+    // creates this window hidden for exactly this reason (see display.html
+    // for the full explanation of the black/white/black flash this avoids).
+    setTimeout(() => {
+        const w = window.__TAURI__?.window?.getCurrentWindow?.();
+        w?.show().catch(() => {});
+    }, 50);
   </script>
 </body>
 </html>

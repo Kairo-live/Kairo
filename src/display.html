@@ -23,6 +23,12 @@
             font-family: 'Manrope', system-ui, -apple-system, sans-serif;
             overflow: hidden;
             -webkit-font-smoothing: antialiased;
+            /* This is a live broadcast output, not a page to read — verse
+               text (and everything else on it) shouldn't be selectable at
+               all. #kairo-label already had this individually; applying it
+               here covers the actual content too. */
+            -webkit-user-select: none;
+            user-select: none;
         }
 
         #stage {
@@ -32,13 +38,30 @@
             overflow: hidden;
         }
 
+        /* News-ticker / large-scroll text layers (layer.scroll.enabled) — see
+           buildLayerDOM below. Matches Theme Studio's own preview keyframe. */
+        @keyframes kairo-marquee {
+            from { transform: translateX(0); }
+            to   { transform: translateX(-100%); }
+        }
+
+        /* Two independently-controlled layers, PP-style: media (image/video)
+           sits behind, the slide (theme background/text) renders on top.
+           Each clears/updates without touching the other. */
+        #media-layer, #slide-layer {
+            position: absolute;
+            inset: 0;
+        }
+        #media-layer { z-index: 0; }
+        #slide-layer { z-index: 1; }
+        #media-layer video, #media-layer img {
+            position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain;
+        }
+
         /* Layer transitions */
         .display-layer {
             transition: opacity 350ms ease, transform 350ms ease;
         }
-
-        /* Stage fade wrapper */
-        #stage.fade-out .display-layer { opacity: 0 !important; }
 
         /* Transparent background (no-bg look) */
         body.transparent-bg {
@@ -81,10 +104,16 @@
     </style>
 </head>
 <body>
-    <div id="stage"></div>
+    <div id="stage">
+        <div id="media-layer"></div>
+        <div id="slide-layer"></div>
+    </div>
     <div id="kairo-label">KAIRO</div>
     <div id="conn-status" class="visible reconnecting">Connecting…</div>
 
+    <script src="design_space.js"></script>
+    <script src="word_split.js"></script>
+    <script src="color_utils.js"></script>
     <script>
     'use strict';
 
@@ -98,7 +127,10 @@
     // location.host is always correct — and matches whichever port Tauri
     // picked at launch).
     const WS_URL = `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}`;
-    const RECONNECT_DELAY = 3000;
+    // Base delay for exponential backoff (see scheduleReconnect) — capped
+    // low since this is a local sidecar process, not a remote network hop.
+    const RECONNECT_BASE_DELAY = 1000;
+    const RECONNECT_MAX_DELAY  = 8000;
 
     // Fetch the auth token from Tauri once at startup, then append it to the
     // WS URL. In a non-Tauri context the call no-ops and we connect unauthed
@@ -118,14 +150,24 @@
 
     let ws             = null;
     let reconnectTimer = null;
+    let reconnectAttempts = 0;
     let currentVerseText = '';
     let currentVerseRef  = '';
     let currentTranslatedText = ''; // right-panel text for the Multi-Language theme
+    let currentStyleByLayerId = {}; // per-slide, per-layer-id overrides (Full Edit) for whatever's currently shown
     let activeLook       = null;
     let pendingFade      = false;
 
     const stage      = document.getElementById('stage');
+    const slideLayer = document.getElementById('slide-layer');
+    const mediaLayer = document.getElementById('media-layer');
     const connStatus = document.getElementById('conn-status');
+
+    // ── Media layer state (independent of the slide/text layer) ────────────
+    let mediaMuted  = false;
+    let mediaVolume = 1;
+    let mediaSinkId = null;
+    function currentMediaVideo() { return mediaLayer.querySelector('video'); }
 
     // ── Font loader ────────────────────────────────────────────────────────
     const loadedFonts = new Set(['Manrope', 'system-ui']);
@@ -139,18 +181,9 @@
         document.head.appendChild(link);
     }
 
-    // ── Hex → rgba helper ─────────────────────────────────────────────────
-    function hexToRgb(hex) {
-        const h = hex.replace('#','');
-        const r = parseInt(h.slice(0,2), 16);
-        const g = parseInt(h.slice(2,4), 16);
-        const b = parseInt(h.slice(4,6), 16);
-        return { r, g, b };
-    }
-    function hexOpacity(hex, opacity) {
-        const { r, g, b } = hexToRgb(hex || '#000000');
-        return `rgba(${r},${g},${b},${(opacity / 100).toFixed(2)})`;
-    }
+    // hexToRgb/hexOpacity now come from color_utils.js, loaded via a <script>
+    // tag above this one — shared with app.js/service.js, which had their own
+    // slightly divergent copies of this same logic.
 
     // ── Free-canvas positioning ────────────────────────────────────────────
     // A layer may carry `pos: {x, y, w, h}` in 1920×1080 design-space pixels
@@ -158,7 +191,8 @@
     // for that layer: the element is placed absolutely at the equivalent
     // percentage of the real stage, so positions survive any output size.
     // h = 0 means "auto height" (text grows downward from y).
-    const DESIGN_W = 1920, DESIGN_H = 1080;
+    // Shared with app.js/service.js — see design_space.js.
+    const DESIGN_W = window.KAIRO_DESIGN_W, DESIGN_H = window.KAIRO_DESIGN_H;
     function applyPos(div, pos) {
         // `inset` is shorthand for top/right/bottom/left — assigning it
         // (even '') resets those longhands, which was silently wiping out
@@ -173,12 +207,28 @@
     }
 
     // ── Build layer DOM from look ──────────────────────────────────────────
-    function buildLayerDOM(look, verseText, verseRef, translatedText) {
+    // `styleByLayerId` is a per-slide, per-layer-id override map (Kairo's
+    // "Full Edit" feature) — a specific playlist item's specific slide can
+    // override any text layer's position/font/align/color/shadow/outline/
+    // visibility without touching the theme itself.
+    function buildLayerDOM(look, verseText, verseRef, translatedText, styleByLayerId = {}) {
         const frag    = document.createDocumentFragment();
         const layout  = look.layout || 'fullscreen';
         let   isTransparent = false;
 
-        look.layers.forEach(layer => {
+        // Item/slide-specific layers (Full-scale edit's per-slide custom
+        // layers) ride along inside styleByLayerId rather than a parallel
+        // field — appended last so they paint on top, same as every other
+        // "new layer" convention.
+        const layers = [...(look.layers || []), ...((styleByLayerId || {}).__customLayers || [])];
+        // Only themes that actually pair a reference/translation caption with
+        // a verse layer get the "no caption without a verse line" guard below
+        // — a theme deliberately built with ONLY a reference/citation layer
+        // (no verse layer at all) has nothing else to show, so its reference
+        // must still paint even when verseText is empty. Same rule
+        // paintLookLayers (service.js) applies for every preview.
+        const hasVerseLayer = layers.some(l => l.type === 'text' && l.binding === 'verse' && l.visible !== false);
+        layers.forEach(layer => {
             if (!layer.visible) return;
 
             // Image layer — always free-positioned, drawn in layer order.
@@ -194,6 +244,7 @@
                 if (layer.radius) div.style.borderRadius = (layer.radius / DESIGN_H * 100) + 'vh';
                 applyPos(div, p);
                 div.style.height = (p.h / DESIGN_H * 100) + '%';
+                if (layer.rotation) div.style.transform = `rotate(${layer.rotation}deg)`;
                 frag.appendChild(div);
                 return;
             }
@@ -267,6 +318,7 @@
                     div.style.height  = (layer.pos.h / DESIGN_H * 100) + '%';
                     div.style.zIndex  = '1';
                     if (layer.radius) div.style.borderRadius = (layer.radius / DESIGN_H * 100) + 'vh';
+                    if (layer.rotation) div.style.transform = `rotate(${layer.rotation}deg)`;
                 }
 
                 frag.appendChild(div);
@@ -274,6 +326,11 @@
             }
 
             if (layer.type === 'text') {
+                // Per-slide override for this specific layer (by its stable
+                // theme-defined id) — see buildLayerDOM's own comment.
+                const ov = (styleByLayerId || {})[layer.id] || {};
+                if (ov.visible === false) return;
+
                 // Pick content for this layer
                 let content = '';
                 if (layer.binding === 'verse')     content = verseText;
@@ -286,14 +343,34 @@
                 div.dataset.binding = layer.binding || 'custom';
                 div.dataset.layerId = layer.id || '';
 
-                const fs = layer.font;
-                const shadowStr = layer.shadow.enabled
-                    ? `${layer.shadow.x}px ${layer.shadow.y}px ${layer.shadow.blur}px ${hexOpacity(layer.shadow.color, layer.shadow.opacity)}`
+                // Field-by-field merges — a partial override (just font.size,
+                // say) must not blow away the rest of the theme's settings.
+                const fs = { ...layer.font, ...(ov.font || {}) };
+                const shadow = ov.shadow ? { ...layer.shadow, ...ov.shadow } : layer.shadow;
+                const outline = ov.outline ? { ...layer.outline, ...ov.outline } : layer.outline;
+                const color = ov.color || layer.color;
+                const opacity = ov.opacity ?? layer.opacity;
+                const align = ov.align || layer.align;
+                const shadowStr = shadow.enabled
+                    ? `${shadow.x}px ${shadow.y}px ${shadow.blur}px ${hexOpacity(shadow.color, shadow.opacity)}`
                     : 'none';
+
+                // A reference/translation caption with no verse line to
+                // caption reads as orphaned floating text (e.g. just a song
+                // title on an otherwise empty canvas) rather than theme-
+                // controlled output — withhold it, same rule paintLookLayers
+                // (service.js) applies for every preview. The div still gets
+                // created (data-binding intact) so showVerse's in-place
+                // update path below can reveal/re-hide it as verseText
+                // changes, without a full rebuild every slide.
+                const isCaptionOfVerse = hasVerseLayer && (layer.binding === 'reference' || layer.binding === 'verse_translated');
 
                 div.style.cssText = `
                     position: absolute;
-                    color: ${hexOpacity(layer.color, layer.opacity)};
+                    display: ${isCaptionOfVerse && !String(verseText || '').trim() ? 'none' : 'flex'};
+                    flex-direction: column;
+                    justify-content: center;
+                    color: ${hexOpacity(color, opacity)};
                     font-family: '${fs.family}', system-ui, sans-serif;
                     font-size: ${fs.size}px;
                     font-weight: ${fs.weight};
@@ -301,14 +378,14 @@
                     line-height: ${fs.lineHeight};
                     letter-spacing: ${fs.letterSpacing}px;
                     text-transform: ${fs.transform};
-                    text-align: ${layer.align};
+                    text-align: ${align};
                     text-shadow: ${shadowStr};
                     z-index: 10;
                 `;
 
                 // Outline via webkit-text-stroke
-                if (layer.outline && layer.outline.enabled) {
-                    div.style.webkitTextStroke = `${layer.outline.width}px ${layer.outline.color}`;
+                if (outline && outline.enabled) {
+                    div.style.webkitTextStroke = `${outline.width}px ${outline.color}`;
                 }
 
                 // Positioning by layout
@@ -346,6 +423,24 @@
                     div.style.whiteSpace    = 'nowrap';
                     div.style.overflow      = 'hidden';
                     div.style.textOverflow  = 'ellipsis';
+                } else if (layout === 'scroll-fill') {
+                    // Large scrolling text filling the whole screen — same
+                    // marquee mechanism as the ticker above, just a full-height
+                    // band instead of a thin strip at the bottom.
+                    div.style.left    = '0';
+                    div.style.right   = '0';
+                    div.style.top     = '0';
+                    div.style.bottom  = '0';
+                    // Must NOT unconditionally force 'flex' here — that stomps
+                    // the "no caption without a verse line" display:none the
+                    // cssText block above just set for a reference/translated
+                    // layer with no verse text, undoing that guard for any
+                    // theme using this layout.
+                    if (div.style.display !== 'none') div.style.display = 'flex';
+                    div.style.alignItems = 'center';
+                    div.style.whiteSpace = 'nowrap';
+                    div.style.overflow   = 'hidden';
+                    div.style.padding    = '0';
                 } else if (layout === 'lower-third-card') {
                     // Text positioned inside the bottom-left card (matches bg insets)
                     div.style.left    = '4%';
@@ -420,17 +515,45 @@
                 }
 
                 // Free-canvas override: explicit box wins over every layout rule.
-                if (layer.pos) {
-                    applyPos(div, layer.pos);
+                // A per-slide override box (ov.pos) wins over the theme's own —
+                // it can also introduce free-canvas positioning for a layer that
+                // otherwise only ever used a layout preset.
+                const effectivePos = ov.pos || layer.pos;
+                if (effectivePos) {
+                    applyPos(div, effectivePos);
                     div.style.transform = 'none';
                     div.style.padding   = '0';
                 }
 
-                // Remember the designed size so auto-fit always shrinks from the
-                // theme's intended size, never from a previously-shrunk value.
+                // Remember the designed size (already override-aware via `fs`
+                // above) so auto-fit always shrinks from the intended size,
+                // never from a previously-shrunk value. Also stash the
+                // effective box so fitTextLayer's shrink budget matches
+                // whatever box is actually rendered, override or not.
                 div.dataset.baseSize = fs.size;
+                if (effectivePos) div.dataset.effPos = JSON.stringify(effectivePos);
+                else delete div.dataset.effPos;
 
-                div.textContent = content;
+                // Marquee scroll (news-ticker / large-scroll layers) — same
+                // technique as Theme Studio's own preview (see renderPreview
+                // in app.js): an inner span pushed off the right edge and
+                // animated to -100%, so it crosses the whole band and loops
+                // without needing to measure the text's actual width.
+                if (layer.scroll?.enabled) {
+                    div.style.whiteSpace   = 'nowrap';
+                    div.style.overflow     = 'hidden';
+                    div.style.textOverflow = 'clip';
+                    const span = document.createElement('span');
+                    span.style.display = 'inline-block';
+                    span.style.paddingLeft = '100%';
+                    span.style.animation = `kairo-marquee ${Math.max(1, layer.scroll.speed || 15)}s linear infinite`;
+                    span.textContent = content;
+                    div.appendChild(span);
+                } else if (layer.binding === 'verse' && window.KairoWordSplit?.applyMotionText(div, look?.textAnimation, content, look?.textAnimationSpeed || 1, { color: look?.textHighlightColor, intensity: look?.textAnimationIntensity })) {
+                    // handled
+                } else {
+                    div.textContent = content;
+                }
                 frag.appendChild(div);
 
                 // Ensure font is loaded
@@ -466,10 +589,12 @@
 
         // Free-canvas verse box: the budget is its own box height when set, or
         // the space from its top edge to the bottom of the stage when auto.
-        const look = activeLook || FALLBACK_LOOK;
-        const verseLayer = (look.layers || []).find(l => l.type === 'text' && l.binding === binding && l.visible !== false);
-        if (verseLayer && verseLayer.pos) {
-            const p = verseLayer.pos;
+        // Read the EFFECTIVE box stashed on the element itself (buildLayerDOM's
+        // `dataset.effPos`), not the theme's raw layer.pos — a per-slide
+        // override can supply/replace this box entirely, and the shrink
+        // budget must match whatever box is actually rendered.
+        const p = el.dataset.effPos ? JSON.parse(el.dataset.effPos) : null;
+        if (p) {
             const maxHpx = p.h > 0
                 ? stageH * (p.h / 1080)
                 : stageH * Math.max(0.08, 1 - p.y / 1080);
@@ -566,31 +691,77 @@
         }
     }
 
-    // ── Render the stage with current look + text ──────────────────────────
-    function renderStage(verseText, verseRef, animate = true, translatedText = '') {
+    // ── Render the slide layer with current look + text ─────────────────────
+    // Targets #slide-layer specifically, not the whole #stage — the media
+    // layer behind it (an independently-sent image/video) must not fade or
+    // clear just because the slide's text changed.
+    function renderStage(verseText, verseRef, animate = true, translatedText = '', styleByLayerId = {}) {
         const look = activeLook || FALLBACK_LOOK;
 
         const doRender = () => {
-            stage.innerHTML = '';
+            slideLayer.innerHTML = '';
             document.body.classList.remove('transparent-bg');
 
-            const { frag, isTransparent } = buildLayerDOM(look, verseText, verseRef, translatedText);
+            // Nothing to actually show — leave the slide layer empty rather
+            // than painting the theme's own background over the media layer
+            // sitting behind it. Centralized here (not just in clearDisplay)
+            // because applyLook() also calls this on every 'look-update'
+            // broadcast (which fires on every Theme Studio autosave, i.e.
+            // constantly while editing a theme) — clearing at boot alone
+            // wasn't enough, since the very next look-update repainted the
+            // "empty" background right back in, silently undoing it and
+            // burying whatever media had been sent in the meantime.
+            if (!verseText && !verseRef) { fitVerse(); return; }
+
+            const { frag, isTransparent } = buildLayerDOM(look, verseText, verseRef, translatedText, styleByLayerId);
             if (isTransparent) document.body.classList.add('transparent-bg');
-            stage.appendChild(frag);
+            slideLayer.appendChild(frag);
             fitVerse();
         };
 
-        if (animate) {
-            // Fade out → swap → fade in
-            stage.classList.add('fade-out');
-            stage.style.transition = 'opacity 300ms ease';
-            stage.style.opacity    = '0';
+        // look.animation ('fade'/'slide-up'/'cut') picks the transition shape;
+        // look.animationSpeed (a multiplier — 1 = the original fixed 300ms
+        // this used to be hardcoded to, <1 faster, >1 slower) picks its pace.
+        // Themes saved before either field existed fall back to exactly
+        // today's old behavior (plain 300ms fade).
+        const animType = look.animation || 'fade';
+        const speedMs = Math.round(300 * (typeof look.animationSpeed === 'number' && look.animationSpeed > 0 ? look.animationSpeed : 1));
+
+        // 'cut' skips this whole-slide-layer fade/slide choreography
+        // entirely (and the synchronous offsetHeight forced-reflow below).
+        // Text Animation (Word/Activate/Karaoke/etc, a separate per-theme
+        // setting from this Transition — see KairoWordSplit's file header)
+        // runs independently inside buildLayerDOM regardless of what
+        // happens here; Fade/Slide + a Text Animation is a valid,
+        // deliberate combination, not redundant.
+        if (animate && animType === 'cut') {
+            doRender();
+        } else if (animate) {
+            // Fade (+ slide, for 'slide-up') out → swap → fade (+ slide) in.
+            // Reuses one shared element/transition for both halves — same
+            // trick that made the plain opacity fade work without any extra
+            // reflow step, now covering slide-up's transform too.
+            const outY = animType === 'slide-up' ? '-16px' : '0px';
+            slideLayer.style.transition = `opacity ${speedMs}ms ease, transform ${speedMs}ms ease`;
+            slideLayer.style.opacity    = '0';
+            slideLayer.style.transform  = animType === 'slide-up' ? `translateY(${outY})` : 'none';
 
             setTimeout(() => {
                 doRender();
-                stage.style.opacity = '1';
-                stage.classList.remove('fade-out');
-            }, 320);
+                if (animType === 'slide-up') {
+                    // Land the new content NOT quite in place first (no
+                    // transition yet, so this doesn't itself animate) —
+                    // needs a real reflow before the transition below can
+                    // actually play, unlike the opacity-only case which
+                    // already had one from this same setTimeout gap.
+                    slideLayer.style.transition = 'none';
+                    slideLayer.style.transform  = 'translateY(16px)';
+                    slideLayer.offsetHeight; // force layout
+                    slideLayer.style.transition = `opacity ${speedMs}ms ease, transform ${speedMs}ms ease`;
+                    slideLayer.style.transform  = 'none';
+                }
+                slideLayer.style.opacity = '1';
+            }, speedMs + 20);
         } else {
             doRender();
         }
@@ -598,62 +769,156 @@
 
     // ── Image slide: full-frame picture, bypassing the theme's text layers ──
     // Still honours the theme's canvas transparency, so an image slide over a
-    // chroma/alpha rig keys the same way a verse slide would.
-    function renderImageStage(src, animate = true) {
+    // chroma/alpha rig keys the same way a verse slide would. This is a
+    // slide-type item's own image (part of the slide layer) — not the
+    // independent media layer; see renderMediaStage for that.
+    function renderImageStage(src, animate = true, fit = 'contain') {
         const look = activeLook || FALLBACK_LOOK;
         const bg = (look.layers || []).find(l => l.type === 'background' && !l.pos);
         const isTransparent = !!(bg && bg.fill === 'transparent');
 
         const doRender = () => {
-            stage.innerHTML = '';
+            slideLayer.innerHTML = '';
             document.body.classList.toggle('transparent-bg', isTransparent);
             const img = document.createElement('img');
             img.src = src;
-            img.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;object-fit:contain;';
-            stage.appendChild(img);
+            // object-fit accepts the literal 'fill' keyword natively — unlike
+            // background-size (used elsewhere for layer.fit), no translation
+            // to '100% 100%' is needed here.
+            img.style.cssText = `position:absolute;inset:0;width:100%;height:100%;object-fit:${fit};`;
+            slideLayer.appendChild(img);
         };
 
         if (animate) {
-            stage.classList.add('fade-out');
-            stage.style.transition = 'opacity 300ms ease';
-            stage.style.opacity    = '0';
+            slideLayer.style.transition = 'opacity 300ms ease';
+            slideLayer.style.opacity    = '0';
             setTimeout(() => {
                 doRender();
-                stage.style.opacity = '1';
-                stage.classList.remove('fade-out');
+                slideLayer.style.opacity = '1';
             }, 320);
         } else {
             doRender();
         }
     }
 
+    // ── Independent media layer: image or looping video, sent/cleared apart
+    // from whatever the slide layer is showing. No native <video> controls —
+    // this is the output the congregation sees; every control lives in the
+    // operator's window and reaches here via WS (see handleMessage below).
+    function renderMediaStage(src, kind, fit) {
+        mediaLayer.innerHTML = '';
+        if (!src) return;
+        // object-fit accepts the literal 'fill' keyword natively (unlike
+        // background-size, which needs the 100%/100% translation elsewhere
+        // in this file) — inline style here wins over the CSS default
+        // (object-fit:contain, see #media-layer img/video above), so a
+        // sender that never passes fit keeps today's exact behavior.
+        const objectFit = fit || 'contain';
+        if (kind === 'video') {
+            const v = document.createElement('video');
+            v.src = src;
+            v.autoplay = true;
+            v.loop = true;
+            v.muted = mediaMuted;
+            v.volume = mediaVolume;
+            v.playsInline = true;
+            v.style.objectFit = objectFit;
+            if (mediaSinkId && typeof v.setSinkId === 'function') {
+                v.setSinkId(mediaSinkId).catch(() => {});
+            }
+            // Throttled status reports so the operator's window can drive a
+            // real seek slider without polling — see server.js's ws.on('message').
+            let lastReport = 0;
+            v.addEventListener('timeupdate', () => {
+                const now = Date.now();
+                if (now - lastReport < 250) return;
+                lastReport = now;
+                reportMediaStatus(v);
+            });
+            v.addEventListener('play', () => reportMediaStatus(v));
+            v.addEventListener('pause', () => reportMediaStatus(v));
+            v.addEventListener('loadedmetadata', () => reportMediaStatus(v));
+            mediaLayer.appendChild(v);
+        } else {
+            const img = document.createElement('img');
+            img.src = src;
+            img.style.objectFit = objectFit;
+            mediaLayer.appendChild(img);
+        }
+    }
+
+    function reportMediaStatus(v) {
+        try {
+            ws?.send(JSON.stringify({
+                type: 'media-status',
+                currentTime: v.currentTime, duration: v.duration || 0, paused: v.paused,
+            }));
+        } catch {}
+    }
+
+    function applyMediaControl(action, value) {
+        const v = currentMediaVideo();
+        if (action === 'mute') { mediaMuted = true; if (v) v.muted = true; }
+        else if (action === 'unmute') { mediaMuted = false; if (v) v.muted = false; }
+        else if (action === 'play') { if (v) v.play().catch(() => {}); }
+        else if (action === 'pause') { if (v) v.pause(); }
+        else if (action === 'seek') { if (v && typeof value === 'number') v.currentTime = value; }
+        else if (action === 'volume') { mediaVolume = value; if (v) v.volume = value; }
+    }
+
+    async function applyAudioOutput(deviceId) {
+        mediaSinkId = deviceId || null;
+        const v = currentMediaVideo();
+        if (v && mediaSinkId && typeof v.setSinkId === 'function') {
+            try { await v.setSinkId(mediaSinkId); }
+            catch (err) { console.warn('[KAIRO] setSinkId failed:', err.message); }
+        }
+    }
+
     // ── Update only the text content in existing layers (no re-render) ──────
     function updateTextContent(verseText, verseRef, translatedText = '') {
+        // Same "no caption without a verse line" rule buildLayerDOM applies
+        // at initial render — re-checked here so it still holds as verseText
+        // changes slide-to-slide along this in-place (no-rebuild) path. Only
+        // applies to themes that actually pair a caption with a verse layer;
+        // a reference-only theme (no verse layer at all) always shows.
+        const hasVerseLayer = (activeLook?.layers || []).some(l => l.type === 'text' && l.binding === 'verse' && l.visible !== false);
+        const showCaptions = !hasVerseLayer || !!String(verseText || '').trim();
         // Use data-binding attributes to target the right divs
         stage.querySelectorAll('[data-binding="verse"]').forEach(el => {
-            el.textContent = verseText;
+            if (!window.KairoWordSplit?.applyMotionText(el, activeLook?.textAnimation, verseText, activeLook?.textAnimationSpeed || 1, { color: activeLook?.textHighlightColor, intensity: activeLook?.textAnimationIntensity })) {
+                el.textContent = verseText;
+            }
         });
         stage.querySelectorAll('[data-binding="verse_translated"]').forEach(el => {
             el.textContent = translatedText;
+            el.style.display = showCaptions ? 'flex' : 'none';
         });
         stage.querySelectorAll('[data-binding="reference"]').forEach(el => {
             el.textContent = verseRef;
+            el.style.display = showCaptions ? 'flex' : 'none';
         });
     }
 
     // ── Apply a new look (re-render with existing text) ────────────────────
     function applyLook(look, animate = true) {
         activeLook = look;
-        renderStage(currentVerseText, currentVerseRef, animate, currentTranslatedText);
+        renderStage(currentVerseText, currentVerseRef, animate, currentTranslatedText, currentStyleByLayerId);
     }
 
     // ── Show verse (smart update: re-render on first verse, in-place after) ──
-    function showVerse(text, ref, isRangeActive = false, translatedText = '') {
+    function showVerse(text, ref, isRangeActive = false, translatedText = '', styleByLayerId = {}) {
         const wasEmpty = !currentVerseText && !currentVerseRef;
-        const changed  = text !== currentVerseText || ref !== currentVerseRef || translatedText !== currentTranslatedText;
+        // Also compare the style override — the exact same slide re-sent
+        // after only tweaking its per-slide layout (Full Edit) must still
+        // pick up the new override, not take the text-only in-place path
+        // below (which never touches position/font).
+        const styleChanged = JSON.stringify(styleByLayerId || {}) !== JSON.stringify(currentStyleByLayerId || {});
+        const changed  = text !== currentVerseText || ref !== currentVerseRef || translatedText !== currentTranslatedText || styleChanged;
         currentVerseText = text;
         currentVerseRef  = ref;
         currentTranslatedText = translatedText;
+        currentStyleByLayerId = styleByLayerId || {};
 
         if (!changed) {
             if (isRangeActive) setRangeActive(true);
@@ -662,17 +927,57 @@
 
         if (wasEmpty || stage.children.length === 0) {
             // First verse or blank stage — do a full render with fade
-            renderStage(text, ref, true, translatedText);
+            renderStage(text, ref, true, translatedText, currentStyleByLayerId);
+        } else if (styleChanged) {
+            // Text unchanged but the layout override changed — the in-place
+            // path below only ever swaps textContent, so a style-only change
+            // needs the full rebuild too.
+            renderStage(text, ref, true, translatedText, currentStyleByLayerId);
         } else {
-            // Stage already has layers — fade text, swap, fade back
+            // Stage already has layers — fade (+ slide, for 'slide-up') text,
+            // swap, fade back in. This in-place path (not renderStage, which
+            // rebuilds the whole layer stack) is what actually runs for
+            // every ordinary slide-to-slide change once the stage is
+            // already showing something — a plain hardcoded 250ms opacity
+            // fade here used to silently ignore whatever look.animation/
+            // animationSpeed renderStage itself already respects, so a
+            // theme like Lyrics — Motion never visibly animated in real use,
+            // only on the very first slide of a service.
+            const animType = (activeLook && activeLook.animation) || 'fade';
+            const speedMs = Math.round(300 * ((activeLook && typeof activeLook.animationSpeed === 'number' && activeLook.animationSpeed > 0) ? activeLook.animationSpeed : 1));
+
+            // 'cut' skips this whole-block opacity/transform choreography
+            // entirely. Text Animation (a separate per-theme setting from
+            // this Transition) still runs inside updateTextContent either
+            // way — Fade/Slide + a Text Animation is a valid combination.
+            if (animType === 'cut') {
+                updateTextContent(text, ref, translatedText);
+                fitVerse();
+                if (isRangeActive) setRangeActive(true);
+                return;
+            }
+
             const textEls = stage.querySelectorAll('[data-binding]');
-            textEls.forEach(el => { el.style.opacity = '0'; el.style.transition = 'opacity 250ms ease'; });
+            textEls.forEach(el => {
+                el.style.transition = `opacity ${speedMs}ms ease, transform ${speedMs}ms ease`;
+                el.style.opacity    = '0';
+                if (animType === 'slide-up') el.style.transform = 'translateY(-16px)';
+            });
 
             setTimeout(() => {
                 updateTextContent(text, ref, translatedText);
                 fitVerse();
+                if (animType === 'slide-up') {
+                    // Same forced-reflow trick as renderStage's own slide-up
+                    // path — land at the "below" starting point with no
+                    // transition first, so animating back to place actually
+                    // plays instead of jumping straight there.
+                    textEls.forEach(el => { el.style.transition = 'none'; el.style.transform = 'translateY(16px)'; });
+                    stage.offsetHeight; // force layout
+                    textEls.forEach(el => { el.style.transition = `opacity ${speedMs}ms ease, transform ${speedMs}ms ease`; el.style.transform = 'none'; });
+                }
                 textEls.forEach(el => { el.style.opacity = ''; });
-            }, 260);
+            }, speedMs + 10);
         }
 
         // Range active highlight
@@ -681,11 +986,21 @@
         }
     }
 
+    // Genuinely empty — not renderStage('', '', true), which still paints
+    // the theme's own background layer (opaque, by default) with just the
+    // text missing. That's fine on its own, but it sits at a higher
+    // z-index than the independent media layer, so an opaque "empty" slide
+    // layer permanently hides any image/video sent there — clearing never
+    // actually looked cleared once media was in the picture. Dropping the
+    // slide layer's content entirely when there's nothing to show lets the
+    // media layer show through, the same way a cleared front layer in
+    // ProPresenter reveals whatever's behind it.
     function clearDisplay() {
         currentVerseText = '';
         currentVerseRef  = '';
         currentTranslatedText = '';
-        renderStage('', '', true);
+        currentStyleByLayerId = {};
+        renderStage('', '', true); // renderStage itself leaves the layer empty for blank text
     }
 
     function setRangeActive(active) {
@@ -736,6 +1051,7 @@
 
         ws.onopen = () => {
             clearTimeout(reconnectTimer);
+            reconnectAttempts = 0;
             setConnStatus('connected', '');
             setTimeout(() => connStatus.classList.remove('visible'), 1500);
         };
@@ -758,7 +1074,9 @@
 
     function scheduleReconnect() {
         clearTimeout(reconnectTimer);
-        reconnectTimer = setTimeout(connect, RECONNECT_DELAY);
+        const delay = Math.min(RECONNECT_BASE_DELAY * 1.6 ** reconnectAttempts, RECONNECT_MAX_DELAY) + Math.random() * 300;
+        reconnectAttempts++;
+        reconnectTimer = setTimeout(connect, delay);
     }
 
     function setConnStatus(cls, text) {
@@ -779,9 +1097,9 @@
                     // verse text to bind, just the picture, full-frame.
                     currentVerseText = '';
                     currentVerseRef  = verse.reference || verse.ref || '';
-                    renderImageStage(verse.image, true);
+                    renderImageStage(verse.image, true, verse.fit || 'contain');
                 } else {
-                    showVerse(verse.text || verse.verse || '', verse.reference || verse.ref || '', false, verse.translatedText || '');
+                    showVerse(verse.text || verse.verse || '', verse.reference || verse.ref || '', false, verse.translatedText || '', verse.slideStyle || {});
                 }
             }
             return;
@@ -802,8 +1120,33 @@
             return;
         }
 
+        // Legacy whole-stage clear — nothing sends this anymore (clear-layer
+        // with layer:'all' replaced it) but keep it as an alias in case
+        // anything external still posts the old shape.
         if (msg.type === 'clear') {
             clearDisplay();
+            renderMediaStage(null);
+            return;
+        }
+
+        if (msg.type === 'clear-layer') {
+            if (msg.layer === 'slide' || msg.layer === 'all') clearDisplay();
+            if (msg.layer === 'media' || msg.layer === 'all') renderMediaStage(null);
+            return;
+        }
+
+        if (msg.type === 'media' && msg.target === 'viewer') {
+            renderMediaStage(msg.src, msg.kind, msg.fit);
+            return;
+        }
+
+        if (msg.type === 'media-control') {
+            applyMediaControl(msg.action, msg.value);
+            return;
+        }
+
+        if (msg.type === 'audio-output') {
+            applyAudioOutput(msg.deviceId);
             return;
         }
 
@@ -821,12 +1164,28 @@
     activeLook = loadActiveLook() || FALLBACK_LOOK;
     assignedLook = activeLook;   // baseline this output reverts to
 
-    // 2. Initial render (empty verse/ref)
-    renderStage('', '', false);
+    // 2. Start genuinely blank — nothing painted yet, not even the theme's
+    // background — until the first real slide/verse actually arrives. See
+    // renderStage's comment for why an eagerly-painted empty slide layer
+    // is a problem now that there's a media layer behind it.
 
     // 3. Connect WebSocket (after the auth token is loaded so the upgrade
     //    URL carries it; falls back to unauthed when not running under Tauri).
     loadAuthToken().finally(connect);
+
+    // 4. Reveal the window now that its own dark CSS has actually settled.
+    // openDisplayWindow (index.html) creates this window hidden — same
+    // fix as the main window's own splash->show sequence, same reason: a
+    // window visible immediately by default shows WebKit's default WHITE
+    // background before this page's CSS paints, which on the actual
+    // output screen read as a black/white/black flash on every open. A
+    // short timer, not requestAnimationFrame — an invisible surface never
+    // gets a compositing pass to synchronize against, so rAF here would
+    // simply never fire (confirmed the hard way on the main window).
+    setTimeout(() => {
+        const w = window.__TAURI__?.window?.getCurrentWindow?.();
+        w?.show().catch(() => {});
+    }, 50);
     </script>
 </body>
 </html>
