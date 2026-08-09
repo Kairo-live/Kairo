@@ -1161,7 +1161,47 @@
                     <div class="settings-section-label">Outputs</div>
                     <p class="setting-hint" style="margin:-4px 0 12px;">Enable any number of destinations at once. Each one renders with its own theme — set it per output below.</p>
 
-                    <!-- Card 1: ProPresenter -->
+                    <!-- Card 1: External Display — first in the list since it's the
+                         primary/default output every service actually needs; the
+                         broadcast integrations below it (ProPresenter, OBS, Syphon,
+                         NDI) are opt-in add-ons on top of it, not equals to it.
+                         Matches OUTPUT_DEFS' own ordering (src/app.js), which
+                         already put it first for the same reason. -->
+                    <div class="output-card" id="card-external">
+                        <div class="output-card-header" data-card="external">
+                            <label class="output-toggle" title="Auto-open on a connected external display">
+                                <input type="checkbox" id="external-enabled-toggle">
+                                <span class="output-toggle-track"></span>
+                            </label>
+                            <span class="output-card-name">External Display</span>
+                            <span class="output-header-status">
+                                <span class="bs-dot" id="external-header-dot"></span>
+                                <span id="external-header-status">Checking…</span>
+                            </span>
+                            <span class="output-card-chevron">▾</span>
+                        </div>
+                        <div class="output-card-body output-card-body--collapsed">
+                            <!-- Layout and background opacity used to live here.
+                                 They now belong to the assigned theme (Theme
+                                 Studio owns layout, canvas fill and opacity), so
+                                 duplicating them per-output only created two
+                                 competing sources of truth.
+
+                                 Rows are rendered by renderDisplayOutputs() —
+                                 one per physical screen, each with its own
+                                 theme, so a main screen and a stage monitor can
+                                 show different designs at the same time. -->
+                            <p class="setting-hint" id="display-status-hint">Checking connected screens…</p>
+                            <button id="open-external-btn" class="modal-btn secondary" style="width:100%;justify-content:center;">Open on External Display</button>
+
+                            <!-- Additional screens (stage monitor, foyer, …). Each
+                                 gets its own theme and its own window. -->
+                            <div id="extra-displays-list"></div>
+                            <button id="add-display-btn" class="modal-btn secondary" style="width:100%;justify-content:center;margin-top:8px;">+ Add another display</button>
+                        </div>
+                    </div>
+
+                    <!-- Card 2: ProPresenter -->
                     <div class="output-card" id="card-propresenter">
                         <div class="output-card-header" data-card="propresenter">
                             <label class="output-toggle" title="Enable ProPresenter output">
@@ -1169,22 +1209,21 @@
                                 <span class="output-toggle-track"></span>
                             </label>
                             <span class="output-card-name">ProPresenter</span>
-                            <span class="output-card-chevron">▾</span>
-                        </div>
-                        <div class="output-card-body">
-                            <!-- Sync status + auto-send toggle — merged in here from the
-                                 old standalone sidebar bar so ProPresenter connection
-                                 state lives next to its own output config, not as a
-                                 separate always-visible strip in the main layout. -->
-                            <div class="rs-pp-bar" style="margin-bottom:14px;">
-                                <label class="sync-toggle" title="Toggle auto-send to ProPresenter">
+                            <!-- Sync status + auto-send toggle — shares the header row with
+                                 the theme badge (output-theme-badge, inserted by JS right
+                                 before the chevron) rather than sitting on its own row
+                                 below, so both "what this output shows" and "is it live"
+                                 read at a glance without expanding the card. -->
+                            <span class="pp-header-sync" title="Toggle auto-send to ProPresenter">
+                                <label class="sync-toggle">
                                     <input type="checkbox" id="auto-send-checkbox">
                                     <span class="sync-track"><span class="sync-thumb"></span></span>
                                 </label>
-                                <span class="rs-pp-label">Sync</span>
-                                <span class="bs-dot" id="propresenter-dot"></span>
                                 <span class="rs-pp-status" id="propresenter-status">Checking…</span>
-                            </div>
+                            </span>
+                            <span class="output-card-chevron">▾</span>
+                        </div>
+                        <div class="output-card-body output-card-body--collapsed">
                             <div class="setting-group">
                                 <label class="setting-label">URL</label>
                                 <div style="display:flex;gap:6px;">
@@ -1203,7 +1242,7 @@
                         </div>
                     </div>
 
-                    <!-- Card 2: OBS WebSocket -->
+                    <!-- Card 3: OBS WebSocket -->
                     <div class="output-card" id="card-obs">
                         <div class="output-card-header" data-card="obs">
                             <label class="output-toggle" title="Enable OBS WebSocket output">
@@ -1211,6 +1250,10 @@
                                 <span class="output-toggle-track"></span>
                             </label>
                             <span class="output-card-name">OBS WebSocket</span>
+                            <span class="output-header-status">
+                                <span class="bs-dot" id="obs-header-dot"></span>
+                                <span id="obs-header-status">Checking…</span>
+                            </span>
                             <span class="output-card-chevron">▾</span>
                         </div>
                         <div class="output-card-body output-card-body--collapsed">
@@ -1233,7 +1276,7 @@
                         </div>
                     </div>
 
-                    <!-- Card 3: Syphon -->
+                    <!-- Card 4: Syphon -->
                     <div class="output-card" id="card-syphon">
                         <div class="output-card-header" data-card="syphon">
                             <label class="output-toggle" title="Enable Syphon output">
@@ -1241,6 +1284,10 @@
                                 <span class="output-toggle-track"></span>
                             </label>
                             <span class="output-card-name">Syphon</span>
+                            <span class="output-header-status">
+                                <span class="bs-dot" id="syphon-header-dot"></span>
+                                <span id="syphon-header-status">Checking…</span>
+                            </span>
                             <span class="output-card-chevron">▾</span>
                         </div>
                         <div class="output-card-body output-card-body--collapsed">
@@ -1261,7 +1308,7 @@
                         </div>
                     </div>
 
-                    <!-- Card 4: NDI (native sender) -->
+                    <!-- Card 5: NDI (native sender) -->
                     <div class="output-card" id="card-ndi">
                         <div class="output-card-header" data-card="ndi">
                             <label class="output-toggle" title="Enable NDI output">
@@ -1269,6 +1316,10 @@
                                 <span class="output-toggle-track"></span>
                             </label>
                             <span class="output-card-name">NDI</span>
+                            <span class="output-header-status">
+                                <span class="bs-dot" id="ndi-header-dot"></span>
+                                <span id="ndi-header-status">Checking…</span>
+                            </span>
                             <span class="output-card-chevron">▾</span>
                         </div>
                         <div class="output-card-body output-card-body--collapsed">
@@ -1289,37 +1340,6 @@
                             <div id="ndi-active-hint" style="display:none;font-size:11px;color:var(--text-3);line-height:1.55;padding:10px 12px;background:rgba(77,182,172,0.06);border-left:2px solid #4db6ac;border-radius:4px;">
                                 Broadcasting at <strong style="color:var(--text);">1280×720 / 15 fps</strong>. Detected verses render directly to the NDI frame in real time — no capture bridge required.
                             </div>
-                        </div>
-                    </div>
-
-                    <!-- Card 5: External Display -->
-                    <div class="output-card" id="card-external">
-                        <div class="output-card-header" data-card="external">
-                            <label class="output-toggle" title="Enable External Display output">
-                                <input type="checkbox" id="external-enabled-toggle">
-                                <span class="output-toggle-track"></span>
-                            </label>
-                            <span class="output-card-name">External Display</span>
-                            <span class="output-card-chevron">▾</span>
-                        </div>
-                        <div class="output-card-body output-card-body--collapsed">
-                            <!-- Layout and background opacity used to live here.
-                                 They now belong to the assigned theme (Theme
-                                 Studio owns layout, canvas fill and opacity), so
-                                 duplicating them per-output only created two
-                                 competing sources of truth.
-
-                                 Rows are rendered by renderDisplayOutputs() —
-                                 one per physical screen, each with its own
-                                 theme, so a main screen and a stage monitor can
-                                 show different designs at the same time. -->
-                            <p class="setting-hint" id="display-status-hint">Checking connected screens…</p>
-                            <button id="open-external-btn" class="modal-btn secondary" style="width:100%;justify-content:center;">Open on External Display</button>
-
-                            <!-- Additional screens (stage monitor, foyer, …). Each
-                                 gets its own theme and its own window. -->
-                            <div id="extra-displays-list"></div>
-                            <button id="add-display-btn" class="modal-btn secondary" style="width:100%;justify-content:center;margin-top:8px;">+ Add another display</button>
                         </div>
                     </div>
                 </div>
@@ -1395,8 +1415,11 @@
             }
 
             header.addEventListener('click', function (e) {
-                // If user clicked the toggle switch itself, let the checkbox change fire first
+                // If user clicked the toggle switch itself, let the checkbox change fire first.
+                // Also skip ProPresenter's header sync row (auto-send toggle + connection dot) —
+                // it manages its own state on click, not the accordion's.
                 if (e.target === toggle || e.target.classList.contains('output-toggle-track')) return;
+                if (e.target.closest('.pp-header-sync')) return;
                 card.classList.toggle('expanded');
             });
 
@@ -1518,9 +1541,13 @@
             var syphonName     = document.getElementById('syphon-source-name');
             var testSyphonBtn  = document.getElementById('test-syphon-btn');
             var activeHint     = document.getElementById('syphon-active-hint');
+            var syphonHeaderDot = document.getElementById('syphon-header-dot');
+            var syphonHeaderTxt = document.getElementById('syphon-header-status');
             var invokeFn = window.__TAURI__?.core?.invoke || window.__TAURI__?.invoke;
 
             function setSyphonStatus(text, kind) {
+                if (syphonHeaderDot) syphonHeaderDot.className = 'bs-dot' + (kind === 'active' ? ' connected' : kind === 'error' ? ' error' : '');
+                if (syphonHeaderTxt) syphonHeaderTxt.textContent = kind === 'active' ? 'Broadcasting' : kind === 'error' ? 'Error' : kind === 'warn' ? 'Not found' : 'Off';
                 if (!syphonStatusEl) return;
                 syphonStatusEl.textContent = text;
                 syphonStatusEl.style.color =
@@ -1632,9 +1659,13 @@
             var testNdiBtn   = document.getElementById('test-ndi-btn');
             var installHint  = document.getElementById('ndi-install-hint');
             var activeHint   = document.getElementById('ndi-active-hint');
+            var ndiHeaderDot = document.getElementById('ndi-header-dot');
+            var ndiHeaderTxt = document.getElementById('ndi-header-status');
             var invokeFn = window.__TAURI__?.core?.invoke || window.__TAURI__?.invoke;
 
             function setNdiStatus(text, kind) {
+                if (ndiHeaderDot) ndiHeaderDot.className = 'bs-dot' + (kind === 'active' ? ' connected' : kind === 'error' ? ' error' : '');
+                if (ndiHeaderTxt) ndiHeaderTxt.textContent = kind === 'active' ? 'Broadcasting' : kind === 'error' ? 'Error' : kind === 'warn' ? 'Not found' : 'Off';
                 if (!ndiStatusEl) return;
                 ndiStatusEl.textContent = text;
                 ndiStatusEl.style.color =

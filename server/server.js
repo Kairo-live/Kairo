@@ -1686,6 +1686,15 @@ app.get('/api/obs/test', async (_, res) => {
   res.json(r);
 });
 
+// Cheap status read for the Outputs panel's header indicator — reports the
+// EXISTING obsConnected/obsClient state rather than opening a fresh test
+// connection like /api/obs/test does. Safe to poll on an interval; opening
+// a new WS handshake every few seconds just to show a dot would be wasteful
+// and could itself interfere with OBS.
+app.get('/api/obs/status', (_, res) => {
+  res.json({ connected: !!(obsConnected && obsClient), enabled: settings.obsEnabled === true });
+});
+
 app.post('/api/obs/connect', async (_, res) => {
   await connectOBS();
   res.json({ ok: obsConnected });

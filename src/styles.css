@@ -172,6 +172,18 @@ html, body {
   -webkit-font-smoothing: antialiased;
 }
 
+/* The rest of the app disables selection above, so the only place text ever
+   gets selected is inputs/contentEditable (rename fields, Flow's slide text,
+   search boxes) — exactly where input.select() highlights everything on
+   entering rename mode. Left unstyled, the platform's default selection
+   background (light, meant for light-background pages) sat behind this
+   app's near-white text with almost no contrast. Reusing the same teal-bg/
+   dark-text pairing already used for active badges elsewhere. */
+::selection {
+  background: var(--blue);
+  color: #06201d;
+}
+
 /* Thin custom scrollbars (Webkit) */
 ::-webkit-scrollbar         { width: 4px; height: 4px; }
 ::-webkit-scrollbar-track   { background: transparent; }
@@ -193,16 +205,44 @@ html, body {
   position: relative;
   z-index: 20;
   box-shadow: 0 1px 0 rgba(0,0,0,0.4);
+  /* No GPU-layer-promotion here (no transform/will-change/isolation) — that
+     was tried both ways during a long investigation into .top-bar visually
+     folding up off-screen, and neither helped. Root cause turned out to be
+     unrelated to this element entirely: service.js's focusInStack() called
+     element.scrollIntoView() on a stack card, and in WebKit that API's
+     "walk up and find a scrollable ancestor" can still reach body/html and
+     shift the WHOLE PAGE even with overflow:hidden set on both — pushing
+     this normal-flow element (at the very top of body) off the top of the
+     viewport. Fixed by scrolling the intended container's scrollTop
+     directly instead of calling scrollIntoView at all. See focusInStack in
+     service.js for the real fix. */
 }
 
 /* Frameless-window dragging only means anything inside the real Tauri shell
    (.is-tauri, set in index.html's early inline script via window.__TAURI__).
-   Applying -webkit-app-region: drag unconditionally hit a real Chromium
-   compositing bug when this page loads in an ordinary browser tab (e.g.
-   testing straight against the dev server): the top bar would silently stop
-   being painted after certain reflows — correct in the DOM/computed styles,
-   invisible on screen — until something forced a repaint. */
-.is-tauri .top-bar { -webkit-app-region: drag; }
+   This used to mark the WHOLE .top-bar as draggable with the three named
+   children carved back out as no-drag — but a drag region that contains
+   content which mutates at runtime (mic label text, the Listen button's
+   active state, the download menu, etc.) is a known WebKit/Chromium
+   compositing trap: updates to descendants of a drag region can leave the
+   region's paint layer stale, and the visible symptom is the surrounding
+   bar silently no longer being painted — correct in the DOM/computed
+   styles, invisible on screen — until something forces a repaint. This
+   reproduced both in an ordinary Chromium browser tab AND inside the
+   packaged Tauri app's WKWebView, i.e. it's the drag-region-over-dynamic-
+   content pattern itself, not one specific engine's bug.
+   First fix: confine dragging to .top-bar-center alone — it's permanently
+   empty flex-filler space nothing ever writes to. That narrowed the bug but
+   didn't eliminate it — the bar still occasionally vanished after it
+   shipped, meaning the CSS app-region mechanism itself is the trap, not
+   just what happens to be nested inside a given region. Real fix: drive
+   the drag from JS instead (see the .top-bar-center mousedown listener in
+   app.js, which calls Tauri's own startDragging()) — this never touches
+   the CSS app-region/compositing path at all, so there's nothing left for
+   that WebKit/Chromium bug class to trigger on. -webkit-app-region is
+   deliberately NOT set anywhere anymore; no-drag below is now a no-op kept
+   only so re-introducing app-region CSS later doesn't silently make
+   buttons draggable. */
 
 /* macOS: inset the logo so it clears the traffic lights. Windows/Linux draw
    their controls on the right, so the logo sits flush left and the right side
@@ -213,18 +253,28 @@ html, body {
 .platform-win32 .top-bar { padding-right: 8px; }
 
 .top-bar-left,
-.top-bar-center,
 .top-bar-right,
 .window-controls {
   -webkit-app-region: no-drag;
 }
 
-/* ── Left: logo + edition ── */
+/* ── Left: logo + edition ──
+   flex-basis is deliberately wider than the logo's own natural content
+   width (~79px) — the logo left-aligns inside that reserved box (default
+   justify-content:flex-start), leaving empty space to ITS right before
+   .top-bar-center begins. That's a partial counterweight to
+   .top-bar-right's much heavier content (see .top-bar-center's comment):
+   it can't fully match the right side without overflowing the app's
+   1000px minimum window width (tauri.conf.json), but shifting the nav
+   group visibly toward true center is safe as long as this stays
+   shrinkable (flex-shrink:1, not 0) so it's the first thing to give way
+   under pressure, never the buttons/nav themselves. */
 .top-bar-left {
   display: flex;
   align-items: center;
   gap: 10px;
-  flex-shrink: 0;
+  flex: 0 1 180px;
+  min-width: 0;
 }
 
 .app-logo {
@@ -253,41 +303,42 @@ html, body {
   padding: 2px 7px;
 }
 
-/* ── Center: session timer ── */
+/* ── Center: the Bible/Slides/Songs/Media/Theme Studio tab group — visually
+   centered in the space actually left between the logo and the right-side
+   controls, not the true center of the whole bar. Also the JS drag-region
+   target (see wireWindowDrag in app.js) for whatever empty space is left
+   around the tabs.
+   True geometric centering (either position:absolute at left:50%, or a
+   3-column CSS grid with two equal-width side tracks) was tried and
+   reverted: .top-bar-right (~439px — mic label, Start Listening, the
+   download menu, Settings) is roughly 5.5x wider than .top-bar-left
+   (~79px — just the logo; macOS's 84px traffic-light padding doesn't add
+   toolbar content, just inset). At the app's real window sizes
+   (src-tauri/tauri.conf.json: 1280px default, 1000px minimum) there simply
+   isn't room to force both sides to equal width without either wasting a
+   few hundred px of dead space on the left or squeezing the right side's
+   content below its natural size — confirmed live: the equal-track grid
+   visibly overlapped "No mic selected"/"Start Listening" into "Theme
+   Studio" at 1400px, let alone the 1000-1280px this app actually runs at.
+   flex:1 + justify-content:center — centering in whatever space the
+   unequal sides actually leave — is the only approach that fits without
+   collision at real widths; it lands left of true mathematical center
+   (by ~146px at 1400px width) because the right side is so much wider,
+   but that's a direct consequence of the content, not a centering bug to
+   chase away without first shrinking the right-side toolbar.
+   .top-bar-left's flex-basis (see its own comment) partially counterweights
+   that, nudging the nav rightward. shrink:0 here (not flex:1's implicit
+   shrink:1) makes sure that under real space pressure .top-bar-left's
+   deliberately-shrinkable spacer gives way FIRST — the nav tabs themselves
+   must never compress below their own content width and spill out over the
+   logo/toolbar, which is what a shared shrink:1 here let happen at the
+   app's 1000px minimum width. */
 .top-bar-center {
-  flex: 1;
+  flex: 1 0 auto;
+  min-width: 0;
   display: flex;
   align-items: center;
   justify-content: center;
-}
-
-.tb-session-pill {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  background: var(--bg-hover);
-  border: 1px solid var(--border-md);
-  border-radius: 20px;
-  padding: 5px 18px;
-  -webkit-app-region: drag;
-}
-
-.tb-session-label {
-  font-size: 9px;
-  font-weight: 700;
-  letter-spacing: 0.15em;
-  text-transform: uppercase;
-  color: var(--text-3);
-}
-
-.tb-session-time {
-  font-size: 13px;
-  font-weight: 600;
-  font-family: var(--mono);
-  color: var(--text);
-  letter-spacing: 0.05em;
-  min-width: 52px;
-  text-align: center;
 }
 
 /* ── Right: controls ── */
@@ -330,7 +381,7 @@ html, body {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  max-width: 160px;
+  max-width: 110px;
 }
 
 /* Square icon buttons */
@@ -356,9 +407,9 @@ html, body {
 .tb-studio-btn {
   display: inline-flex;
   align-items: center;
-  gap: 7px;
+  gap: 6px;
   height: 30px;
-  padding: 0 14px;
+  padding: 0 10px;
   background: var(--bg-hover);
   border: 1px solid var(--border-md);
   border-radius: 999px;
@@ -934,9 +985,10 @@ html, body {
 
 /* (Old .rp-search-*, .rp-picker-*, .rp-select, .rp-go-btn removed — dead code) */
 
-/* ── Live screen (16:9 ProPresenter preview) ── */
+/* ── Live screen (matches the main output's real aspect ratio — see
+   applyOutputAspect in app.js; falls back to 16:9 until detected) ── */
 .live-screen {
-  aspect-ratio: 16 / 9;
+  aspect-ratio: var(--kairo-output-aspect, 16 / 9);
   background: linear-gradient(160deg, #1a1a1c 0%, #141416 50%, #0f0f11 100%);
   border-radius: var(--radius-lg);
   overflow: hidden;
@@ -974,6 +1026,20 @@ html, body {
   z-index: 1;
 }
 .live-screen-themed.hidden { display: none; }
+
+/* Mirrors #media-layer on the real output — sits behind the slide/text
+   layer above (same z-order), so this preview reads the same as what's
+   actually composited on screen. */
+.live-screen-media {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+}
+.live-screen-media.hidden { display: none; }
+.live-screen-media img, .live-screen-media video {
+  width: 100%; height: 100%;
+  object-fit: contain;
+}
 
 /* The content (Bible text, lyric line, slide body — whatever is bound to
    "verse") is always what the audience is meant to read; the reference
@@ -1247,10 +1313,12 @@ html, body {
 .modal-header h2 { font-size: 14px; font-weight: 700; margin: 0; }
 
 .modal-close-btn {
-  width: 26px; height: 26px;
-  display: flex; align-items: center; justify-content: center;
+  width: auto; height: 26px;
+  display: flex; align-items: center; justify-content: center; gap: 6px;
+  padding: 0 10px;
   background: transparent; border: none;
   color: var(--text-3); cursor: pointer;
+  font-size: 11px; font-weight: 600; font-family: var(--font);
   border-radius: 4px; transition: all var(--trans);
 }
 
@@ -1341,7 +1409,7 @@ html, body {
 /* One row per physical screen: name · theme · open · remove. */
 .display-output-row {
   display: grid;
-  grid-template-columns: 1fr 1fr auto auto;
+  grid-template-columns: 1fr 1fr 1.3fr auto auto;
   gap: 6px;
   align-items: center;
   margin-bottom: 6px;
@@ -1504,6 +1572,26 @@ html, body {
   color: var(--text-3);
   font-weight: 600;
 }
+.svc-delim-input {
+  width: 48px;
+  padding: 3px 6px;
+  background: var(--bg-input);
+  border: 1px solid var(--border-md);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: var(--fs-sm);
+  text-align: center;
+}
+.svc-delim-input:focus { outline: none; border-color: var(--blue); }
+
+.svc-popover-hint {
+  font-size: var(--fs-xs);
+  color: var(--text-3);
+  margin-top: 4px;
+  max-width: 160px;
+  line-height: 1.4;
+}
 
 .svc-empty {
   padding: 28px 16px;
@@ -1526,6 +1614,10 @@ html, body {
 }
 .svc-item:hover { background: var(--bg-hover); }
 .svc-item.active { background: var(--blue-dim); }
+/* Multi-select (Cmd/Ctrl+Click, Shift+Click, Cmd/Ctrl+A) — an outline
+   rather than active's solid fill, so "selected for a bulk action" reads
+   distinctly from "currently open," and an item can be both at once. */
+.svc-item.selected { outline: 2px solid var(--blue); outline-offset: -2px; }
 .svc-item-num {
   width: 20px; height: 20px;
   flex: none;
@@ -1551,6 +1643,10 @@ html, body {
 .svc-item-dragging { opacity: 0.4; }
 .svc-drop-before { box-shadow: inset 0 2px 0 0 var(--blue); }
 .svc-drop-after  { box-shadow: inset 0 -2px 0 0 var(--blue); }
+/* Whole-row highlight (not before/after) — used when the drop target is a
+   single destination, not a position between two rows, e.g. dragging an
+   item onto a playlist in the switcher popover. */
+.svc-drop-target { box-shadow: inset 0 0 0 2px var(--blue); background: var(--bg-hover); }
 
 /* Panel header */
 .svc-header { flex-wrap: wrap; gap: var(--space-2) var(--space-3); }
@@ -1594,17 +1690,30 @@ html, body {
 }
 .svc-slide:hover { border-color: var(--blue); }
 .svc-slide.live { border-color: var(--red); box-shadow: 0 0 0 1px var(--red); }
+.svc-slide.selected { outline: 2px solid var(--blue); outline-offset: -2px; }
 
-/* The lyric is the content; the stanza label is chrome, so it sits under the
-   slide at secondary weight rather than heading it. */
+/* Overlaid at the bottom-left of the thumbnail — matches Full-scale edit's
+   slide-list convention (.ts-item-slide-label) rather than sitting as its
+   own row below the card. */
 .svc-slide-label {
-  font-size: var(--fs-xs); font-weight: 600;
-  letter-spacing: 0.06em; text-transform: uppercase;
-  color: var(--text-3);
+  position: absolute;
+  left: 8px;
+  bottom: 7px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: rgba(0,0,0,0.65);
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text);
+  line-height: 1.4;
+  max-width: calc(100% - 16px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .svc-slide-preview {
   position: relative;
-  aspect-ratio: 16/9;
+  aspect-ratio: var(--kairo-output-aspect, 16/9);
   background: #000;
   border-radius: 4px;
   padding: 10px;
@@ -1631,7 +1740,8 @@ html, body {
   padding: 0;
 }
 
-/* List view: preview shrinks to a thumbnail, label sits beside it. */
+/* List view: preview shrinks to a thumbnail; the label stays overlaid on it
+   (same convention as grid mode), not beside it. */
 .svc-slides-grid.is-list .svc-slide {
   flex-direction: row;
   align-items: center;
@@ -1639,12 +1749,11 @@ html, body {
   padding: 6px 10px;
 }
 .svc-slides-grid.is-list .svc-slide-preview {
-  width: 116px;
+  width: var(--svc-card);
   flex: none;
   padding: 6px;
 }
 .svc-slides-grid.is-list .svc-slide-line { font-size: 9px; }
-.svc-slides-grid.is-list .svc-slide-label { order: -1; min-width: 96px; }
 
 .svc-add-line {
   margin-top: 6px;
@@ -1753,11 +1862,11 @@ html, body {
   border-radius: 999px;
   padding: 2px 8px;
 }
-.svc-card-count { flex: none; font-size: var(--fs-xs); color: var(--text-3); white-space: nowrap; }
 .svc-card-icon-btn {
   flex: none;
   min-width: 22px; height: 22px;
-  padding: 0 5px;
+  padding: 0 8px;
+  gap: 4px;
   display: flex; align-items: center; justify-content: center;
   background: transparent;
   border: 1px solid var(--border-md);
@@ -1768,19 +1877,53 @@ html, body {
   transition: var(--trans);
 }
 .svc-card-icon-btn:hover { color: var(--blue); border-color: var(--blue); }
-.svc-card-edit:hover { color: var(--blue); border-color: var(--blue); }
-.svc-card-del { color: var(--text-3); border-color: transparent; font-size: 15px; }
-.svc-card-del:hover { color: var(--red); border-color: transparent; }
+.svc-card-icon-btn span { font-weight: 600; }
 
-.svc-card-body { padding: var(--space-3); }
+/* Theme picker — tinted so it reads as its own kind of control (picks a
+   theme) rather than blending into the lines/edit/delete row as another
+   plain grey square. !important because this is also layered onto
+   .ls-icon-btn (bible-theme-btn, svc-item-theme-btn) which is declared
+   later in this file — same specificity, so without it the later base
+   button rule silently wins and the tint never showed up there. */
+.svc-card-theme-btn {
+  color: var(--purple) !important;
+  border-color: rgba(139, 92, 246, 0.35) !important;
+  background: rgba(139, 92, 246, 0.08) !important;
+}
+.svc-card-theme-btn:hover {
+  color: var(--purple) !important;
+  border-color: var(--purple) !important;
+  background: rgba(139, 92, 246, 0.16) !important;
+}
+
+/* Deliberately NOT its own bounded/scrolling region — that was tried (a
+   capped max-height + independent overflow, to keep the card's header
+   pinned while its own slides scrolled underneath) but with more than one
+   large deck expanded at once, each card became its own separate scroll
+   region: the mouse-wheel gesture got captured by whichever one the
+   cursor was over, and handing off to the next card at its scroll limit
+   felt jumpy/stuck. One continuous scroll through .svc-stack-list reads
+   as a normal page instead, at the cost of the header no longer staying
+   pinned for a very long deck. */
+.svc-card-body {
+  padding: var(--space-3);
+}
 .svc-card-body .svc-slides-grid { padding: 0; }
 
 /* ── Popover (theme / lines pickers) ── */
 .svc-popover {
-  position: absolute;
-  z-index: 60;
+  position: fixed;
+  /* Above .ts-view's z-index:60 (Theme Studio/item mode's modal shell) —
+     equal z-index falls back to DOM order, and with svc-popover living
+     outside .main-layout (see index.html) so it isn't hidden along with it,
+     the modal (later in the DOM) would otherwise paint over an open
+     context menu while item mode is active. Still well below real modals/
+     toasts (1000+) so those still win if ever open at the same time. */
+  z-index: 500;
   min-width: 160px;
   max-width: 240px;
+  max-height: calc(100vh - 24px);
+  overflow-y: auto;
   padding: 8px;
   background: var(--bg-card);
   border: 1px solid var(--border-md);
@@ -1797,6 +1940,17 @@ html, body {
   margin-bottom: 6px;
 }
 .svc-popover-list { display: flex; flex-direction: column; gap: 1px; max-height: 240px; overflow-y: auto; }
+/* Theme picker rows (openThemePopover/openBibleThemePopover, service.js) —
+   a thumbnail alongside the name, same idea as Theme Studio's own list. */
+.svc-popover-item.has-thumb { display: flex; align-items: center; gap: 8px; }
+.svc-popover-group-label {
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-3);
+  font-weight: 700;
+  padding: 6px 8px 2px;
+}
 .svc-popover-item {
   background: transparent;
   border: none;
@@ -1810,6 +1964,13 @@ html, body {
 }
 .svc-popover-item:hover { background: var(--bg-hover); }
 .svc-popover-item.active { color: var(--blue); font-weight: 600; }
+.svc-popover-item:disabled { opacity: 0.4; cursor: default; }
+.svc-popover-item:disabled:hover { background: transparent; }
+/* Context-menu additions — destructive actions and submenu rows. */
+.svc-popover-item.danger { color: var(--red); }
+.svc-popover-item.danger:hover { background: var(--red-dim); }
+.svc-popover-item.has-submenu { display: flex; align-items: center; justify-content: space-between; width: 100%; }
+.svc-popover-item.has-submenu::after { content: '\203A'; color: var(--text-3); margin-left: 8px; }
 
 /* ── Full-scale edit ──────────────────────────────────────────────────────
    Back button + editable title + (song-only) delimiter + theme icon, all on
@@ -1822,15 +1983,8 @@ html, body {
 }
 .svc-theme-icon-btn { width: 28px; height: 28px; }
 
-.svc-edit-stage {
-  flex: 1;
-  display: flex;
-  min-height: 0;
-  overflow: hidden;
-}
-.svc-edit-stage.hidden { display: none; }
-
-/* Flow view — every slide of the section, stacked and editable at once. */
+/* Flow — every slide of the section, stacked and editable at once. The one
+   editing surface for every item type (slides/song/scripture/image). */
 .svc-flow {
   flex: 1;
   min-height: 0;
@@ -1840,7 +1994,6 @@ html, body {
   flex-direction: column;
   gap: var(--space-2);
 }
-.svc-flow.hidden { display: none; }
 .svc-flow-row {
   display: flex;
   align-items: flex-start;
@@ -1851,7 +2004,9 @@ html, body {
   background: var(--bg-card);
 }
 .svc-flow-row.live { border-color: var(--red); }
+.svc-flow-row.selected { outline: 2px solid var(--blue); outline-offset: -2px; }
 .svc-flow-grip { color: var(--text-3); flex: none; cursor: grab; padding-top: 6px; }
+.svc-flow-grip.is-disabled { cursor: default; opacity: 0.35; }
 .svc-flow-num {
   flex: none;
   width: 24px; height: 24px;
@@ -1876,13 +2031,15 @@ html, body {
 .svc-flow-send {
   flex: none;
   min-width: 22px; height: 22px;
-  padding: 0 5px;
+  padding: 0 8px;
+  gap: 5px;
   margin-top: 2px;
   display: flex; align-items: center; justify-content: center;
   background: transparent;
   border: 1px solid var(--border-md);
   border-radius: var(--radius-sm);
   color: var(--text-2);
+  font-size: 11px; font-weight: 600; font-family: var(--font);
   cursor: pointer;
   transition: var(--trans);
 }
@@ -1890,18 +2047,37 @@ html, body {
 .svc-flow-del {
   flex: none;
   min-width: 22px; height: 22px;
-  padding: 0 5px;
+  padding: 0 8px;
+  gap: 5px;
   margin-top: 2px;
   display: flex; align-items: center; justify-content: center;
   background: transparent;
   border: 1px solid var(--border-md);
   border-radius: var(--radius-sm);
   color: var(--text-2);
-  font-size: 15px;
+  font-size: 11px; font-weight: 600; font-family: var(--font);
   cursor: pointer;
   transition: var(--trans);
 }
 .svc-flow-del:hover { color: var(--red); border-color: var(--red); }
+.svc-flow-del.is-disabled { opacity: 0.3; cursor: default; }
+.svc-flow-del.is-disabled:hover { color: var(--text-2); border-color: var(--border-md); }
+.svc-flow-image {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 8px;
+  background: var(--bg-input);
+  border-radius: var(--radius-sm);
+}
+.svc-flow-image img {
+  max-width: 100%;
+  max-height: 160px;
+  border-radius: var(--radius-sm);
+  object-fit: contain;
+}
 .svc-flow-row.svc-item-dragging { opacity: 0.4; }
 .svc-flow-row.svc-drop-before { box-shadow: inset 0 2px 0 0 var(--blue); }
 .svc-flow-row.svc-drop-after  { box-shadow: inset 0 -2px 0 0 var(--blue); }
@@ -1912,106 +2088,11 @@ html, body {
   padding: var(--space-2) 0;
 }
 
-.svc-strip {
-  width: 190px;
-  flex: none;
-  overflow-y: auto;
-  padding: var(--space-2);
-  border-right: 1px solid var(--border);
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-.svc-strip-item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  background: transparent;
-  border: 1px solid transparent;
-  border-radius: var(--radius-sm);
-  padding: 6px 8px;
-  cursor: pointer;
-  text-align: left;
-  font-family: var(--font);
-  color: var(--text-2);
-}
-.svc-strip-item:hover { background: var(--bg-hover); }
-.svc-strip-item.active { background: var(--blue-dim); color: var(--text); border-color: rgba(77,182,172,0.3); }
-.svc-strip-item.live { border-color: var(--red); }
-.svc-strip-num {
-  flex: none;
-  font-size: 10px; font-weight: 700;
-  color: var(--text-3);
-  min-width: 16px;
-}
-.svc-strip-item.active .svc-strip-num { color: var(--blue); }
-.svc-strip-text {
-  font-size: var(--fs-xs);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.svc-canvas-wrap {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: var(--space-2);
-  padding: var(--space-4);
-  background: #0a0a0a;
-}
-.svc-canvas {
-  position: relative;
-  width: 100%;
-  max-width: 900px;
-  aspect-ratio: 16/9;
-  background: #000;
-  border-radius: var(--radius);
-  overflow: hidden;
-  box-shadow: 0 4px 24px rgba(0,0,0,0.6);
-}
-.svc-canvas.is-alpha {
-  background: repeating-conic-gradient(#1a1a1a 0% 25%, #0e0e0e 0% 50%) 0 0 / 14px 14px;
-}
+/* .svc-canvas-text is still shared — paintLookLayers renders it into
+   thumbnails/previews wherever a look is painted, not just the old
+   full-edit canvas (which no longer exists). */
 .svc-canvas-text { outline: none; white-space: pre-wrap; }
 .svc-canvas-text.is-verse:focus { box-shadow: 0 0 0 1px var(--blue); border-radius: 4px; }
-.svc-canvas-hint {
-  font-size: var(--fs-xs);
-  color: var(--text-3);
-  text-align: center;
-}
-
-.svc-inspector {
-  width: 240px;
-  flex: none;
-  overflow-y: auto;
-  padding: var(--space-3);
-  border-left: 1px solid var(--border);
-}
-.svc-insp-head {
-  font-size: var(--fs-xs);
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  color: var(--text-3);
-  font-weight: 700;
-  margin-bottom: var(--space-2);
-}
-.svc-insp-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 8px;
-}
-.svc-insp-label {
-  font-size: var(--fs-xs);
-  color: var(--text-3);
-  font-weight: 600;
-  min-width: 34px;
-}
-.svc-insp-num { width: 72px; flex: none; }
 
 /* Hymn picker */
 .hymn-list { flex: 1; overflow-y: auto; padding: 10px 16px 16px; }
@@ -2039,35 +2120,17 @@ html, body {
   border-radius: 999px;
   padding: 3px 10px;
 }
-
-/* Slides library */
-.slib-list {
-  flex: 1;
-  overflow-y: auto;
-  padding: 14px 16px 16px;
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-  gap: 10px;
-  align-content: start;
-}
-.slib-card {
-  display: block;
-  width: 100%;
-  padding: 12px 14px;
-  background: var(--bg-panel);
+/* Only shown on the operator's own persistent Song Library rows — bundled
+   hymns stay read-only, so they never get these. */
+.hymn-edit, .hymn-delete {
+  font-size: var(--fs-xs); font-weight: 600;
+  color: var(--text-3);
   border: 1px solid var(--border);
-  border-radius: var(--radius);
-  cursor: pointer;
-  text-align: left;
-  font-family: var(--font);
-  transition: var(--trans);
+  border-radius: 999px;
+  padding: 3px 10px;
 }
-.slib-card:hover { background: var(--bg-hover); border-color: var(--blue); }
-.slib-card-title {
-  font-size: var(--fs-md); font-weight: 600; color: var(--text);
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-}
-.slib-card-sub { font-size: var(--fs-xs); color: var(--text-3); margin-top: 3px; }
+.hymn-edit:hover { color: var(--text); border-color: var(--text-3); }
+.hymn-delete:hover { color: var(--red); border-color: var(--red); }
 
 /* ── Language packs ── */
 .lang-pack-list {
@@ -2234,6 +2297,14 @@ select {
   border-radius: 0 0 var(--radius-lg) var(--radius-lg);
 }
 
+/* App-wide primary/secondary rule: primary = filled accent, the one
+   confirming action in a view (Save, Add, Confirm, Send); secondary =
+   outlined/transparent, everything else (Cancel, Test, Back, Refresh).
+   .modal-btn is the canonical two-tier button used across every modal
+   footer; other contexts with their own established pill styling
+   (.tb-studio-btn in the top bar, .ts-add-btn in Theme Studio) express the
+   same filled-vs-outlined distinction rather than being forced onto this
+   literal class. */
 .modal-btn {
   padding: 7px 18px; border: none;
   border-radius: var(--radius-sm);
@@ -2305,6 +2376,39 @@ select {
   transition: transform var(--trans);
   line-height: 1;
 }
+
+/* State classes JS applies to .bs-dot (updatePPStatus, and now every
+   output's header indicator) — .active already existed and covers the
+   "connected/on" case, but .connected/.error never had rules of their own,
+   so the ProPresenter dot in particular never actually changed color
+   regardless of real connection state. */
+.bs-dot.connected { background: var(--green); box-shadow: 0 0 6px rgba(232,64,74,0.4); }
+.bs-dot.error      { background: var(--red); }
+.bs-dot.warn       { background: var(--orange, #d9a441); }
+
+/* Compact header-row status (dot + short text) for the plain output cards
+   (External Display, OBS, Syphon, NDI) — sits between the card name and
+   the theme badge/chevron, same row, no wrapper box (unlike ProPresenter's
+   pp-header-sync, this has no toggle to lay out around). */
+.output-header-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text-3);
+  font-family: var(--mono);
+  flex-shrink: 0;
+}
+
+/* ProPresenter's header sync row — toggle + dot + status, inline with the
+   theme badge instead of its own row below (see index.html for why). */
+.pp-header-sync {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.pp-header-sync .rs-pp-status { font-family: var(--mono); }
 
 .output-card.expanded .output-card-chevron { transform: rotate(180deg); }
 
@@ -2480,6 +2584,209 @@ select {
 @keyframes fade-up {
   from { opacity: 0; transform: translateY(6px); }
   to   { opacity: 1; transform: none; }
+}
+
+/* News-ticker / large-scroll text layers (layer.scroll.enabled) — see
+   renderPreview in app.js. The inner span starts pushed fully off the right
+   edge (padding-left:100%, set inline) and animates to -100%, so it always
+   crosses the full band and loops regardless of the text's actual width. */
+@keyframes kairo-marquee {
+  from { transform: translateX(0); }
+  to   { transform: translateX(-100%); }
+}
+
+/* Per-word "lean-in" reveal for Lyrics — Motion's Word transition (see
+   word_split.js's buildWordSpans) — bold, punchy broadcast/LED-wall style:
+   each word starts oversized, slightly tilted, and transparent, and snaps
+   into place with a small overshoot, distinctly punchier than the plain
+   Slide transition used elsewhere. --kairo-word-delay/--kairo-word-dur are
+   set inline per word for the staggered cascade. */
+@keyframes kairo-word-in {
+  0%   { opacity: 0; transform: scale(1.4) rotate(-4deg) translateY(14px); }
+  60%  { opacity: 1; transform: scale(0.96) rotate(1deg) translateY(-3px); }
+  100% { opacity: 1; transform: scale(1) rotate(0deg) translateY(0); }
+}
+.kairo-word {
+  display: inline-block;
+  animation: kairo-word-in var(--kairo-word-dur, 260ms) cubic-bezier(.2,.8,.2,1) both;
+  animation-delay: var(--kairo-word-delay, 0ms);
+  transform-origin: 50% 100%;
+}
+
+/* "Activate" transition (word_split.js's buildActivateSpans) — inspired by
+   Final Cut Pro's "Activate" title: each word starts dim/desaturated and
+   flashes up to full brightness with a brief glow as it "activates",
+   settling at its normal color. No background-clip/gradient-sweep trick —
+   that would need to permanently override the layer's own text color to
+   mask a moving highlight, which fights an operator's actual color choice;
+   opacity + brightness + a glow spike reads as the same "power-on" moment
+   without touching color at all. */
+@keyframes kairo-word-activate {
+  0%   { opacity: 0; filter: brightness(0.45) saturate(0.5); text-shadow: 0 0 0 rgba(255,255,255,0); letter-spacing: 0.06em; }
+  55%  { opacity: 1; filter: brightness(1.6) saturate(1.3); text-shadow: 0 0 18px rgba(255,255,255,0.85); letter-spacing: 0; }
+  100% { opacity: 1; filter: brightness(1) saturate(1); text-shadow: 0 0 0 rgba(255,255,255,0); letter-spacing: 0; }
+}
+.kairo-word-activate {
+  display: inline-block;
+  animation: kairo-word-activate var(--kairo-word-dur, 420ms) ease-out both;
+  animation-delay: var(--kairo-word-delay, 0ms);
+}
+
+/* "Karaoke" transition (buildKaraokeSpans) — each word sits dim ("unsung")
+   until its turn, then snaps instantly to fully lit and stays there, same
+   rhythm as a bouncing-ball lyric video. `steps(1)` makes the switch a
+   discrete flip rather than a fade — the stagger delay alone provides the
+   left-to-right chase timing, --kairo-word-dur is deliberately tiny (see
+   buildKaraokeSpans) since there's nothing to actually animate over time. */
+@keyframes kairo-word-karaoke {
+  from { opacity: 0.32; }
+  /* --kairo-highlight-color is only set inline when the theme configures
+     one (see buildKaraokeSpans) — falls back to `inherit` so the word just
+     keeps the layer's own color when no override is set. */
+  to   { opacity: 1; color: var(--kairo-highlight-color, inherit); }
+}
+.kairo-word-karaoke {
+  display: inline-block;
+  opacity: 0.32;
+  animation: kairo-word-karaoke 1ms steps(1, end) both;
+  animation-delay: var(--kairo-word-delay, 0ms);
+}
+
+/* "Typewriter" transition (buildTypewriterSpans) — one character appears
+   at a time as if being typed, finishing with a blinking caret. Each
+   character is an instant opacity flip (same steps() reasoning as karaoke
+   above) timed purely by its stagger delay. */
+@keyframes kairo-char-type {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+.kairo-char {
+  display: inline-block;
+  opacity: 0;
+  animation: kairo-char-type 1ms steps(1, end) both;
+  animation-delay: var(--kairo-word-delay, 0ms);
+}
+@keyframes kairo-caret-blink {
+  0%, 45%  { opacity: 1; }
+  50%, 95% { opacity: 0; }
+  100%     { opacity: 1; }
+}
+.kairo-caret {
+  display: inline-block;
+  width: 0.07em;
+  height: 0.9em;
+  margin-left: 0.04em;
+  background: currentColor;
+  opacity: 0;
+  vertical-align: -0.05em;
+  animation: kairo-char-type 1ms steps(1, end) forwards, kairo-caret-blink 1s step-end infinite;
+  animation-delay: var(--kairo-word-delay, 0ms), var(--kairo-word-delay, 0ms);
+}
+
+/* "Impact" transition (buildImpactSpans) — the "Hormozi preset"/CapCut-style
+   dynamic caption: most words pop in at normal size on the same overshoot
+   entrance as the plain Word transition, but words picked out by
+   isImpactHit() (long words, Capitalized proper nouns) run bigger, bolder,
+   and accent-colored — the "keyword highlight" look. Reusing kairo-word-in's
+   entrance (rather than inventing a second one) is deliberate: the visual
+   distinction this transition is about is size/weight/color contrast
+   between words, not a different motion. */
+.kairo-word-impact {
+  display: inline-block;
+  animation: kairo-word-in var(--kairo-word-dur, 300ms) cubic-bezier(.2,.8,.2,1) both;
+  animation-delay: var(--kairo-word-delay, 0ms);
+  transform-origin: 50% 100%;
+}
+.kairo-word-impact-hit {
+  /* color is set inline per-word by buildImpactSpans (opts.color, the
+     theme's own Highlight Color) — no fallback declared here so an inline
+     style is never fighting a stylesheet value. --kairo-impact-scale is
+     also set inline, scaled by the theme's Intensity setting. */
+  font-weight: 800;
+  font-size: calc(1em * var(--kairo-impact-scale, 1.22));
+}
+
+/* "Bounce" transition (buildBounceSpans) — springy pop-on: each word
+   overshoots well past 100% size on the way in and settles with a couple
+   of decreasing wobbles, the higher-energy "TikTok bounce" caption rhythm,
+   distinct from Word's single gentle overshoot. */
+@keyframes kairo-word-bounce {
+  0%   { opacity: 0; transform: scale(0.3) translateY(24px); }
+  45%  { opacity: 1; transform: scale(1.28) translateY(-8px); }
+  65%  { transform: scale(0.92) translateY(2px); }
+  82%  { transform: scale(1.06) translateY(-1px); }
+  100% { transform: scale(1) translateY(0); }
+}
+.kairo-word-bounce {
+  display: inline-block;
+  animation: kairo-word-bounce var(--kairo-word-dur, 520ms) cubic-bezier(.34,1.56,.64,1) both;
+  animation-delay: var(--kairo-word-delay, 0ms);
+}
+
+/* "Highlight Box" transition (buildHighlightBoxSpans) — the animated
+   background-pill caption style (YouTube/Descript-style "spotlight"
+   captions): a solid highlight-colored box appears behind each word in
+   turn, sliding along word by word. Genuinely different mechanic from
+   Karaoke (a moving background box vs. a text-opacity chase), even though
+   the rhythm is similar — box-shadow (not background) so the box can
+   extend past the word's own edges as padding without affecting layout/
+   line-wrapping the way real padding would. */
+@keyframes kairo-word-highlightbox {
+  from { box-shadow: 0 0 0 0 transparent; color: inherit; }
+  to   { box-shadow: 0 0.08em 0 0.16em var(--kairo-highlight-color, #ffd23f); color: #0a0a0a; }
+}
+.kairo-word-highlightbox {
+  display: inline-block;
+  background: transparent;
+  border-radius: 0.15em;
+  animation: kairo-word-highlightbox 1ms steps(1, end) both;
+  animation-delay: var(--kairo-word-delay, 0ms);
+}
+
+/* "Shimmer" transition (buildShimmerSpans) — a soft gradient sweep across
+   the whole line, the "premium title card" look. Unlike every other text
+   animation here this isn't per-word — one continuous background-
+   clip:text gradient animated across the full line in a single pass. */
+@keyframes kairo-shimmer-sweep {
+  0%   { background-position: 200% 0; }
+  100% { background-position: -50% 0; }
+}
+.kairo-shimmer {
+  display: inline-block;
+  /* --kairo-shimmer-base is captured from the layer's own (pre-override)
+     text color by buildShimmerSpans — `currentColor` can't be used for the
+     gradient's dark stops here, since this same rule sets this element's
+     own `color` to transparent (required for background-clip:text to
+     actually show the gradient through the glyphs), which would make
+     currentColor resolve to transparent too. */
+  background-image: linear-gradient(100deg, var(--kairo-shimmer-base, #fff) 30%, #fff 48%, var(--kairo-shimmer-base, #fff) 66%);
+  background-size: 250% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: kairo-shimmer-sweep var(--kairo-shimmer-dur, 1400ms) ease-in-out both;
+}
+
+/* "Bold Caption" transition (buildBoldCapSpans) — the bold-caption style
+   from viral short-form editing: every word runs at a flat, heavy weight
+   (900) so size alone (not weight) distinguishes a punch word from a
+   normal one — most words sit at a normal size, then an occasional word
+   explodes much bigger with tightened letter-spacing (font-size/letter-
+   spacing set inline per word — see the JS comment for why no rotation/
+   jitter is involved here, unlike an earlier version of this). Wrapped in
+   a flexbox rather than plain inline text so the oversized words don't
+   fight normal line-height/baseline alignment. */
+@keyframes kairo-word-boldcap-in {
+  0%   { opacity: 0; transform: translateY(16px) scale(0.5); }
+  70%  { opacity: 1; transform: translateY(0) scale(1.08); }
+  100% { opacity: 1; transform: translateY(0) scale(1); }
+}
+.kairo-word-boldcap {
+  display: inline-block;
+  line-height: 1;
+  font-weight: 900;
+  animation: kairo-word-boldcap-in var(--kairo-word-dur, 360ms) cubic-bezier(.2,.8,.2,1) both;
+  animation-delay: var(--kairo-word-delay, 0ms);
 }
 
 /* ══════════════════════════════════════
@@ -2667,6 +2974,19 @@ select {
 }
 .ls-icon-btn:hover { background: var(--bg-hover); color: var(--text-2); border-color: var(--border-md); }
 
+/* Labeled variant — for standalone one-off actions (New playlist, Clear
+   transcript, Theme picker). Media transport controls (play/mute) stay
+   icon-only, universal-convention buttons, so this is opt-in via a second
+   class rather than changing .ls-icon-btn itself. */
+.ls-icon-btn-labeled {
+  width: auto;
+  padding: 0 8px;
+  gap: 5px;
+  font-size: 11px;
+  font-weight: 600;
+  font-family: var(--font);
+}
+
 .ls-transcript-body {
   flex: 1;
   overflow-y: auto;
@@ -2707,16 +3027,30 @@ select {
   min-width: 0;
 }
 
+.cs-search-icon {
+  position: absolute;
+  left: 11px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--text-3);
+  pointer-events: none;
+}
+
 .cs-search-input {
   width: 100%;
   height: 34px;
-  background: var(--bg-card);
-  border: 1px solid var(--border);
+  /* --bg-card == --bg-panel, so the field was invisible against the
+     toolbar behind it — the icon read as floating loose rather than
+     sitting inside a field. A black overlay this close to the panel's
+     own near-black tone (#161618) still isn't enough contrast at normal
+     size, so lighten instead of darken to make the box itself visible. */
+  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid var(--border-md);
   border-radius: var(--radius);
   color: var(--text);
   font-family: var(--font);
   font-size: 12px;
-  padding: 0 30px 0 12px;
+  padding: 0 30px 0 32px;
   outline: none;
   transition: border-color var(--trans);
 }
@@ -2736,25 +3070,41 @@ select {
 }
 
 .cs-search-btn {
-  width: 34px; height: 34px;
-  display: flex; align-items: center; justify-content: center;
+  width: auto; height: 34px;
+  display: flex; align-items: center; justify-content: center; gap: 6px;
+  padding: 0 14px;
   background: var(--blue);
   border: none; border-radius: var(--radius);
   color: white; cursor: pointer; flex-shrink: 0;
+  font-size: 12px; font-weight: 600; font-family: var(--font);
   transition: opacity var(--trans);
 }
 .cs-search-btn:hover { opacity: 0.85; }
 
+/* .ls-icon-btn's 24px height is right for the icon-only transport
+   controls it was built for, but next to the 34px Search button here it
+   looked out of place — match it. */
+.cs-theme-btn {
+  height: 34px;
+  padding: 0 12px;
+}
+
 .cs-select {
   height: 34px;
-  background: var(--bg-card);
-  border: 1px solid var(--border);
+  background-color: rgba(255, 255, 255, 0.07);
+  /* Global `select { appearance: none; }` strips the native arrow app-wide;
+     every other select re-adds one (see select.setting-input) except this
+     one, so it silently looked like it had no more options. */
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%236e6e6e' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 8px center;
+  border: 1px solid var(--border-md);
   border-radius: var(--radius);
   color: var(--text);
   font-family: var(--font-head);
   font-size: 11px;
   font-weight: 600;
-  padding: 0 8px;
+  padding: 0 22px 0 8px;
   outline: none;
   cursor: pointer;
   transition: border-color var(--trans);
@@ -3171,6 +3521,193 @@ select {
   font-family: var(--mono);
 }
 
+/* Per-layer output clear — deliberately placed at the bottom of the
+   ProPresenter Sync card rather than replacing it; both are "what's
+   currently live" controls and read naturally as one group. */
+.rs-layer-clear-bar {
+  display: flex;
+  gap: 6px;
+  padding: 0 2px;
+  flex-shrink: 0;
+}
+.rs-layer-clear-btn {
+  flex: 1;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-md);
+  border-radius: var(--radius-sm);
+  color: var(--text-2);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  padding: 6px 4px;
+  cursor: pointer;
+  transition: var(--trans);
+}
+.rs-layer-clear-btn:hover { color: var(--red); border-color: var(--red); }
+.rs-layer-clear-btn.rs-layer-clear-all { color: var(--text-3); }
+
+/* ── Media tab ────────────────────────────────────────────────────────── */
+.media-folder-rail {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 10px 16px 0;
+  flex-shrink: 0;
+}
+.media-folder-chip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-md);
+  border-radius: 999px;
+  color: var(--text-2);
+  font-size: 11px;
+  font-weight: 600;
+  padding: 5px 10px;
+  cursor: pointer;
+  transition: var(--trans);
+}
+.media-folder-chip:hover { border-color: var(--blue); color: var(--text); }
+.media-folder-chip.active { border-color: var(--blue); color: var(--blue); background: var(--bg-hover); }
+.media-folder-chip-del {
+  color: var(--text-3);
+  font-size: 13px;
+  line-height: 1;
+}
+.media-folder-chip-del:hover { color: var(--red); }
+.media-folder-chip-add { font-size: 13px; font-weight: 700; padding: 5px 11px; }
+
+.media-transport {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  flex-shrink: 0;
+}
+.media-transport #media-mute-btn.active { color: var(--blue); border-color: var(--blue); }
+.media-seek { flex: 1; }
+.media-volume { width: 80px; flex: none; }
+.media-time {
+  font-size: 10px;
+  font-family: var(--mono);
+  color: var(--text-3);
+  white-space: nowrap;
+  flex: none;
+}
+
+.media-dropzone {
+  position: relative;
+  flex: 1;
+  overflow-y: auto;
+  padding: 10px 16px 16px;
+}
+.media-dropzone-hint {
+  position: absolute;
+  inset: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 2px dashed var(--blue);
+  border-radius: var(--radius-lg);
+  background: rgba(59, 130, 246, 0.08);
+  color: var(--blue);
+  font-size: 13px;
+  font-weight: 600;
+  pointer-events: none;
+  z-index: 5;
+}
+
+.media-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 10px;
+}
+.media-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  cursor: pointer;
+  text-align: left;
+  transition: var(--trans);
+}
+.media-card:hover { border-color: var(--blue); }
+.media-card img, .media-card video {
+  width: 100%;
+  aspect-ratio: var(--kairo-output-aspect, 16 / 9);
+  object-fit: cover;
+  background: #000;
+  display: block;
+}
+.media-card-label {
+  font-size: 11px;
+  color: var(--text-2);
+  padding: 6px 8px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.media-card-badge {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  background: rgba(0,0,0,0.6);
+  color: #fff;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+/* Theme Studio / Full-scale edit's "Library" button — a thumbnail picker
+   over the Media tab's bin + smart folders, appended straight to <body>
+   (not inside .ts-view) so it layers on top of the editor without needing
+   to know anything about its internal structure. */
+.ts-media-picker-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  background: rgba(0,0,0,0.65);
+  backdrop-filter: blur(8px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.ts-media-picker-panel {
+  background: var(--bg);
+  border: 1px solid var(--border-md);
+  border-radius: var(--radius-lg);
+  width: 720px;
+  max-width: 92vw;
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 24px 60px rgba(0,0,0,0.6);
+}
+.ts-media-picker-header {
+  padding: 14px 18px;
+  border-bottom: 1px solid rgba(255,255,255,0.06);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text);
+}
+.ts-media-picker-grid {
+  padding: 16px;
+  overflow-y: auto;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 10px;
+}
+
 .rs-section {
   display: flex;
   flex-direction: column;
@@ -3252,13 +3789,15 @@ select {
 }
 
 .rs-clear-btn {
-  width: 22px; height: 22px;
-  display: flex; align-items: center; justify-content: center;
+  width: auto; height: 22px;
+  display: flex; align-items: center; justify-content: center; gap: 4px;
+  padding: 0 8px;
   background: transparent;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   color: var(--text-3);
   cursor: pointer;
+  font-size: 10px; font-weight: 600; font-family: var(--font);
   transition: all var(--trans);
   margin-left: 2px;
 }
@@ -3436,10 +3975,19 @@ select {
   transition: border-color 0.12s;
 }
 .cand-card:hover { border-color: rgba(77,182,172,0.35); }
+/* Phrase/keyword search hit — the engine found the closest match(es) but
+   isn't confident enough to call it a direct reference, so it's a pick-one
+   suggestion rather than something already live. Amber to read as distinct
+   from ordinary fingerprint/context candidates below. */
+.cand-search {
+  border-left: 2px solid rgba(245,158,11,0.6);
+  background: rgba(245,158,11,0.04);
+}
 .cand-sent {
   border-left: 2px solid rgba(232,64,74,0.5);
   background: rgba(232,64,74,0.025);
 }
+.cand-sent.cand-search { border-left-color: rgba(232,64,74,0.5); }
 .cand-row {
   display: flex;
   align-items: center;
@@ -3612,10 +4160,45 @@ select {
 
 .rs-preview-card .live-screen {
   width: 100%;
-  aspect-ratio: 16 / 9;
+  aspect-ratio: var(--kairo-output-aspect, 16 / 9);
   height: auto;
   border-radius: 0;
   border: none;
+}
+
+.rs-preview-output-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--border);
+  background: rgba(255,255,255,0.015);
+}
+.rs-preview-output-label {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-3);
+  flex-shrink: 0;
+}
+.rs-preview-output-select {
+  flex: 1;
+  min-width: 0;
+  height: 22px;
+  background-color: var(--bg-input);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%236e6e6e' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 6px center;
+  border: 1px solid var(--border-md);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 11px;
+  font-weight: 600;
+  padding: 0 20px 0 7px;
+  outline: none;
+  cursor: pointer;
 }
 
 .range-nav-bar {
@@ -3698,23 +4281,6 @@ select {
   min-height: 0;
 }
 
-/* The studio header is app chrome, not canvas — give it its own raised surface
-   and a hard edge so it reads as separate from the working area below (they
-   previously ran together as one flat field). */
-.ts-view-header {
-  display: flex;
-  align-items: center;
-  gap: var(--space-4);
-  padding: 0 var(--space-4);
-  height: 56px;
-  flex: none;
-  background: var(--bg-hover);
-  border-bottom: 1px solid var(--border-md);
-  box-shadow: 0 1px 0 rgba(0,0,0,0.5);
-  position: relative;
-  z-index: 5;
-}
-
 .ts-back-btn {
   display: inline-flex;
   align-items: center;
@@ -3733,26 +4299,6 @@ select {
 .ts-back-btn:hover { background: var(--bg-hover); color: var(--text); }
 .ts-back-btn svg { width: 14px; height: 14px; }
 
-.ts-view-title {
-  display: flex;
-  align-items: center;
-  gap: var(--space-3);
-  flex: 1;
-  min-width: 0;
-}
-.ts-view-title h2 {
-  font-size: var(--fs-lg);
-  font-weight: 700;
-  letter-spacing: -0.01em;
-  white-space: nowrap;
-}
-
-.ts-view-actions {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  flex: none;
-}
 .ts-danger-btn {
   color: var(--red) !important;
   border-color: rgba(232,64,74,0.3) !important;
@@ -3816,9 +4362,18 @@ select {
 .ts-layer-drop-before { box-shadow: inset 0 2px 0 0 var(--blue); }
 .ts-layer-drop-after  { box-shadow: inset 0 -2px 0 0 var(--blue); }
 
-/* Themes column header: label left, actions right. */
-.ts-themes-col .ts-col-header { gap: var(--space-1); }
-.ts-themes-col .ts-col-header .ts-col-label { margin-right: auto; }
+/* Themes column header: label on its own line, actions wrap below — five
+   labeled buttons don't fit the 232px column on one row like the old
+   icon-only row did. */
+.ts-col-header-wrap { flex-direction: column; align-items: flex-start; gap: 8px; }
+.ts-col-header-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.ts-add-btn-compact { padding: 4px 8px; font-size: 10px; gap: 4px; }
+.ts-add-btn:disabled { opacity: 0.35; cursor: default; pointer-events: none; }
+
+/* Item-mode (Full Edit) header: replaces the themes header wholesale. */
+.ts-item-mode-header { padding: 12px 12px 8px; }
+.ts-item-mode-header .ts-add-btn { width: 100%; justify-content: center; }
+.ts-item-mode-header svg { width: 14px; height: 14px; }
 
 .ts-body {
   flex: 1;
@@ -3853,6 +4408,8 @@ select {
   transition: all var(--trans);
 }
 .ts-icon-btn:hover { background: var(--bg-hover); color: var(--text); }
+.ts-icon-btn:disabled { opacity: 0.3; cursor: default; }
+.ts-icon-btn:disabled:hover { background: transparent; color: var(--text-2); }
 
 /* ── Col 1: Themes list ── */
 .ts-themes-col {
@@ -3891,13 +4448,182 @@ select {
 .ts-theme-item:hover { background: var(--bg-hover); color: var(--text); }
 .ts-theme-item.active { background: var(--blue-dim); color: var(--blue); font-weight: 600; }
 
-.ts-theme-dot {
-  width: 6px; height: 6px;
-  border-radius: 50%;
-  background: var(--border-md);
+.ts-theme-thumb {
+  position: relative;
+  width: 56px; height: 32px;
+  border-radius: 3px;
+  overflow: hidden;
+  background: #000;
   flex-shrink: 0;
+  border: 1px solid var(--border-md);
+  /* A genuinely-transparent-canvas theme (paintLookLayers' own 'is-alpha'
+     class, mirrored here — see renderLookThumbnail in service.js) would
+     otherwise render as a flat, indistinguishable black box at this size,
+     identical to a theme that's actually just black. The checker pattern
+     reads as "transparent" at a glance, same convention as every image
+     editor's alpha-channel preview. */
 }
-.ts-theme-item.active .ts-theme-dot { background: var(--blue); }
+.ts-theme-thumb.is-transparent-thumb {
+  background-color: #1a1a1a;
+  background-image:
+    linear-gradient(45deg, #2e2e2e 25%, transparent 25%),
+    linear-gradient(-45deg, #2e2e2e 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, #2e2e2e 75%),
+    linear-gradient(-45deg, transparent 75%, #2e2e2e 75%);
+  background-size: 8px 8px;
+  background-position: 0 0, 0 4px, 4px -4px, -4px 0px;
+}
+
+/* A bundle imported from one .protheme file (several named theme-slides)
+   groups under one collapsible header instead of listing as unrelated flat
+   themes — see collapsedThemeGroups in app.js for why this is purely a list
+   grouping, not a real container in the data model. */
+.ts-theme-group-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 10px;
+  margin-top: 4px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: var(--text-2);
+  user-select: none;
+  transition: all var(--trans);
+}
+.ts-theme-group-header:hover { background: var(--bg-hover); color: var(--text); }
+.ts-theme-group-chevron {
+  flex-shrink: 0;
+  font-size: 10px;
+  transition: transform var(--trans);
+}
+.ts-theme-group-header.collapsed .ts-theme-group-chevron { transform: rotate(-90deg); }
+.ts-theme-group-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.ts-theme-group-count {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-3);
+  background: var(--bg-input);
+  border-radius: 999px;
+  padding: 1px 6px;
+}
+.ts-theme-group-header .ts-theme-del { display: none; }
+.ts-theme-group-header:hover .ts-theme-del { display: flex; }
+/* Tree-style nesting (Finder/Xcode-navigator convention, closer to how
+   ProPresenter itself shows a Theme's Slides indented under it) — a
+   continuous vertical guide down the group with a small branch tick into
+   each row, instead of plain indentation with nothing tying the rows
+   together visually. */
+.ts-theme-item-grouped {
+  padding-left: 30px;
+  position: relative;
+}
+.ts-theme-item-grouped::before {
+  content: '';
+  position: absolute;
+  left: 16px;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--border-md);
+}
+.ts-theme-item-grouped::after {
+  content: '';
+  position: absolute;
+  left: 16px;
+  top: 50%;
+  width: 8px;
+  height: 1px;
+  background: var(--border-md);
+}
+.ts-theme-item-grouped:last-child::before { bottom: 50%; }
+
+/* Full Edit's left panel — this item's slides as large, readable thumbnails
+   stacked vertically (one per row, full column width) with the slide number
+   overlaid at the bottom, in the same #looks-list container the themes list
+   uses (mutually exclusive by mode). */
+.ts-item-slide-row {
+  display: flex;
+  padding: 6px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+  user-select: none;
+  transition: all var(--trans);
+}
+.ts-item-slide-row:hover { background: var(--bg-hover); }
+.ts-item-slide-row.active { background: var(--blue-dim); }
+/* Multi-select (Cmd/Ctrl+Click, Shift+Click) — distinct from .active (the
+   slide currently open on the canvas), so this rings the thumbnail itself
+   rather than reusing .active's background tint. */
+.ts-item-slide-row.selected .ts-item-slide-thumb { outline: 2px solid var(--blue); outline-offset: 2px; }
+.ts-item-slide-thumb {
+  position: relative;
+  width: 100%;
+  aspect-ratio: var(--kairo-output-aspect, 16 / 9);
+  background: #000;
+  border-radius: 6px;
+  overflow: hidden;
+  border: 1px solid var(--border-md);
+}
+.ts-item-slide-row.active .ts-item-slide-thumb { border-color: var(--blue); }
+.ts-item-slide-label {
+  position: absolute;
+  left: 8px;
+  bottom: 7px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: rgba(0,0,0,0.65);
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text);
+  line-height: 1.4;
+}
+.ts-item-slide-row.active .ts-item-slide-label { color: var(--blue); background: rgba(0,0,0,0.8); }
+
+.ts-theme-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.ts-theme-name-input {
+  flex: 1;
+  min-width: 0;
+  background: var(--bg-input);
+  border: 1px solid var(--blue);
+  border-radius: 4px;
+  color: var(--text);
+  font: inherit;
+  padding: 1px 4px;
+}
+/* Hidden until hovered/active so the list doesn't read as a wall of little
+   × buttons — it's a rare action, not a primary one per row. */
+.ts-theme-del {
+  flex: none;
+  width: 16px; height: 16px;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  color: var(--text-3);
+  font-size: 13px;
+  cursor: pointer;
+  border-radius: 4px;
+}
+.ts-theme-item:hover .ts-theme-del,
+.ts-theme-item.active .ts-theme-del { display: flex; }
+.ts-theme-del:hover { color: var(--red); background: var(--bg-hover); }
 
 /* ── Col 2: Preview + layers ── */
 .ts-center-col {
@@ -3905,25 +4631,55 @@ select {
   flex-direction: column;
   overflow: hidden;
   border-right: 1px solid var(--border);
-  background: #141416;
+  /* App-standard contrast grey for the frame AROUND the stage — deliberately
+     different from the stage's own pure-black transparent fill just below
+     (.ts-preview-stage.ts-transparent-bg) so the canvas itself still reads
+     as a distinct surface, not blended into the surrounding panel. */
+  background: var(--bg-hover);
 }
 
 /* Take the leftover column height and centre the canvas in it, so the working
-   area reads as a deliberate stage rather than leaving dead space underneath. */
+   area reads as a deliberate stage rather than leaving dead space underneath.
+   Plain flex-centering — the stage's own width/height are computed in JS
+   (see fitPreviewStage in app.js) and set as explicit pixel inline styles,
+   not derived from CSS aspect-ratio/max-width auto-sizing, after two CSS-only
+   attempts each failed differently (inset:0 stretched one axis regardless of
+   aspect-ratio; a single-point anchor had nothing driving it to grow past
+   near-zero at all). An explicitly-sized box centers perfectly with plain
+   flex, no auto-sizing ambiguity left for the browser to resolve. */
 .ts-preview-wrap {
   flex: 1;
   min-height: 0;
-  padding: 16px 16px 12px;
+  /* Deliberately generous — the stage now grows to fill whatever space this
+     padding leaves, so a thin margin here reads as almost no gap between the
+     grey body and the black stage at all. This is what actually needs to be
+     visible for the two surfaces to read as distinct, not the colors alone
+     (those were already correct). */
+  padding: 40px;
   display: flex;
   align-items: center;
   justify-content: center;
   overflow: hidden;
 }
 
+/* Right-aligned on the Add-content row, rather than living in the meta row
+   below or floating loose over the canvas. */
+.ts-canvas-size-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+}
+.ts-canvas-size-group .ts-meta-label { white-space: nowrap; }
+
 .ts-preview-stage {
-  width: 100%;
-  max-height: 100%;
-  aspect-ratio: 16/9;
+  /* Width/height are set as explicit px inline styles by fitPreviewStage()
+     in app.js (measures .ts-preview-wrap's real padded content box and
+     computes the largest box matching the theme's own canvas aspect ratio) —
+     see that function's comment for why two different pure-CSS auto-sizing
+     techniques were tried and abandoned first. aspect-ratio is kept only as
+     a harmless fallback in case JS hasn't run yet on first paint. */
+  aspect-ratio: var(--kairo-output-aspect, 16/9);
   background: #000;
   border-radius: 6px;
   overflow: hidden;
@@ -3932,9 +4688,16 @@ select {
   box-shadow: 0 4px 24px rgba(0,0,0,0.6);
 }
 
-/* Checkerboard for transparent bg */
+/* Flat grey for a transparent-canvas theme — matches the app's own standard
+   contrast-surface tone (same token used for hover/panel surfaces elsewhere)
+   rather than a checkerboard, which read as noisy against the rest of the
+   app's flat dark-grey visual language. */
+/* Pure black — same convention as every other "transparent" indicator in the
+   app (e.g. a theme thumbnail's transparent fill) — set against the grey
+   frame around it (.ts-center-col) for deliberate contrast, so the stage
+   itself is unmistakably its own surface. */
 .ts-preview-stage.ts-transparent-bg {
-  background: repeating-conic-gradient(#1a1a1a 0% 25%, #0e0e0e 0% 50%) 0 0 / 14px 14px;
+  background: #000;
 }
 
 /* ── Free-canvas selection ── */
@@ -3978,21 +4741,11 @@ select {
 .ts-guide-h { left: 0; right: 0; height: 1px; }
 
 /* ── Meta row (layout + animation + name) ── */
-.ts-meta-row {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  padding: 0 16px 10px;
-  flex-shrink: 0;
-  flex-wrap: wrap;
-}
-
-.ts-meta-group {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
+/* Still used by the Add-Content row's own "Size" picker (.ts-canvas-size-group)
+   — the rest of what used to share this label style (Layout/Transition/
+   Canvas/Translate) moved into the right-side properties panel as
+   .ts-props-section/.ts-props-section-label, matching that panel's own
+   per-layer property convention instead of a separate one. */
 .ts-meta-label {
   font-size: 9px;
   font-weight: 700;
@@ -4000,6 +4753,23 @@ select {
   text-transform: uppercase;
   color: var(--text-3);
   white-space: nowrap;
+}
+
+.ts-size-select {
+  height: 24px;
+  background-color: var(--bg-input);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%236e6e6e' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 6px center;
+  border: 1px solid var(--border-md);
+  border-radius: 5px;
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 10px;
+  font-weight: 600;
+  padding: 0 20px 0 8px;
+  outline: none;
+  cursor: pointer;
 }
 
 .ts-chip-group {
@@ -4113,6 +4883,10 @@ select {
 
 .ts-layer-row:hover { background: var(--bg-hover); }
 .ts-layer-row.active { background: var(--blue-dim); border-color: rgba(77,182,172,0.25); }
+/* Select-all's footprint (Cmd/Ctrl+A) — distinct from .active (the single
+   layer whose properties show in the panel) since a whole-theme select-all
+   spans many rows at once, none of which is "the" edited layer. */
+.ts-layer-row.multi-selected:not(.active) { border-color: rgba(77,182,172,0.4); background: rgba(77,182,172,0.08); }
 
 .ts-layer-vis {
   background: none; border: none; cursor: pointer;
@@ -4261,6 +5035,16 @@ select {
   accent-color: var(--blue);
   cursor: pointer;
 }
+
+/* Transition speed — sits right next to the Fade/Slide/Cut chips, hidden
+   for Cut (an instant swap has no duration to tune). */
+.ts-anim-speed-slider {
+  width: 60px;
+  height: 3px;
+  accent-color: var(--blue);
+  cursor: pointer;
+}
+.ts-anim-speed-slider.hidden { display: none; }
 
 .ts-prop-val {
   font-size: 10px;

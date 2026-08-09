@@ -129,7 +129,6 @@ const micDisplay         = document.getElementById('mic-display');
 const elapsedTimeEl      = document.getElementById('elapsed-time');
 const transcriptContent  = document.getElementById('transcript-content');
 const proPresenterStatus = document.getElementById('propresenter-status');
-const propresenterDot    = document.getElementById('propresenter-dot');
 const settingsBtn        = document.getElementById('settings-btn');
 const settingsModal      = document.getElementById('settings-modal');
 const closeSettingsBtn   = document.getElementById('close-settings');
@@ -1056,10 +1055,18 @@ function handlePPSuccess(verse) {
 }
 
 function updatePPStatus(text, cls) {
-  if (proPresenterStatus) proPresenterStatus.textContent = text;
-  if (propresenterDot) {
-    propresenterDot.className = 'bs-dot' + (cls ? ' ' + cls : '');
-  }
+  if (!proPresenterStatus) return;
+  proPresenterStatus.textContent = text;
+  // Colored text only — no separate dot. It used to sit right next to the
+  // sync toggle, which is ALSO red when on (this app's --green is red by
+  // brand, not literal green), so two red shapes touching read as visual
+  // clutter rather than two distinct pieces of information. The toggle
+  // already conveys on/off; the text alone conveys connection state,
+  // matching how OBS/Syphon/NDI's own status text already works (colored
+  // text, no dot).
+  proPresenterStatus.style.color =
+    cls === 'connected' ? 'var(--green)' :
+    cls === 'error'     ? 'var(--red)'   : 'var(--text-3)';
 }
 
 async function checkPP() {
@@ -1317,6 +1324,28 @@ async function loadSettings() {
     if (obsUrlInput && settings.obsUrl) obsUrlInput.value = settings.obsUrl;
     if (obsPasswordInput && settings.obsPassword) obsPasswordInput.value = settings.obsPassword;
     if (obsTextSourceInput && settings.obsTextSource) obsTextSourceInput.value = settings.obsTextSource;
+    // NDI/Syphon: their start/stop/status logic lives in index.html's inline
+    // scripts (native Tauri outputs, wired independently since that script
+    // runs before app.js loads) — but neither toggle's checked state was
+    // ever persisted to settings or restored on relaunch, so both silently
+    // reset to off every session even if the operator had them broadcasting
+    // last time. This only adds the missing persistence layer as a SECOND
+    // listener alongside the inline script's own — addEventListener doesn't
+    // replace, so its start/stop handling is untouched. Auto-resume
+    // dispatches a real 'change' event (not a direct function call — those
+    // are scoped inside the inline script's own IIFE) so the inline
+    // script's existing startNdi()/startSyphon() fires exactly as if the
+    // operator had just clicked the toggle themselves.
+    const ndiToggleEl    = document.getElementById('ndi-enabled-toggle');
+    const syphonToggleEl = document.getElementById('syphon-enabled-toggle');
+    [['ndiEnabled', ndiToggleEl], ['syphonEnabled', syphonToggleEl]].forEach(([key, el]) => {
+      if (!el) return;
+      el.addEventListener('change', () => saveSettingsPatch({ [key]: el.checked }));
+      if (settings[key] && !el.disabled) {
+        el.checked = true;
+        el.dispatchEvent(new Event('change'));
+      }
+    });
     const ollamaUrlInput   = document.getElementById('ollama-url');
     const ollamaModelSel   = document.getElementById('ollama-model');
     if (ollamaUrlInput) ollamaUrlInput.value = settings.ollamaUrl || 'http://localhost:11434';
@@ -1694,6 +1723,63 @@ testObsBtn?.addEventListener('click', async () => {
     if (obsStatusEl) { obsStatusEl.textContent = 'Error: ' + e.message; obsStatusEl.style.color = 'var(--red)'; }
   }
 });
+
+// ── OBS: lightweight periodic status → header indicator ────────────────────
+// Separate from the Test button's /api/obs/test (which opens a FRESH
+// connection each click) — this just reads the server's already-tracked
+// obsConnected state, cheap enough to poll on an interval.
+function updateOBSHeaderStatus(connected, enabled) {
+  const dot = document.getElementById('obs-header-dot');
+  const txt = document.getElementById('obs-header-status');
+  if (!dot || !txt) return;
+  dot.className = 'bs-dot' + (connected ? ' connected' : enabled ? ' error' : '');
+  txt.textContent = connected ? 'Connected' : enabled ? 'Not connected' : 'Off';
+}
+async function pollOBSStatus() {
+  try {
+    const r = await fetch(`${SERVER}/api/obs/status`);
+    const d = await r.json();
+    updateOBSHeaderStatus(d.connected, d.enabled);
+  } catch { updateOBSHeaderStatus(false, false); }
+}
+pollOBSStatus();
+setInterval(pollOBSStatus, 5000);
+
+// ── External Display: toggle persists whether Kairo should auto-open on a
+// connected external display; header status reports whether a physical
+// external display is actually plugged in right now — NOT window-open
+// state, which is a different question (you can have a window open on
+// your laptop's own screen with nothing external connected at all). Reuses
+// the same list_monitors Tauri command refreshDisplayStatus() already
+// calls (see list_monitors in src-tauri/src/lib.rs — real OS-level
+// monitor enumeration, not the Window Management API WebKit doesn't
+// support). ─────────────────────────────────────────────────────────────
+(function wireExternalDisplayOutput() {
+  const toggle    = document.getElementById('external-enabled-toggle');
+  const headerDot = document.getElementById('external-header-dot');
+  const headerTxt = document.getElementById('external-header-status');
+  if (!toggle) return;
+  toggle.checked = settings.externalDisplayEnabled !== false;
+  toggle.addEventListener('change', () => {
+    settings.externalDisplayEnabled = toggle.checked;
+    saveSettingsPatch({ externalDisplayEnabled: toggle.checked });
+  });
+
+  async function refresh() {
+    const tauriInvoke = window.__TAURI__?.core?.invoke || window.__TAURI__?.invoke;
+    let connected = false;
+    if (tauriInvoke) {
+      try {
+        const monitors = await tauriInvoke('list_monitors');
+        connected = Array.isArray(monitors) && monitors.length > 1;
+      } catch { /* not running inside Tauri, or the call failed — treat as not connected */ }
+    }
+    if (headerDot) headerDot.className = 'bs-dot' + (connected ? ' connected' : '');
+    if (headerTxt) headerTxt.textContent = connected ? 'External display connected' : 'No external display connected';
+  }
+  refresh();
+  setInterval(refresh, 3000);
+})();
 
 swapPPBtn?.addEventListener('click', async () => {
   settings.ppSwapTokenOrder = !settings.ppSwapTokenOrder;
