@@ -1765,19 +1765,26 @@ setInterval(pollOBSStatus, 5000);
     saveSettingsPatch({ externalDisplayEnabled: toggle.checked });
   });
 
+  // Shares refreshDisplayStatus()'s own list_monitors call (and its
+  // cachedScreens result) rather than making a second, separate one here —
+  // one Tauri round-trip per poll instead of two, one source of truth for
+  // "how many screens are there" between this header status and the
+  // Physical Screen dropdown below it.
   async function refresh() {
-    const tauriInvoke = window.__TAURI__?.core?.invoke || window.__TAURI__?.invoke;
-    let connected = false;
-    if (tauriInvoke) {
-      try {
-        const monitors = await tauriInvoke('list_monitors');
-        connected = Array.isArray(monitors) && monitors.length > 1;
-      } catch { /* not running inside Tauri, or the call failed — treat as not connected */ }
-    }
+    await refreshDisplayStatus();
+    upsertPrimaryScreenPicker();
+    const connected = cachedScreens.length > 1;
     if (headerDot) headerDot.className = 'bs-dot' + (connected ? ' connected' : '');
     if (headerTxt) headerTxt.textContent = connected ? 'External display connected' : 'No external display connected';
   }
   refresh();
+  // Real incident this fixes: a display plugged in AFTER the app was
+  // already running never got picked up, because nothing re-queried
+  // list_monitors once the settings panel's initial render had already
+  // happened — reopening the panel didn't help either, since Physical
+  // Screen's dropdown only ever rebuilt from whatever cachedScreens held
+  // at THAT render, not a fresh check. Polling here keeps both this status
+  // line and the dropdown genuinely live while Settings is open.
   setInterval(refresh, 3000);
 })();
 
@@ -6157,7 +6164,7 @@ function populateScreenOptions(sel, outputId) {
   sel.innerHTML = '';
   const noneOpt = document.createElement('option');
   noneOpt.value = '';
-  noneOpt.textContent = 'Not assigned — opens on this window’s screen';
+  noneOpt.textContent = 'Not assigned — defaults to your primary screen';
   sel.appendChild(noneOpt);
   cachedScreens.forEach(s => {
     const o = document.createElement('option');
@@ -6426,7 +6433,7 @@ async function refreshDisplayStatus() {
     return;
   }
   if (detected <= 1) {
-    hint.innerHTML = `<span style="color:var(--orange)">No external display detected.</span> The window will open on this screen — connect a projector or second monitor first.`;
+    hint.innerHTML = `<span style="color:var(--orange)">No external display detected.</span> Output will show on this screen until a projector or second monitor is connected.`;
     return;
   }
   hint.innerHTML = `<span style="color:var(--blue)">${detected} screens connected.</span> ${configured} output${configured > 1 ? 's' : ''} configured — assign each to a screen below so Open lands in the right place.`;
