@@ -1801,10 +1801,32 @@ setInterval(pollOBSStatus, 5000);
 (function wireExternalDisplayStatus() {
   const headerDot = document.getElementById('external-header-dot');
   const headerTxt = document.getElementById('external-header-status');
+  let autoResumeDone = false;
 
   // Shares refreshDisplayStatus()'s own list_monitors call (and its
   // cachedScreens result) rather than making a second, separate one here.
   async function refresh() {
+    // Auto-reopen whatever monitor was previously selected, once, the
+    // first time this runs after launch — a picker that only opens a
+    // window on its OWN change event means every app restart (or a
+    // display-server crash mid-dev-session, which happened repeatedly
+    // while debugging this exact feature) silently loses the output
+    // window with no way back short of manually re-touching the
+    // dropdown, even though the assignment itself was never lost.
+    // Matches how every other presentation app restores its output on
+    // launch instead of requiring the operator to re-pick it.
+    if (!autoResumeDone) {
+      autoResumeDone = true;
+      const primaryScreen = outputScreenMap()[PRIMARY_DISPLAY];
+      if (primaryScreen && typeof openDisplayOutput === 'function') {
+        openDisplayOutput({ id: PRIMARY_DISPLAY, name: PRIMARY_DISPLAY });
+      }
+      extraDisplays().forEach(d => {
+        if (outputScreenMap()[d.id] && typeof openDisplayOutput === 'function') {
+          openDisplayOutput(d);
+        }
+      });
+    }
     await refreshDisplayStatus();
     upsertPrimaryMonitorPicker();
     const connected = cachedScreens.length > 1;
@@ -6256,23 +6278,27 @@ function upsertPrimaryMonitorPicker() {
   }
 }
 
-// Briefly numbers every connected screen (identify.html) so the operator
-// can match "Display 2" in the picker to an actual physical monitor —
-// same idea as macOS's own System Settings > Displays "Identify" button,
-// necessary because macOS's own numbering doesn't necessarily match the
-// order this app's picker lists them in.
+// Briefly numbers just the monitor CURRENTLY SELECTED in the Output
+// Display picker (not every connected screen) — this confirms "yes, this
+// dropdown's choice really is that physical monitor" for the one output
+// actually being configured, rather than a generic all-screens overview
+// that doesn't say which number corresponds to which dropdown entry.
 let identifyWindowsOpen = false;
 document.getElementById('identify-displays-btn')?.addEventListener('click', async () => {
   if (identifyWindowsOpen || typeof openDisplayWindow !== 'function') return;
+  const sel = document.querySelector('#external-picker-row .output-screen-select');
+  const idx = sel ? Number(sel.value) : NaN;
+  const s = Number.isInteger(idx) ? cachedScreens[idx] : null;
+  if (!s) { toast('Select a display first', 'error'); return; }
   identifyWindowsOpen = true;
-  const labels = cachedScreens.map((s, i) => `kairo-identify-${i}`);
-  await Promise.all(cachedScreens.map((s, i) => openDisplayWindow(
-    labels[i],
-    `/identify.html?n=${i + 1}&label=${encodeURIComponent(s.isPrimary ? 'This Mac’s screen' : `Display ${i + 1}`)}`,
+  const label = 'kairo-identify-0';
+  await openDisplayWindow(
+    label,
+    `/identify.html?n=${idx + 1}&label=${encodeURIComponent(s.isPrimary ? 'This Mac’s screen' : `Display ${idx + 1}`)}`,
     { width: s.width, height: s.height, x: s.left, y: s.top, fullscreen: false }
-  )));
+  );
   setTimeout(() => {
-    labels.forEach(label => { if (typeof closeDisplayWindow === 'function') closeDisplayWindow(label); });
+    if (typeof closeDisplayWindow === 'function') closeDisplayWindow(label);
     identifyWindowsOpen = false;
   }, 3000);
 });
