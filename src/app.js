@@ -6292,20 +6292,39 @@ async function refreshDisplayStatus() {
   const extras = extraDisplays().length;
   const configured = 1 + extras;
   let detected = null;
-  try {
-    if (window.getScreenDetails) {
-      const d = await window.getScreenDetails();
-      const screens = d.screens || [];
-      cachedScreens = screens.map((s, i) => ({
-        index: i, width: s.width, height: s.height, left: s.left, top: s.top, isPrimary: !!s.isPrimary,
-      }));
-      detected = screens.length;
-    } else if (typeof window.screen?.isExtended === 'boolean') {
+  // Real OS-level enumeration first — the Window Management API
+  // (getScreenDetails/isExtended) this used to rely on exclusively is
+  // Chromium-only and WebKit has never implemented it, so it silently
+  // never detected anything in the packaged macOS app (see list_monitors
+  // in src-tauri/src/lib.rs for the full story). Only fall back to the
+  // web APIs when not running inside Tauri at all (e.g. testing app.js
+  // directly in a plain browser tab).
+  const tauriInvoke = window.__TAURI__?.core?.invoke || window.__TAURI__?.invoke;
+  if (tauriInvoke) {
+    try {
+      const screens = await tauriInvoke('list_monitors');
+      if (Array.isArray(screens) && screens.length) {
+        cachedScreens = screens;
+        detected = screens.length;
+      }
+    } catch (err) { console.warn('[KAIRO] list_monitors failed:', err); }
+  }
+  if (detected == null) {
+    try {
+      if (window.getScreenDetails) {
+        const d = await window.getScreenDetails();
+        const screens = d.screens || [];
+        cachedScreens = screens.map((s, i) => ({
+          index: i, width: s.width, height: s.height, left: s.left, top: s.top, isPrimary: !!s.isPrimary,
+        }));
+        detected = screens.length;
+      } else if (typeof window.screen?.isExtended === 'boolean') {
+        detected = window.screen.isExtended ? 2 : 1;
+      }
+    } catch { /* permission denied — leave cachedScreens as last known, fall back below */ }
+    if (detected == null && typeof window.screen?.isExtended === 'boolean') {
       detected = window.screen.isExtended ? 2 : 1;
     }
-  } catch { /* permission denied — leave cachedScreens as last known, fall back below */ }
-  if (detected == null && typeof window.screen?.isExtended === 'boolean') {
-    detected = window.screen.isExtended ? 2 : 1;
   }
 
   if (detected == null) {

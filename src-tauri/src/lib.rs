@@ -11,9 +11,9 @@ use std::process::{Child, Command};
 use std::sync::{Arc, Mutex};
 use base64::Engine;
 use tauri::utils::config::Color;
-use tauri::{AppHandle, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder};
-#[cfg(not(debug_assertions))]
-use tauri::Emitter;
+use tauri::{AppHandle, Emitter, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder};
+use tauri::menu::{AboutMetadataBuilder, MenuBuilder, MenuItemBuilder, SubmenuBuilder};
+use tauri_plugin_shell::ShellExt;
 use tauri_plugin_updater::UpdaterExt;
 
 // Embedded splash HTML — baked into the binary so it can render INSTANTLY
@@ -25,6 +25,143 @@ const SPLASH_HTML: &str = include_str!("splash.html");
 fn splash_data_url() -> String {
     let encoded = base64::engine::general_purpose::STANDARD.encode(SPLASH_HTML);
     format!("data:text/html;charset=utf-8;base64,{}", encoded)
+}
+
+// ── Native app menu ──────────────────────────────────────────────────────
+// Previously just Tauri's bare default (File > Close Window and nothing
+// else) — no Edit menu at all, which on macOS means Cmd+Z/Cmd+C/Cmd+V/
+// Cmd+A don't reliably reach a WKWebView text field: those shortcuts are
+// routed through the OS's Edit-menu-backed responder chain (`cut:`/`copy:`/
+// `paste:`/`undo:`/`selectAll:` selectors), not just "whatever the browser
+// does with the key combo" — an app with no Edit menu items wired to those
+// selectors can silently drop them in some inputs. Everything menu-command-
+// shaped (New Theme, Import, Export) is dispatched to the frontend as a
+// plain window event rather than reimplemented in Rust — app.js already
+// owns every one of those flows (file pickers, unsaved-state, toasts), so
+// Rust's job here is just "tell the frontend which menu item fired".
+fn build_app_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+    let about_metadata = AboutMetadataBuilder::new()
+        .name(Some("KAIRO"))
+        .version(Some(env!("CARGO_PKG_VERSION")))
+        .copyright(Some("© 2026 KAIRO"))
+        .website(Some("https://github.com/Kairo-live/Kairo"))
+        .website_label(Some("GitHub"))
+        .build();
+
+    // macOS's own app menu (titled with the app's real name automatically,
+    // "KAIRO" here) — About/Services/Hide/Quit live here by OS convention,
+    // not under File/Help the way Windows/Linux menus would put them.
+    // Standard macOS placement (Preferences… right after About, Cmd+,) —
+    // opens the same in-app Settings panel the toolbar gear icon does, via
+    // the "menu-settings" window event (see the frontend listener in
+    // app.js) rather than Rust knowing anything about that panel itself.
+    let settings_item = MenuItemBuilder::with_id("menu-settings", "Settings…")
+        .accelerator("CmdOrCtrl+,")
+        .build(app)?;
+
+    let app_menu = SubmenuBuilder::new(app, "KAIRO")
+        .about(Some(about_metadata))
+        .separator()
+        .item(&settings_item)
+        .separator()
+        .services()
+        .separator()
+        .hide()
+        .hide_others()
+        .show_all()
+        .separator()
+        .quit()
+        .build()?;
+
+    let file_menu = SubmenuBuilder::new(app, "File")
+        .text("menu-new-theme", "New Theme")
+        .text("menu-import", "Import…")
+        .text("menu-export-theme", "Export Current Theme")
+        .separator()
+        .close_window()
+        .build()?;
+
+    // Standard Cut/Copy/Paste/Select All/Undo/Redo — see the file-level
+    // comment above for why this menu existing at all (not just its
+    // contents) is the actual fix.
+    let edit_menu = SubmenuBuilder::new(app, "Edit")
+        .undo()
+        .redo()
+        .separator()
+        .cut()
+        .copy()
+        .paste()
+        .select_all()
+        .build()?;
+
+    let view_menu = SubmenuBuilder::new(app, "View")
+        .fullscreen()
+        .build()?;
+
+    let window_menu = SubmenuBuilder::new(app, "Window")
+        .minimize()
+        .maximize_with_text("Zoom")
+        .separator()
+        .bring_all_to_front()
+        .close_window()
+        .build()?;
+
+    let help_menu = SubmenuBuilder::new(app, "Help")
+        .text("menu-learn-more", "KAIRO on GitHub")
+        .text("menu-check-updates", "Check for Updates…")
+        .build()?;
+
+    MenuBuilder::new(app)
+        .item(&app_menu)
+        .item(&file_menu)
+        .item(&edit_menu)
+        .item(&view_menu)
+        .item(&window_menu)
+        .item(&help_menu)
+        .build()
+}
+
+// Shared by both the startup background check and the on-demand "Check for
+// Updates…" menu item. `announce_up_to_date` distinguishes them: the silent
+// startup check should stay silent unless there's actually something to
+// show, while a menu click is a direct request that deserves a response
+// either way (a "Check for Updates" button that says nothing when there's
+// nothing new reads as broken, not reassuring).
+fn check_for_updates(app: AppHandle, announce_up_to_date: bool) {
+    tauri::async_runtime::spawn(async move {
+        match app.updater() {
+            Ok(updater) => match updater.check().await {
+                Ok(Some(update)) => {
+                    println!("[KAIRO] Update available: {}", update.version);
+                    let _ = app.emit(
+                        "update-available",
+                        serde_json::json!({
+                            "version": update.version,
+                            "notes":   update.body.unwrap_or_default(),
+                        }),
+                    );
+                }
+                Ok(None) => {
+                    println!("[KAIRO] App is up to date.");
+                    if announce_up_to_date {
+                        let _ = app.emit("update-check-result", serde_json::json!({ "upToDate": true }));
+                    }
+                }
+                Err(e) => {
+                    eprintln!("[KAIRO] Update check error: {e}");
+                    if announce_up_to_date {
+                        let _ = app.emit("update-check-result", serde_json::json!({ "error": e.to_string() }));
+                    }
+                }
+            },
+            Err(e) => {
+                eprintln!("[KAIRO] Updater unavailable: {e}");
+                if announce_up_to_date {
+                    let _ = app.emit("update-check-result", serde_json::json!({ "error": e.to_string() }));
+                }
+            }
+        }
+    });
 }
 
 struct ServerProcess(Arc<Mutex<Option<Child>>>);
@@ -50,14 +187,39 @@ struct ServerConfig {
 /// There is a tiny race window (~ms) but no other process is realistically
 /// going to grab that exact port in between.
 fn pick_free_port() -> u16 {
-    if std::net::TcpListener::bind("127.0.0.1:7777").is_ok() {
+    // Dev builds never spawn their own Node sidecar (see the
+    // `#[cfg(not(debug_assertions))]` gate around `start_server` in `run`
+    // below) — the real, only server is the one `beforeDevCommand` already
+    // started (`npm run server`, always port 7777) before this process even
+    // launches. That means the 7777-probe below deterministically fails
+    // every single dev run (the port is legitimately taken, by the server
+    // this app is actually supposed to use), silently falling back to a
+    // random port nothing is listening on — every consumer of this value
+    // (the health-check poll, the post-splash `navigate()`, and the
+    // `get_server_port`/`get_server_config` IPC commands the frontend and
+    // the display window both rely on) would then all point at that dead
+    // port instead of the real server. Concretely: the window would
+    // navigate away from the correctly-loaded page to a connection that
+    // refuses, the frontend's JS would never run, and the app would appear
+    // to hang on the splash screen or show a blank window — indistinguishable
+    // from "not running". Always use 7777 in dev; only probe/fall back to a
+    // random free port in a release build, where this process's own sidecar
+    // spawn (below) is what's actually claiming that port.
+    #[cfg(debug_assertions)]
+    {
         return 7777;
     }
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .ok()
-        .and_then(|l| l.local_addr().ok())
-        .map(|a| a.port())
-        .unwrap_or(7777)
+    #[cfg(not(debug_assertions))]
+    {
+        if std::net::TcpListener::bind("127.0.0.1:7777").is_ok() {
+            return 7777;
+        }
+        std::net::TcpListener::bind("127.0.0.1:0")
+            .ok()
+            .and_then(|l| l.local_addr().ok())
+            .map(|a| a.port())
+            .unwrap_or(7777)
+    }
 }
 
 /// 32 bytes of OS entropy → URL-safe base64. ~43 chars, ~256 bits of entropy.
@@ -138,11 +300,18 @@ fn start_server(app: &AppHandle, port: u16, token: &str) -> Option<Child> {
         }
     };
 
-    // Resolve server.js
-    let resource_dir = app
-        .path()
-        .resource_dir()
-        .expect("Tauri resource dir unavailable");
+    // Resolve server.js. A packaging/permissions quirk (sandboxed install,
+    // moved bundle) making resource_dir unavailable used to panic and kill
+    // the whole process at launch — fall back to the same cwd-relative dev
+    // path the bundled-vs-dev branches below already use instead.
+    let cwd = || std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let resource_dir = match app.path().resource_dir() {
+        Ok(dir) => dir,
+        Err(e) => {
+            eprintln!("[KAIRO] WARNING: Tauri resource dir unavailable ({e}) — falling back to cwd-relative paths.");
+            cwd()
+        }
+    };
 
     let server_js = {
         // Production: bundled at resource_dir/server/server.js
@@ -151,10 +320,7 @@ fn start_server(app: &AppHandle, port: u16, token: &str) -> Option<Child> {
             bundled
         } else {
             // Dev: relative to project root
-            std::env::current_dir()
-                .unwrap()
-                .join("server")
-                .join("server.js")
+            cwd().join("server").join("server.js")
         }
     };
 
@@ -165,10 +331,7 @@ fn start_server(app: &AppHandle, port: u16, token: &str) -> Option<Child> {
             bundled
         } else {
             // Dev: project root databases/logos
-            std::env::current_dir()
-                .unwrap()
-                .join("databases")
-                .join("logos")
+            cwd().join("databases").join("logos")
         }
     };
 
@@ -228,6 +391,49 @@ fn get_server_config(state: tauri::State<'_, ServerConfig>) -> serde_json::Value
     serde_json::json!({ "port": state.port, "token": state.token })
 }
 
+/// Real, OS-level connected-display enumeration for the External Display /
+/// extra-output pickers. The frontend previously relied ENTIRELY on the
+/// browser's Window Management API (`getScreenDetails()` / `screen.
+/// isExtended`) to detect connected monitors — that API is Chromium-only;
+/// WebKit (the engine behind Tauri's WKWebView on macOS) has never
+/// implemented it, so `getScreenDetails` is simply `undefined` and
+/// `isExtended` is unsupported too. On macOS this meant a newly connected
+/// display was silently never detected — not a permission issue, not a
+/// timing issue, the API the whole feature depended on doesn't exist in
+/// this webview at all. Tauri's own monitor APIs go through the OS
+/// directly (winit → Cocoa NSScreen on macOS, Win32 on Windows), so they
+/// work regardless of what the webview engine exposes to JS. Same field
+/// shape the frontend's Window-Management-API path already produces
+/// (index/width/height/left/top/isPrimary) so both paths are interchangeable.
+#[tauri::command]
+fn list_monitors(app: AppHandle) -> Result<Vec<serde_json::Value>, String> {
+    let win = app
+        .get_webview_window("main")
+        .ok_or_else(|| "main window not available".to_string())?;
+    let monitors = win.available_monitors().map_err(|e| e.to_string())?;
+    let primary_pos = win
+        .primary_monitor()
+        .ok()
+        .flatten()
+        .map(|m| *m.position());
+    Ok(monitors
+        .iter()
+        .enumerate()
+        .map(|(i, m)| {
+            let pos = m.position();
+            let size = m.size();
+            serde_json::json!({
+                "index": i,
+                "width": size.width,
+                "height": size.height,
+                "left": pos.x,
+                "top": pos.y,
+                "isPrimary": primary_pos.map(|p| p == *pos).unwrap_or(i == 0),
+            })
+        })
+        .collect())
+}
+
 /// Called by the frontend once it has actually painted the real app (auth
 /// token loaded, styles applied) — this is the signal to reveal the main
 /// window and dismiss the splash. Showing the window immediately after
@@ -281,12 +487,23 @@ fn ndi_available() -> bool {
 #[tauri::command]
 fn ndi_start(app: AppHandle, source_name: String) -> Result<(), String> {
     let state = app.state::<NdiState>();
-    let h = state.0.lock().map_err(|e| e.to_string())?;
-    if h.is_running() {
-        return Ok(()); // idempotent — already broadcasting
+    {
+        // Check-and-reserve happens under one lock acquisition so two
+        // near-simultaneous calls can't both pass the check before either's
+        // background thread has actually installed its sender — see
+        // try_reserve_start's doc comment.
+        let mut h = state.0.lock().map_err(|e| e.to_string())?;
+        if !h.try_reserve_start() {
+            return Ok(()); // idempotent — already broadcasting or starting
+        }
     }
-    drop(h);
-    ndi::start(&source_name, state.0.clone())
+    let result = ndi::start(&source_name, state.0.clone());
+    if result.is_err() {
+        // start() failed before ever reaching the point where it would clear
+        // the reservation itself — clear it here so a retry isn't blocked.
+        if let Ok(mut h) = state.0.lock() { h.clear_starting(); }
+    }
+    result
 }
 
 #[tauri::command]
@@ -383,6 +600,7 @@ pub fn run() {
             get_server_port,
             get_server_token,
             get_server_config,
+            list_monitors,
             signal_main_ready,
             install_update,
             ndi_available,
@@ -394,6 +612,26 @@ pub fn run() {
             syphon_stop,
             syphon_update,
         ])
+        .menu(|handle| build_app_menu(handle))
+        .on_menu_event(|app, event| {
+            let id = event.id().as_ref();
+            // Everything here just forwards to the frontend as a plain window
+            // event — app.js already owns New Theme/Import/Export (file
+            // pickers, unsaved-state handling, toasts) via their existing
+            // toolbar buttons, so the menu should trigger the exact same
+            // code path rather than a second, divergent implementation in
+            // Rust. "Check for Updates…"/"Learn More" are the only two menu
+            // items handled entirely natively, since neither has (or needs)
+            // a frontend counterpart.
+            match id {
+                "menu-check-updates" => check_for_updates(app.clone(), true),
+                "menu-learn-more" => { let _ = app.shell().open("https://github.com/Kairo-live/Kairo", None); }
+                "menu-new-theme" | "menu-import" | "menu-export-theme" | "menu-settings" => {
+                    let _ = app.emit(id, ());
+                }
+                _ => {}
+            }
+        })
         .setup(|app| {
             let handle = app.handle().clone();
 
@@ -412,7 +650,14 @@ pub fn run() {
             .inner_size(440.0, 300.0)
             .center()
             .decorations(false)
-            .always_on_top(true)
+            // NOT always-on-top: that pins the splash above every other
+            // app's windows system-wide (macOS's floating window level
+            // ignores app boundaries), not just above Kairo's own main
+            // window — confirmed via a real reported repro where switching
+            // to another app mid-launch left the splash floating over it.
+            // A normal window level still shows immediately in front on
+            // launch (the OS focuses a just-created window), it just stops
+            // fighting to stay in front once the user looks elsewhere.
             .resizable(false)
             .skip_taskbar(false)
             // Set the native window + webview background to dark BEFORE HTML
@@ -432,7 +677,18 @@ pub fn run() {
             {
                 let cfg = app.state::<ServerConfig>();
                 let child = start_server(&handle, cfg.port, &cfg.token);
-                *app.state::<ServerProcess>().0.lock().unwrap() = child;
+                // Recover rather than panic if the mutex was ever poisoned —
+                // losing the child handle here would leak the Node sidecar
+                // process on shutdown, which matters more than a clean panic.
+                // Bound to its own `let` first — chaining straight off
+                // `app.state::<ServerProcess>()` made the State a temporary
+                // that got dropped at the end of the statement while the
+                // MutexGuard borrowed from it was still in use (E0716); this
+                // block only compiles in release builds (debug_assertions
+                // off), so `cargo build` never caught it during dev.
+                let server_process = app.state::<ServerProcess>();
+                let mut guard = server_process.0.lock().unwrap_or_else(|p| p.into_inner());
+                *guard = child;
             }
             #[cfg(debug_assertions)]
             {
@@ -521,29 +777,17 @@ pub fn run() {
 
                 // Check for updates in the background after the window is visible.
                 // Only runs in release builds — updater endpoint won't resolve in dev.
+                // Silent unless something's actually found (announce_up_to_date:
+                // false) — unlike the menu's on-demand "Check for Updates…", a
+                // background check the user didn't ask for shouldn't ever pop up
+                // just to say "you're fine".
                 #[cfg(not(debug_assertions))]
                 {
                     let handle3 = handle2.clone();
                     tauri::async_runtime::spawn(async move {
                         // Small delay so the UI settles before we show a banner.
                         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                        match handle3.updater() {
-                            Ok(updater) => match updater.check().await {
-                                Ok(Some(update)) => {
-                                    println!("[KAIRO] Update available: {}", update.version);
-                                    let _ = handle3.emit(
-                                        "update-available",
-                                        serde_json::json!({
-                                            "version": update.version,
-                                            "notes":   update.body.unwrap_or_default(),
-                                        }),
-                                    );
-                                }
-                                Ok(None) => println!("[KAIRO] App is up to date."),
-                                Err(e)   => eprintln!("[KAIRO] Update check error: {e}"),
-                            },
-                            Err(e) => eprintln!("[KAIRO] Updater unavailable: {e}"),
-                        }
+                        check_for_updates(handle3, false);
                     });
                 }
             });
@@ -554,16 +798,31 @@ pub fn run() {
         .expect("Error building KAIRO")
         .run(|app, event| {
             if matches!(event, RunEvent::Exit | RunEvent::ExitRequested { .. }) {
+                // Recover from a poisoned mutex instead of panicking — this is
+                // shutdown-time child-process cleanup; a panic here would
+                // skip it entirely and leak the Node sidecar.
                 if let Some(mut child) = app
                     .state::<ServerProcess>()
                     .0
                     .lock()
-                    .unwrap()
+                    .unwrap_or_else(|p| p.into_inner())
                     .take()
                 {
                     let _ = child.kill();
                     let _ = child.wait();
                     println!("[KAIRO] Server stopped.");
+                }
+                // NDI/Syphon hold native resources (CGL context, GL texture,
+                // background sender thread) that were previously never
+                // released on quit — only the Node child was cleaned up.
+                // stop_and_join (not plain stop) actually waits for the
+                // background thread's NDIlib_send_destroy/NDIlib_destroy to
+                // run, bounded so a hung native call can't hang shutdown.
+                app.state::<NdiState>().0.lock().unwrap_or_else(|p| p.into_inner())
+                    .stop_and_join(std::time::Duration::from_millis(500));
+                #[cfg(target_os = "macos")]
+                {
+                    let _ = syphon::stop(app.state::<SyphonState>().0.clone());
                 }
             }
         });
