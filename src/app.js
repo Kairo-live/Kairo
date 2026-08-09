@@ -6431,12 +6431,17 @@ async function renderDisplayOutputs() {
 // buildScreenSelect) read synchronously once this resolves — resolution
 // itself is no longer captured here; each output's screen is chosen
 // explicitly instead (see outputScreenMap).
+// Populates cachedScreens (read by populateScreenOptions/buildScreenSelect
+// for the monitor pickers). Real incident: this used to bail out entirely
+// via an early `if (!hint) return` guarding a status-text element that got
+// deleted from the External Display card during its redesign to the
+// monitor-picker layout — cachedScreens silently never populated again,
+// no error anywhere, the picker just always showed "None" regardless of
+// how many real displays were connected. Removed the dependency outright
+// rather than re-adding UI the new minimal design doesn't need — the
+// header status dot/text and the picker's own option list already say
+// everything this used to render into a separate hint line.
 async function refreshDisplayStatus() {
-  const hint = document.getElementById('display-status-hint');
-  if (!hint) return;
-  const extras = extraDisplays().length;
-  const configured = 1 + extras;
-  let detected = null;
   // Real OS-level enumeration first — the Window Management API
   // (getScreenDetails/isExtended) this used to rely on exclusively is
   // Chromium-only and WebKit has never implemented it, so it silently
@@ -6445,6 +6450,7 @@ async function refreshDisplayStatus() {
   // web APIs when not running inside Tauri at all (e.g. testing app.js
   // directly in a plain browser tab).
   const tauriInvoke = window.__TAURI__?.core?.invoke || window.__TAURI__?.invoke;
+  let detected = null;
   if (tauriInvoke) {
     try {
       const screens = await tauriInvoke('list_monitors');
@@ -6466,21 +6472,8 @@ async function refreshDisplayStatus() {
       } else if (typeof window.screen?.isExtended === 'boolean') {
         detected = window.screen.isExtended ? 2 : 1;
       }
-    } catch { /* permission denied — leave cachedScreens as last known, fall back below */ }
-    if (detected == null && typeof window.screen?.isExtended === 'boolean') {
-      detected = window.screen.isExtended ? 2 : 1;
-    }
+    } catch { /* permission denied — leave cachedScreens as last known */ }
   }
-
-  if (detected == null) {
-    hint.innerHTML = `${configured} display output${configured > 1 ? 's' : ''} configured. Pick which screen each one should use below.`;
-    return;
-  }
-  if (detected <= 1) {
-    hint.innerHTML = `<span style="color:var(--orange)">No external display detected.</span> Output will show on this screen until a projector or second monitor is connected.`;
-    return;
-  }
-  hint.innerHTML = `<span style="color:var(--blue)">${detected} screens connected.</span> Pick which one each output should use below.`;
 }
 
 // Open a window for one screen. It identifies itself via ?output= so it renders
