@@ -858,6 +858,25 @@ function buildCandidateCard(v, method, isSent = false) {
   return card;
 }
 
+// Manually sending an arbitrary verse from the Live Queue (not the next
+// sequential one) needs to tell the SERVER where the range now stands, not
+// just update this client's own preview — the range nav bar's "N / total"
+// count and "Next" target are driven by the server's own rangeCurrentVerse/
+// rangeQueue, which showInViewer/sendVerseToServer never touch. Real
+// incident: sending verse 8 out of a loaded 25-verse Matthew 1 range left
+// the nav bar stuck reporting "3/25 → verse 4", disconnected from what was
+// actually on screen. Only fires when the sent verse is actually part of
+// the currently active range — a normal one-off citation has nothing to
+// sync.
+function syncRangeJumpIfNeeded(v) {
+  if (!rangeRefs.has(v.reference)) return;
+  fetch(`${SERVER}/api/range/jump-to`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ book: v.book, chapter: v.chapter, verse: v.verse }),
+  }).catch(err => console.warn('[KAIRO] range jump-to failed:', err.message));
+}
+
 // Compact single-row card for the Live Queue section
 function buildQueueRow(v, method, correctedFrom = null) {
   const card = document.createElement('div');
@@ -883,11 +902,13 @@ function buildQueueRow(v, method, correctedFrom = null) {
     e.stopPropagation();
     showInViewer([v], method || 'direct', 1.0);
     sendVerseToServer(v);
+    syncRangeJumpIfNeeded(v);
   });
   // Double-click anywhere on card → send to screen (no reorder)
   wireDoubleClickSend(card, () => {
     updateViewerDisplay(v);   // update preview only — card stays in place
     sendVerseToServer(v);
+    syncRangeJumpIfNeeded(v);
     // Flash feedback
     card.classList.add('sent-pulse');
     setTimeout(() => card.classList.remove('sent-pulse'), 600);
@@ -1026,12 +1047,14 @@ function buildRangeCard(v, isActive) {
     e.stopPropagation();
     showInViewer([v], 'direct', 1.0);
     sendVerseToServer(v);
+    syncRangeJumpIfNeeded(v);
   });
 
   card.addEventListener('dblclick', (e) => {
     e.preventDefault();
     updateViewerDisplay(v);   // update preview only — card stays in place
     sendVerseToServer(v);
+    syncRangeJumpIfNeeded(v);
     card.classList.add('sent-pulse');
     setTimeout(() => card.classList.remove('sent-pulse'), 600);
   });

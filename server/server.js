@@ -1730,6 +1730,28 @@ app.post('/api/range/clear', (_, res) => {
   res.json({ ok: true });
 });
 
+// Manually jumping to an arbitrary verse WITHIN the active range (clicking
+// "Send" on some other row in the Live Queue, not the next sequential one)
+// only ever updated the client's own preview + pushed to outputs —
+// rangeCurrentVerse/rangeQueue never learned about the jump, so the range
+// position indicator ("RANGE 3/25 → next verse") and the "Next" button kept
+// advancing from wherever the range last THOUGHT it was, completely
+// disconnected from what was actually on screen. Real incident: sent verse
+// 8 of a loaded Matthew 1 range, the range nav bar stayed stuck on "3/25 →
+// verse 4" as if nothing had happened.
+app.post('/api/range/jump-to', (req, res) => {
+  const { book, chapter, verse } = req.body || {};
+  if (!rangeAllVerses.length) return res.json({ ok: false, reason: 'no range active' });
+  const idx = rangeAllVerses.findIndex(v => v.book === book && v.chapter === chapter && v.verse === verse);
+  if (idx === -1) return res.json({ ok: false, reason: 'verse not in active range' });
+  rangeCurrentVerse = rangeAllVerses[idx];
+  rangeQueue        = rangeAllVerses.slice(idx + 1);
+  rangeAdvancing     = false;
+  broadcastRangeState();
+  broadcast({ type: 'range-active', activeRef: rangeCurrentVerse.reference });
+  res.json({ ok: true });
+});
+
 app.post('/api/lookup', async (req, res) => {
   try {
     const { book, chapter, verse, verseEnd } = req.body;
