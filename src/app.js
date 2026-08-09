@@ -6623,10 +6623,86 @@ async function saveSettingsPatch(patch) {
       llmStatusEl.innerHTML = has
         ? `<span class="cs-pill cs-pill-ok">●</span> Ollama ready · <strong>${s.configuredModel}</strong>`
         : `<span class="cs-pill cs-pill-warn">●</span> Ollama running, but <strong>${s.configuredModel}</strong> not installed. Run <code>ollama pull ${s.configuredModel}</code>`;
+    } else if (s.installSupported) {
+      // One-click GUIDED install (macOS + Windows): Kairo downloads the
+      // official installer and launches it — Gatekeeper (macOS) or the
+      // installer's own dialog (Windows) still needs one click through on
+      // the user's side, same tradeoff as everything else that isn't a
+      // plain file Kairo can just drop in place (see ollama_installer.js).
+      llmStatusEl.innerHTML = `<span class="cs-pill cs-pill-err">●</span> Ollama not reachable at ${s.url || 'localhost:11434'}. <button id="cs-ollama-install-btn" class="modal-btn secondary" style="margin-left:6px;font-size:11px;padding:3px 10px;">Install Ollama</button>`;
     } else {
       llmStatusEl.innerHTML = `<span class="cs-pill cs-pill-err">●</span> Ollama not reachable at ${s.url || 'localhost:11434'} — install from <a href="https://ollama.com" target="_blank" rel="noopener">ollama.com</a>`;
     }
   }
+
+  // Delegated (not attached per-render, since renderLLMStatus rebuilds the
+  // button's innerHTML on every status poll) — click anywhere in the LLM
+  // status line, only act if it actually landed on the install button.
+  llmStatusEl?.addEventListener('click', async (e) => {
+    if (e.target.id !== 'cs-ollama-install-btn') return;
+    const btn = e.target;
+    btn.disabled = true;
+    btn.textContent = 'Downloading…';
+
+    let res;
+    try {
+      res = await fetch(`${SERVER}/api/llm/install`, { method: 'POST' });
+    } catch (err) {
+      btn.textContent = `Failed: ${err.message}`;
+      btn.disabled = false;
+      return;
+    }
+    if (!res.ok || !res.body) {
+      btn.textContent = `HTTP ${res.status}`;
+      btn.disabled = false;
+      return;
+    }
+
+    // Same NDJSON-line streaming pattern as the Whisper install flow above.
+    const reader  = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '', failed = null;
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      const lines = buf.split('\n');
+      buf = lines.pop();
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        let evt;
+        try { evt = JSON.parse(line); } catch { continue; }
+        if (evt.phase === 'download' && typeof evt.pct === 'number') {
+          btn.textContent = `Downloading… ${evt.pct}%`;
+        } else if (evt.phase === 'extract') {
+          btn.textContent = 'Extracting…';
+        } else if (evt.phase === 'launch' || evt.phase === 'launched') {
+          btn.textContent = 'Opening installer…';
+        } else if (evt.phase === 'complete' && evt.ok === false) {
+          failed = evt.error || 'install failed';
+        }
+      }
+    }
+
+    if (failed) {
+      btn.textContent = `Failed: ${failed}`;
+      btn.disabled = false;
+      return;
+    }
+
+    // The OS-native install step (drag to Applications / click through the
+    // Windows installer) still has to happen on the user's side — poll
+    // status for a while afterward so the panel updates itself the moment
+    // Ollama actually comes up, instead of leaving a stale "not reachable"
+    // message the user has to manually refresh past.
+    btn.textContent = 'Waiting for Ollama to start…';
+    for (let i = 0; i < 60; i++) {
+      await new Promise(r => setTimeout(r, 3000));
+      const s = await fetchLLMStatus();
+      if (s.ok) { renderLLMStatus(s); return; }
+    }
+    renderLLMStatus(await fetchLLMStatus());
+  });
 
   function renderSessionList(items) {
     if (!sessionList) return;
