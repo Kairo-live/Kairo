@@ -405,33 +405,56 @@ fn get_server_config(state: tauri::State<'_, ServerConfig>) -> serde_json::Value
 /// work regardless of what the webview engine exposes to JS. Same field
 /// shape the frontend's Window-Management-API path already produces
 /// (index/width/height/left/top/isPrimary) so both paths are interchangeable.
+// macOS's NSScreen (what tao's available_monitors() reads on this platform)
+// only reflects a hotplugged display once the run loop has actually
+// processed NSApplicationDidChangeScreenParametersNotification — a query
+// issued off the main thread (which is where #[tauri::command] handlers
+// run by default) can read a stale, cached screen count indefinitely, even
+// polled repeatedly, even minutes after the display was connected. Real
+// incident this caused: a genuinely connected second monitor never showed
+// up no matter how often the frontend re-polled this command, because the
+// polling itself was never the problem — every single call was reading
+// the same stale off-main-thread snapshot. run_on_main_thread forces the
+// actual query onto the thread where the run loop (and therefore NSScreen's
+// notification-driven cache) is live.
 #[tauri::command]
 fn list_monitors(app: AppHandle) -> Result<Vec<serde_json::Value>, String> {
-    let win = app
-        .get_webview_window("main")
-        .ok_or_else(|| "main window not available".to_string())?;
-    let monitors = win.available_monitors().map_err(|e| e.to_string())?;
-    let primary_pos = win
-        .primary_monitor()
-        .ok()
-        .flatten()
-        .map(|m| *m.position());
-    Ok(monitors
-        .iter()
-        .enumerate()
-        .map(|(i, m)| {
-            let pos = m.position();
-            let size = m.size();
-            serde_json::json!({
-                "index": i,
-                "width": size.width,
-                "height": size.height,
-                "left": pos.x,
-                "top": pos.y,
-                "isPrimary": primary_pos.map(|p| p == *pos).unwrap_or(i == 0),
-            })
-        })
-        .collect())
+    let (tx, rx) = std::sync::mpsc::channel();
+    let app_for_thread = app.clone();
+    app.run_on_main_thread(move || {
+        let result = (|| -> Result<Vec<serde_json::Value>, String> {
+            let win = app_for_thread
+                .get_webview_window("main")
+                .ok_or_else(|| "main window not available".to_string())?;
+            let monitors = win.available_monitors().map_err(|e| e.to_string())?;
+            let primary_pos = win
+                .primary_monitor()
+                .ok()
+                .flatten()
+                .map(|m| *m.position());
+            Ok(monitors
+                .iter()
+                .enumerate()
+                .map(|(i, m)| {
+                    let pos = m.position();
+                    let size = m.size();
+                    serde_json::json!({
+                        "index": i,
+                        "width": size.width,
+                        "height": size.height,
+                        "left": pos.x,
+                        "top": pos.y,
+                        "isPrimary": primary_pos.map(|p| p == *pos).unwrap_or(i == 0),
+                    })
+                })
+                .collect())
+        })();
+        // Channel send failing just means the caller already gave up
+        // waiting (e.g. dropped rx) — nothing to do about that here.
+        let _ = tx.send(result);
+    })
+    .map_err(|e| e.to_string())?;
+    rx.recv().map_err(|e| e.to_string())?
 }
 
 /// Called by the frontend once it has actually painted the real app (auth
