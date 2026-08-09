@@ -1114,6 +1114,45 @@ function markVerseEndIfJustFinished(transcript) {
   if (meaningfulWords(transcript).join(' ').includes(tail3)) verseEndDetectedAt = Date.now();
 }
 
+// ── Last-2-words end-of-verse detection (range auto-advance) ───────────────
+// If a range is active, check whether this transcript contains the last two
+// meaningful words of the currently-displayed verse. This is the ONLY range
+// auto-advance trigger — a timing-based estimator (words-per-second × verse
+// length) used to run alongside this, but it measured pace from the last
+// 15s of ALL speech, including tangents. A preacher who reads a verse then
+// explains it for a minute talks at a normal (often faster) conversational
+// pace while explaining — the estimator read that as "fast reader" and
+// advanced the display to the next verse while they were still mid-
+// explanation of the current one. Matching the last two words the preacher
+// actually finished reading has no such failure mode: it only fires when
+// they've genuinely said the end of the verse, however long that takes.
+//
+// Previously only called from the FINAL-transcript path, which meant it
+// could only react once Deepgram's endpointing had already closed out the
+// segment — an extra few hundred ms to a second-plus of pure waiting, on
+// top of however long the words themselves took to arrive. Direct-citation
+// detection doesn't pay that tax (it already runs on interim text too), so
+// range-advance was measurably slower to react than a fresh citation despite
+// being the simpler case. Now called from both interim and final so it
+// reacts the moment the words are heard, same as everything else.
+function maybeAdvanceRangeOnLastWords(transcript) {
+  const now = Date.now();
+  if (!(rangeCurrentVerse && rangeQueue.length && !rangeAdvancing
+      && now - rangeLastAdvanceAt >= RANGE_ADVANCE_COOLDOWN_MS)) return;
+  const tail2 = getLastMeaningfulWords(
+    rangeCurrentVerse.text || rangeCurrentVerse.kjv_text || '', 2
+  );
+  if (!tail2) return;
+  // Filter the transcript through the SAME stop-word removal as tail2 (see
+  // meaningfulWords) — a raw substring check would require "heaven" and
+  // "earth" to be literally adjacent, but the actual spoken verse has "and
+  // the" between them, same as the source text does.
+  const transcriptMeaningful = meaningfulWords(transcript).join(' ');
+  if (transcriptMeaningful.includes(tail2)) {
+    requestRangeAdvance(`Last-2-words advance: "${tail2}" detected`);
+  }
+}
+
 async function maybeHandleVerseEndNumberJump(transcript) {
   if (!verseEndDetectedAt || Date.now() - verseEndDetectedAt > VERSE_END_NUMBER_WINDOW_MS) return false;
   const now = Date.now();
@@ -2602,6 +2641,7 @@ async function handleTranscriptSegment(transcript, isFinal, confidence, speechFi
     // finishes. The trie still gets the (stable, one-shot) final text below.
     if (!whisperActive) streamNewWords(transcript, false);
     maybeHandleNextVerseTrigger(transcript).catch(() => {});
+    maybeAdvanceRangeOnLastWords(transcript);
     if (workerBasicReady) {
       let foundRef = await processForReferences(transcript, false);
       if (!foundRef && referenceContext.isValid) {
@@ -2663,34 +2703,7 @@ async function handleTranscriptSegment(transcript, isFinal, confidence, speechFi
   accumulateTopicWords(transcript);
   maybeRebuildTopicLibrary();
 
-  // ── Last-2-words end-of-verse detection ──────────────────────────────────
-  // If a range is active, check whether this transcript contains the last two
-  // meaningful words of the currently-displayed verse. This is the ONLY range
-  // auto-advance trigger — a timing-based estimator (words-per-second × verse
-  // length) used to run alongside this, but it measured pace from the last
-  // 15s of ALL speech, including tangents. A preacher who reads a verse then
-  // explains it for a minute talks at a normal (often faster) conversational
-  // pace while explaining — the estimator read that as "fast reader" and
-  // advanced the display to the next verse while they were still mid-
-  // explanation of the current one. Matching the last two words the preacher
-  // actually finished reading has no such failure mode: it only fires when
-  // they've genuinely said the end of the verse, however long that takes.
-  if (rangeCurrentVerse && rangeQueue.length && !rangeAdvancing
-      && now - rangeLastAdvanceAt >= RANGE_ADVANCE_COOLDOWN_MS) {
-    const tail2 = getLastMeaningfulWords(
-      rangeCurrentVerse.text || rangeCurrentVerse.kjv_text || '', 2
-    );
-    if (tail2) {
-      // Filter the transcript through the SAME stop-word removal as tail2
-      // (see meaningfulWords) — a raw substring check would require "heaven"
-      // and "earth" to be literally adjacent, but the actual spoken verse
-      // has "and the" between them, same as the source text does.
-      const transcriptMeaningful = meaningfulWords(transcript).join(' ');
-      if (transcriptMeaningful.includes(tail2)) {
-        requestRangeAdvance(`Last-2-words advance: "${tail2}" detected`);
-      }
-    }
-  }
+  maybeAdvanceRangeOnLastWords(transcript);
 
   let foundRef = await processForReferences(transcript, true);
 
