@@ -98,6 +98,40 @@ fn build_app_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry
         .fullscreen()
         .build()?;
 
+    // Operator-facing live controls — everything here has an existing
+    // toolbar button already wired up with the real logic (dedup, WS
+    // broadcast, etc.); like File's New Theme/Import/Export above, Rust's
+    // job is only to tell the frontend which one fired (see
+    // initNativeMenuBridge in app.js), not to reimplement any of it.
+    // Accelerators picked to avoid the Edit/Window menus' defaults above.
+    let toggle_listening_item = MenuItemBuilder::with_id("menu-toggle-listening", "Start/Stop Listening")
+        .accelerator("CmdOrCtrl+L")
+        .build(app)?;
+    let range_next_item = MenuItemBuilder::with_id("menu-range-next", "Next")
+        .accelerator("CmdOrCtrl+Right")
+        .build(app)?;
+    let clear_slide_item = MenuItemBuilder::with_id("menu-clear-slide", "Clear Slide")
+        .accelerator("CmdOrCtrl+K")
+        .build(app)?;
+    let clear_all_item = MenuItemBuilder::with_id("menu-clear-all", "Clear All")
+        .accelerator("CmdOrCtrl+Shift+K")
+        .build(app)?;
+
+    let controls_menu = SubmenuBuilder::new(app, "Controls")
+        .item(&toggle_listening_item)
+        .separator()
+        .item(&range_next_item)
+        .text("menu-range-end", "End Range")
+        .separator()
+        .item(&clear_slide_item)
+        .text("menu-clear-media", "Clear Media")
+        // The timer/clock layer's own clear — added once the output grew
+        // a third composited layer alongside slide/media (see the Timer
+        // tab in service.js and server/segments.js).
+        .text("menu-clear-timer", "Clear Timer")
+        .item(&clear_all_item)
+        .build()?;
+
     let window_menu = SubmenuBuilder::new(app, "Window")
         .minimize()
         .maximize_with_text("Zoom")
@@ -116,6 +150,7 @@ fn build_app_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry
         .item(&file_menu)
         .item(&edit_menu)
         .item(&view_menu)
+        .item(&controls_menu)
         .item(&window_menu)
         .item(&help_menu)
         .build()
@@ -623,6 +658,7 @@ pub fn run() {
 
     let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(ServerProcess(Arc::new(Mutex::new(None))))
         .manage(server_config)
@@ -664,7 +700,9 @@ pub fn run() {
             match id {
                 "menu-check-updates" => check_for_updates(app.clone(), true),
                 "menu-learn-more" => { let _ = app.shell().open("https://github.com/Kairo-live/Kairo", None); }
-                "menu-new-theme" | "menu-import" | "menu-export-theme" | "menu-settings" => {
+                "menu-new-theme" | "menu-import" | "menu-export-theme" | "menu-settings"
+                | "menu-toggle-listening" | "menu-range-next" | "menu-range-end"
+                | "menu-clear-slide" | "menu-clear-media" | "menu-clear-timer" | "menu-clear-all" => {
                     let _ = app.emit(id, ());
                 }
                 _ => {}

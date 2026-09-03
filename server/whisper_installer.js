@@ -11,6 +11,7 @@
 const fs    = require('fs');
 const path  = require('path');
 const https = require('https');
+const { checkDiskSpace } = require('./disk_space');
 
 const HF_BASE = 'https://huggingface.co/ggerganov/whisper.cpp/resolve/main';
 
@@ -49,11 +50,17 @@ function isModelPresent(name = DEFAULT_NAME, base) {
   return fs.existsSync(p) && fs.statSync(p).size > 1_000_000; // guards against a truncated/partial download
 }
 
+// No activity (not even a data event) for this long → treat the connection
+// as stalled. Hugging Face's CDN can accept the connection and then hang
+// mid-transfer; without this the install promise never settles and the
+// progress UI freezes with no way to cancel/retry.
+const DOWNLOAD_IDLE_TIMEOUT_MS = 30_000;
+
 // Follows redirects (Hugging Face's CDN issues a 302 to its S3-backed mirror).
 function download(url, dest, onProgress, maxRedirects = 5) {
   return new Promise((resolve, reject) => {
     const file = fs.createWriteStream(dest);
-    https.get(url, (res) => {
+    const req = https.get(url, (res) => {
       if ([301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location) {
         file.close();
         try { fs.unlinkSync(dest); } catch {}
@@ -83,8 +90,12 @@ function download(url, dest, onProgress, maxRedirects = 5) {
       try { fs.unlinkSync(dest); } catch {}
       reject(err);
     });
+    req.setTimeout(DOWNLOAD_IDLE_TIMEOUT_MS, () => {
+      req.destroy(new Error(`Download stalled (no activity for ${DOWNLOAD_IDLE_TIMEOUT_MS / 1000}s)`));
+    });
   });
 }
+
 
 async function installWhisperModel({ name = DEFAULT_NAME, modelsDir: base, onProgress } = {}) {
   if (isModelPresent(name, base)) {
@@ -95,6 +106,8 @@ async function installWhisperModel({ name = DEFAULT_NAME, modelsDir: base, onPro
   fs.mkdirSync(dir, { recursive: true });
   const dest = modelPath(name, base);
   const spec = modelSpec(name);
+
+  checkDiskSpace(dir, spec.mb);
 
   onProgress?.({ phase: 'download', pct: 0 });
   await download(`${HF_BASE}/${spec.file}`, dest, onProgress);

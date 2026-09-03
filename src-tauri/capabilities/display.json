@@ -1,0 +1,9 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "display-capability",
+  "description": "KAIRO output/display windows (kairo-*) — display.html only ever calls get_server_token (to authenticate its own WS connection to the local server); scoped narrowly instead of inheriting the main window's full permission set (NDI/Syphon control, app updates, window creation), none of which the output window uses.",
+  "windows": ["kairo-*"],
+  "permissions": [
+    "allow-get-server-token"
+  ]
+}

@@ -571,7 +571,7 @@ const SAME_BOOK_WINDOW_MS = 60000;
 // blocked, that's fundamentally different evidence than any single hit, and
 // after enough repeats it's more reasonable to conclude the "active"
 // context is what's actually stale/wrong.
-let staleOverrideCandidate = null;   // { key, count, lastSeenAt }
+let staleOverrideCandidate = null;   // { key, count, lastSeenAt, methods: Set }
 const STALE_OVERRIDE_COUNT     = 3;
 const STALE_OVERRIDE_WINDOW_MS = 20000;
 
@@ -924,6 +924,11 @@ function getLastMeaningfulWords(text, n = 2) {
   return words.slice(-n).join(' ');
 }
 
+function getFirstMeaningfulWords(text, n = 3) {
+  const words = meaningfulWords(text);
+  return words.slice(0, n).join(' ');
+}
+
 async function setRangeQueue(verses) {
   await attachBibleTranslations(verses);
   rangeAllVerses      = verses.slice();
@@ -988,6 +993,13 @@ function broadcastRangeState() {
 let lastNextVerseAt = 0;
 const NEXT_VERSE_COOLDOWN_MS = 4000;
 let lastOutputVerse = null;   // last verse actually pushed to outputs
+// Every verse key actually sent while the current book has been active —
+// NOT every verse number below the current one. See isBackwardInSameBook's
+// comment below for why this distinction matters: a preacher citing a
+// passage's last verse first, then reading the whole thing from the top,
+// is completely normal and every one of those earlier verses was legitimately
+// SKIPPED, not already shown. Reset whenever the active book changes.
+let sentVerseKeysThisBook = new Set();
 
 async function maybeHandleNextVerseTrigger(transcript) {
   const tail = transcript.split(RE_SPACES).slice(-8).join(' ').toLowerCase();
@@ -1150,6 +1162,32 @@ function maybeAdvanceRangeOnLastWords(transcript) {
   const transcriptMeaningful = meaningfulWords(transcript).join(' ');
   if (transcriptMeaningful.includes(tail2)) {
     requestRangeAdvance(`Last-2-words advance: "${tail2}" detected`);
+  }
+}
+
+// Complements the check above rather than replacing it: that one only
+// fires once the preacher has nearly finished the CURRENT verse, which is
+// inherently a late signal — the tail words don't exist yet until they're
+// almost done reading. This one watches for the very START of the NEXT
+// verse instead, so a preacher who paraphrases the end of the current one
+// or just launches straight into the next without hitting its exact last
+// two words still gets picked up promptly. Requires 2+ meaningful (stop-
+// word-filtered, 3+ char) words, not one bare common word, for the same
+// false-positive reasons as every other proximity-based guard in this
+// codebase (see reference_parser.js's Esther/Obadiah incidents) — most
+// verse-opening words ("And", "For", "Then") are already in SKIP_WORDS,
+// so this naturally skips right past the generic openings that would
+// otherwise make it trigger-happy.
+function maybeAdvanceRangeOnNextVersePrefix(transcript) {
+  const now = Date.now();
+  if (!(rangeCurrentVerse && rangeQueue.length && !rangeAdvancing
+      && now - rangeLastAdvanceAt >= RANGE_ADVANCE_COOLDOWN_MS)) return;
+  const nextVerse = rangeQueue[0];
+  const prefix3 = getFirstMeaningfulWords(nextVerse.text || nextVerse.kjv_text || '', 3);
+  if (meaningfulWords(prefix3).length < 2) return;
+  const transcriptMeaningful = meaningfulWords(transcript).join(' ');
+  if (transcriptMeaningful.includes(prefix3)) {
+    requestRangeAdvance(`Next-verse-prefix advance: "${prefix3}" detected`);
   }
 }
 
@@ -1444,6 +1482,16 @@ app.post('/api/theme/import-protheme', (req, res) => {
 app.post('/api/service/send', async (req, res) => {
   const { verse, look } = req.body;
   if (!verse) return res.status(400).json({ error: 'No slide provided' });
+  // Every OTHER path that can put a verse on the viewer (broadcastDetection,
+  // setRangeQueue/advanceRangeQueue) runs it through attachBibleTranslations
+  // first, so the Multi-Language theme's right-hand panel has something to
+  // show. This is the one send path that never did — it's what the Send
+  // button, double-click, and Candidates promote all funnel through (see
+  // sendVerseToServer in app.js), so any of those looked like the theme
+  // "randomly" not working: it genuinely never got a translation attached
+  // for this specific send path, while auto-detected/range verses (which go
+  // through broadcastDetection) always did.
+  await attachBibleTranslations([verse]);
   logDebug('service-send', {
     reference: verse.reference || null,
     hasImage: !!verse.image,
@@ -1474,6 +1522,16 @@ app.post('/api/debug-log', (req, res) => {
   if (event && typeof event === 'string') logDebug(`client:${event}`, data && typeof data === 'object' ? data : {});
   res.json({ ok: true });
 });
+
+// Ollama is a translation fallback ONLY now — tried after the bundled local
+// MT model, before falling through to Claude (see translate.js). It used to
+// also back Content Studio's sermon-note generation; that feature (and its
+// model-management/pull UI) was removed as unfocused scope, but translate.js
+// still calls these two, so they stay. No settings UI sets these anymore —
+// they resolve to sensible defaults (a bare local Ollama install would just
+// work) unless someone hand-edits databases/settings.json.
+function ollamaUrl()   { return (settings.ollamaUrl   || 'http://localhost:11434').replace(/\/+$/, ''); }
+function ollamaModel() { return  settings.ollamaModel || 'qwen2.5:7b-instruct'; }
 
 // Multi-language theme support. `ref` (book/chapter/verse) resolves against
 // a real bundled translation; anything else goes to the bundled local MT
@@ -1534,10 +1592,15 @@ app.get('/api/media/folders', (_req, res) => res.json({ ok: true, folders: media
 // directly, but isn't exposed in the UI anymore now that creation is the
 // normal path.
 app.post('/api/media/folders', (req, res) => {
-  const { name } = req.body || {};
-  if (!name || !name.trim()) return res.status(400).json({ error: 'name required' });
+  const { name, dirPath } = req.body || {};
+  const onChange = (folderId) => broadcast({ type: 'media-folder-changed', folderId });
   try {
-    const folder = media.createFolder(name.trim(), (folderId) => broadcast({ type: 'media-folder-changed', folderId }));
+    // dirPath → link a real folder the operator picked anywhere on disk
+    // (the native folder picker). No dirPath → the legacy "just name it,
+    // KAIRO makes one under Documents" path.
+    const folder = dirPath
+      ? media.addFolder((name && name.trim()) || null, dirPath, onChange)
+      : media.createFolder((name || '').trim(), onChange);
     res.json({ ok: true, folder });
   } catch (err) { res.status(422).json({ error: err.message, code: err.code || null }); }
 });
@@ -1547,7 +1610,7 @@ app.delete('/api/media/folders/:id', (req, res) => {
 app.get('/api/media/folders/:id/items', async (req, res) => {
   const items = await media.listFolderItems(req.params.id);
   if (items === null) return res.status(404).json({ error: 'No such folder' });
-  res.json({ ok: true, items });
+  res.json({ ok: true, items, truncated: !!items.truncated });
 });
 app.post('/api/media/folders/:id/upload', async (req, res) => {
   const { filename, dataBase64 } = req.body || {};
@@ -1581,6 +1644,61 @@ app.put('/api/songs/:id', (req, res) => {
 });
 app.delete('/api/songs/:id', (req, res) => res.json({ ok: songs.removeSong(req.params.id) }));
 
+// ── Action/Trigger framework (stage timer, system clock message, …) ──────
+// Generic registry — see triggers.js. Firing broadcasts over the same WS
+// broadcast() every other real-time message already uses; the display
+// window listens for {type:'action', actionId, ...} the same way it
+// listens for 'detection'/'media'/etc.
+const triggers = require('./triggers');
+triggers.init(broadcast);
+
+app.get('/api/triggers', (_req, res) => res.json({
+  ok: true, triggers: triggers.listTriggers(), types: triggers.listTriggerTypes(),
+}));
+app.post('/api/triggers', (req, res) => res.json({ ok: true, trigger: triggers.addTrigger(req.body || {}) }));
+app.put('/api/triggers/:id', (req, res) => {
+  const trigger = triggers.updateTrigger(req.params.id, req.body || {});
+  if (!trigger) return res.status(404).json({ error: 'No such trigger' });
+  res.json({ ok: true, trigger });
+});
+app.delete('/api/triggers/:id', (req, res) => res.json({ ok: triggers.removeTrigger(req.params.id) }));
+app.post('/api/triggers/:id/fire', (req, res) => {
+  const result = triggers.fireTrigger(req.params.id);
+  if (result.error) return res.status(404).json(result);
+  res.json(result);
+});
+app.post('/api/triggers/:id/stop', (req, res) => { triggers.stopTrigger(req.params.id); res.json({ ok: true }); });
+
+// ── Service Segments (Preservice/Worship/Sermon/…) ────────────────────────
+// Ordered stage-timer presets with a "one live at a time" rule — see
+// segments.js. Each segment IS a triggers.js stage-timer under the hood.
+const segments = require('./segments');
+segments.init();
+
+app.get('/api/segments', (_req, res) => res.json({ ok: true, segments: segments.listSegments() }));
+app.post('/api/segments', (req, res) => res.json({ ok: true, segment: segments.addSegment(req.body?.name || 'Segment', { themeId: req.body?.themeId, slideStyles: req.body?.slideStyles }) }));
+app.put('/api/segments/:id', (req, res) => {
+  const s = segments.updateSegment(req.params.id, req.body || {});
+  if (!s) return res.status(404).json({ error: 'No such segment' });
+  res.json({ ok: true, segment: s });
+});
+app.delete('/api/segments/:id', (req, res) => res.json({ ok: segments.removeSegment(req.params.id) }));
+app.post('/api/segments/reorder', (req, res) => res.json({ ok: true, segments: segments.reorderSegments(req.body?.orderedIds || []) }));
+app.post('/api/segments/:id/start', (req, res) => {
+  const result = segments.startSegment(req.params.id, req.body?.endAtTime);
+  if (result.error) return res.status(400).json(result);
+  res.json(result);
+});
+app.post('/api/segments/:id/stop', (req, res) => {
+  const result = segments.stopSegment(req.params.id, req.body?.markDone);
+  if (result.error) return res.status(404).json(result);
+  res.json(result);
+});
+app.post('/api/segments/:id/reset', (req, res) => {
+  const result = segments.resetSegment(req.params.id);
+  if (result.error) return res.status(404).json(result);
+  res.json(result);
+});
 // Send a media item (image/video) to the output's independent media layer —
 // separate from /api/service/send, which drives the theme/text slide layer.
 // The two compose on the display: media sits behind, the slide's theme
@@ -1592,11 +1710,35 @@ app.post('/api/service/send-media', (req, res) => {
   res.json({ ok: true });
 });
 
+// A segment's themed countdown goes to its OWN independent layer
+// (#timer-layer in display.html), NOT the slide layer — so scripture/lyrics
+// on screen are undisturbed and Clear Timer removes only this. The
+// per-second value still arrives via the stage-timer 'action' broadcast.
+app.post('/api/service/send-timer', (req, res) => {
+  const { look, style, label, timerText, clear } = req.body || {};
+  if (clear) {
+    broadcast({ type: 'timer-slide', target: 'viewer', clear: true });
+  } else {
+    broadcast({ type: 'timer-slide', target: 'viewer', look: look || null, style: style || {}, label: label || null, timerText: timerText || '0:00', timestamp: Date.now() });
+  }
+  res.json({ ok: true });
+});
+
 // Clear one output layer independently, or 'all' for the previous
 // whole-stage clear behavior (kept for compatibility with anything still
 // sending bare {type:'clear'}).
 app.post('/api/service/clear-layer', async (req, res) => {
   const layer = req.body?.layer || 'all';
+  // Stop the actual thing *before* telling the display to hide it — a
+  // still-running segment/clock trigger would otherwise broadcast a
+  // fresh update a second later and silently bring the badge right back,
+  // the same lesson as the display-window silent-failure fixes elsewhere.
+  if (layer === 'timer' || layer === 'all') {
+    segments.stopLiveSegment();
+    triggers.listTriggers()
+      .filter(t => t.typeId === 'clock-message' && triggers.isActive(t.id))
+      .forEach(t => triggers.stopTrigger(t.id));
+  }
   broadcast({ type: 'clear-layer', target: 'viewer', layer });
   if (layer === 'slide' || layer === 'all') await clearExternalOutputs();
   res.json({ ok: true });
@@ -1780,7 +1922,34 @@ app.post('/api/search', async (req, res) => {
 
     // Parse — inBibleMode=true so ambiguous book names (John, Mark, Luke, Acts…)
     // resolve correctly when typed explicitly rather than spoken mid-sermon
-    const ref = parseSpokenReference(normQuery, true);
+    let ref = parseSpokenReference(normQuery, true);
+
+    // ── Bare "<book> <chapter>" with no "chapter" keyword ───────────────────
+    // parseSpokenReference requires the literal word "chapter" between an
+    // AMBIGUOUS_BOOKS book (Genesis, John, Mark, Acts, James, Exodus,
+    // Numbers, Job… ~24 books) and a bare number before it'll trust the
+    // number as a chapter — that guard exists to stop live speech
+    // ("...he owes me thirty dollars...") from hallucinating a citation out
+    // of an unrelated stray number near a mis-heard book name (see the
+    // comment above that guard in reference_parser.js). None of that risk
+    // applies here — this is deliberate, typed input, not overheard
+    // fragments — so "Genesis 1" or "John 3:16" typed into search silently
+    // fell through to keyword text search and came back empty, while the
+    // exact same reference for a non-ambiguous book ("Matthew 5") worked
+    // fine. Retry with "chapter" spliced in at every position and accept
+    // the first one parseSpokenReference itself resolves — this can't
+    // invent a reference the parser wouldn't otherwise accept, it just
+    // supplies the one keyword the guard was waiting to see. Bounded to
+    // short queries since a real reference is never more than a handful of
+    // words.
+    if (!ref) {
+      const words = normQuery.split(/\s+/).filter(Boolean);
+      if (words.length <= 8 && !words.includes('chapter')) {
+        for (let i = 1; i < words.length && !ref; i++) {
+          ref = parseSpokenReference([...words.slice(0, i), 'chapter', ...words.slice(i)].join(' '), true);
+        }
+      }
+    }
 
     if (ref && ref.book) {
       // ── Range (verseStart / verseEnd) ──────────────────────────────────────
@@ -1938,13 +2107,9 @@ app.post('/api/whisper/install', async (_req, res) => {
 // mt_engine.js (ONNX/@huggingface/transformers), downloaded once on first
 // need rather than baked into the app installer (see mt_installer.js).
 //
-// Routes are named /api/translate-model/* rather than /api/llm/* — the
-// latter was already taken by the Ollama-connectivity check a few hundred
-// lines down (app.get('/api/llm/status', ...) for Content Studio/sermon
-// notes). Both silently registering the same path meant this route always
-// won (Express takes the first match) and the Ollama status check never
-// actually ran. Renaming this one is the fix, since the Ollama endpoint's
-// path is the one already relied on elsewhere.
+// Routes are named /api/translate-model/* rather than /api/llm/* to keep
+// this clearly distinct from Ollama (a separate, optional translation
+// fallback — see ollamaUrl()/ollamaModel() near /api/translate above).
 // French/Spanish/Portuguese are three independent model downloads (see
 // mt_engine.js) — status/install/in-progress tracking is per-language.
 const mtInstaller = require('./mt_installer');
@@ -1995,647 +2160,6 @@ app.post('/api/translate-model/install', async (req, res) => {
   }
 });
 
-// ─────────────────────────────────────────────────────────────────────────
-// CONTENT STUDIO — sermon notes & sermon points
-//   Saved sessions live as JSON in <app-data>/sessions/<id>.json. Generation
-//   runs through a local Ollama instance — fully offline. Anti-hallucination
-//   guardrails: only verses that actually fired during the session are
-//   passed to the model, and any scripture refs in the response that aren't
-//   in that whitelist are stripped post-hoc.
-// ─────────────────────────────────────────────────────────────────────────
-const SESSIONS_DIR = process.env.KAIRO_APP_DATA_DIR
-  ? path.join(process.env.KAIRO_APP_DATA_DIR, 'sessions')
-  : path.join(__dirname, '..', 'databases', 'sessions');
-
-function ensureSessionsDir() { fs.mkdirSync(SESSIONS_DIR, { recursive: true }); }
-function sessionPath(id) {
-  if (!/^[A-Za-z0-9_\-]+$/.test(String(id || ''))) return null;
-  return path.join(SESSIONS_DIR, `${id}.json`);
-}
-function readSession(id) {
-  const p = sessionPath(id);
-  if (!p || !fs.existsSync(p)) return null;
-  try { return JSON.parse(fs.readFileSync(p, 'utf8')); } catch { return null; }
-}
-async function writeSession(s) {
-  await fs.promises.mkdir(SESSIONS_DIR, { recursive: true });
-  const p = sessionPath(s.id);
-  if (!p) throw new Error('invalid session id');
-  await fs.promises.writeFile(p, JSON.stringify(s, null, 2));
-}
-
-app.get('/api/sessions', async (_req, res) => {
-  ensureSessionsDir();
-  let files = [];
-  try { files = (await fs.promises.readdir(SESSIONS_DIR)).filter(f => f.endsWith('.json')); } catch {}
-  const list = (await Promise.all(files.map(async (f) => {
-    try {
-      const s = JSON.parse(await fs.promises.readFile(path.join(SESSIONS_DIR, f), 'utf8'));
-      return {
-        id: s.id,
-        title: s.title || s.date || s.id,
-        date: s.date,
-        durationMin: s.durationMin || 0,
-        verseCount: (s.verses || []).length,
-        wordCount: (s.transcript || '').split(/\s+/).filter(Boolean).length,
-        hasNote: !!(s.generated && s.generated.note),
-        hasPoints: !!(s.generated && s.generated.points),
-        createdAt: s.createdAt,
-      };
-    } catch { return null; }
-  }))).filter(Boolean);
-  list.sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
-  res.json({ sessions: list });
-});
-
-app.get('/api/sessions/:id', (req, res) => {
-  const s = readSession(req.params.id);
-  if (!s) return res.status(404).json({ error: 'not found' });
-  res.json(s);
-});
-
-// Hard caps on session size. Even an hour-long sermon rarely exceeds ~10k
-// words; these limits give plenty of headroom and prevent a misbehaving
-// client from filling the disk.
-const MAX_TRANSCRIPT_CHARS = 200_000;
-const MAX_VERSES_PER_SESSION = 500;
-
-app.post('/api/sessions', async (req, res) => {
-  const body = req.body || {};
-  const transcript = String(body.transcript || '').trim().slice(0, MAX_TRANSCRIPT_CHARS);
-  const verses = (Array.isArray(body.verses) ? body.verses : [])
-    .slice(0, MAX_VERSES_PER_SESSION)
-    .map(v => ({
-      ref:  String(v?.ref  || '').slice(0, 80),
-      text: String(v?.text || '').slice(0, 4000),
-      time: String(v?.time || '').slice(0, 16),
-    }))
-    .filter(v => v.ref);
-  if (!transcript && !verses.length && !body.id) {
-    return res.status(400).json({ error: 'empty session — record some audio first' });
-  }
-  const now = new Date();
-  const id = body.id ? String(body.id).slice(0, 64) : now.toISOString().replace(/[:.]/g, '-');
-  if (!/^[A-Za-z0-9_\-]+$/.test(id)) {
-    return res.status(400).json({ error: 'invalid session id' });
-  }
-  const existing = body.id ? readSession(body.id) : null;
-  const session = existing || {};
-  session.id          = id;
-  session.title       = body.title       ?? session.title       ?? `Session — ${now.toLocaleDateString()}`;
-  session.date        = body.date        ?? session.date        ?? now.toISOString().slice(0, 10);
-  session.durationMin = body.durationMin ?? session.durationMin ?? 0;
-  session.transcript  = transcript || session.transcript || '';
-  session.verses      = verses.length ? verses : (session.verses || []);
-  session.generated   = session.generated || {};
-  session.createdAt   = session.createdAt || now.toISOString();
-  session.updatedAt   = now.toISOString();
-  // writeSession is async — without await the response races the disk write
-  // (an immediate follow-up read 404s) and write errors escape the catch.
-  try { await writeSession(session); }
-  catch (e) { return res.status(500).json({ error: e.message }); }
-  res.json({ ok: true, id, session });
-});
-
-app.delete('/api/sessions/:id', (req, res) => {
-  const p = sessionPath(req.params.id);
-  if (!p || !fs.existsSync(p)) return res.status(404).json({ error: 'not found' });
-  try { fs.unlinkSync(p); res.json({ ok: true }); }
-  catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-function ollamaUrl()   { return (settings.ollamaUrl   || 'http://localhost:11434').replace(/\/+$/, ''); }
-function ollamaModel() { return  settings.ollamaModel || 'qwen2.5:7b-instruct'; }
-
-app.get('/api/llm/status', async (_req, res) => {
-  const url = ollamaUrl();
-  try {
-    const r = await axios.get(url + '/api/tags', { timeout: 1500 });
-    const models = (r.data?.models || []).map(m => m.name);
-    res.json({ ok: true, url, models, configuredModel: ollamaModel() });
-  } catch (e) {
-    res.json({ ok: false, url, error: e.code || e.message });
-  }
-});
-
-// Streams Ollama's `/api/pull` progress through to the client as NDJSON.
-// Client disconnect = pull cancellation: we destroy the upstream stream so
-// Ollama stops fetching layers.
-// Ollama model names: <namespace>/<name>:<tag> — alphanumerics, dots, dashes,
-// underscores, slashes, colons. Reject anything else so we don't pass weird
-// strings (or accidental shell metacharacters) downstream.
-const MODEL_NAME_RE = /^[A-Za-z0-9._:\-\/]{1,128}$/;
-
-app.post('/api/llm/pull', async (req, res) => {
-  const model = String(req.body?.model || ollamaModel()).trim();
-  if (!model || !MODEL_NAME_RE.test(model)) {
-    return res.status(400).json({ error: 'invalid model name' });
-  }
-  const url = ollamaUrl();
-
-  startNdjsonStream(res);
-
-  let upstream;
-  try {
-    upstream = await axios.post(url + '/api/pull',
-      { name: model, stream: true },
-      { responseType: 'stream', timeout: 0 }
-    );
-  } catch (e) {
-    res.write(JSON.stringify({ error: 'Cannot reach Ollama: ' + (e.code || e.message) }) + '\n');
-    return res.end();
-  }
-
-  let cancelled = false;
-  req.on('close', () => {
-    cancelled = true;
-    try { upstream.data.destroy(); } catch {}
-  });
-  upstream.data.on('data', chunk => { if (!cancelled) res.write(chunk); });
-  upstream.data.on('end',   () => res.end());
-  upstream.data.on('error', e => {
-    try { res.write(JSON.stringify({ error: e.message }) + '\n'); } catch {}
-    res.end();
-  });
-});
-
-// Hard cap on transcript words shipped to the model — keeps inference fast
-// on 7B models and prevents context-window overflows. Long sermons keep the
-// most recent 4k words; the user can export the full transcript separately.
-const TRANSCRIPT_WORD_CAP = 4000;
-function clampTranscript(t) {
-  if (!t) return '';
-  const words = t.split(/\s+/);
-  return words.length <= TRANSCRIPT_WORD_CAP ? t : words.slice(-TRANSCRIPT_WORD_CAP).join(' ');
-}
-
-const NOTE_PROMPT = `You are a sermon-transcript analyst. Produce a faithful, structured sermon note from the transcript and verified scripture list provided.
-
-STRICT RULES:
-1. Use ONLY material present in the transcript.
-2. Cite scriptures only by reference — never paraphrase or reword Bible text.
-3. Only reference scriptures from the verified list. Never invent references.
-4. If the transcript is too short or unclear for a section, return an empty array — do not pad.
-5. Output JSON ONLY matching this schema:
-{
-  "title": string,
-  "summary": string,
-  "sections": [
-    { "heading": string, "body": string, "scriptures": [string] }
-  ],
-  "closing": string
-}`;
-
-const POINTS_PROMPT = `You are a sermon-transcript analyst. Extract the preacher's main points as a bullet outline.
-
-STRICT RULES:
-1. Use ONLY material present in the transcript.
-2. Each point must be grounded in something the preacher actually said.
-3. Tie each point to one scripture from the verified list when possible — otherwise leave scripture as null.
-4. supportingQuote, if present, must be an EXACT short fragment from the transcript (max 25 words). If no clean quote, use null.
-5. 3–7 points, ordered by appearance in the transcript.
-6. Output JSON ONLY matching this schema:
-{
-  "title": string,
-  "mainTheme": string,
-  "points": [
-    { "point": string, "explanation": string, "scripture": string | null, "supportingQuote": string | null }
-  ]
-}`;
-
-function buildUserPayload(session) {
-  const verseList = (session.verses || [])
-    .map(v => `- ${v.ref}${v.text ? `: "${String(v.text).replace(/"/g, "'")}"` : ''}`)
-    .join('\n') || '(none — preacher did not cite any tracked verses)';
-  return `VERIFIED SCRIPTURES (the only references you may cite):
-${verseList}
-
-TRANSCRIPT:
-${clampTranscript(session.transcript || '')}`;
-}
-
-function sanitizeNote(out, allowed) {
-  if (!out || typeof out !== 'object') return null;
-  const ok = new Set(allowed);
-  const sections = Array.isArray(out.sections) ? out.sections : [];
-  return {
-    title:   String(out.title   || '').slice(0, 200),
-    summary: String(out.summary || '').slice(0, 600),
-    sections: sections.slice(0, 12).map(s => ({
-      heading:    String(s.heading || '').slice(0, 120),
-      body:       String(s.body    || '').slice(0, 1200),
-      scriptures: Array.isArray(s.scriptures) ? s.scriptures.filter(r => ok.has(r)) : [],
-    })).filter(s => s.heading || s.body),
-    closing: String(out.closing || '').slice(0, 400),
-  };
-}
-
-function sanitizePoints(out, allowed) {
-  if (!out || typeof out !== 'object') return null;
-  const ok = new Set(allowed);
-  const points = Array.isArray(out.points) ? out.points : [];
-  return {
-    title:     String(out.title     || '').slice(0, 200),
-    mainTheme: String(out.mainTheme || '').slice(0, 400),
-    points: points.slice(0, 10).map(p => ({
-      point:           String(p.point       || '').slice(0, 200),
-      explanation:     String(p.explanation || '').slice(0, 800),
-      scripture:       p.scripture && ok.has(p.scripture) ? p.scripture : null,
-      supportingQuote: p.supportingQuote ? String(p.supportingQuote).slice(0, 250) : null,
-    })).filter(p => p.point),
-  };
-}
-
-// ── Structure-aware generation (map/reduce) ──────────────────────────────
-// The old single-shot path clamped to the LAST 4k words — an hour-long sermon
-// is 8-10k words, so the first half was silently discarded — and asked one
-// model call to structure everything. Instead we use what Kairo already
-// knows: the sermon segments naturally at its scripture citations.
-//
-//   1. Anchor each captured verse at its position in the transcript by
-//      locating a 4-word shingle of the verse text (the preacher read it).
-//   2. Cut the transcript into chunks at the midpoints between anchors —
-//      one chunk per scripture moment, whole sermon covered.
-//   3. MAP: one small model call per chunk (heading/point/explanation/quote).
-//      Small context per call → faster on 7B-class models, far less drift.
-//   4. REDUCE: sections/points are assembled deterministically in preaching
-//      order (structure never depends on the model); one final call writes
-//      only the connective prose (title, summary/theme, closing).
-//
-// Scriptures are attached from the anchors themselves, so the citation
-// whitelist holds by construction. Falls back to the single-shot path for
-// short sessions or if Ollama can't handle per-chunk calls.
-
-const MAX_MAP_CHUNKS    = 8;     // cap model calls per generation
-const MIN_CHUNK_WORDS   = 60;    // merge slivers into their neighbour
-const CHUNK_WORD_CAP    = 1200;  // clamp any one chunk fed to the model
-
-const CHUNK_PROMPT = `You are a sermon-transcript analyst. You are given ONE segment of a sermon transcript, and the scripture that was read in that segment (if any). Extract the preacher's teaching in this segment.
-
-STRICT RULES:
-1. Use ONLY material present in the segment.
-2. heading: a 3-8 word title for this part of the sermon.
-3. point: ONE sentence stating the main point the preacher makes here.
-4. explanation: 2-4 sentences expanding the point, faithful to the transcript.
-5. supportingQuote: an EXACT short fragment from the segment (max 25 words), or null if there is no clean quote.
-6. Output JSON only.`;
-
-const CHUNK_SCHEMA = {
-  type: 'object',
-  properties: {
-    heading:         { type: 'string' },
-    point:           { type: 'string' },
-    explanation:     { type: 'string' },
-    supportingQuote: { type: ['string', 'null'] },
-  },
-  required: ['heading', 'point', 'explanation'],
-};
-
-const NOTE_META_PROMPT = `You are a sermon-transcript analyst. You are given the section outline of a sermon (headings, points, scriptures, in preaching order). Write the framing prose for the sermon note.
-
-STRICT RULES:
-1. title: a faithful sermon title (max 12 words) drawn from the outline's theme.
-2. summary: 2-4 sentences summarising the sermon's overall message.
-3. closing: 1-3 sentences capturing the sermon's charge or conclusion.
-4. Do not introduce ideas or scriptures that are not in the outline.
-5. Output JSON only.`;
-
-const NOTE_META_SCHEMA = {
-  type: 'object',
-  properties: {
-    title:   { type: 'string' },
-    summary: { type: 'string' },
-    closing: { type: 'string' },
-  },
-  required: ['title', 'summary', 'closing'],
-};
-
-const POINTS_META_PROMPT = `You are a sermon-transcript analyst. You are given the extracted points of a sermon in preaching order. Write the framing prose.
-
-STRICT RULES:
-1. title: a faithful sermon title (max 12 words).
-2. mainTheme: 1-2 sentences stating the sermon's central theme.
-3. Do not introduce ideas that are not in the points.
-4. Output JSON only.`;
-
-const POINTS_META_SCHEMA = {
-  type: 'object',
-  properties: {
-    title:     { type: 'string' },
-    mainTheme: { type: 'string' },
-  },
-  required: ['title', 'mainTheme'],
-};
-
-const OLLAMA_CALL_TIMEOUT_MS = 120_000;
-
-// One chat call with schema-constrained output. Ollama ≥ 0.5 accepts a JSON
-// schema in `format` and guarantees conforming output; older versions reject
-// it, so retry once with plain JSON mode.
-async function ollamaChat(system, user, schema) {
-  const body = {
-    model:   ollamaModel(),
-    stream:  false,
-    options: { temperature: 0.2, num_ctx: 8192 },
-    messages: [
-      { role: 'system', content: system },
-      { role: 'user',   content: user },
-    ],
-  };
-  let raw;
-  try {
-    const r = await axios.post(ollamaUrl() + '/api/chat', { ...body, format: schema },
-      { timeout: OLLAMA_CALL_TIMEOUT_MS });
-    raw = r.data?.message?.content || '';
-  } catch (e) {
-    if (!e.response || e.response.status < 400 || e.response.status >= 500) throw e;
-    const r = await axios.post(ollamaUrl() + '/api/chat', { ...body, format: 'json' },
-      { timeout: OLLAMA_CALL_TIMEOUT_MS });
-    raw = r.data?.message?.content || '';
-  }
-  return JSON.parse(raw);   // throws on garbage — caller decides per chunk
-}
-
-function _contentNormWord(w) { return w.toLowerCase().replace(/[^a-z0-9]/g, ''); }
-
-// Cut the transcript into per-scripture chunks. Returns null when there isn't
-// enough structure to be worth it (fewer than 2 anchored verses).
-function buildSermonChunks(session) {
-  const oWords = String(session.transcript || '').split(/\s+/).filter(Boolean);
-  if (oWords.length < MIN_CHUNK_WORDS * 2) return null;
-  const nWords = oWords.map(_contentNormWord);
-
-  // Transcript 4-gram → first word position (skip grams with empty tokens)
-  const gramPos = new Map();
-  for (let i = 0; i + 4 <= nWords.length; i++) {
-    if (!nWords[i] || !nWords[i+1] || !nWords[i+2] || !nWords[i+3]) continue;
-    const g = `${nWords[i]} ${nWords[i+1]} ${nWords[i+2]} ${nWords[i+3]}`;
-    if (!gramPos.has(g)) gramPos.set(g, i);
-  }
-
-  // Anchor each verse at the earliest transcript position of any of its 4-grams
-  const anchored = [];
-  for (const v of (session.verses || [])) {
-    const vw = String(v.text || '').split(/\s+/).map(_contentNormWord).filter(Boolean);
-    let pos = null;
-    for (let i = 0; i + 4 <= vw.length; i++) {
-      const p = gramPos.get(`${vw[i]} ${vw[i+1]} ${vw[i+2]} ${vw[i+3]}`);
-      if (p !== undefined && (pos === null || p < pos)) pos = p;
-    }
-    if (pos !== null) anchored.push({ ref: v.ref, text: v.text, pos });
-  }
-  if (anchored.length < 2) return null;
-  anchored.sort((a, b) => a.pos - b.pos);
-
-  // Chunk k runs from the midpoint before its anchor to the midpoint after.
-  // First chunk absorbs the intro; last chunk runs to the end (closing).
-  let chunks = anchored.map((a, k) => {
-    const start = k === 0 ? 0 : Math.floor((anchored[k-1].pos + a.pos) / 2);
-    const end   = k === anchored.length - 1
-      ? oWords.length
-      : Math.floor((a.pos + anchored[k+1].pos) / 2);
-    return { verses: [a], start, end };
-  });
-
-  // Merge slivers into the previous chunk, then cap the total count by
-  // repeatedly merging the smallest adjacent pair.
-  chunks = chunks.filter((c, k) => {
-    if (k > 0 && c.end - c.start < MIN_CHUNK_WORDS) {
-      chunks[k-1].verses.push(...c.verses);
-      chunks[k-1].end = c.end;
-      return false;
-    }
-    return true;
-  });
-  while (chunks.length > MAX_MAP_CHUNKS) {
-    let idx = 0, best = Infinity;
-    for (let k = 0; k + 1 < chunks.length; k++) {
-      const size = (chunks[k].end - chunks[k].start) + (chunks[k+1].end - chunks[k+1].start);
-      if (size < best) { best = size; idx = k; }
-    }
-    chunks[idx].verses.push(...chunks[idx+1].verses);
-    chunks[idx].end = chunks[idx+1].end;
-    chunks.splice(idx + 1, 1);
-  }
-
-  return chunks.map(c => ({
-    verses: c.verses,
-    text:   oWords.slice(c.start, Math.min(c.end, c.start + CHUNK_WORD_CAP)).join(' '),
-  }));
-}
-
-// Quote must be an exact fragment of the chunk — enforce, don't trust.
-function _verifyQuote(quote, chunkText) {
-  if (!quote) return null;
-  const q = String(quote).trim();
-  if (!q || q.split(/\s+/).length > 25) return null;
-  const norm = s => s.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim();
-  return norm(chunkText).includes(norm(q)) ? q : null;
-}
-
-async function generateStructured(session, type) {
-  const chunks = buildSermonChunks(session);
-  if (!chunks || chunks.length < 2) return null;   // short session → single-shot
-
-  console.log(`[Content] Structured generation: ${chunks.length} chunks (${type})`);
-
-  // MAP — one small extraction per chunk. A failed chunk is skipped, not fatal.
-  const extracted = [];
-  for (let k = 0; k < chunks.length; k++) {
-    const c = chunks[k];
-    const scriptureLine = c.verses
-      .map(v => `${v.ref}: "${String(v.text || '').slice(0, 300)}"`)
-      .join('\n') || '(none)';
-    try {
-      const out = await ollamaChat(
-        CHUNK_PROMPT,
-        `SCRIPTURE READ IN THIS SEGMENT:\n${scriptureLine}\n\nSEGMENT ${k + 1} OF ${chunks.length}:\n${c.text}`,
-        CHUNK_SCHEMA,
-      );
-      if (out && out.point) {
-        extracted.push({
-          heading:         String(out.heading || '').slice(0, 120),
-          point:           String(out.point || '').slice(0, 200),
-          explanation:     String(out.explanation || '').slice(0, 1200),
-          supportingQuote: _verifyQuote(out.supportingQuote, c.text),
-          scriptures:      c.verses.map(v => v.ref),
-        });
-      }
-    } catch (e) {
-      console.warn(`[Content] Chunk ${k + 1}/${chunks.length} failed: ${e.message}`);
-    }
-    broadcast({ type: 'content-progress', done: k + 1, total: chunks.length + 1 });
-  }
-  if (extracted.length < 2) return null;   // not enough survived → single-shot
-
-  // REDUCE — structure is assembled here, in preaching order; the model only
-  // writes the connective prose around it.
-  const outline = extracted
-    .map((s, k) => `${k + 1}. ${s.heading} — ${s.point} [${s.scriptures.join(', ') || 'no scripture'}]`)
-    .join('\n');
-
-  let meta = {};
-  try {
-    meta = await ollamaChat(
-      type === 'note' ? NOTE_META_PROMPT : POINTS_META_PROMPT,
-      `SERMON OUTLINE:\n${outline}`,
-      type === 'note' ? NOTE_META_SCHEMA : POINTS_META_SCHEMA,
-    ) || {};
-  } catch (e) {
-    console.warn('[Content] Meta call failed, using fallbacks:', e.message);
-  }
-  broadcast({ type: 'content-progress', done: chunks.length + 1, total: chunks.length + 1 });
-
-  const fallbackTitle = session.title || `Sermon — ${session.date || session.id}`;
-  if (type === 'note') {
-    return {
-      title:   String(meta.title || fallbackTitle).slice(0, 200),
-      summary: String(meta.summary || '').slice(0, 600),
-      sections: extracted.map(s => ({
-        heading:    s.heading,
-        body:       s.supportingQuote ? `${s.explanation} — "${s.supportingQuote}"` : s.explanation,
-        scriptures: s.scriptures,
-      })),
-      closing: String(meta.closing || '').slice(0, 400),
-    };
-  }
-  return {
-    title:     String(meta.title || fallbackTitle).slice(0, 200),
-    mainTheme: String(meta.mainTheme || '').slice(0, 400),
-    points: extracted.slice(0, 10).map(s => ({
-      point:           s.point,
-      explanation:     s.explanation,
-      scripture:       s.scriptures[0] || null,
-      supportingQuote: s.supportingQuote,
-    })),
-  };
-}
-
-app.post('/api/content/generate', async (req, res) => {
-  const { sessionId, type } = req.body || {};
-  if (!sessionId) return res.status(400).json({ error: 'sessionId required' });
-  if (type !== 'note' && type !== 'points') return res.status(400).json({ error: 'type must be note|points' });
-
-  const session = readSession(sessionId);
-  if (!session) return res.status(404).json({ error: 'session not found' });
-  if (!(session.transcript || '').trim()) {
-    return res.status(400).json({ error: 'session has no transcript' });
-  }
-
-  const url = ollamaUrl();
-  const model = ollamaModel();
-  const allowed = (session.verses || []).map(v => v.ref);
-
-  // ── Structured map/reduce path ──────────────────────────────────────────
-  let parsed = null;
-  try {
-    parsed = await generateStructured(session, type);
-  } catch (e) {
-    console.warn('[Content] Structured generation failed — falling back to single-shot:', e.message);
-  }
-
-  // ── Single-shot fallback (short sessions, or structured path failed) ────
-  if (!parsed) {
-    const systemPrompt = type === 'note' ? NOTE_PROMPT : POINTS_PROMPT;
-    let raw;
-    try {
-      const r = await axios.post(url + '/api/chat', {
-        model,
-        stream: false,
-        format: 'json',
-        options: { temperature: 0.2, num_ctx: 8192 },
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user',   content: buildUserPayload(session) },
-        ],
-      }, { timeout: 180_000 });
-      raw = r.data?.message?.content || '';
-    } catch (e) {
-      const msg = e.response?.data?.error || e.code || e.message;
-      return res.status(502).json({ error: `Ollama request failed: ${msg}`, url, model });
-    }
-    try { parsed = JSON.parse(raw); }
-    catch { return res.status(502).json({ error: 'Model returned invalid JSON', raw: raw.slice(0, 500) }); }
-  }
-
-  const cleaned = type === 'note' ? sanitizeNote(parsed, allowed) : sanitizePoints(parsed, allowed);
-  if (!cleaned) return res.status(502).json({ error: 'Model output failed validation' });
-
-  session.generated = session.generated || {};
-  session.generated[type] = { ...cleaned, generatedAt: new Date().toISOString(), model };
-  session.updatedAt = new Date().toISOString();
-  try { await writeSession(session); }
-  catch (e) { return res.status(500).json({ error: e.message }); }
-
-  res.json({ ok: true, type, content: session.generated[type] });
-});
-
-// ── DOCX export ───────────────────────────────────────────────────────────
-// Renders a generated note/points document as a properly formatted Word file.
-app.get('/api/content/export', async (req, res) => {
-  const { sessionId, type } = req.query;
-  if (!sessionId || (type !== 'note' && type !== 'points')) {
-    return res.status(400).json({ error: 'sessionId and type=note|points required' });
-  }
-  const session = readSession(sessionId);
-  const content = session?.generated?.[type];
-  if (!content) return res.status(404).json({ error: 'no generated content — generate it in Content Studio first' });
-
-  try {
-    const { Document, Packer, Paragraph, TextRun, HeadingLevel } = require('docx');
-    const children = [
-      new Paragraph({ heading: HeadingLevel.TITLE, children: [new TextRun(content.title || 'Sermon')] }),
-      new Paragraph({ children: [new TextRun({ text: session.date || '', italics: true, color: '666666' })] }),
-      new Paragraph({ text: '' }),
-    ];
-
-    if (type === 'note') {
-      if (content.summary) {
-        children.push(new Paragraph({ children: [new TextRun({ text: content.summary, italics: true })] }),
-                      new Paragraph({ text: '' }));
-      }
-      for (const s of (content.sections || [])) {
-        children.push(new Paragraph({ heading: HeadingLevel.HEADING_1, children: [new TextRun(s.heading || '')] }));
-        if (s.scriptures?.length) {
-          children.push(new Paragraph({ children: [new TextRun({ text: s.scriptures.join('  ·  '), bold: true, color: '8B0000' })] }));
-        }
-        if (s.body) children.push(new Paragraph({ children: [new TextRun(s.body)] }));
-        children.push(new Paragraph({ text: '' }));
-      }
-      if (content.closing) {
-        children.push(new Paragraph({ heading: HeadingLevel.HEADING_1, children: [new TextRun('Closing')] }),
-                      new Paragraph({ children: [new TextRun({ text: content.closing, italics: true })] }));
-      }
-    } else {
-      if (content.mainTheme) {
-        children.push(new Paragraph({ children: [new TextRun({ text: content.mainTheme, italics: true })] }),
-                      new Paragraph({ text: '' }));
-      }
-      (content.points || []).forEach((p, i) => {
-        children.push(new Paragraph({ heading: HeadingLevel.HEADING_2, children: [new TextRun(`${i + 1}. ${p.point || ''}`)] }));
-        if (p.scripture) {
-          children.push(new Paragraph({ children: [new TextRun({ text: p.scripture, bold: true, color: '8B0000' })] }));
-        }
-        if (p.explanation) children.push(new Paragraph({ children: [new TextRun(p.explanation)] }));
-        if (p.supportingQuote) {
-          children.push(new Paragraph({ children: [new TextRun({ text: `"${p.supportingQuote}"`, italics: true, color: '444444' })] }));
-        }
-        children.push(new Paragraph({ text: '' }));
-      });
-    }
-
-    const doc = new Document({ sections: [{ children }] });
-    const buf = await Packer.toBuffer(doc);
-    const safeDate = (session.date || session.id || '').replace(/[^A-Za-z0-9_\-]/g, '-');
-    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
-    res.setHeader('Content-Disposition', `attachment; filename="KAIRO_${type}_${safeDate}.docx"`);
-    res.send(buf);
-  } catch (e) {
-    console.error('[Content] DOCX export failed:', e.message);
-    res.status(500).json({ error: e.message });
-  }
-});
-
 // ── Shared transcript pipeline ───────────────────────────────────────────
 // Called by both the Deepgram WebSocket handler and the /api/stream-text
 // endpoint (browser Web Speech API path). Broadcasts the transcript to
@@ -2673,6 +2197,7 @@ async function handleTranscriptSegment(transcript, isFinal, confidence, speechFi
     if (!whisperActive) streamNewWords(transcript, false);
     maybeHandleNextVerseTrigger(transcript).catch(() => {});
     maybeAdvanceRangeOnLastWords(transcript);
+    maybeAdvanceRangeOnNextVersePrefix(transcript);
     if (workerBasicReady) {
       let foundRef = await processForReferences(transcript, false);
       if (!foundRef && referenceContext.isValid) {
@@ -2735,6 +2260,7 @@ async function handleTranscriptSegment(transcript, isFinal, confidence, speechFi
   maybeRebuildTopicLibrary();
 
   maybeAdvanceRangeOnLastWords(transcript);
+  maybeAdvanceRangeOnNextVersePrefix(transcript);
 
   let foundRef = await processForReferences(transcript, true);
 
@@ -3212,6 +2738,29 @@ async function processStreamText(text) {
 
     if (confirmed.length) {
       const top = confirmed.slice(0, 5);
+
+      // ── Duplicate-content tie guard ───────────────────────────────────────
+      // Several verses share near-identical wording (Psalms 14 & 53, 40:13-17
+      // & 70, 57:7-11+60:5-12 & 108, Psalm 18 & 2 Samuel 22 …). Their common
+      // opening words open an alignment candidate for BOTH verses at once,
+      // and while only the shared prefix has been heard, both sit at the
+      // same `matched` word-count — there is genuinely no way yet to tell
+      // which one is being read. Real incident: reading Psalms 53:1
+      // verbatim still reported "stream" hits on Psalms 14:1 every time,
+      // regardless of which of the pair was actually spoken — whichever
+      // verse's alignment candidate happened to be touched first internally
+      // silently won the tie. Two DIFFERENT references at essentially the
+      // same matched depth is exactly that ambiguity, not a real signal —
+      // hold both back rather than confidently show a coin-flip as if it
+      // were a citation. verbatim (which checks the full, divergent tail —
+      // not just the shared opening) resolves these correctly moments
+      // later once the wording actually diverges.
+      const runnerUp = top.find(r => r.reference !== top[0].reference);
+      if (runnerUp && Math.abs((top[0].matched || 0) - (runnerUp.matched || 0)) < 2) {
+        console.log(`[Stream] Ambiguous — "${top[0].reference}" and "${runnerUp.reference}" tied at matched=${top[0].matched} (near-duplicate wording), holding both back`);
+        return;
+      }
+
       // Give the mis-citation corrector first look — see maybeCorrectMiscitation
       // for why this now applies to stream hits too, not just verbatim.
       const corrected = maybeCorrectMiscitation(top[0], text);
@@ -3942,10 +3491,21 @@ async function broadcastDetection(verses, method, topScore, target) {
     // holds for catching up or jumping to a different book; going backward
     // within a passage you're actively reading forward through is never
     // that, so it just stays a Candidate no matter how many times it repeats.
+    // Only blocks a genuine RE-send of a verse that's actually already been
+    // shown (sentVerseKeysThisBook) — not any verse merely numbered below
+    // whatever's on screen. Real incident this widening fixes: a preacher
+    // citing a passage's LAST verse first (its "reference"), then reading
+    // the whole thing from the top — Matthew 15:23-27 read in full, in
+    // order, at 90-99% confidence each, every single one silently dropped
+    // because verse 28 (the punch line, cited/paraphrased earlier) was
+    // already active. Those earlier verses were legitimately SKIPPED, never
+    // shown, so re-detecting them isn't the stale-backward-jump case at
+    // all — it's exactly the "catching up" case the override exists for.
     const isBackwardInSameBook = lastOutputVerse
       && verses[0].book    === lastOutputVerse.book
       && verses[0].chapter === lastOutputVerse.chapter
-      && verses[0].verse   <  lastOutputVerse.verse;
+      && verses[0].verse   <  lastOutputVerse.verse
+      && sentVerseKeysThisBook.has(topKey);
     if (!isSequential) {
       // Track repeated independent re-detection of this exact non-active
       // verse — see the comment on staleOverrideCandidate above.
@@ -3953,12 +3513,32 @@ async function broadcastDetection(verses, method, topScore, target) {
           && now - staleOverrideCandidate.lastSeenAt < STALE_OVERRIDE_WINDOW_MS) {
         staleOverrideCandidate.count++;
         staleOverrideCandidate.lastSeenAt = now;
+        staleOverrideCandidate.methods.add(method);
       } else {
-        staleOverrideCandidate = { key: topKey, count: 1, lastSeenAt: now };
+        staleOverrideCandidate = { key: topKey, count: 1, lastSeenAt: now, methods: new Set([method]) };
       }
 
-      if (staleOverrideCandidate.count >= STALE_OVERRIDE_COUNT && !isBackwardInSameBook) {
-        console.log(`[Guard] Overriding stale active reference: "${verses[0].reference}" independently re-detected ${staleOverrideCandidate.count}x while "${lastSentBook || 'nothing'}" (last: ${lastOutputVerse?.reference || '?'}) sat active — letting it through`);
+      // Cross-method agreement is stronger evidence than the same method
+      // repeating: two independent detection layers (e.g. the anchor-trie
+      // 'stream' pass and the phrase-alignment 'verbatim' pass) landing on
+      // the same verse from the same transcript rules out one method's own
+      // idiosyncratic false-positive pattern just recurring — which is
+      // exactly the risk STALE_OVERRIDE_COUNT's same-method 3x exists to
+      // catch. Real incident this addresses: a heavily STT-garbled spoken
+      // citation ("January of the thirtieth of the seventeen" for
+      // "Jeremiah 30:17") never resolves to a 'direct' hit, so a genuinely
+      // correct, sequence-certain verbatim match had to sit through 3 full
+      // independent re-detections before reaching the screen — a multi-
+      // second lag on something two different layers already agreed on
+      // within the same breath. Two methods agreeing needs only 2 hits
+      // total, not 3 of the same one.
+      const crossMethodConfirmed = staleOverrideCandidate.methods.size >= 2 && staleOverrideCandidate.count >= 2;
+
+      if ((staleOverrideCandidate.count >= STALE_OVERRIDE_COUNT || crossMethodConfirmed) && !isBackwardInSameBook) {
+        const via = staleOverrideCandidate.count >= STALE_OVERRIDE_COUNT
+          ? `independently re-detected ${staleOverrideCandidate.count}x`
+          : `${[...staleOverrideCandidate.methods].join('+')} agree`;
+        console.log(`[Guard] Overriding stale active reference: "${verses[0].reference}" ${via} while "${lastSentBook || 'nothing'}" (last: ${lastOutputVerse?.reference || '?'}) sat active — letting it through`);
         staleOverrideCandidate = null;   // consumed
       } else {
         const backwardNote = isBackwardInSameBook && staleOverrideCandidate.count >= STALE_OVERRIDE_COUNT
@@ -4068,6 +3648,10 @@ async function broadcastDetection(verses, method, topScore, target) {
 
 // ── Output routing — sends to all enabled destinations ───────────────────
 async function sendToOutputs(verse) {
+  if (!lastOutputVerse || lastOutputVerse.book !== verse.book) {
+    sentVerseKeysThisBook = new Set();
+  }
+  sentVerseKeysThisBook.add(`${verse.book}|${verse.chapter}|${verse.verse}`);
   lastOutputVerse = verse;
   // Use the in-memory settings object (kept in sync by POST /api/settings)
   // rather than re-reading settings.json from disk on every single verse —

@@ -83,6 +83,10 @@
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="12" rx="1.5"/><path d="M7 20h10"/><path d="M12 16v4"/></svg>
                     <span>Slides</span>
                 </button>
+                <button id="timer-btn" class="tb-studio-btn" title="Timer — service segment countdowns, sent to the output's own timer layer">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l3 2"/><path d="M9 2h6"/></svg>
+                    <span>Timer</span>
+                </button>
                 <button id="songs-btn" class="tb-studio-btn" title="Songs — hymns &amp; lyrics">
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
                     <span>Songs</span>
@@ -117,24 +121,6 @@
                     <span>Export</span>
                 </button>
                 <div id="download-menu" class="tb-menu hidden" role="menu">
-                    <div class="tb-menu-label">Sermon AI</div>
-                    <button class="tb-menu-item" data-download="note"   role="menuitem">
-                        <span class="tb-menu-item-name">Sermon Note</span>
-                        <span class="tb-menu-item-fmt">PDF</span>
-                    </button>
-                    <button class="tb-menu-item" data-download="points" role="menuitem">
-                        <span class="tb-menu-item-name">Sermon Points</span>
-                        <span class="tb-menu-item-fmt">PDF</span>
-                    </button>
-                    <button class="tb-menu-item" data-download="note-docx" role="menuitem">
-                        <span class="tb-menu-item-name">Sermon Note</span>
-                        <span class="tb-menu-item-fmt">Word</span>
-                    </button>
-                    <button class="tb-menu-item" data-download="points-docx" role="menuitem">
-                        <span class="tb-menu-item-name">Sermon Points</span>
-                        <span class="tb-menu-item-fmt">Word</span>
-                    </button>
-                    <div class="tb-menu-divider"></div>
                     <div class="tb-menu-label">Live session</div>
                     <button class="tb-menu-item" data-download="transcript" role="menuitem">
                         <span class="tb-menu-item-name">Transcript</span>
@@ -330,7 +316,7 @@
                         </button>
                         <button id="svc-item-fullscale-btn" class="ls-icon-btn ls-icon-btn-labeled" title="Open the layout/position canvas for this section">
                             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><line x1="3" y1="10" x2="21" y2="10"/><line x1="9" y1="10" x2="9" y2="20"/></svg>
-                            <span>Full-scale edit</span>
+                            <span>Edit</span>
                         </button>
                     </div>
                 </div>
@@ -389,6 +375,28 @@
                 </div>
             </div>
 
+            <!-- Timer tab — named service-segment countdowns (Preservice/
+                 Worship/Sermon/...), sent to the output's own timer layer
+                 (display.html's #timer-badge/#clock-badge). Cards mirror
+                 the slide-thumbnail visual language (black 16:9 preview +
+                 bottom-left label, see .ts-item-slide-thumb) so a segment
+                 reads as "a layer" the same way a slide does. Exactly one
+                 segment is ever live — starting one stops+finishes
+                 whichever was live before it (see server/segments.js). -->
+            <div class="cs-live-queue-section cs-live-queue-main hidden" id="timer-view">
+                <div class="cs-section-header svc-header">
+                    <span class="cs-section-label">Timer</span>
+                    <div class="svc-header-right">
+                        <label class="bs-check-label" style="margin-right:8px;">
+                            <input type="checkbox" id="clock-toggle">
+                            Live clock
+                        </label>
+                        <button id="segment-add-btn" class="modal-btn secondary svc-edit-btn">+ Add Segment</button>
+                    </div>
+                </div>
+                <div class="timer-grid" id="timer-grid"></div>
+            </div>
+
             <!-- Live Queue — all sent + range verses, fills remaining space -->
             <div class="cs-live-queue-section cs-live-queue-main" id="live-queue-section">
                 <div class="cs-section-header">
@@ -415,10 +423,16 @@
                  config instead of a separate always-visible strip here. -->
 
             <!-- Per-layer output clear — the output composites an
-                 independent media layer (image/video) behind the slide
-                 layer (theme background/text); each clears on its own. -->
+                 independent media layer (image/video) and a timer/clock
+                 layer behind/over the slide layer (theme background/text);
+                 each clears on its own. Clearing the timer layer actually
+                 stops the live segment server-side (see clearOutputLayer
+                 in app.js) — a cosmetic-only hide would just have the
+                 still-running countdown silently bring the badge back a
+                 second later. -->
             <div class="rs-layer-clear-bar">
                 <button id="clear-slide-layer-btn" class="rs-layer-clear-btn" title="Clear the slide/text layer only">Clear Slide</button>
+                <button id="clear-timer-layer-btn" class="rs-layer-clear-btn" title="Stop the live segment timer/clock">Clear Timer</button>
                 <button id="clear-media-layer-btn" class="rs-layer-clear-btn" title="Clear the media layer only">Clear Media</button>
                 <button id="clear-all-layers-btn" class="rs-layer-clear-btn rs-layer-clear-all" title="Clear everything on the output">Clear All</button>
             </div>
@@ -450,6 +464,10 @@
                          carries its own theme (e.g. a ProPresenter import) —
                          paintLookLayers renders straight into this. -->
                     <div class="live-screen-themed hidden" id="slide-preview-themed"></div>
+                    <!-- Mirrors the real output's #timer-layer — a live
+                         segment's themed countdown renders here on top of
+                         whatever slide/media is showing, same as the output. -->
+                    <div class="live-screen-timer hidden" id="slide-preview-timer"></div>
                     <div class="live-screen-badge">LIVE</div>
                 </div>
                 <!-- Range navigation -->
@@ -760,6 +778,14 @@
                         </button>
                     </div>
 
+                    <!-- Timer segments only (item.type === 'timer', see
+                         renderItemTimerControls in app.js) — the countdown's
+                         actual target (ends-at clock time, or a duration)
+                         lives here now instead of only behind the separate
+                         Quick-edit popover, since "editing" a timer should
+                         include what makes it a timer, not just its font. -->
+                    <div class="ts-item-mode-header hidden" id="ts-item-timer-header"></div>
+
                     <!-- Theme-level controls — always visible regardless of
                          layer selection, same section/row convention as the
                          per-layer properties below so the whole panel reads
@@ -843,73 +869,20 @@
                         <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" opacity="0.3"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="9" y1="9" x2="15" y2="9"/><line x1="9" y1="13" x2="15" y2="13"/><line x1="9" y1="17" x2="12" y2="17"/></svg>
                         <span>Select a layer<br>to edit its properties</span>
                     </div>
+                    <!-- Layout/Style/Effects — groups the (previously one
+                         long stack of) per-layer sections below into tabs,
+                         see PROPS_TABS/renderProps in app.js. Effects hides
+                         itself for layer types with nothing to put there
+                         (image/background have no shadow/outline/scroll). -->
+                    <div class="ts-props-tabs hidden" id="ts-props-tabs">
+                        <button class="ts-tab-btn active" data-tab="layout" id="ts-props-tab-layout">Layout</button>
+                        <button class="ts-tab-btn" data-tab="style" id="ts-props-tab-style">Style</button>
+                        <button class="ts-tab-btn" data-tab="effects" id="ts-props-tab-effects">Effects</button>
+                    </div>
                     <!-- Properties injected by JS -->
                     <div id="ts-props-panel" style="display:none;"></div>
                 </div>
 
-            </div>
-        </div>
-    </div>
-
-    <!-- ═══ CONTENT STUDIO MODAL ═══ -->
-    <div id="content-studio-modal" class="modal hidden">
-        <div class="modal-overlay"></div>
-        <div class="modal-content cs-modal">
-            <div class="modal-header">
-                <div style="display:flex;align-items:center;gap:10px;">
-                    <h2>Content Studio</h2>
-                    <span style="font-size:10px;color:var(--text-3);font-weight:400;">Sermon notes & points · offline AI</span>
-                </div>
-                <button id="close-content-studio" class="modal-close-btn">
-                    <svg width="16" height="16" viewBox="0 0 16 16"><path d="M3 3l10 10M13 3L3 13" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
-                    <span>Close</span>
-                </button>
-            </div>
-
-            <div class="cs-body">
-                <!-- LEFT: session library -->
-                <aside class="cs-sidebar">
-                    <div class="cs-sidebar-header">
-                        <span class="cs-section-label">Sessions</span>
-                        <button id="cs-save-current-btn" class="modal-btn primary" style="padding:5px 10px;font-size:10px;">+ Save current</button>
-                    </div>
-                    <div id="cs-llm-status" class="cs-llm-status">Checking offline model…</div>
-                    <div id="cs-session-list" class="cs-session-list"></div>
-                </aside>
-
-                <!-- RIGHT: detail / preview -->
-                <section class="cs-main">
-                    <div id="cs-empty-pane" class="cs-empty-pane">
-                        <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2" opacity="0.3"><path d="M4 4h12a3 3 0 0 1 3 3v13H7a3 3 0 0 1-3-3z"/><line x1="8" y1="9"  x2="15" y2="9"/><line x1="8" y1="13" x2="15" y2="13"/></svg>
-                        <p>Select a session to view, generate, or export.</p>
-                        <p class="cs-hint">All processing stays on your machine. The model only reads the transcript and the verses you actually called during the sermon.</p>
-                    </div>
-                    <div id="cs-detail-pane" class="cs-detail-pane" style="display:none;">
-                        <header class="cs-detail-header">
-                            <div>
-                                <h3 id="cs-detail-title" class="cs-detail-title"></h3>
-                                <div id="cs-detail-meta" class="cs-detail-meta"></div>
-                            </div>
-                            <div class="cs-detail-actions">
-                                <button id="cs-delete-session-btn" class="modal-btn secondary" title="Delete session" style="color:var(--red);border-color:rgba(232,64,74,0.3);font-size:11px;">Delete</button>
-                            </div>
-                        </header>
-
-                        <nav class="cs-tabs">
-                            <button id="cs-tab-note"   class="cs-tab active">Sermon Note</button>
-                            <button id="cs-tab-points" class="cs-tab">Sermon Points</button>
-                            <button id="cs-tab-source" class="cs-tab">Source</button>
-                            <div class="cs-tab-spacer"></div>
-                            <span class="cs-export-hint" title="Use the download icon in the top-bar to export as PDF.">↑ Download from the top bar</span>
-                            <button id="cs-export-pdf-btn" class="modal-btn secondary" style="display:none;" aria-hidden="true">Export PDF</button>
-                            <button id="cs-generate-btn"   class="modal-btn primary"   style="font-size:11px;">
-                                <span id="cs-generate-label">Generate</span>
-                            </button>
-                        </nav>
-
-                        <div id="cs-preview" class="cs-preview"></div>
-                    </div>
-                </section>
             </div>
         </div>
     </div>
@@ -945,9 +918,9 @@
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
                     <span>Outputs</span>
                 </button>
-                <button class="settings-nav-item" data-pane="content">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="13" y2="17"/></svg>
-                    <span>Content Studio</span>
+                <button class="settings-nav-item" data-pane="shortcuts">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M6 8h.01M10 8h.01M14 8h.01M18 8h.01M6 12h.01M10 12h.01M14 12h.01M18 12h.01M8 16h8"/></svg>
+                    <span>Shortcuts</span>
                 </button>
             </nav>
 
@@ -1052,47 +1025,20 @@
 
             </section>
 
-            <section class="settings-pane" data-pane="content">
-                <!-- ── CONTENT STUDIO (offline LLM) ────────────────── -->
+
+            <section class="settings-pane" data-pane="shortcuts">
+                <!-- ── SHORTCUTS ─────────────────────────────────────
+                     Independent of the native menu's own fixed
+                     accelerators (see src-tauri/src/lib.rs) — those are
+                     the OS-level defaults and don't change; this is a
+                     separate, customizable in-app layer for the same
+                     actions, same idea as ProPresenter's Key Mappings
+                     panel. -->
                 <div class="settings-section">
-                    <div class="settings-section-label">Content Studio</div>
-
-                    <!-- Launcher — opens the full Content Studio modal. -->
-                    <button id="content-studio-btn" class="modal-btn primary" style="width:100%;justify-content:center;margin-bottom:12px;gap:8px;">
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-                            <path d="M4 4h12a3 3 0 0 1 3 3v13H7a3 3 0 0 1-3-3z"/>
-                            <line x1="8" y1="9"  x2="15" y2="9"/>
-                            <line x1="8" y1="13" x2="15" y2="13"/>
-                            <line x1="8" y1="17" x2="12" y2="17"/>
-                        </svg>
-                        Open Content Studio
-                    </button>
-
-                    <!-- State-aware status panel — JS swaps content based on Ollama detection. -->
-                    <div id="ollama-status-panel" class="osp osp-loading">
-                        <div class="osp-row">
-                            <span class="osp-dot"></span>
-                            <span class="osp-title">Checking offline AI…</span>
-                        </div>
-                    </div>
-
-                    <div class="setting-group">
-                        <label class="setting-label">Ollama URL</label>
-                        <input type="text" id="ollama-url" class="setting-input" placeholder="http://localhost:11434">
-                    </div>
-
-                    <div class="setting-group">
-                        <label class="setting-label">Model</label>
-                        <div style="display:flex;gap:6px;align-items:center;">
-                            <select id="ollama-model" class="setting-input" style="flex:1;">
-                                <option value="">Loading…</option>
-                            </select>
-                            <button id="refresh-ollama-btn" class="modal-btn secondary" style="white-space:nowrap;font-size:11px;" title="Refresh model list">↻ Refresh</button>
-                        </div>
-                        <p class="setting-hint" id="ollama-status-hint" style="font-size:11px;color:var(--text-3);">Recommended: <code>qwen2.5:7b-instruct</code>. Use the panel above to download it with one click.</p>
-                    </div>
+                    <div class="settings-section-label">Shortcuts</div>
+                    <p class="setting-hint" style="font-size:11px;color:var(--text-3);margin-bottom:10px;">Click Change, then press a key combo. These are independent of the app's native menu shortcuts.</p>
+                    <div id="hotkeys-list"></div>
                 </div>
-
             </section>
 
             <section class="settings-pane" data-pane="language">
@@ -1580,6 +1526,18 @@
         window.openDisplayWindow  = openDisplayWindow;
         window.closeDisplayWindow = closeDisplayWindow;
 
+        // The bug above was silent for an entire session because nothing
+        // ever confirmed these two actually became real globals — the
+        // first sign of trouble was an operator reporting "nothing
+        // happens." Recording it once at boot means a regression here
+        // (e.g. this script block getting wrapped in yet another scope)
+        // shows up in the debug log immediately instead of only when
+        // someone notices the display never opens.
+        fetch('/api/debug-log', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({
+          event: 'display-lifecycle-globals-attached',
+          data: { openDisplayWindow: typeof window.openDisplayWindow === 'function', closeDisplayWindow: typeof window.closeDisplayWindow === 'function' },
+        }) }).catch(function(){});
+
         // Syphon: NATIVE sender driven through Tauri commands defined in
         // src-tauri/src/syphon.rs. Syphon.framework is bundled with the app,
         // so unlike NDI there's no SDK to install. Frames are rendered in
@@ -1831,7 +1789,9 @@
     <script src="design_space.js"></script>
     <script src="word_split.js"></script>
     <script src="color_utils.js"></script>
+    <script src="content_browser.js"></script>
     <script src="hymns.js"></script>
+    <script src="lyrics_follow.js"></script>
     <script src="service.js"></script>
     <script src="app.js"></script>
 </body>

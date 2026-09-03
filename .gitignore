@@ -13,8 +13,18 @@ databases/settings.json
 # Large binary / model files
 databases/logos/ivf.faiss
 databases/logos/verses.bin
+databases/logos/verse_embeddings.f32
+databases/logos/verse_embeddings.json
 databases/logos/model/
 # map.json and kjv.json are required by the Tauri bundle — committed.
+
+# Operator runtime state — regenerated on first run (segments.js seeds
+# DEFAULT_SEGMENTS, triggers/media start empty). Not source.
+databases/segments/
+databases/triggers/
+databases/media/
+databases/sessions/
+databases/songs/songs.json
 
 # Whisper offline-STT models (downloaded by scripts/download-whisper-model.js on first use)
 server/models/

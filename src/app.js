@@ -9,6 +9,16 @@
 const SERVER = `${location.protocol}//${location.host}`;
 const WS_URL = `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}`;
 
+// The id of Kairo's one non-removable output (see outputScreenMap/extraDisplays
+// far below, ~line 6067) — hoisted up here because wireExternalDisplayStatus's
+// IIFE calls refresh() synchronously at load, well before that later const
+// would otherwise execute. A `const` isn't hoisted the way `var`/`function`
+// are, so referencing it before its original declaration line threw a
+// ReferenceError on every single launch (confirmed already broken in the
+// last commit, not something introduced just now) — silently killing the
+// "auto-reopen display on launch" feature's very first run every time.
+const PRIMARY_DISPLAY = 'display-1';
+
 // Auth token shared between Tauri and the Node sidecar. Fetched once at boot
 // via Tauri IPC, then injected into every fetch (Authorization header) and
 // WebSocket URL (?token=…). In a non-Tauri context (e.g. opening index.html
@@ -250,23 +260,27 @@ function connectWS() {
   ws.onerror = () => ws.close();
 }
 
+// ── Action/trigger dispatch ──────────────────────────────────────────────
+// Server-side triggers.js broadcasts one envelope shape for every trigger
+// type: {type:'action', actionId, target, triggerId, payload}. Rather than
+// growing handleServerMessage's switch by one case per trigger type, this
+// is the one case it needs — dispatch by actionId through a small
+// registry, so a new trigger type only needs a registerActionHandler call
+// somewhere, not a switch-statement edit here.
+const _actionHandlers = new Map();
+function registerActionHandler(actionId, fn) { _actionHandlers.set(actionId, fn); }
+
 function handleServerMessage(msg) {
   switch (msg.type) {
+
+    case 'action':
+      _actionHandlers.get(msg.actionId)?.(msg);
+      break;
 
     case 'worker-ready':
       workerReady = true;
       if (workerStatusEl) { workerStatusEl.textContent = 'Engine ready'; workerStatusEl.style.color = 'var(--green)'; }
       break;
-
-    case 'content-progress': {
-      // Map/reduce generation reports per-chunk progress; reflect it on the
-      // Content Studio generate button if a generation is in flight.
-      const lbl = document.getElementById('cs-generate-label');
-      if (lbl && lbl.textContent.startsWith('Generating')) {
-        lbl.textContent = `Generating… ${msg.done}/${msg.total}`;
-      }
-      break;
-    }
 
     case 'worker-error':
       workerReady = false;
@@ -332,8 +346,15 @@ function handleServerMessage(msg) {
       if (msg.target === 'viewer') renderMediaPreview(msg.src, msg.kind);
       break;
 
+    // A live segment's themed countdown — mirror it into the Monitoring
+    // panel's own timer layer, exactly the way the real output does.
+    case 'timer-slide':
+      window.KairoService?.onTimerSlide?.(msg);
+      break;
+
     case 'clear-layer':
       if (msg.layer === 'media' || msg.layer === 'all') clearMediaPreview();
+      if (msg.layer === 'timer' || msg.layer === 'all') window.KairoService?.onTimerSlide?.({ clear: true });
       break;
 
   }
@@ -438,6 +459,9 @@ function handleTranscript(msg) {
     if (interimSpan) { interimSpan.textContent = msg.text; interimSpan.style.opacity = '0.5'; }
     scheduleTranscriptScroll();
   }
+  // Lyric follower (service.js) — every transcript segment, final or interim,
+  // feeds the aligner; it only looks at the tail so interim churn is fine.
+  window.KairoService?.onTranscript?.(msg);
 }
 
 // ── Detection routing ──────────────────────────────────────────────────────
@@ -536,7 +560,7 @@ document.getElementById('live-preview-output-select')?.addEventListener('change'
   }
 });
 
-function renderPreviewScreen(text, reference, look, translatedText = '', image = null, fit = 'contain', styleByLayerId = {}) {
+function renderPreviewScreen(text, reference, look, translatedText = '', image = null, fit = 'contain', styleByLayerId = {}, timerText = '') {
   const myGen = ++previewRenderGen;
   const effectiveLook = look || primaryOutputLook();
   const newPreviewKey = `${reference || ''} ${text || ''}`;
@@ -589,7 +613,7 @@ function renderPreviewScreen(text, reference, look, translatedText = '', image =
     } else if (effectiveLook && themed && window.KairoService?.paintLookLayers) {
       plain?.classList.add('hidden');
       themed.classList.remove('hidden');
-      window.KairoService.paintLookLayers(themed, effectiveLook, styleByLayerId, { verseText: text, referenceText: reference || '', translatedText });
+      window.KairoService.paintLookLayers(themed, effectiveLook, styleByLayerId, { verseText: text, referenceText: reference || '', translatedText, timerText });
     } else {
       themed?.classList.add('hidden');
       plain?.classList.remove('hidden');
@@ -689,8 +713,11 @@ function updateViewerDisplay(v) {
 function showInViewer(verses, method, topScore, correctedFrom = null, look = null) {
   const v = verses[0];
 
-  // Update live preview screen
-  renderPreviewScreen(cleanVerseText(v.text), v.reference, look, v.translatedText || '', v.image || null, v.fit || 'contain', v.slideStyle || {});
+  // Update live preview screen — v.timerText is set for a timer-segment send
+  // (service.js sendTimerSegmentToSlideLayer); the per-second countdown then
+  // updates that same [data-binding="timer"] element via onTimerAction, the
+  // same split display.html uses (renderStage seeds it, handleActionBadge ticks it).
+  renderPreviewScreen(cleanVerseText(v.text), v.reference, look, v.translatedText || '', v.image || null, v.fit || 'contain', v.slideStyle || {}, v.timerText || '');
 
   // A playlist send (song/slide deck/announcement/scripture item run from
   // the service) isn't a scripture detection — the Bible tab's Live Queue,
@@ -1390,10 +1417,6 @@ async function loadSettings() {
         el.dispatchEvent(new Event('change'));
       }
     });
-    const ollamaUrlInput   = document.getElementById('ollama-url');
-    const ollamaModelSel   = document.getElementById('ollama-model');
-    if (ollamaUrlInput) ollamaUrlInput.value = settings.ollamaUrl || 'http://localhost:11434';
-    populateOllamaModels(settings.ollamaModel || 'qwen2.5:7b-instruct');
     // Restore toggle-group state from persisted settings
     syncToggleGroup('speech-engine-toggle', 'engine', settings.speechEngine || 'deepgram');
     syncToggleGroup('audio-mode-toggle',    'mode',   settings.audioMode    || 'mic');
@@ -1402,6 +1425,18 @@ async function loadSettings() {
     // Per-output theme pickers live inside each output card.
     renderOutputThemePickers();
     renderDisplayOutputs();
+    // Push the resolved per-output theme map to the server now, not just
+    // whenever a theme/display setting is next touched — applyOutputThemes()
+    // was previously only ever called as a side effect of the operator
+    // changing something in Settings, so the server's currentOutputThemes
+    // stayed {} for an entire session on a fresh launch. Anything server-
+    // side that depends on knowing the primary output's theme (e.g.
+    // attachBibleTranslations gating on the Multi-Language layout — see
+    // primaryOutputTranslateLang in server.js) silently did nothing until
+    // the operator happened to open Settings and touch a picker, which is
+    // exactly why the Multi-Language theme looked like it "worked sometimes
+    // and not others."
+    applyOutputThemes();
     // Language
     const sttLang = document.getElementById('stt-language');
     if (sttLang) sttLang.value = settings.sttLanguage || 'en-US';
@@ -1410,6 +1445,7 @@ async function loadSettings() {
     renderLangPacks();
     // First-run: no Deepgram key → show a nudge banner so the user knows what to do.
     showFirstRunBannerIfNeeded(settings);
+    if (typeof renderHotkeysList === 'function') renderHotkeysList(); // now that settings.hotkeys is real, not defaults
   } catch (err) {
     console.warn('[Settings] Load failed:', err);
     toast('Could not load settings from server', 'error');
@@ -1504,217 +1540,6 @@ async function saveCurrentSettings() {
   toast('Settings saved', 'success');
   checkPP();
 }
-
-// Default recommended model — reflected in the status panel + first-run pulls.
-const DEFAULT_OLLAMA_MODEL = 'qwen2.5:7b-instruct';
-
-let activePullController = null; // AbortController for in-flight pull (so Cancel works)
-
-async function populateOllamaModels(preferred) {
-  const sel    = document.getElementById('ollama-model');
-  const hint   = document.getElementById('ollama-status-hint');
-  const panel  = document.getElementById('ollama-status-panel');
-  if (!sel || !panel) return;
-
-  let j = { ok: false };
-  try {
-    const r = await fetch(`${SERVER}/api/llm/status`);
-    j = await r.json();
-  } catch {}
-
-  // ── Populate dropdown ────────────────────────────────────────────────
-  sel.innerHTML = '';
-  const desired = preferred || j.configuredModel || DEFAULT_OLLAMA_MODEL;
-  const models  = j.ok ? (j.models || []) : [];
-  if (!j.ok) {
-    const opt = document.createElement('option');
-    opt.value = desired;
-    opt.textContent = 'Ollama not reachable';
-    sel.appendChild(opt);
-  } else if (!models.length) {
-    const opt = document.createElement('option');
-    opt.value = desired;
-    opt.textContent = desired + ' (not installed)';
-    sel.appendChild(opt);
-  } else {
-    for (const name of models) {
-      const opt = document.createElement('option');
-      opt.value = name;
-      opt.textContent = name;
-      if (name === desired) opt.selected = true;
-      sel.appendChild(opt);
-    }
-    if (desired && !models.includes(desired)) {
-      const opt = document.createElement('option');
-      opt.value = desired;
-      opt.textContent = desired + ' (not installed)';
-      opt.selected = true;
-      sel.appendChild(opt);
-    }
-  }
-  if (hint) {
-    hint.textContent = j.ok && models.length
-      ? `${models.length} model${models.length === 1 ? '' : 's'} installed.`
-      : `Recommended: ${DEFAULT_OLLAMA_MODEL}. Click Download in the panel above.`;
-  }
-
-  // ── Status panel (state-aware) ───────────────────────────────────────
-  if (activePullController) return; // pull in progress — leave panel alone
-  renderOllamaStatusPanel(j, desired, models);
-}
-
-function renderOllamaStatusPanel(status, model, models) {
-  const panel = document.getElementById('ollama-status-panel');
-  if (!panel) return;
-
-  // State 1 — Ollama not running
-  if (!status.ok) {
-    panel.className = 'osp osp-err';
-    panel.innerHTML = `
-      <div class="osp-row">
-        <span class="osp-dot"></span>
-        <span class="osp-title">Ollama not running</span>
-      </div>
-      <p class="osp-msg">Install once — runs offline, no API key, no telemetry.</p>
-      <div class="osp-actions">
-        <a href="https://ollama.com/download" target="_blank" rel="noopener" class="osp-btn osp-btn-primary">Get Ollama →</a>
-        <button class="osp-btn osp-btn-ghost" id="osp-recheck-btn">Re-check</button>
-      </div>`;
-    panel.querySelector('#osp-recheck-btn')?.addEventListener('click', () => populateOllamaModels(model));
-    return;
-  }
-
-  // State 2 — Ollama running, model not installed
-  if (!models.includes(model)) {
-    const sizeHint = (model || '').includes('7b') ? '~4.5 GB' :
-                     (model || '').includes('3b') ? '~2 GB'   :
-                     (model || '').includes('13b')? '~7 GB'   : '';
-    panel.className = 'osp osp-warn';
-    panel.innerHTML = `
-      <div class="osp-row">
-        <span class="osp-dot"></span>
-        <span class="osp-title">Ollama ready, model not installed</span>
-      </div>
-      <p class="osp-msg"><code>${escapeHtml(model)}</code> ${sizeHint ? `· ${sizeHint}` : ''} · download takes a few minutes the first time.</p>
-      <div class="osp-actions">
-        <button class="osp-btn osp-btn-primary" id="osp-pull-btn">Download model</button>
-      </div>`;
-    panel.querySelector('#osp-pull-btn')?.addEventListener('click', () => pullModel(model));
-    return;
-  }
-
-  // State 3 — Ready
-  panel.className = 'osp osp-ok';
-  panel.innerHTML = `
-    <div class="osp-row">
-      <span class="osp-dot"></span>
-      <span class="osp-title">Ready · <strong>${escapeHtml(model)}</strong></span>
-    </div>
-    <p class="osp-msg">Offline AI is set up. Open Content Studio to generate notes.</p>`;
-}
-
-async function pullModel(modelName) {
-  const panel = document.getElementById('ollama-status-panel');
-  if (!panel) return;
-  if (activePullController) return; // already pulling
-
-  panel.className = 'osp osp-progress';
-  panel.innerHTML = `
-    <div class="osp-row">
-      <span class="osp-dot pulse"></span>
-      <span class="osp-title">Downloading <strong>${escapeHtml(modelName)}</strong></span>
-    </div>
-    <div class="osp-progress-status" id="osp-progress-status">Connecting to Ollama…</div>
-    <div class="osp-progress-bar"><div class="osp-progress-fill" id="osp-progress-fill" style="width:0%"></div></div>
-    <div class="osp-progress-meta" id="osp-progress-meta"></div>
-    <div class="osp-actions">
-      <button class="osp-btn osp-btn-ghost" id="osp-cancel-btn">Cancel</button>
-    </div>`;
-
-  const statusEl = panel.querySelector('#osp-progress-status');
-  const fillEl   = panel.querySelector('#osp-progress-fill');
-  const metaEl   = panel.querySelector('#osp-progress-meta');
-  const cancelBtn= panel.querySelector('#osp-cancel-btn');
-
-  activePullController = new AbortController();
-  cancelBtn.addEventListener('click', () => {
-    if (activePullController) activePullController.abort();
-  });
-
-  // Track totals across the pull so we can show overall progress.
-  // Ollama reports per-layer {digest, completed, total}; we track each digest.
-  const layers = new Map(); // digest -> { total, completed }
-
-  function fmtBytes(n) {
-    if (!n && n !== 0) return '';
-    if (n < 1024) return `${n} B`;
-    if (n < 1024**2) return `${(n/1024).toFixed(1)} KB`;
-    if (n < 1024**3) return `${(n/1024**2).toFixed(1)} MB`;
-    return `${(n/1024**3).toFixed(2)} GB`;
-  }
-
-  function applyProgress(msg) {
-    if (msg.error) { statusEl.textContent = 'Error: ' + msg.error; return; }
-    if (msg.status) statusEl.textContent = msg.status.charAt(0).toUpperCase() + msg.status.slice(1);
-    if (msg.digest && msg.total != null) {
-      layers.set(msg.digest, { total: msg.total, completed: msg.completed || 0 });
-    }
-    let totalAll = 0, doneAll = 0;
-    for (const { total, completed } of layers.values()) {
-      totalAll += total;
-      doneAll  += completed;
-    }
-    if (totalAll > 0) {
-      const pct = Math.min(99.9, (doneAll / totalAll) * 100);
-      fillEl.style.width = pct.toFixed(1) + '%';
-      metaEl.textContent = `${fmtBytes(doneAll)} / ${fmtBytes(totalAll)} · ${pct.toFixed(0)}%`;
-    }
-    if (msg.status === 'success') {
-      fillEl.style.width = '100%';
-      metaEl.textContent = 'Done';
-    }
-  }
-
-  try {
-    const r = await fetch(`${SERVER}/api/llm/pull`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: modelName }),
-      signal: activePullController.signal,
-    });
-    if (!r.ok || !r.body) throw new Error('stream failed');
-    const reader  = r.body.getReader();
-    const decoder = new TextDecoder();
-    let buf = '';
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      buf += decoder.decode(value, { stream: true });
-      const lines = buf.split('\n');
-      buf = lines.pop();
-      for (const line of lines) {
-        if (!line.trim()) continue;
-        try { applyProgress(JSON.parse(line)); } catch {}
-      }
-    }
-    activePullController = null;
-    toast('Model downloaded', 'success');
-    populateOllamaModels(modelName);
-  } catch (e) {
-    activePullController = null;
-    if (e.name === 'AbortError') {
-      toast('Download cancelled', 'info');
-    } else {
-      toast('Download failed: ' + e.message, 'error');
-    }
-    populateOllamaModels(modelName);
-  }
-}
-
-document.getElementById('refresh-ollama-btn')?.addEventListener('click', () => {
-  const sel = document.getElementById('ollama-model');
-  populateOllamaModels(sel?.value);
-});
 
 function updatePPTokenLabel() {
   if (!ppTokenOrderLabel) return;
@@ -1911,9 +1736,18 @@ async function runSearch() {
         showInViewer([d.result], d.method || 'direct', 1.0);
       }
       sendVerseToServer(d.result);
-      // Keep the text so the user can quickly extend to a range (e.g. add "-18")
+      // Keep the text so the user can quickly extend to a range (e.g. add "-18").
+      // Explicit focus() before select() — this runs after an await, outside
+      // the original click/Enter keypress's own call stack, and WebKit (the
+      // packaged app's actual renderer, unlike a plain Chromium tab) is
+      // stricter about honoring a bare .select() once that user-gesture
+      // context has lapsed. Without the focus() first, .select() can
+      // silently fail to actually move keyboard focus into the box — the
+      // text still shows selected, but the NEXT keystroke goes nowhere,
+      // which reads as "search stopped working" right after a send.
       if (scriptureSearchInput) {
-        scriptureSearchInput.select(); // select all → ready to retype or append
+        scriptureSearchInput.focus();
+        scriptureSearchInput.select();
       }
 
     } else if (d.results?.length) {
@@ -1983,6 +1817,10 @@ function clearOutputLayer(layer) {
 }
 document.getElementById('clear-slide-layer-btn')?.addEventListener('click', () => clearOutputLayer('slide'));
 document.getElementById('clear-media-layer-btn')?.addEventListener('click', () => clearOutputLayer('media'));
+// 'timer' has no client-side preview to clear (unlike slide/media, the
+// countdown only ever exists on the actual output) — the server-side stop
+// is the whole effect; see clear-layer's handling in server.js.
+document.getElementById('clear-timer-layer-btn')?.addEventListener('click', () => clearOutputLayer('timer'));
 document.getElementById('clear-all-layers-btn')?.addEventListener('click', () => clearOutputLayer('all'));
 
 clearTranscriptBtn?.addEventListener('click', () => {
@@ -2240,13 +2078,14 @@ async function refreshMtStatus(code) {
   }
 }
 
-async function installMtModel(code) {
-  const sub = document.getElementById(`mt-sub-${code}`);
-  const btn = document.getElementById(`mt-btn-${code}`);
-  if (!sub || !btn) return;
-  btn.style.display = 'none';
-  sub.textContent = 'Connecting…';
-
+// Core NDJSON-install-stream reader, shared by the Settings row above and
+// the inline point-of-use upsell below (renderInlineTranslateUpsell) —
+// they only differ in how they *render* progress, not in how the install
+// itself is kicked off or read. POSTing while the server already has this
+// language installing returns 409 (surfaces via onError) — callers that
+// want to just watch an already-running install should poll status
+// instead of calling this a second time.
+async function streamMtInstall(code, { onProgress, onDone, onComplete, onError } = {}) {
   let res;
   try {
     res = await fetch(`${SERVER}/api/translate-model/install`, {
@@ -2255,13 +2094,11 @@ async function installMtModel(code) {
       body: JSON.stringify({ lang: code }),
     });
   } catch (err) {
-    sub.textContent = `Failed: ${err.message}`;
-    btn.style.display = '';
+    onError?.(err.message);
     return;
   }
   if (!res.ok || !res.body) {
-    sub.textContent = `HTTP ${res.status}`;
-    btn.style.display = '';
+    onError?.(`HTTP ${res.status}`);
     return;
   }
 
@@ -2279,19 +2116,115 @@ async function installMtModel(code) {
       let evt;
       try { evt = JSON.parse(line); } catch { continue; }
       if (evt.phase === 'download' && typeof evt.pct === 'number') {
-        sub.textContent = `Downloading… ${evt.pct}%`;
+        onProgress?.(evt.pct);
       } else if (evt.phase === 'done') {
-        sub.textContent = evt.already ? 'Already installed.' : 'Done.';
+        onDone?.(!!evt.already);
       } else if (evt.phase === 'complete') {
-        if (evt.ok) {
-          setTimeout(() => refreshMtStatus(code), 800);
-        } else {
-          sub.textContent = `Failed: ${evt.error || 'unknown error'}`;
-          btn.style.display = '';
-        }
+        onComplete?.(!!evt.ok, evt.error);
       }
     }
   }
+}
+
+async function installMtModel(code) {
+  const sub = document.getElementById(`mt-sub-${code}`);
+  const btn = document.getElementById(`mt-btn-${code}`);
+  if (!sub || !btn) return;
+  btn.style.display = 'none';
+  sub.textContent = 'Connecting…';
+  await streamMtInstall(code, {
+    onProgress: (pct) => { sub.textContent = `Downloading… ${pct}%`; },
+    onDone: (already) => { sub.textContent = already ? 'Already installed.' : 'Done.'; },
+    onComplete: (ok, error) => {
+      if (ok) setTimeout(() => refreshMtStatus(code), 800);
+      else { sub.textContent = `Failed: ${error || 'unknown error'}`; btn.style.display = ''; }
+    },
+    onError: (msg) => { sub.textContent = `Failed: ${msg}`; btn.style.display = ''; },
+  });
+}
+
+// ── Inline "you need this translation pack" upsell ─────────────────────
+// Point-of-use counterpart to the Settings row above — same backend
+// (/api/translate-model/status + /install), heavier .osp-family styling
+// (matches Ollama's status panel) since a mid-workflow upsell needs more
+// visual weight than a Settings list row. `container` is any element the
+// caller owns (e.g. a popover) that this fully takes over via className/
+// innerHTML — callers just need to give it a home and re-render on
+// re-open, the same way the Settings row re-polls on its own.
+const _inlineMtPollTimers = new WeakMap(); // container -> interval id
+
+function _inlineMtTitle(container, dotClass, text) {
+  return `<div class="osp-row"><span class="osp-dot${dotClass ? ' ' + dotClass : ''}"></span><span class="osp-title">${text}</span></div>`;
+}
+
+async function renderInlineTranslateUpsell(container, code) {
+  if (!container) return;
+  clearInterval(_inlineMtPollTimers.get(container));
+  const name = (MT_LANGUAGES.find(l => l.code === code) || {}).name || code;
+  container.className = 'osp osp-loading';
+  container.innerHTML = _inlineMtTitle(container, '', `Checking ${escapeHtml(name)}…`);
+
+  let status;
+  try {
+    status = await fetch(`${SERVER}/api/translate-model/status?lang=${code}`).then(r => r.json());
+  } catch {
+    container.className = 'osp osp-err';
+    container.innerHTML = _inlineMtTitle(container, '', `Could not check ${escapeHtml(name)}`);
+    return;
+  }
+
+  if (status.installed) {
+    container.className = 'osp osp-ok';
+    container.innerHTML = _inlineMtTitle(container, '', `${escapeHtml(name)} is installed`);
+    return;
+  }
+
+  if (status.installing) {
+    // Started elsewhere (Settings, or translate.js's own background
+    // kick-off) — watch it instead of firing a second install (the server
+    // 409s a concurrent POST for the same language). No live % is
+    // available for an install we didn't start ourselves, same as the
+    // Settings row in this state.
+    container.className = 'osp osp-progress';
+    container.innerHTML = _inlineMtTitle(container, 'pulse', `Downloading ${escapeHtml(name)}…`) +
+      '<p class="osp-msg">Started elsewhere — installing in the background.</p>';
+    _inlineMtPollTimers.set(container, setInterval(() => renderInlineTranslateUpsell(container, code), 2000));
+    return;
+  }
+
+  container.className = 'osp osp-warn';
+  container.innerHTML =
+    _inlineMtTitle(container, '', `${escapeHtml(name)} isn't downloaded yet`) +
+    `<p class="osp-msg">${status.approxMB ? `~${status.approxMB}MB · ` : ''}Runs offline once installed.</p>` +
+    `<div class="osp-actions"><button class="osp-btn osp-btn-primary" id="osp-inline-install">Download ${escapeHtml(name)}</button></div>`;
+  container.querySelector('#osp-inline-install')?.addEventListener('click', () => _startInlineTranslateInstall(container, code, name));
+}
+
+function _startInlineTranslateInstall(container, code, name) {
+  container.className = 'osp osp-progress';
+  container.innerHTML =
+    _inlineMtTitle(container, 'pulse', `Downloading <strong>${escapeHtml(name)}</strong>`) +
+    '<div class="osp-progress-bar"><div class="osp-progress-fill" id="osp-inline-fill" style="width:0%"></div></div>' +
+    '<div class="osp-progress-meta" id="osp-inline-meta"></div>';
+  const fillEl = container.querySelector('#osp-inline-fill');
+  const metaEl = container.querySelector('#osp-inline-meta');
+  streamMtInstall(code, {
+    onProgress: (pct) => { if (fillEl) fillEl.style.width = `${pct}%`; if (metaEl) metaEl.textContent = `${pct}%`; },
+    onDone: () => { if (metaEl) metaEl.textContent = 'Finishing…'; },
+    onComplete: (ok, error) => {
+      if (ok) {
+        container.className = 'osp osp-ok';
+        container.innerHTML = _inlineMtTitle(container, '', `${escapeHtml(name)} is installed`);
+      } else {
+        container.className = 'osp osp-err';
+        container.innerHTML = _inlineMtTitle(container, '', `Failed: ${escapeHtml(error || 'unknown error')}`);
+      }
+    },
+    onError: (msg) => {
+      container.className = 'osp osp-err';
+      container.innerHTML = _inlineMtTitle(container, '', `Failed: ${escapeHtml(msg)}`);
+    },
+  });
 }
 
 renderMtModelList();
@@ -2348,10 +2281,6 @@ navigator.mediaDevices?.addEventListener?.('devicechange', () => {
     try {
       if      (kind === 'verses')      downloadVersesTxt();
       else if (kind === 'transcript')  downloadTranscriptTxt();
-      else if (kind === 'note')        await downloadAIContent('note');
-      else if (kind === 'points')      await downloadAIContent('points');
-      else if (kind === 'note-docx')   await downloadAIContentDocx('note');
-      else if (kind === 'points-docx') await downloadAIContentDocx('points');
     } catch (err) {
       toast('Download failed: ' + (err.message || err), 'error');
     }
@@ -2378,75 +2307,6 @@ function downloadTranscriptTxt() {
   if (!sessionTranscriptParts.length) { toast('No transcript captured yet — start listening first', 'info'); return; }
   const lines = sessionTranscriptParts.map(p => `[${p.time}] ${p.text}`).join('\n');
   downloadAsFile(lines, `KAIRO_transcript_${new Date().toISOString().slice(0, 10)}.txt`);
-}
-
-// AI content lives on saved sessions. Resolve the most recent saved session
-// that has the requested type ('note'|'points') generated. Shared by both the
-// PDF and Word export paths below, which otherwise repeated this fetch+find
-// block verbatim. Returns { error: true } on a reachability failure (caller
-// should just return — the toast is already shown), or { candidate } where
-// candidate is null if nothing's been generated yet.
-async function resolveGeneratedSession(type) {
-  let sessions = [];
-  try {
-    const r = await fetch(`${SERVER}/api/sessions`);
-    sessions = (await r.json()).sessions || [];
-  } catch {
-    toast('Could not reach Kairo server', 'error');
-    return { error: true };
-  }
-  const want = type === 'note' ? 'hasNote' : 'hasPoints';
-  return { candidate: sessions.find(s => s[want]) || null };
-}
-
-async function downloadAIContent(type) {
-  const { error, candidate } = await resolveGeneratedSession(type);
-  if (error) return;
-  if (!candidate) {
-    toast(`No saved sermon ${type === 'note' ? 'note' : 'points'} yet — opening Content Studio`, 'info');
-    document.getElementById('settings-modal')?.classList.add('hidden');
-    document.getElementById('content-studio-modal')?.classList.remove('hidden');
-    document.getElementById('content-studio-btn')?.click();
-    return;
-  }
-  const r = await fetch(`${SERVER}/api/sessions/${encodeURIComponent(candidate.id)}`);
-  if (!r.ok) throw new Error('failed to load session');
-  const session = await r.json();
-  const content = session.generated?.[type];
-  if (!content) throw new Error('content missing on session');
-  // Use the existing render+print pipeline by dispatching a synthetic open
-  // through Content Studio's renderers. We import them via a small bridge.
-  if (typeof window.__cs_exportToPDF === 'function') {
-    window.__cs_exportToPDF(session, type, content);
-  } else {
-    toast('Content Studio not ready', 'error');
-  }
-}
-
-// Word export goes through the server, which renders the generated content
-// as a real .docx (headings, scripture lines, quotes). Same session
-// resolution as the PDF path.
-async function downloadAIContentDocx(type) {
-  const { error, candidate } = await resolveGeneratedSession(type);
-  if (error) return;
-  if (!candidate) {
-    toast(`No saved sermon ${type === 'note' ? 'note' : 'points'} yet — opening Content Studio`, 'info');
-    document.getElementById('settings-modal')?.classList.add('hidden');
-    document.getElementById('content-studio-btn')?.click();
-    return;
-  }
-  const r = await fetch(`${SERVER}/api/content/export?sessionId=${encodeURIComponent(candidate.id)}&type=${type}`);
-  if (!r.ok) {
-    const j = await r.json().catch(() => ({}));
-    throw new Error(j.error || 'export failed');
-  }
-  const blob = await r.blob();
-  const url  = URL.createObjectURL(blob);
-  const a    = document.createElement('a');
-  a.href     = url;
-  a.download = `KAIRO_${type}_${(candidate.date || candidate.id).replace(/[^A-Za-z0-9_\-]/g, '-')}.docx`;
-  a.click();
-  URL.revokeObjectURL(url);
 }
 
 // ── Elapsed timer ──────────────────────────────────────────────────────────
@@ -2969,6 +2829,26 @@ const DEFAULT_LOOKS = [
         color: '#ffffff', opacity: 65, align: 'center',
         shadow: { enabled: true, color: '#000000', opacity: 70, blur: 8, x: 0, y: 2 },
         outline: { ...NO_OUTLINE } },
+    ],
+  },
+  {
+    // The default look every timer segment falls back to until an operator
+    // assigns something else — the whole point is that opening "Edit" on a
+    // brand-new segment (themeId still null) shows a real, centered
+    // countdown right away instead of an empty canvas with no text layer
+    // to explain what the number will look like (see resolveItemBaseLook's
+    // timer-specific branch, which reaches for this by id rather than
+    // falling through to whatever the output's own default theme is).
+    id: 'timer-big', name: 'Timer — Big Countdown', layout: 'fullscreen', animation: 'cut',
+    groupId: 'grp-timer', groupName: 'Timer',
+    layers: [
+      { id: 'bg', type: 'background', name: 'Canvas', visible: true,
+        fill: 'gradient', color: '#0b0b0f', opacity: 100, color2: '#1c1c30', angle: 160 },
+      { id: 'timer', type: 'text', name: 'Countdown', visible: true, binding: 'timer', customText: '',
+        pos: { x: 160, y: 380, w: 1600, h: 320 },
+        font: { family: 'Manrope', size: 180, weight: 800, italic: false, lineHeight: 1, letterSpacing: 0, transform: 'none' },
+        color: '#ffffff', opacity: 100, align: 'center',
+        shadow: { ...TXT_SHADOW_SOFT }, outline: { ...NO_OUTLINE } },
     ],
   },
 ];
@@ -3715,6 +3595,7 @@ function applyLayerOrder(layers, orderIds) {
 // ── Render preview ────────────────────────────────────────────────────────
 const PREVIEW_TEXT_SAMPLE = 'For God so loved the world, that he gave his only begotten Son.';
 const PREVIEW_REF_SAMPLE  = 'John 3:16 (KJV)';
+const PREVIEW_TIMER_SAMPLE = '12:34'; // static placeholder while editing — the real value only ever exists live on the actual output
 const SCALE = 0.14; // preview is ~14% of full display size
 
 // Same John 3:16 the left panel previews, in each supported language — real
@@ -3742,6 +3623,7 @@ function layerTextContent(layer) {
     if (s) {
       if (layer.binding === 'verse') return s.text || '(empty slide)';
       if (layer.binding === 'reference') return s.reference || '';
+      if (layer.binding === 'timer') return s.timerText || PREVIEW_TIMER_SAMPLE;
       if (layer.binding === 'verse_translated') {
         return TS_TRANSLATE_SAMPLES[tsItemCtx.item.translateTo] || '[No translation language set for this item]';
       }
@@ -3750,6 +3632,7 @@ function layerTextContent(layer) {
   }
   if (layer.binding === 'verse')     return PREVIEW_TEXT_SAMPLE;
   if (layer.binding === 'reference') return PREVIEW_REF_SAMPLE;
+  if (layer.binding === 'timer')     return PREVIEW_TIMER_SAMPLE;
   if (layer.binding === 'verse_translated') {
     return TS_TRANSLATE_SAMPLES[activeLook?.translateTo] || '[Pick a language below]';
   }
@@ -3935,11 +3818,13 @@ function renderPreview() {
         div.style.left = '0'; div.style.right = '0';
         if (layer.binding === 'verse')     { div.style.top = '50%'; div.style.transform = 'translateY(-60%)'; }
         if (layer.binding === 'reference') { div.style.top = '50%'; div.style.transform = 'translateY(20%)'; }
+        if (layer.binding === 'timer')     { div.style.top = '5%'; div.style.right = '4%'; div.style.left = 'auto'; }
         if (layer.align === 'left') { div.style.textAlign = 'left'; }
       } else if (layout === 'lower-third') {
         div.style.left = '0'; div.style.right = '0'; div.style.bottom = '0';
         if (layer.binding === 'verse')     { div.style.bottom = '10%'; }
         if (layer.binding === 'reference') { div.style.bottom = '3%'; }
+        if (layer.binding === 'timer')     { div.style.top = '5%'; div.style.bottom = 'auto'; div.style.right = '4%'; div.style.left = 'auto'; }
         div.style.padding = '0 5%';
       } else if (layout === 'ticker') {
         div.style.left = '0'; div.style.right = '0'; div.style.bottom = '2%';
@@ -3962,6 +3847,7 @@ function renderPreview() {
         if (layout === 'split-left') div.style.left = '0'; else div.style.right = '0';
         if (layer.binding === 'verse')     { div.style.top = '50%'; div.style.transform = 'translateY(-58%)'; }
         if (layer.binding === 'reference') { div.style.top = '50%'; div.style.transform = 'translateY(120%)'; }
+        if (layer.binding === 'timer')     { div.style.top = '5%'; }
       }
 
       // Free-canvas override: explicit box wins over every layout rule.
@@ -4324,15 +4210,30 @@ function tsDecorateLayerEl(div, layer, draggable) {
 }
 
 // ── Render properties panel ───────────────────────────────────────────────
+// Which of the 3 props tabs a layer type actually has content for — a
+// background/image layer has nothing under Effects (no shadow/outline/
+// scroll), so that tab is hidden rather than shown-but-empty for them.
+const PROPS_TABS_BY_LAYER_TYPE = {
+  background: ['layout', 'style'],
+  image:      ['layout', 'style'],
+  text:       ['layout', 'style', 'effects'],
+};
+// Persists across layer switches within one Edit/Theme Studio session
+// (picking a different layer doesn't jump you back to Layout every time) —
+// reset only when it lands on a tab the newly-selected layer doesn't have.
+let activePropsTab = 'layout';
+
 function renderProps() {
   const empty = document.getElementById('ts-props-empty');
   const panel = document.getElementById('ts-props-panel');
+  const tabs = document.getElementById('ts-props-tabs');
   if (!panel || !empty) return;
 
   if (!activeLayer) {
     empty.style.display = 'flex';
     panel.style.display = 'none';
     panel.innerHTML = '';
+    tabs?.classList.add('hidden');
     return;
   }
 
@@ -4347,7 +4248,32 @@ function renderProps() {
   } else {
     renderTextProps(panel, activeLayer);
   }
+
+  const available = PROPS_TABS_BY_LAYER_TYPE[activeLayer.type] || PROPS_TABS_BY_LAYER_TYPE.text;
+  if (!available.includes(activePropsTab)) activePropsTab = available[0];
+  if (tabs) {
+    tabs.classList.remove('hidden');
+    tabs.querySelectorAll('.ts-tab-btn').forEach(btn => {
+      const has = available.includes(btn.dataset.tab);
+      btn.classList.toggle('hidden', !has);
+      btn.classList.toggle('active', btn.dataset.tab === activePropsTab);
+    });
+  }
+  // A class, not a direct style write — see the .ts-tab-hidden comment in
+  // styles.css for why this has to compose with, not clobber, each
+  // section's own enabled/disabled inline display (Shadow/Outline/Scroll).
+  panel.querySelectorAll('[data-tab]').forEach(el => {
+    el.classList.toggle('ts-tab-hidden', el.dataset.tab !== activePropsTab);
+  });
 }
+
+document.querySelectorAll('#ts-props-tabs .ts-tab-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    if (btn.classList.contains('hidden')) return;
+    activePropsTab = btn.dataset.tab;
+    renderProps();
+  });
+});
 
 function prop(label, content) {
   const row = document.createElement('div');
@@ -4360,9 +4286,15 @@ function prop(label, content) {
   return row;
 }
 
-function section(label, ...children) {
+// `tab` groups this section under one of the props panel's tabs (see
+// PROPS_TABS / renderProps below) — every render*Props function tags each
+// section it builds so the panel can show one tab's worth at a time instead
+// of every section stacked in one long scroll, which is what "the edit
+// controls feel very cluttered" was describing.
+function section(tab, label, ...children) {
   const s = document.createElement('div');
   s.className = 'ts-props-section';
+  s.dataset.tab = tab;
   if (label) {
     const l = document.createElement('div');
     l.className = 'ts-props-section-label';
@@ -4545,6 +4477,11 @@ function scheduleThemeAutosave() {
     lastThemeSnapshot = deepClone(activeLook); // burst settled — this is now the baseline for the next one
     saveLooks();
     renderLooksList();
+    // Live-update the output: if the theme being edited is what's on screen
+    // right now (a playlist item's own theme, or the live timer), re-push it
+    // so the operator doesn't have to hit Send again. saveLooks() already
+    // re-broadcasts look-update for the output-default case.
+    try { window.KairoService?.resendLiveForThemeEdit?.(activeLook?.id); } catch {}
   }, 500);
 }
 
@@ -4629,6 +4566,10 @@ function scheduleItemStyleAutosave() {
     }
     writeItemSlideStyleFromSynthetic();
     window.KairoService?.saveService?.();
+    // If the slide being restyled is the one live on the output, re-push it.
+    try {
+      if (tsItemCtx) window.KairoService?.resendLiveForSlideStyleEdit?.(tsItemCtx.item.id, tsItemCtx.slideIndex);
+    } catch {}
   }, 500);
 }
 function resetItemHistory() {
@@ -4826,7 +4767,7 @@ function renderLayoutProps(panel, layer) {
     kids.push(prop('Position', reset));
   }
 
-  panel.appendChild(section('Layout', ...kids));
+  panel.appendChild(section('layout', 'Layout', ...kids));
 }
 
 // Background layer properties
@@ -4834,12 +4775,12 @@ function renderBgProps(panel, layer) {
   renderLayoutProps(panel, layer);
 
   // Fill type
-  panel.appendChild(section('Fill',
+  panel.appendChild(section('style', 'Fill',
     makeFillChips(layer.fill, v => { layer.fill = v; colorRow.style.display = v === 'transparent' ? 'none' : ''; grad2Row.style.display = v === 'gradient' ? '' : 'none'; up(); })
   ));
 
   // Color + opacity
-  const colorRow = section('Color',
+  const colorRow = section('style', 'Color',
     prop('Color', makeColor(layer.color, v => { layer.color = v; up(); })),
     prop('Opacity', makeSlider(layer.opacity, 0, 100, v => { layer.opacity = v; up(); }))
   );
@@ -4847,7 +4788,7 @@ function renderBgProps(panel, layer) {
   panel.appendChild(colorRow);
 
   // Gradient color 2
-  const grad2Row = section('Gradient',
+  const grad2Row = section('style', 'Gradient',
     prop('Color 2', makeColor(layer.color2 || '#1a1a2e', v => { layer.color2 = v; up(); })),
     prop('Angle', makeNumber(layer.angle || 160, 0, 360, 5, v => { layer.angle = v; up(); }))
   );
@@ -4861,11 +4802,11 @@ function renderImageProps(panel, layer) {
   nameInp.type = 'text'; nameInp.className = 'ts-prop-input';
   nameInp.value = layer.name; nameInp.placeholder = 'Layer name';
   nameInp.addEventListener('input', () => { layer.name = nameInp.value; renderLayersList(); });
-  panel.appendChild(section('Layer', prop('Name', nameInp)));
+  panel.appendChild(section('layout', 'Layer', prop('Name', nameInp)));
 
   renderLayoutProps(panel, layer);
 
-  panel.appendChild(section('Image',
+  panel.appendChild(section('style', 'Image',
     prop('Fit', makeChips([
       { label: 'Contain', value: 'contain' },
       { label: 'Cover',   value: 'cover' },
@@ -4875,48 +4816,12 @@ function renderImageProps(panel, layer) {
     prop('Radius', makeSlider(layer.radius || 0, 0, 200, v => { layer.radius = v; up(); }))
   ));
 
-  // Background removal — colour key. Keeps the original so it can be undone.
-  const cutBtn = document.createElement('button');
-  cutBtn.className = 'ts-fill-chip';
-  cutBtn.textContent = layer.srcOriginal ? 'Re-cut background' : 'Remove background';
-  cutBtn.title = 'Key out a flat backdrop (logos, graphics, green screen)';
-  cutBtn.addEventListener('click', async () => {
-    cutBtn.disabled = true;
-    cutBtn.textContent = 'Working…';
-    try {
-      const original = layer.srcOriginal || layer.src;
-      const out = await removeImageBackground({ src: original }, layer.cutTolerance || 40);
-      layer.srcOriginal = original;
-      layer.src = out;
-      up(); renderProps();
-      toast('Background removed', 'success');
-    } catch {
-      toast('Could not process that image', 'error');
-      cutBtn.disabled = false;
-      cutBtn.textContent = 'Remove background';
-    }
-  });
-
-  const cutKids = [prop('Cutout', cutBtn)];
-  if (layer.srcOriginal) {
-    cutKids.push(prop('Tolerance', makeSlider(layer.cutTolerance || 40, 5, 160, async v => {
-      layer.cutTolerance = v;
-      try {
-        layer.src = await removeImageBackground({ src: layer.srcOriginal }, v);
-        up();
-      } catch {}
-    })));
-    const undo = document.createElement('button');
-    undo.className = 'ts-fill-chip';
-    undo.textContent = 'Restore original';
-    undo.addEventListener('click', () => {
-      layer.src = layer.srcOriginal;
-      delete layer.srcOriginal;
-      up(); renderProps();
-    });
-    cutKids.push(prop('Undo', undo));
-  }
-  panel.appendChild(section('Background', ...cutKids));
+  // The color-key "Remove background" cutout used to live here — pulled per
+  // operator report that it doesn't key cleanly (a flat-color-tolerance
+  // keyer can't handle a real photo background, only a true flat backdrop),
+  // so it did more harm than good. removeImageBackground() itself is gone
+  // too; if a real cutout tool comes back, it should be an actual
+  // segmentation model, not this.
 }
 
 // Text layer properties
@@ -4927,11 +4832,12 @@ function renderTextProps(panel, layer) {
   nameInp.value = layer.name; nameInp.placeholder = 'Layer name';
   nameInp.addEventListener('input', () => { layer.name = nameInp.value; renderLayersList(); });
 
-  panel.appendChild(section('Layer',
+  panel.appendChild(section('layout', 'Layer',
     prop('Name', nameInp),
     prop('Binds to', makeChips([
       { label: 'Verse', value: 'verse' },
       { label: 'Ref', value: 'reference' },
+      { label: 'Timer', value: 'timer' },
       { label: 'Custom', value: 'custom' },
     ], layer.binding, v => { layer.binding = v; customRow.style.display = v === 'custom' ? '' : 'none'; up(); }))
   ));
@@ -4942,12 +4848,12 @@ function renderTextProps(panel, layer) {
   customInp.type = 'text'; customInp.className = 'ts-prop-input';
   customInp.value = layer.customText || ''; customInp.placeholder = 'Custom text…';
   customInp.addEventListener('input', () => { layer.customText = customInp.value; up(); });
-  const customRow = section(null, prop('Text', customInp));
+  const customRow = section('layout', null, prop('Text', customInp));
   customRow.style.display = layer.binding === 'custom' ? '' : 'none';
   panel.appendChild(customRow);
 
   // Font
-  panel.appendChild(section('Font',
+  panel.appendChild(section('style', 'Font',
     prop('Family', makeFontSelect(layer.font.family, v => { layer.font.family = v; up(); })),
     (() => {
       const row = document.createElement('div');
@@ -4977,20 +4883,20 @@ function renderTextProps(panel, layer) {
   ));
 
   // Spacing
-  panel.appendChild(section('Spacing',
+  panel.appendChild(section('style', 'Spacing',
     prop('Line H', makeSlider(layer.font.lineHeight, 0.8, 3, v => { layer.font.lineHeight = parseFloat(v.toFixed(2)); up(); })),
     prop('Letter', makeSlider(layer.font.letterSpacing, -5, 30, v => { layer.font.letterSpacing = parseFloat(v.toFixed(1)); up(); }))
   ));
 
   // Color
-  panel.appendChild(section('Color',
+  panel.appendChild(section('style', 'Color',
     prop('Color', makeColor(layer.color, v => { layer.color = v; up(); })),
     prop('Opacity', makeSlider(layer.opacity, 0, 100, v => { layer.opacity = v; up(); })),
     prop('Align', makeAlignBtns(layer.align, v => { layer.align = v; up(); }))
   ));
 
   // Shadow
-  const shadowDetails = section(null,
+  const shadowDetails = section('effects', null,
     prop('Color', makeColor(layer.shadow.color, v => { layer.shadow.color = v; up(); })),
     prop('Opacity', makeSlider(layer.shadow.opacity, 0, 100, v => { layer.shadow.opacity = v; up(); })),
     prop('Blur', makeSlider(layer.shadow.blur, 0, 60, v => { layer.shadow.blur = v; up(); })),
@@ -5011,12 +4917,12 @@ function renderTextProps(panel, layer) {
   const shLabel = document.createElement('span'); shLabel.className = 'ts-prop-label'; shLabel.textContent = 'Shadow';
   const shToggle = makeToggle(layer.shadow.enabled, v => { layer.shadow.enabled = v; shadowDetails.style.display = v ? '' : 'none'; up(); });
   shadowHeader.appendChild(shLabel); shadowHeader.appendChild(shToggle);
-  const shadowSection = section('Shadow', shadowHeader);
+  const shadowSection = section('effects', 'Shadow', shadowHeader);
   panel.appendChild(shadowSection);
   panel.appendChild(shadowDetails);
 
   // Outline
-  const outlineDetails = section(null,
+  const outlineDetails = section('effects', null,
     prop('Color', makeColor(layer.outline.color, v => { layer.outline.color = v; up(); })),
     prop('Width', makeSlider(layer.outline.width, 1, 10, v => { layer.outline.width = v; up(); }))
   );
@@ -5027,7 +4933,7 @@ function renderTextProps(panel, layer) {
   const olLabel = document.createElement('span'); olLabel.className = 'ts-prop-label'; olLabel.textContent = 'Outline';
   const olToggle = makeToggle(layer.outline.enabled, v => { layer.outline.enabled = v; outlineDetails.style.display = v ? '' : 'none'; up(); });
   outlineHeader.appendChild(olLabel); outlineHeader.appendChild(olToggle);
-  panel.appendChild(section('Outline', outlineHeader));
+  panel.appendChild(section('effects', 'Outline', outlineHeader));
   panel.appendChild(outlineDetails);
 
   // Scroll — continuous horizontal marquee (news-ticker / large-scroll
@@ -5035,7 +4941,7 @@ function renderTextProps(panel, layer) {
   // layout: works on the Ticker preset's bottom strip or a free-canvas box
   // just as well. Speed is seconds per full loop — lower is faster.
   if (!layer.scroll) layer.scroll = { enabled: false, speed: 15 };
-  const scrollDetails = section(null,
+  const scrollDetails = section('effects', null,
     prop('Speed', makeSlider(layer.scroll.speed, 3, 60, v => { layer.scroll.speed = v; up(); }))
   );
   scrollDetails.style.display = layer.scroll.enabled ? '' : 'none';
@@ -5045,7 +4951,7 @@ function renderTextProps(panel, layer) {
   const scLabel = document.createElement('span'); scLabel.className = 'ts-prop-label'; scLabel.textContent = 'Scroll';
   const scToggle = makeToggle(layer.scroll.enabled, v => { layer.scroll.enabled = v; scrollDetails.style.display = v ? '' : 'none'; up(); });
   scrollHeader.appendChild(scLabel); scrollHeader.appendChild(scToggle);
-  panel.appendChild(section('Scroll', scrollHeader));
+  panel.appendChild(section('effects', 'Scroll', scrollHeader));
   panel.appendChild(scrollDetails);
 }
 
@@ -5115,7 +5021,7 @@ function toggleItemModeChrome(isItem) {
   document.querySelector('.ts-canvas-size-group')?.classList.toggle('hidden', isItem);
   const hint = document.querySelector('.ts-layers-hint');
   if (hint) hint.style.visibility = isItem ? 'hidden' : '';
-  if (isItem) updateItemThemeLabel();
+  if (isItem) { updateItemThemeLabel(); renderItemTimerControls(); }
 }
 document.getElementById('ts-item-back-btn')?.addEventListener('click', () => closeItemStyleEditor());
 
@@ -5129,6 +5035,112 @@ function updateItemThemeLabel() {
   const resolved = window.KairoService.themeForItem(tsItemCtx.item);
   label.textContent = tsItemCtx.item.themeId ? (resolved?.name || 'Theme') : 'Output default';
 }
+
+// The countdown's actual target — this is the thing that makes a timer
+// segment a timer, and it used to live ONLY behind the separate Quick-edit
+// popover on the card, with nothing about it visible from inside Edit
+// itself ("I don't see any controls for the user to set the timer"). Lives
+// in the item-mode header rather than the per-layer props panel below
+// because it's a property of the SEGMENT, not of whichever text/image
+// layer happens to be selected (or unselected) on the canvas right now.
+function renderItemTimerControls() {
+  const host = document.getElementById('ts-item-timer-header');
+  if (!host) return;
+  const item = tsItemCtx?.item;
+  const isTimer = item?.type === 'timer';
+  host.classList.toggle('hidden', !isTimer);
+  host.innerHTML = '';
+  if (!isTimer) return;
+
+  const params = item.trigger?.params || {};
+  const mode = params.mode === 'duration' ? 'duration' : 'endAt';
+
+  const label = document.createElement('div');
+  label.className = 'ts-props-section-label';
+  label.textContent = 'Timer';
+  host.appendChild(label);
+
+  const modeRow = document.createElement('div');
+  modeRow.className = 'ts-prop-row';
+  modeRow.appendChild(makeChips([
+    { label: 'Ends at', value: 'endAt' },
+    { label: 'Duration', value: 'duration' },
+  ], mode, (v) => { save({ mode: v }); renderItemTimerControls(); }));
+  host.appendChild(modeRow);
+
+  const fieldRow = document.createElement('div');
+  fieldRow.className = 'ts-prop-row';
+  if (mode === 'duration') {
+    const minutes = document.createElement('input');
+    minutes.type = 'number'; minutes.min = '1'; minutes.className = 'ts-prop-number';
+    minutes.placeholder = 'Minutes';
+    minutes.value = params.durationSec ? Math.round(params.durationSec / 60) : '';
+    minutes.addEventListener('change', () => {
+      const min = parseFloat(minutes.value);
+      if (min > 0) save({ mode: 'duration', durationSec: Math.round(min * 60) });
+    });
+    fieldRow.appendChild(minutes);
+    const suffix = document.createElement('span');
+    suffix.className = 'ts-prop-label';
+    suffix.textContent = 'minutes';
+    fieldRow.appendChild(suffix);
+  } else {
+    // Plain validated text, not <input type="time"> — WebKit's native time
+    // control (Tauri's real webview on macOS) can show a complete-looking
+    // value while .value still reads back empty until every sub-segment is
+    // explicitly confirmed, which silently defeated this exact field. Same
+    // fix as the Quick-edit popover in service.js.
+    const timeInp = document.createElement('input');
+    timeInp.type = 'text'; timeInp.inputMode = 'numeric'; timeInp.placeholder = 'HH:MM'; timeInp.maxLength = 5;
+    timeInp.className = 'ts-prop-input';
+    timeInp.value = params.endAtTime || '';
+    timeInp.addEventListener('input', () => {
+      const digits = timeInp.value.replace(/\D/g, '').slice(0, 4);
+      timeInp.value = digits.length > 2 ? `${digits.slice(0, 2)}:${digits.slice(2)}` : digits;
+    });
+    timeInp.addEventListener('change', () => {
+      if (/^([01]\d|2[0-3]):[0-5]\d$/.test(timeInp.value)) save({ mode: 'endAt', endAtTime: timeInp.value });
+    });
+    fieldRow.appendChild(timeInp);
+  }
+  host.appendChild(fieldRow);
+
+  // Warning / overtime colours — the countdown recolours through these as it
+  // runs down (last minute → warning, past zero → overtime). The base colour
+  // is the timer text layer's own colour, edited on the canvas like any layer.
+  const timerLayer = (resolveItemBaseLook(item)?.layers || []).find(l => l.binding === 'timer');
+  const colorRow = document.createElement('div');
+  colorRow.className = 'ts-prop-row';
+  const warnLbl = document.createElement('span');
+  warnLbl.className = 'ts-prop-label'; warnLbl.textContent = 'Warning';
+  colorRow.appendChild(warnLbl);
+  colorRow.appendChild(makeColor(params.warnColor || timerLayer?.warnColor || '#ffcf4d',
+    (v) => save({ warnColor: v })));
+  const otLbl = document.createElement('span');
+  otLbl.className = 'ts-prop-label'; otLbl.textContent = 'Overtime';
+  otLbl.style.marginLeft = '10px';
+  colorRow.appendChild(otLbl);
+  colorRow.appendChild(makeColor(params.overtimeColor || timerLayer?.overtimeColor || '#ff5c5c',
+    (v) => save({ overtimeColor: v })));
+  host.appendChild(colorRow);
+
+  // Local echo so the field reflects the change immediately even before
+  // the PUT round-trips — item.trigger is the same live segmentList
+  // reference getTimerItem handed out, so this mutation is visible to
+  // anything else reading item.trigger.params too (e.g. re-opening Quick
+  // edit on this same segment without a full reload in between).
+  function save(patch) {
+    item.trigger = item.trigger || { params: {} };
+    item.trigger.params = { ...item.trigger.params, ...patch };
+    window.KairoService.updateSegmentParams(item.id, item.trigger.params);
+    // If this segment is the one live on the output, push the change now
+    // (warn/overtime colour, or a re-timed countdown) instead of making the
+    // operator stop and restart it.
+    if (patch.warnColor || patch.overtimeColor) {
+      setTimeout(() => window.KairoService?.resendLiveTimer?.(), 150);
+    }
+  }
+}
 document.getElementById('ts-item-theme-picker-btn')?.addEventListener('click', (e) => {
   if (!tsItemCtx) return;
   window.KairoService.openThemePopover(e.currentTarget, tsItemCtx.item);
@@ -5140,7 +5152,14 @@ document.getElementById('ts-item-theme-picker-btn')?.addEventListener('click', (
 // small layer-renderer/resolver rather than cross-file exporting one.
 function resolveItemBaseLook(item) {
   const explicit = item.themeId ? looks.find(l => l.id === item.themeId) : null;
-  return explicit || primaryOutputLook() || looks[0] || null;
+  if (explicit) return explicit;
+  // A fresh timer segment has no themeId yet, and falling through to the
+  // output's own assigned theme (built for verse/reference bindings) meant
+  // Edit opened on a blank canvas with nothing showing what the countdown
+  // would even look like. 'timer-big' always exists (a DEFAULT_LOOKS
+  // entry, never deletable) so this never itself falls through to null.
+  if (item.type === 'timer') return looks.find(l => l.id === 'timer-big') || primaryOutputLook() || looks[0] || null;
+  return primaryOutputLook() || looks[0] || null;
 }
 
 // Builds the synthetic "look" item mode points activeLook at: a deep clone
@@ -5280,7 +5299,14 @@ function selectItemSlide(index) {
 
 // ── Item mode open/close (mirrors openThemeStudio/closeThemeStudio above) ──
 function openItemStyleEditor(itemId, slideIndex = 0) {
-  const item = window.KairoService?.service?.items.find(i => i.id === itemId);
+  // Timer segments aren't playlist items — they live in server/segments.js,
+  // not service.items — so they don't show up in the normal lookup at all.
+  // getTimerItem adapts one into the same {id, type, themeId, slideStyles}
+  // shape a real item has (see service.js), which is all this editor and
+  // slidesFor/themeForItem actually require; everything downstream (undo,
+  // autosave, theme resolution) then runs completely unmodified.
+  const item = window.KairoService?.service?.items.find(i => i.id === itemId)
+    || window.KairoService?.getTimerItem?.(itemId);
   if (!item) return;
   tsMode = 'item';
   tsItemCtx = { item, slideIndex, baseLook: resolveItemBaseLook(item) };
@@ -5899,67 +5925,6 @@ tsImageFile?.addEventListener('change', async () => {
   }
 });
 
-// ── Background removal (colour key) ───────────────────────────────────────
-// Removes a flat backdrop from an image layer by keying out every pixel within
-// `tolerance` of a sample colour, then feathering the resulting edge. This is
-// the reliable, dependency-free case: logos, graphics and anything shot on a
-// flat/green backdrop. (Full AI subject cutout needs a segmentation model —
-// tracked separately.) Sample colour defaults to the most common edge pixel,
-// which is the backdrop in virtually every real image.
-// Pixels processed per chunk before yielding back to the event loop — keeps
-// a large background image (e.g. 4000x3000) from visibly freezing the whole
-// UI for the entire duration of the keying pass.
-const BG_REMOVE_CHUNK_PIXELS = 200_000;
-
-function removeImageBackground(layer, tolerance = 40) {
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    img.onerror = () => reject(new Error('decode failed'));
-    img.onload = async () => {
-      const w = img.naturalWidth, h = img.naturalHeight;
-      const c = document.createElement('canvas');
-      c.width = w; c.height = h;
-      const ctx = c.getContext('2d', { willReadFrequently: true });
-      ctx.drawImage(img, 0, 0);
-      const imgData = ctx.getImageData(0, 0, w, h);
-      const d = imgData.data;
-
-      // Sample the border: the modal colour around the edge is the backdrop.
-      const counts = new Map();
-      const sample = (x, y) => {
-        const i = (y * w + x) * 4;
-        // Quantise to 8 levels/channel so near-identical pixels group together.
-        const key = ((d[i] >> 5) << 10) | ((d[i + 1] >> 5) << 5) | (d[i + 2] >> 5);
-        counts.set(key, (counts.get(key) || 0) + 1);
-      };
-      for (let x = 0; x < w; x++) { sample(x, 0); sample(x, h - 1); }
-      for (let y = 0; y < h; y++) { sample(0, y); sample(w - 1, y); }
-      let bestKey = 0, bestN = -1;
-      for (const [k, n] of counts) if (n > bestN) { bestN = n; bestKey = k; }
-      const kr = ((bestKey >> 10) & 31) * 8 + 4;
-      const kg = ((bestKey >> 5)  & 31) * 8 + 4;
-      const kb = ( bestKey        & 31) * 8 + 4;
-
-      // Key out matching pixels; feather partial matches so edges don't jag.
-      // Chunked with a yield every BG_REMOVE_CHUNK_PIXELS pixels rather than
-      // one uninterrupted pass over the whole buffer.
-      const hard = tolerance, soft = tolerance * 1.8;
-      const chunkStride = BG_REMOVE_CHUNK_PIXELS * 4;
-      for (let i = 0; i < d.length; i += 4) {
-        const dist = Math.sqrt(
-          (d[i] - kr) ** 2 + (d[i + 1] - kg) ** 2 + (d[i + 2] - kb) ** 2
-        );
-        if (dist <= hard) d[i + 3] = 0;
-        else if (dist < soft) d[i + 3] = Math.round(d[i + 3] * ((dist - hard) / (soft - hard)));
-        if (i % chunkStride === 0) await new Promise(r => setTimeout(r, 0));
-      }
-      ctx.putImageData(imgData, 0, 0);
-      resolve(c.toDataURL('image/png'));   // PNG — alpha must survive
-    };
-    img.src = layer.src;
-  });
-}
-
 // ── Theme import / export ─────────────────────────────────────────────────
 // .kairotheme is KAIRO's own real, distinct file type — a small envelope
 // (format marker + version) wrapping a theme, rather than a bare .json blob
@@ -6165,8 +6130,9 @@ newLookBtn?.addEventListener('click', () => {
 // One card per output. The primary external display keeps its own card (its
 // theme picker is injected inline like every other output); any *additional*
 // screens a church drives — stage monitor, foyer — are appended inside that
-// card as extra rows.
-const PRIMARY_DISPLAY = 'display-1';
+// card as extra rows. PRIMARY_DISPLAY itself is declared near the top of
+// the file now (see the comment there) — it has to exist before
+// wireExternalDisplayStatus's IIFE runs at load.
 const OUTPUT_DEFS = [
   { key: PRIMARY_DISPLAY, card: 'card-external',     label: 'External Display' },
   { key: 'ndi',           card: 'card-ndi',          label: 'NDI' },
@@ -6240,6 +6206,21 @@ function populateScreenOptions(sel, outputId) {
 // "Open" button. Matches every other presentation app: select where it
 // should go, and it goes there immediately. Selecting "None" closes
 // whatever window was open for this output.
+// Every "nothing happened" display-window bug this session traced back to
+// a silent failure with zero error surface — a duck-typed cross-file
+// guard failing quietly, a fallback nobody saw. This makes that class of
+// failure visible in the debug log the moment it happens, instead of only
+// once an operator reports "the display isn't working."
+function logDisplayLifecycleFallback(where, detail) {
+  // /api/debug-log only reads {event, data} off the body (see server.js) —
+  // anything else silently gets dropped, which would have been a fittingly
+  // ironic way for this exact hardening to go silent itself.
+  fetch(`${SERVER}/api/debug-log`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ event: 'display-lifecycle-fallback', data: { where, ...detail } }),
+  }).catch(() => {});
+}
+
 function buildScreenSelect(outputId) {
   const sel = document.createElement('select');
   sel.className = 'setting-input output-screen-select';
@@ -6253,6 +6234,8 @@ function buildScreenSelect(outputId) {
       if (typeof openDisplayOutput === 'function') openDisplayOutput({ id: outputId, name: outputId });
     } else if (typeof closeDisplayWindow === 'function') {
       closeDisplayWindow(label);
+    } else {
+      logDisplayLifecycleFallback('buildScreenSelect', { outputId, reason: 'closeDisplayWindow not a function' });
     }
   });
   return sel;
@@ -6285,7 +6268,11 @@ function upsertPrimaryMonitorPicker() {
 // that doesn't say which number corresponds to which dropdown entry.
 let identifyWindowsOpen = false;
 document.getElementById('identify-displays-btn')?.addEventListener('click', async () => {
-  if (identifyWindowsOpen || typeof openDisplayWindow !== 'function') return;
+  if (identifyWindowsOpen) return;
+  if (typeof openDisplayWindow !== 'function') {
+    logDisplayLifecycleFallback('identify-displays-btn', { reason: 'openDisplayWindow not a function' });
+    return;
+  }
   const sel = document.querySelector('#external-picker-row .output-screen-select');
   const idx = sel ? Number(sel.value) : NaN;
   const s = Number.isInteger(idx) ? cachedScreens[idx] : null;
@@ -6299,6 +6286,7 @@ document.getElementById('identify-displays-btn')?.addEventListener('click', asyn
   );
   setTimeout(() => {
     if (typeof closeDisplayWindow === 'function') closeDisplayWindow(label);
+    else logDisplayLifecycleFallback('identify-displays-btn/auto-close', { label, reason: 'closeDisplayWindow not a function' });
     identifyWindowsOpen = false;
   }, 3000);
 });
@@ -6536,9 +6524,39 @@ function openDisplayOutput(d) {
   const x = scr.left   != null ? scr.left : window.screen.width;
   const y = scr.top    != null ? scr.top  : 0;
   if (typeof openDisplayWindow === 'function') {
-    openDisplayWindow(`kairo-${d.id}`, url, { width: w, height: h, x, y, fullscreen: true });
+    const label = `kairo-${d.id}`;
+    openDisplayWindow(label, url, { width: w, height: h, x, y, fullscreen: true });
+    verifyDisplayWindowOpened(label);
   } else {
+    // This exact fallback — silently opening the system browser instead
+    // of a real positioned output window — was the actual root cause
+    // behind an entire session of "nothing sends to the display" reports
+    // (openDisplayWindow existed but wasn't attached to `window` yet).
+    // The underlying bug is fixed, but the fallback itself still needs to
+    // never be silent again if it's ever hit for some other reason.
+    logDisplayLifecycleFallback('openDisplayOutput', { outputId: d.id, reason: 'openDisplayWindow not a function — falling back to window.open()' });
     window.open(url, `kairo-${d.id}`, `width=${w},height=${h},left=${x},top=${y}`);
+  }
+}
+
+// A targeted assertion on exactly the operation that broke 5 times this
+// session, not a general health-check subsystem: give the window a
+// second to actually come up, then confirm it did. Every prior bug here
+// left an operator finding out mid-service, from an empty screen, that
+// nothing had actually opened — this surfaces it immediately instead.
+async function verifyDisplayWindowOpened(label) {
+  const getWin = window.__TAURI__?.webviewWindow?.WebviewWindow;
+  if (!getWin) return; // not running inside Tauri (plain dev preview) — nothing to verify
+  await new Promise(r => setTimeout(r, 1000));
+  try {
+    const win = await getWin.getByLabel(label);
+    const visible = win ? await win.isVisible().catch(() => null) : null;
+    if (!win || visible === false) {
+      logDisplayLifecycleFallback('verifyDisplayWindowOpened', { label, exists: !!win, visible });
+      toast('Display window may not have opened — check the monitor picker in Settings', 'error');
+    }
+  } catch (err) {
+    logDisplayLifecycleFallback('verifyDisplayWindowOpened threw', { label, error: String(err) });
   }
 }
 
@@ -6732,370 +6750,151 @@ async function saveSettingsPatch(patch) {
   window.__TAURI__.event.listen('menu-export-theme',  () => clickWhenReady('export-look-btn'));
   // KAIRO > Settings… (Cmd+,) — same panel the toolbar gear icon opens.
   window.__TAURI__.event.listen('menu-settings',      () => { settingsModal?.classList.remove('hidden'); showFirstSettingsPane(); });
+
+  // Controls menu — every item here is just a click on an existing
+  // dashboard button (see src-tauri/src/lib.rs's controls_menu), no modal
+  // to open first, unlike the Theme Studio items above.
+  const clickDirect = (btnId) => document.getElementById(btnId)?.click();
+  window.__TAURI__.event.listen('menu-toggle-listening', () => clickDirect('listen-btn'));
+  window.__TAURI__.event.listen('menu-range-next',       () => clickDirect('range-next-btn'));
+  window.__TAURI__.event.listen('menu-range-end',        () => clickDirect('range-clear-btn'));
+  window.__TAURI__.event.listen('menu-clear-slide',      () => clickDirect('clear-slide-layer-btn'));
+  window.__TAURI__.event.listen('menu-clear-media',      () => clickDirect('clear-media-layer-btn'));
+  window.__TAURI__.event.listen('menu-clear-timer',      () => clickDirect('clear-timer-layer-btn'));
+  window.__TAURI__.event.listen('menu-clear-all',        () => clickDirect('clear-all-layers-btn'));
 })();
 
-// ═══════════════════════════════════════════════════════════════════════════
-// CONTENT STUDIO — capture, save, generate, export
-// ═══════════════════════════════════════════════════════════════════════════
-(function () {
-  const openBtn       = document.getElementById('content-studio-btn');
-  const modal         = document.getElementById('content-studio-modal');
-  if (!openBtn || !modal) return;
+// ── Remappable in-app hotkeys ───────────────────────────────────────────
+// Independent of the native menu's own accelerators (src-tauri/src/lib.rs)
+// — those are fixed OS-level defaults and never change; this is a
+// separate, operator-customizable layer for the same action set,
+// persisted as a plain {actionId: comboString} map in settings.hotkeys
+// via the existing saveSettingsPatch. Same actions the Controls menu
+// drives, on purpose — one list, two independent ways to trigger it.
+const HOTKEY_ACTIONS = [
+  { id: 'toggle-listening', label: 'Start/Stop Listening', btnId: 'listen-btn',            default: 'cmd+l' },
+  { id: 'range-next',       label: 'Next',                 btnId: 'range-next-btn',        default: 'cmd+arrowright' },
+  { id: 'range-end',        label: 'End Range',            btnId: 'range-clear-btn',       default: '' },
+  { id: 'clear-slide',      label: 'Clear Slide',          btnId: 'clear-slide-layer-btn', default: 'cmd+k' },
+  { id: 'clear-media',      label: 'Clear Media',          btnId: 'clear-media-layer-btn', default: '' },
+  { id: 'clear-timer',      label: 'Clear Timer',          btnId: 'clear-timer-layer-btn', default: '' },
+  { id: 'clear-all',        label: 'Clear All',            btnId: 'clear-all-layers-btn',  default: 'cmd+shift+k' },
+];
 
-  const closeBtn      = modal.querySelector('#close-content-studio');
-  const sessionList   = modal.querySelector('#cs-session-list');
-  const saveCurrentBtn= modal.querySelector('#cs-save-current-btn');
-  const llmStatusEl   = modal.querySelector('#cs-llm-status');
-  const detailPane    = modal.querySelector('#cs-detail-pane');
-  const emptyPane     = modal.querySelector('#cs-empty-pane');
+function hotkeyFor(actionId) {
+  const action = HOTKEY_ACTIONS.find(a => a.id === actionId);
+  const stored = settings.hotkeys?.[actionId];
+  return stored !== undefined ? stored : (action?.default || '');
+}
 
-  const detailTitleEl = modal.querySelector('#cs-detail-title');
-  const detailMetaEl  = modal.querySelector('#cs-detail-meta');
-  const tabNoteBtn    = modal.querySelector('#cs-tab-note');
-  const tabPointsBtn  = modal.querySelector('#cs-tab-points');
-  const tabSourceBtn  = modal.querySelector('#cs-tab-source');
-  const generateBtn   = modal.querySelector('#cs-generate-btn');
-  // exportBtn2 removed — top-bar download menu handles all exports now.
-  const deleteBtn2    = modal.querySelector('#cs-delete-session-btn');
-  const previewWrap   = modal.querySelector('#cs-preview');
-  const generateLabel = modal.querySelector('#cs-generate-label');
+// Normalized as ctrl+alt+shift+cmd+<key>, always that modifier order, key
+// lowercased — capture and lookup both go through this so they can never
+// silently disagree on formatting.
+function comboFromEvent(e) {
+  const parts = [];
+  if (e.ctrlKey) parts.push('ctrl');
+  if (e.altKey) parts.push('alt');
+  if (e.shiftKey) parts.push('shift');
+  if (e.metaKey) parts.push('cmd');
+  const key = e.key.toLowerCase();
+  if (!['control', 'alt', 'shift', 'meta'].includes(key)) parts.push(key);
+  return parts.join('+');
+}
 
-  let activeSessionId = null;
-  let activeSession   = null;
-  let activeTab       = 'note'; // 'note' | 'points' | 'source'
+const COMBO_SYMBOLS = { cmd: '⌘', shift: '⇧', alt: '⌥', ctrl: '⌃', arrowright: '→', arrowleft: '←', arrowup: '↑', arrowdown: '↓' };
+function comboDisplay(combo) {
+  if (!combo) return 'Not set';
+  return combo.split('+').map(p => COMBO_SYMBOLS[p] || p.toUpperCase()).join('');
+}
 
-  function snapshotCurrentSession() {
-    const transcript = sessionTranscriptParts.map(p => p.text).join(' ').replace(/\s+/g, ' ').trim();
-    const durationMin = startTime ? Math.max(1, Math.round((Date.now() - startTime) / 60000)) : 0;
-    const verses = sessionVerses.map(v => ({ ref: v.ref, text: cleanVerseText(v.text), time: v.time }));
-    return {
-      title: `Sermon — ${new Date().toLocaleString()}`,
-      date: new Date().toISOString().slice(0, 10),
-      durationMin,
-      transcript,
-      transcriptParts: sessionTranscriptParts.slice(),
-      verses,
-    };
-  }
+let capturingHotkeyId = null;
 
-  async function fetchSessions() {
-    try {
-      const r = await fetch(`${SERVER}/api/sessions`);
-      const j = await r.json();
-      return j.sessions || [];
-    } catch { return []; }
-  }
-
-  async function fetchLLMStatus() {
-    try {
-      const r = await fetch(`${SERVER}/api/llm/status`);
-      return await r.json();
-    } catch { return { ok: false, error: 'unreachable' }; }
-  }
-
-  function renderLLMStatus(s) {
-    if (!llmStatusEl) return;
-    if (s.ok) {
-      const has = s.models?.includes(s.configuredModel);
-      llmStatusEl.innerHTML = has
-        ? `<span class="cs-pill cs-pill-ok">●</span> Ollama ready · <strong>${s.configuredModel}</strong>`
-        : `<span class="cs-pill cs-pill-warn">●</span> Ollama running, but <strong>${s.configuredModel}</strong> not installed. Run <code>ollama pull ${s.configuredModel}</code>`;
-    } else {
-      llmStatusEl.innerHTML = `<span class="cs-pill cs-pill-err">●</span> Ollama not reachable at ${s.url || 'localhost:11434'} — install from <a href="https://ollama.com" target="_blank" rel="noopener">ollama.com</a>`;
+function renderHotkeysList() {
+  const host = document.getElementById('hotkeys-list');
+  if (!host) return;
+  host.innerHTML = '';
+  HOTKEY_ACTIONS.forEach(action => {
+    const combo = hotkeyFor(action.id);
+    const row = document.createElement('div');
+    row.className = 'lang-pack-row';
+    row.innerHTML = `<div class="lang-pack-meta"><div class="lang-pack-name">${escapeHtml(action.label)}</div>` +
+      `<div class="lang-pack-sub">${escapeHtml(comboDisplay(combo))}</div></div>`;
+    const actions = document.createElement('div');
+    actions.style.cssText = 'display:flex;gap:6px;';
+    const changeBtn = document.createElement('button');
+    changeBtn.className = 'modal-btn secondary';
+    changeBtn.textContent = 'Change';
+    changeBtn.addEventListener('click', () => startHotkeyCapture(action.id, changeBtn));
+    actions.appendChild(changeBtn);
+    if (combo) {
+      const clearBtn = document.createElement('button');
+      clearBtn.className = 'modal-btn secondary';
+      clearBtn.textContent = 'Clear';
+      clearBtn.addEventListener('click', () => saveHotkey(action.id, ''));
+      actions.appendChild(clearBtn);
     }
-  }
-
-  function renderSessionList(items) {
-    if (!sessionList) return;
-    if (!items.length) {
-      sessionList.innerHTML = `<div class="cs-empty-list">No saved sessions yet. Click <strong>Save current session</strong> while listening.</div>`;
-      return;
-    }
-    sessionList.innerHTML = '';
-    for (const s of items) {
-      const row = document.createElement('div');
-      row.className = 'cs-session-row' + (s.id === activeSessionId ? ' active' : '');
-      row.dataset.id = s.id;
-      row.innerHTML = `
-        <div class="cs-session-row-main">
-          <div class="cs-session-row-title">${escapeHtml(s.title)}</div>
-          <div class="cs-session-row-meta">${s.date || ''} · ${s.verseCount} verses · ${s.wordCount.toLocaleString()} words</div>
-        </div>
-        <div class="cs-session-row-tags">
-          ${s.hasNote ? '<span class="cs-tag">Note</span>' : ''}
-          ${s.hasPoints ? '<span class="cs-tag">Points</span>' : ''}
-        </div>`;
-      row.addEventListener('click', () => loadSessionIntoDetail(s.id));
-      sessionList.appendChild(row);
-    }
-  }
-
-  async function refreshList() {
-    const [items, status] = await Promise.all([fetchSessions(), fetchLLMStatus()]);
-    renderLLMStatus(status);
-    renderSessionList(items);
-  }
-
-  async function loadSessionIntoDetail(id) {
-    try {
-      const r = await fetch(`${SERVER}/api/sessions/${encodeURIComponent(id)}`);
-      if (!r.ok) throw new Error('not found');
-      activeSession = await r.json();
-      activeSessionId = id;
-    } catch { toast('Failed to load session', 'error'); return; }
-
-    detailPane.style.display = '';
-    emptyPane.style.display  = 'none';
-    detailTitleEl.textContent = activeSession.title || activeSession.id;
-    detailMetaEl.textContent  =
-      `${activeSession.date || ''}  ·  ${activeSession.durationMin || 0} min  ·  ` +
-      `${(activeSession.verses || []).length} verses  ·  ` +
-      `${(activeSession.transcript || '').split(/\s+/).filter(Boolean).length.toLocaleString()} words`;
-
-    sessionList.querySelectorAll('.cs-session-row').forEach(r => {
-      r.classList.toggle('active', r.dataset.id === id);
-    });
-    setTab(activeTab);
-  }
-
-  function setTab(tab) {
-    activeTab = tab;
-    [tabNoteBtn, tabPointsBtn, tabSourceBtn].forEach(b => b?.classList.remove('active'));
-    ({ note: tabNoteBtn, points: tabPointsBtn, source: tabSourceBtn })[tab]?.classList.add('active');
-
-    if (tab === 'source') {
-      generateBtn.style.display = 'none';
-      generateLabel.textContent = '';
-    } else {
-      generateBtn.style.display = '';
-      const has = !!(activeSession?.generated?.[tab]);
-      generateLabel.textContent = has ? 'Regenerate' : 'Generate';
-    }
-    // Export PDF lives on the top-bar download menu now; no per-tab toggle.
-    renderPreview();
-  }
-
-  function renderPreview() {
-    if (!activeSession) { previewWrap.innerHTML = ''; return; }
-    if (activeTab === 'source') {
-      previewWrap.innerHTML = renderSourceHTML(activeSession);
-      return;
-    }
-    const content = activeSession.generated?.[activeTab];
-    if (!content) {
-      previewWrap.innerHTML = `<div class="cs-preview-empty">
-        <p>No ${activeTab === 'note' ? 'sermon note' : 'sermon points'} generated yet.</p>
-        <p class="cs-hint">Click <strong>Generate</strong> — the local model reads the transcript and produces a structured output. Nothing leaves your machine.</p>
-      </div>`;
-      return;
-    }
-    previewWrap.innerHTML = activeTab === 'note'
-      ? renderNoteHTML(activeSession, content)
-      : renderPointsHTML(activeSession, content);
-  }
-
-  function renderSourceHTML(s) {
-    const verses = (s.verses || []).map(v =>
-      `<li><strong>${escapeHtml(v.ref)}</strong> <span class="cs-source-time">${escapeHtml(v.time || '')}</span><br>${escapeHtml(v.text || '')}</li>`
-    ).join('') || '<li class="cs-source-empty">No verses recorded.</li>';
-    const transcript = escapeHtml(s.transcript || '').replace(/\n/g, '<br>') || '<em>No transcript captured.</em>';
-    return `
-      <section class="cs-doc">
-        <h2 class="cs-h2">Verses cited</h2>
-        <ul class="cs-verse-list">${verses}</ul>
-        <h2 class="cs-h2">Transcript</h2>
-        <p class="cs-transcript">${transcript}</p>
-      </section>`;
-  }
-
-  function renderNoteHTML(s, n) {
-    const sections = (n.sections || []).map(sec => `
-      <section class="cs-section">
-        <h3 class="cs-h3">${escapeHtml(sec.heading)}</h3>
-        ${sec.scriptures?.length ? `<div class="cs-scripture-row">${sec.scriptures.map(r => `<span class="cs-scripture-chip">${escapeHtml(r)}</span>`).join('')}</div>` : ''}
-        <p class="cs-body">${escapeHtml(sec.body)}</p>
-      </section>`).join('') || '<p class="cs-preview-empty">Model returned no sections.</p>';
-    return `
-      <article class="cs-doc">
-        <header class="cs-doc-header">
-          <h1 class="cs-h1">${escapeHtml(n.title || s.title)}</h1>
-          <div class="cs-doc-meta">${escapeHtml(s.date || '')} · ${s.durationMin || 0} min</div>
-          ${n.summary ? `<p class="cs-summary">${escapeHtml(n.summary)}</p>` : ''}
-        </header>
-        ${sections}
-        ${n.closing ? `<footer class="cs-closing"><h3 class="cs-h3">Closing</h3><p class="cs-body">${escapeHtml(n.closing)}</p></footer>` : ''}
-      </article>`;
-  }
-
-  function renderPointsHTML(s, p) {
-    const items = (p.points || []).map((it, i) => `
-      <li class="cs-point">
-        <div class="cs-point-num">${i + 1}</div>
-        <div class="cs-point-body">
-          <div class="cs-point-title">${escapeHtml(it.point)}</div>
-          ${it.scripture ? `<div class="cs-point-scripture">${escapeHtml(it.scripture)}</div>` : ''}
-          <p class="cs-body">${escapeHtml(it.explanation)}</p>
-          ${it.supportingQuote ? `<blockquote class="cs-quote">“${escapeHtml(it.supportingQuote)}”</blockquote>` : ''}
-        </div>
-      </li>`).join('') || '<p class="cs-preview-empty">Model returned no points.</p>';
-    return `
-      <article class="cs-doc">
-        <header class="cs-doc-header">
-          <h1 class="cs-h1">${escapeHtml(p.title || s.title)}</h1>
-          <div class="cs-doc-meta">${escapeHtml(s.date || '')} · ${s.durationMin || 0} min</div>
-          ${p.mainTheme ? `<p class="cs-summary"><strong>Theme — </strong>${escapeHtml(p.mainTheme)}</p>` : ''}
-        </header>
-        <ol class="cs-points">${items}</ol>
-      </article>`;
-  }
-
-  // ── Actions ──────────────────────────────────────────────────────────────
-  saveCurrentBtn?.addEventListener('click', async () => {
-    const snap = snapshotCurrentSession();
-    if (!snap.transcript && !snap.verses.length) {
-      toast('Nothing to save — start a session first', 'info');
-      return;
-    }
-    saveCurrentBtn.disabled = true;
-    try {
-      const r = await fetch(`${SERVER}/api/sessions`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(snap),
-      });
-      const j = await r.json();
-      if (!r.ok) throw new Error(j.error || 'save failed');
-      toast('Session saved', 'success');
-      await refreshList();
-      loadSessionIntoDetail(j.id);
-    } catch (e) {
-      toast('Save failed: ' + e.message, 'error');
-    } finally {
-      saveCurrentBtn.disabled = false;
-    }
+    row.appendChild(actions);
+    host.appendChild(row);
   });
+}
 
-  generateBtn?.addEventListener('click', async () => {
-    if (!activeSessionId || activeTab === 'source') return;
-    generateBtn.disabled = true;
-    const orig = generateLabel.textContent;
-    generateLabel.textContent = 'Generating…';
-    previewWrap.classList.add('cs-loading');
-    try {
-      const r = await fetch(`${SERVER}/api/content/generate`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sessionId: activeSessionId, type: activeTab }),
-      });
-      const j = await r.json();
-      if (!r.ok) throw new Error(j.error || 'generate failed');
-      activeSession.generated = activeSession.generated || {};
-      activeSession.generated[activeTab] = j.content;
-      setTab(activeTab);
-      refreshList();
-    } catch (e) {
-      toast('Generation failed: ' + e.message, 'error');
-      generateLabel.textContent = orig;
-    } finally {
-      previewWrap.classList.remove('cs-loading');
-      generateBtn.disabled = false;
-    }
-  });
-
-  // Old in-modal Export PDF button is hidden; downloads live on the top-bar
-  // menu now (window.__cs_exportToPDF reuses this module's render+print fns).
-
-  deleteBtn2?.addEventListener('click', async () => {
-    if (!activeSessionId) return;
-    if (!(await confirmDialog('Delete this session? This cannot be undone.', { title: 'Delete session', confirmLabel: 'Delete', danger: true }))) return;
-    try {
-      await fetch(`${SERVER}/api/sessions/${encodeURIComponent(activeSessionId)}`, { method: 'DELETE' });
-      activeSessionId = null;
-      activeSession = null;
-      detailPane.style.display = 'none';
-      emptyPane.style.display  = '';
-      refreshList();
-    } catch (e) { toast('Delete failed: ' + e.message, 'error'); }
-  });
-
-  tabNoteBtn  ?.addEventListener('click', () => setTab('note'));
-  tabPointsBtn?.addEventListener('click', () => setTab('points'));
-  tabSourceBtn?.addEventListener('click', () => setTab('source'));
-
-  // Background pre-flight: while the Content Studio modal is open, re-ping
-  // Ollama every 15 s so the operator sees the service come back up live
-  // (e.g. they realised it wasn't running, launched it, and the badge flips
-  // green without having to close & reopen the modal). Stopped on close so
-  // we don't poll the LLM endpoint forever in the background.
-  let llmPollTimer = null;
-  function startLlmPoll() {
-    clearInterval(llmPollTimer);
-    llmPollTimer = setInterval(async () => {
-      renderLLMStatus(await fetchLLMStatus());
-    }, 15_000);
-  }
-  function stopLlmPoll() { clearInterval(llmPollTimer); llmPollTimer = null; }
-
-  function closeModal() { modal.classList.add('hidden'); stopLlmPoll(); }
-
-  openBtn.addEventListener('click', () => {
-    // Close Settings first — the launcher lives inside it now, and stacking
-    // two modals leaves the dimmed Settings overlay behind Content Studio.
-    document.getElementById('settings-modal')?.classList.add('hidden');
-    modal.classList.remove('hidden');
-    refreshList();
-    startLlmPoll();
-  });
-  closeBtn?.addEventListener('click', closeModal);
-  modal.querySelector('.modal-overlay')?.addEventListener('click', closeModal);
-
-  // Bridge so the top-bar download menu can reuse this module's render+print
-  // pipeline without duplicating templates. Window-scoped because the IIFE
-  // closes over openPrintWindow / renderNoteHTML / renderPointsHTML.
-  window.__cs_exportToPDF = function (session, type, content) {
-    const html = type === 'note'
-      ? renderNoteHTML(session, content)
-      : renderPointsHTML(session, content);
-    openPrintWindow(html, session.title || session.id);
+function startHotkeyCapture(actionId, btn) {
+  if (capturingHotkeyId) return; // one capture at a time
+  capturingHotkeyId = actionId;
+  const original = btn.textContent;
+  btn.textContent = 'Press keys… (Esc cancels)';
+  const onKey = (e) => {
+    e.preventDefault(); e.stopPropagation();
+    if (e.key === 'Escape') { finish(); return; }
+    if (['Control', 'Alt', 'Shift', 'Meta'].includes(e.key)) return; // a bare modifier isn't a combo yet
+    saveHotkey(actionId, comboFromEvent(e));
+    finish();
   };
-
-  // ── Print → Save as PDF ─────────────────────────────────────────────────
-  function openPrintWindow(bodyHTML, title) {
-    const w = window.open('', '_blank', 'width=900,height=1100');
-    if (!w) { toast('Pop-up blocked — allow pop-ups to export PDF', 'error'); return; }
-    w.document.write(`<!doctype html>
-<html><head><meta charset="utf-8"><title>${escapeHtml(title)}</title>
-<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
-<style>
-  @page { size: A4; margin: 22mm 20mm; }
-  * { box-sizing: border-box; }
-  body { font-family: 'Manrope', -apple-system, sans-serif; color: #111; background: #fff; line-height: 1.55; font-size: 11.5pt; }
-  .cs-doc { max-width: 720px; margin: 0 auto; }
-  .cs-doc-header { border-bottom: 1.5px solid #111; padding-bottom: 10px; margin-bottom: 18px; }
-  .cs-h1 { font-size: 22pt; font-weight: 800; letter-spacing: -0.01em; margin: 0 0 4px; }
-  .cs-doc-meta { font-size: 9.5pt; color: #666; text-transform: uppercase; letter-spacing: 1px; }
-  .cs-summary { margin-top: 10px; font-style: italic; color: #333; }
-  .cs-section { margin-bottom: 16px; page-break-inside: avoid; }
-  .cs-h2 { font-size: 13pt; font-weight: 700; margin: 18px 0 8px; }
-  .cs-h3 { font-size: 12pt; font-weight: 700; margin: 0 0 6px; }
-  .cs-body { margin: 0 0 6px; }
-  .cs-scripture-row { margin: 4px 0 8px; }
-  .cs-scripture-chip { display: inline-block; font-size: 9.5pt; font-weight: 600; background: #f4f4f4; border: 1px solid #ddd; border-radius: 3px; padding: 2px 8px; margin-right: 6px; }
-  .cs-points { list-style: none; padding: 0; margin: 0; counter-reset: pt; }
-  .cs-point { display: flex; gap: 14px; margin-bottom: 16px; page-break-inside: avoid; }
-  .cs-point-num { flex: 0 0 28px; font-size: 14pt; font-weight: 800; color: #999; }
-  .cs-point-body { flex: 1; }
-  .cs-point-title { font-size: 12.5pt; font-weight: 700; margin-bottom: 2px; }
-  .cs-point-scripture { font-size: 9.5pt; font-weight: 600; color: #555; margin-bottom: 6px; }
-  .cs-quote { border-left: 3px solid #ccc; padding: 4px 12px; margin: 8px 0; color: #555; font-style: italic; font-size: 10.5pt; }
-  .cs-closing { margin-top: 18px; padding-top: 12px; border-top: 1px solid #ddd; }
-  @media print { body { -webkit-print-color-adjust: exact; print-color-adjust: exact; } }
-</style></head><body>${bodyHTML}
-<script>window.onload = function(){ setTimeout(function(){ window.print(); }, 200); };</script>
-</body></html>`);
-    w.document.close();
+  function finish() {
+    document.removeEventListener('keydown', onKey, true);
+    capturingHotkeyId = null;
+    renderHotkeysList();
   }
-})();
+  // Captured on the way down (capture:true), ahead of anything else on
+  // the page, so recording a shortcut never also fires whatever it's
+  // about to be bound to.
+  document.addEventListener('keydown', onKey, true);
+}
+
+async function saveHotkey(actionId, combo) {
+  settings.hotkeys = { ...(settings.hotkeys || {}), [actionId]: combo };
+  await saveSettingsPatch({ hotkeys: settings.hotkeys });
+  renderHotkeysList();
+}
+
+// Global dispatcher. Skips text inputs (typing "l" shouldn't toggle
+// listening) and gets out of the way entirely while a new combo is being
+// recorded — startHotkeyCapture's own capture-phase listener already
+// claims the keydown first in that case, but the guard here is cheap
+// insurance against ever double-firing on the same keystroke.
+document.addEventListener('keydown', (e) => {
+  if (capturingHotkeyId) return;
+  const t = e.target;
+  if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+  const combo = comboFromEvent(e);
+  if (!combo) return;
+  const action = HOTKEY_ACTIONS.find(a => hotkeyFor(a.id) === combo);
+  if (!action) return;
+  e.preventDefault();
+  document.getElementById(action.btnId)?.click();
+});
+
+renderHotkeysList();
+
+// ═══════════════════════════════════════════════════════════════════════════
+// TRIGGERS — dispatch into the Timer tab (server/triggers.js, service.js)
+//   The actual UI lives in service.js as a top-bar tab (segment cards,
+//   see showTimerLibrary/onTimerAction) — this just forwards the two
+//   built-in trigger types' broadcasts there, same bridge pattern as
+//   'media-status'/'media-folder-changed' above.
+// ═══════════════════════════════════════════════════════════════════════════
+registerActionHandler('stage-timer',   (msg) => window.KairoService?.onTimerAction?.(msg));
+registerActionHandler('clock-message', (msg) => window.KairoService?.onClockAction?.(msg));
 
 // ── Startup bootstrap ───────────────────────────────────────────────────────
 // Runs behind the branded overlay before the operator touches the app:

@@ -12,6 +12,12 @@
 // having the app guess when a chorus repeats.
 'use strict';
 
+// Wrapped in an IIFE (matching service.js's pattern) so HYMNS/IMPORTED/
+// allHymns don't leak into the shared global scope every classic <script> on
+// the page occupies — only searchHymns/loadHymnBank, the two functions other
+// scripts actually call, are exposed on window below.
+(function () {
+
 const HYMNS = [
   {
     id: 'amazing-grace',
@@ -278,10 +284,24 @@ const HYMNS = [
 // a bad import can never silently replace a known-good hymn).
 let IMPORTED = [];
 
+// The operator's own persistent Song Library (server-backed, foldered,
+// editable — see service.js's loadSongLibrary/addLibrarySong/etc.) merges in
+// last, same id-collision rule as IMPORTED. service.js calls
+// setLibrarySongs() once at load and again after any add/edit/delete so this
+// stays in sync without hymns.js reaching into service.js's own state.
+let LIBRARY = [];
+
+function setLibrarySongs(list) {
+  LIBRARY = Array.isArray(list) ? list : [];
+}
+
 function allHymns() {
-  if (!IMPORTED.length) return HYMNS;
+  if (!IMPORTED.length && !LIBRARY.length) return HYMNS;
   const seen = new Set(HYMNS.map(h => h.id));
-  return [...HYMNS, ...IMPORTED.filter(h => h && h.id && !seen.has(h.id) && (h.blocks || []).length)];
+  const withImported = IMPORTED.filter(h => h && h.id && !seen.has(h.id) && (h.blocks || []).length);
+  withImported.forEach(h => seen.add(h.id));
+  const withLibrary = LIBRARY.filter(h => h && h.id && !seen.has(h.id) && (h.blocks || []).length);
+  return [...HYMNS, ...withImported, ...withLibrary];
 }
 
 // Called by the app at boot. Missing file is the normal case, not an error.
@@ -304,12 +324,18 @@ function searchHymns(query) {
   return pool.filter(h => {
     const hay = [
       h.title, h.author,
-      ...h.blocks.flatMap(b => b.lines),
+      ...h.blocks.flatMap(b => b.lines || []),
     ].join(' ').toLowerCase().replace(/[^a-z0-9\s]/g, '');
     return hay.includes(q);
   });
 }
 
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { HYMNS, searchHymns, allHymns };
+  module.exports = { HYMNS, searchHymns, allHymns, setLibrarySongs };
+} else {
+  window.searchHymns    = searchHymns;
+  window.loadHymnBank   = loadHymnBank;
+  window.setLibrarySongs = setLibrarySongs;
 }
+
+})();

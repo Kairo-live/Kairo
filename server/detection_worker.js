@@ -3,15 +3,21 @@
 //   map.json → directIndex + verbatim inverted index + IDF map + verse fingerprints
 //   → signals {type:'ready'}
 //
-// Four search layers:
+// Five search layers:
 //   1. directLookup      — explicit reference ("1 John 1:10"), O(1)
 //   2. verbatimSearch    — exact phrase match across translations, ~5ms
 //   3. fingerprintSearch — verse signature coverage for paraphrases, ~2ms
+//   4. streaming anchor trie — word-by-word quote detection, sub-ms/word
+//   5. semanticSearch    — meaning-based Candidates via embeddinggemma-300m,
+//      loaded in the background after {type:'ready'} (see semantic_engine.js)
+//      so its ~1-2s model load never delays the fast lexical layers coming
+//      online; signals {type:'semanticReady'} separately once available.
 'use strict';
 
 const { workerData, parentPort } = require('worker_threads');
 const path = require('path');
 const fs   = require('fs');
+const semanticEngine = require('./semantic_engine');
 
 const DATA_DIR = workerData?.dataDir || path.join(__dirname, '..', 'databases', 'logos');
 const MAP_PATH = path.join(DATA_DIR, 'map.json');
@@ -19,6 +25,11 @@ const MAP_PATH = path.join(DATA_DIR, 'map.json');
 // ── Cached regex (avoid re-compilation in hot paths) ─────────────────────
 const RE_NORM = /[^a-z0-9\s]/g;
 const RE_WS   = /\s+/g;
+
+// Hoisted once to module scope — this was previously redefined as an inline
+// closure inside init(), verbatimSearch(), fingerprintSearch(), and
+// fingerprintSearchInLibrary(), reallocating a closure on every hot-path call.
+function norm(s) { return s.toLowerCase().replace(RE_NORM, '').replace(RE_WS, ' ').trim(); }
 
 // ── Top-K selection (avoids full sort for large arrays) ──────────────────
 function topK(arr, k, compareFn) {
@@ -75,6 +86,12 @@ let verseSignatures      = null;   // Map<idx, Map<word, idf>> — top N distinc
 let verseSignatureWeight = null;   // Map<idx, number> — total IDF weight of each verse's signature
 let verseNormText        = null;   // Map<idx, string> — pre-computed norm(kjv_text)
 let verseNormNlt         = null;   // Map<idx, string> — pre-computed norm(nlt_text)
+let verseStemText        = null;   // Map<idx, string> — verseNormText with every word healWord()'d
+let verseStemNlt         = null;   // Map<idx, string> — verseNormNlt with every word healWord()'d
+let verseNormWords       = null;   // Map<idx, string[]> — verseNormText pre-split, avoids re-splitting per search call
+let verseNormNltWords    = null;   // Map<idx, string[]> — verseNormNlt pre-split
+let verseStemWords       = null;   // Map<idx, string[]> — verseStemText pre-split
+let verseStemNltWords    = null;   // Map<idx, string[]> — verseStemNlt pre-split
 
 // ── Streaming 4-gram anchor trie ─────────────────────────────────────────
 // Word-level prefix trie over distinctive verse 4-grams.
@@ -98,6 +115,17 @@ const HIT_DEDUP_MS   = 12000;  // don't re-fire the same verse within 12s in-wor
 
 // Layer 2 tuning
 const ALIGN_CONFIRM_AT   = 6;     // words aligned to escalate from anchor → confirmed
+// IDF floor for confirmation, on top of the word-count floor above — found
+// necessary from a real false-positive: liturgical/prayer language ("in the
+// name of Jesus", "we give you the glory", "receive our thanks") is dense
+// with short common phrases, and 6 CONSECUTIVE common words can coincidentally
+// align with an unrelated verse's wording purely by chance. This layer had
+// no IDF check at all before — word-count alone was the only bar, unlike
+// verbatimSearch (see IDF_FULL_CONFIDENCE), so a "confirmed" auto-send here
+// could fire on 6 aligned words that carried almost no actual identifying
+// content. Reuses the same IDF_FULL_CONFIDENCE bar verbatim search uses, so
+// both auto-send paths require the same minimum "this could only really be
+// this one verse" evidence before going to the live screen.
 const ALIGN_MISS_BUDGET  = 3;     // tolerate this many word skips before dropping —
                                   // covers filler ("you know", "uh", "amen") and
                                   // paraphrase substitutions between verse words so a
@@ -127,9 +155,50 @@ const ALIGN_AGE_MS       = 20000; // drop candidates older than 20s without conf
 // becomes too common after stemming, so aggressive stripping is safe.
 
 // STT artifacts the speech-to-text layer produces. Applied before stemming.
+//
+// Also doubles as the bridge for archaic/British KJV spellings that a
+// preacher pronounces normally but American-English STT transcribes with
+// the modern/American spelling — "honour" is read aloud exactly like
+// "honor", so the transcript says "honor", but the verse text says
+// "honour". This is NOT a tense/suffix issue (suffixStrip can't touch it —
+// the difference is mid-word, not a stripped ending), so without an
+// explicit bridge these silently failed to match at all. Found empirically:
+// map.json has 1,000+ combined occurrences of these words across all their
+// forms — "shew" alone (the KJV's "show") appears 400+ times. Each entry
+// maps the KJV/archaic spelling to its plain modern-spelled equivalent,
+// which then continues through the normal IRREGULAR/suffixStrip pipeline
+// below exactly as if it had been spoken that way — so only ONE spelling
+// per family needs to be listed here; the rest (-s/-ed/-ing/-eth) fall out
+// of the existing suffix rules once the mid-word spelling is bridged.
 const STT_HEAL = {
   oh: 'o',
   unto: 'to',
+
+  // shew (KJV "show") — very common; base + every inflected form, since
+  // each one is a distinct literal word BEFORE suffix stripping runs.
+  shew: 'show', shewed: 'showed', sheweth: 'showeth', shewing: 'showing',
+  shewn: 'shown', shewest: 'showest',
+
+  // -our → -or family (honour/favour/labour/neighbour/colour/armour/
+  // rumour/saviour/behaviour/endeavour) — British KJV spelling vs.
+  // American STT output. Includes the inflected forms that actually occur
+  // in the text; suffixStrip handles further conjugation once the mid-word
+  // spelling itself is bridged to the American form.
+  honour: 'honor', honours: 'honors', honoured: 'honored',
+  honoureth: 'honoreth', honourable: 'honorable',
+  favour: 'favor', favours: 'favors', favoured: 'favored', favoureth: 'favoreth',
+  labour: 'labor', labours: 'labors', laboured: 'labored',
+  laboureth: 'laboreth', labouring: 'laboring',
+  neighbour: 'neighbor', neighbours: 'neighbors',
+  colour: 'color', colours: 'colors', coloured: 'colored',
+  armour: 'armor', armours: 'armors',
+  rumour: 'rumor', rumours: 'rumors',
+  saviour: 'savior', saviours: 'saviors',
+  behaviour: 'behavior', behaviours: 'behaviors',
+  endeavour: 'endeavor', endeavoured: 'endeavored', endeavouring: 'endeavoring',
+
+  // fulness (KJV) vs. fullness (modern/STT) — same word, not a suffix issue.
+  fulness: 'fullness',
 };
 
 // English irregulars — every entry here is a verb whose forms differ enough
@@ -148,6 +217,10 @@ const IRREGULAR = {
   doth: 'do', doeth: 'do', does: 'do', did: 'do', done: 'do', doing: 'do',
   // go (went is irregular; going handled by -ing strip)
   went: 'go', gone: 'go',
+  // show (shown is an irregular past participle, not a suffix pattern —
+  // needed so the "shewn" → "shown" bridge in STT_HEAL actually converges
+  // on the same stem as "show"/"showed"/"shows")
+  shown: 'show',
   // come (came is irregular)
   came: 'com',
   // see (saw/seen irregular)
@@ -177,6 +250,58 @@ const IRREGULAR = {
   brethren: 'brother',
   // men/women suppletive plurals
   men: 'man', women: 'woman', children: 'child',
+
+  // Additional irregulars added after the phrase-match scoring fix — Bible
+  // narrative leans heavily on these, and none of them follow a stem-able
+  // suffix pattern (suffixStrip only handles regular -ed/-ing/-s/-es/-eth/
+  // -est), so without an explicit mapping a spoken "kept"/"killed"/"kills"
+  // never lines up with each other even after the verse-side stemming fix.
+  // Genealogy ("begat"), a huge share of KJV narrative text, is included.
+  beget: 'beget', begat: 'beget', begetteth: 'beget', begotten: 'beget',
+  bear: 'bear', bare: 'bear', bore: 'bear', born: 'bear', borne: 'bear',
+  slay: 'slay', slew: 'slay', slain: 'slay',
+  smite: 'smite', smote: 'smite', smitten: 'smite',
+  draw: 'draw', drew: 'draw', drawn: 'draw',
+  swear: 'swear', swore: 'swear', sware: 'swear', sworn: 'swear',
+  tear: 'tear', tore: 'tear', torn: 'tear',
+  wear: 'wear', wore: 'wear', worn: 'wear',
+  shake: 'shake', shook: 'shake', shaken: 'shake',
+  forsake: 'forsak', forsook: 'forsak', forsaken: 'forsak',
+  hide: 'hid', hid: 'hid', hidden: 'hid',
+  keep: 'keep', kept: 'keep', keepeth: 'keep',
+  weep: 'weep', wept: 'weep',
+  sleep: 'sleep', slept: 'sleep',
+  leave: 'leav', left: 'leav',
+  lose: 'los', lost: 'los',
+  tell: 'tell', told: 'tell',
+  sell: 'sell', sold: 'sell',
+  hold: 'hold', held: 'hold',
+  understand: 'understand', understood: 'understand',
+  build: 'build', built: 'build',
+  send: 'send', sent: 'send',
+  spend: 'spend', spent: 'spend',
+  feel: 'feel', felt: 'feel',
+  find: 'find', found: 'find',
+  bind: 'bind', bound: 'bind',
+  mean: 'mean', meant: 'mean',
+  deal: 'deal', dealt: 'deal',
+  dwell: 'dwell', dwelt: 'dwell',
+  cleave: 'cleav', clave: 'cleav', cloven: 'cleav',
+  strive: 'striv', strove: 'striv', striven: 'striv',
+  arise: 'ris', arose: 'ris', arisen: 'ris',
+  // NOTE: "ground" (dirt/earth) and "lead" (the metal) are deliberately left
+  // out of the grind/lead-the-verb families below — both nouns are far more
+  // common in KJV text ("fell to the ground", "table of shewbread") than the
+  // corresponding verb sense, and folding them in would misroute retrieval.
+  fly: 'fly', flew: 'fly', flown: 'fly',
+  grow: 'grow', grew: 'grow', grown: 'grow',
+  throw: 'throw', threw: 'throw', thrown: 'throw',
+  blow: 'blow', blew: 'blow', blown: 'blow',
+  shine: 'shin', shone: 'shin', shined: 'shin',
+  steal: 'steal', stole: 'steal', stolen: 'steal',
+  // "rid" ("get rid of") is a real, distinct KJV word — map ride/rode/ridden
+  // to "ride" rather than "rid" so the two don't collide.
+  ride: 'ride', rode: 'ride', ridden: 'ride',
 };
 
 // Algorithmic suffix stripper. Runs after STT heal + irregulars.
@@ -291,7 +416,6 @@ async function init() {
 
   // Inverted index: word → [verseIdx, ...]
   // Also tracks document frequency (df) for IDF computation
-  const norm = s => s.toLowerCase().replace(RE_NORM, '').replace(RE_WS, ' ').trim();
 
   // KJV markup: [bracketed] section headings ("[A Psalm of David.]") are not
   // spoken — drop them before indexing, or they inflate verse word counts and
@@ -308,6 +432,45 @@ async function init() {
     const v = verseMetadata[i];
     verseNormText.set(i, norm(v.kjv_text.replace(RE_HEADING, ' ')));
     if (v.nlt_text) verseNormNlt.set(i, norm(v.nlt_text.replace(RE_HEADING, ' ')));
+  }
+
+  // Stemmed text for every verse — same content as verseNormText/verseNormNlt
+  // but every word run through healWord() first. Built once here so
+  // verbatimSearch can compare tense/inflection-normalized text directly
+  // instead of raw words: a spoken "kept"/"keeping"/"keepeth" all collapse to
+  // the same stem the KJV's own wording collapses to, so STT tense drift no
+  // longer breaks the literal phrase-window match (previously it only helped
+  // *retrieve* the candidate verse via stemIndex below, not score it — a
+  // tense mismatch still forced the match down to the much looser 4-gram
+  // fallback tier, which is where wrong-verse noise creeps in).
+  //
+  // Word-array forms (verseNormWords/verseStemWords, + their NLT twins) are
+  // cached alongside the joined-string forms — verbatimSearch needs both
+  // (`.includes()` substring checks want the string; IDF lookups and n-gram
+  // windows want the array by position) and re-splitting the same static
+  // per-verse string on every single search call, for every candidate verse,
+  // was showing up as real repeated work on the detection hot path.
+  verseStemText     = new Map();
+  verseStemNlt      = new Map();
+  verseNormWords    = new Map();
+  verseNormNltWords = new Map();
+  verseStemWords    = new Map();
+  verseStemNltWords = new Map();
+  for (let i = 0; i < verseMetadata.length; i++) {
+    const normWords = verseNormText.get(i).split(' ').filter(Boolean);
+    verseNormWords.set(i, normWords);
+    const stemWords = normWords.map(healWord);
+    verseStemWords.set(i, stemWords);
+    verseStemText.set(i, stemWords.join(' '));
+
+    const nltN = verseNormNlt.get(i);
+    if (nltN) {
+      const nltNormWords = nltN.split(' ').filter(Boolean);
+      verseNormNltWords.set(i, nltNormWords);
+      const nltStemWords = nltNormWords.map(healWord);
+      verseStemNltWords.set(i, nltStemWords);
+      verseStemNlt.set(i, nltStemWords.join(' '));
+    }
   }
 
   const tempIndex = new Map(); // word → Set<idx> (unique per verse)
@@ -388,6 +551,14 @@ async function init() {
 
   parentPort.postMessage({ type: 'ready' });
   console.log('[DetectionWorker] Ready — all four detection layers active.');
+
+  // Semantic layer loads in the background — not awaited here, see the
+  // header comment. Failure is non-fatal (missing/not-yet-built embeddings
+  // file, e.g. a fresh install before build_verse_embeddings.mjs has run) —
+  // semanticSearch calls just no-op via isReady() until this succeeds.
+  semanticEngine.ensureLoaded()
+    .then(() => parentPort.postMessage({ type: 'semanticReady' }))
+    .catch(err => console.warn('[DetectionWorker] Semantic layer unavailable:', err.message));
 }
 
 // ── Anchor trie build ─────────────────────────────────────────────────────
@@ -461,17 +632,38 @@ function _advanceAnchor(node, depth, word, now, next, anchors) {
         const last = recentHitVerses.get(idx) || 0;
         if (now - last < HIT_DEDUP_MS) continue;
         recentHitVerses.set(idx, now);
-        anchors.push({ verseIdx: idx, depth: newDepth, df: terminal.df });
+        // IDF weight of the matched 4-gram itself — a df=1 4-gram is unique
+        // to one verse across the whole Bible, but "unique combination"
+        // doesn't guarantee the individual words are meaningfully rare
+        // ("our father in the" is 4 ordinary words that only HAPPEN to
+        // combine uniquely in Genesis 42:32 — a preacher saying "our father
+        // in the Lord" in an ordinary prayer isn't quoting it). Carried
+        // through to server.js's df=1 fast-share gate for the same reason
+        // ALIGN_CONFIRM_AT got an IDF floor above.
+        const idf = idfWeightedSpan(verseNormWords.get(idx), pos, ANCHOR_N);
+        anchors.push({ verseIdx: idx, depth: newDepth, df: terminal.df, idf });
 
         // Open an alignment candidate so subsequent words can promote this
-        // anchor to confirmed. Starts already at ANCHOR_N words matched.
+        // anchor to confirmed. Starts already at ANCHOR_N words matched —
+        // matchedIdf seeded from the same idf just computed above.
+        // contributedWords tracks which distinct verse-words have already
+        // paid into matchedIdf — without it, a verse built from a couple of
+        // repeated common words ("praise... the LORD... Praise ye the
+        // LORD") can double-count the same word each time it recurs and
+        // walk matchedIdf up to a "certain" score on repetition alone, not
+        // genuine vocabulary diversity. Real incident: "praise the Lord"
+        // (filler, not a citation) cleared the confirm bar against Psalms
+        // 150:6 this way even after the bar itself was raised twice.
+        const seedWords = (verseNormWords.get(idx) || []).slice(pos, pos + ANCHOR_N);
         alignmentCandidates.push({
           idx,
-          cursor:    pos + ANCHOR_N,
-          matched:   ANCHOR_N,
-          misses:    ALIGN_MISS_BUDGET,
-          confirmed: false,
-          firedAt:   now,
+          cursor:     pos + ANCHOR_N,
+          matched:    ANCHOR_N,
+          matchedIdf: idf,
+          contributedWords: new Set(seedWords),
+          misses:     ALIGN_MISS_BUDGET,
+          confirmed:  false,
+          firedAt:    now,
         });
       }
     }
@@ -504,16 +696,28 @@ function streamWord(raw) {
   for (const cand of alignmentCandidates) {
     if (now - cand.firedAt > ALIGN_AGE_MS) continue;
 
-    const words = verseHealedWords.get(cand.idx) || [];
+    const words    = verseHealedWords.get(cand.idx) || [];
+    const rawWords = verseNormWords.get(cand.idx);   // same length/order as `words` — for IDF lookup
     if (cand.cursor >= words.length) continue;   // ran off the end — retire quietly
 
     let matchedThisTick = false;
     if (words[cand.cursor] === word) {
+      const w = rawWords[cand.cursor];
+      if (!cand.contributedWords.has(w)) {
+        cand.matchedIdf += idfMap.get(w) || 0;
+        cand.contributedWords.add(w);
+      }
       cand.cursor++;
       cand.matched++;
       matchedThisTick = true;
     } else if (cand.misses > 0 && cand.cursor + 1 < words.length && words[cand.cursor + 1] === word) {
-      // Skip one verse word (STT insertion or paraphrase)
+      // Skip one verse word (STT insertion or paraphrase) — the matched word
+      // is the one at cursor+1 (the skipped word at cursor contributes no IDF).
+      const w = rawWords[cand.cursor + 1];
+      if (!cand.contributedWords.has(w)) {
+        cand.matchedIdf += idfMap.get(w) || 0;
+        cand.contributedWords.add(w);
+      }
       cand.cursor   += 2;
       cand.matched++;
       cand.misses--;
@@ -526,9 +730,20 @@ function streamWord(raw) {
       continue;   // dead
     }
 
-    if (matchedThisTick && !cand.confirmed && cand.matched >= ALIGN_CONFIRM_AT) {
+    // Word-count floor (structural: enough sequential alignment happened)
+    // AND IDF floor (content: that alignment carries real identifying
+    // weight, not just a run of coincidentally-common words) — see the
+    // comment above ALIGN_CONFIRM_AT for why both are needed. Deliberately a
+    // separate, higher constant from IDF_FULL_CONFIDENCE rather than reusing
+    // it — that one also normalizes verbatimSearch's score curve, so raising
+    // it to tighten this gate would have quietly dropped raw similarity
+    // scores everywhere. Raised from 8 after a real incident: "praise the
+    // Lord" (said as filler, not read as scripture) cleared 8 against Psalms
+    // 150:6 and auto-sent to the live screen.
+    if (matchedThisTick && !cand.confirmed
+        && cand.matched >= ALIGN_CONFIRM_AT && cand.matchedIdf >= ANCHOR_CONFIRM_IDF) {
       cand.confirmed = true;
-      confirmed.push({ verseIdx: cand.idx, matched: cand.matched });
+      confirmed.push({ verseIdx: cand.idx, matched: cand.matched, matchedIdf: cand.matchedIdf });
     }
     kept.push(cand);
   }
@@ -553,6 +768,12 @@ function streamReset() {
   activeStates         = [];
   alignmentCandidates  = [];
   recentHitVerses.clear();
+  // Without this, a worker reused across services (no explicit
+  // buildTopicLibrary call yet) keeps the previous sermon's topic bias for up
+  // to 60s into the new session, skewing fingerprint scoring toward the wrong
+  // passage.
+  topicLibrary      = null;
+  topicLibraryWords = [];
 }
 
 // ── Direct lookup ─────────────────────────────────────────────────────────
@@ -592,12 +813,16 @@ function formatVerse(v, similarity, method) {
 }
 
 // ── Text search ───────────────────────────────────────────────────────────
+// Reuses the verseNormText/verseNormNlt maps built once in init() instead of
+// re-lowercasing all ~31k verses' kjv_text/nlt_text on every call.
 function textSearch(query, limit = 8) {
-  const q = query.toLowerCase();
+  const q = norm(query);
   const results = [];
-  for (const v of verseMetadata) {
-    if (v.kjv_text.toLowerCase().includes(q) || v.nlt_text?.toLowerCase().includes(q)) {
-      results.push(formatVerse(v, 0.9, 'text'));
+  for (let i = 0; i < verseMetadata.length; i++) {
+    const kjvN = verseNormText.get(i);
+    const nltN = verseNormNlt.get(i);
+    if ((kjvN && kjvN.includes(q)) || (nltN && nltN.includes(q))) {
+      results.push(formatVerse(verseMetadata[i], 0.9, 'text'));
       if (results.length >= limit) break;
     }
   }
@@ -630,18 +855,64 @@ function ngramCoverage(tNgramSet, verseWords, n) {
   return matched / total;
 }
 
+// ── IDF-weighted verse coverage ────────────────────────────────────────────
+// Raw word-count coverage ("9 of this verse's 10 words showed up") treats
+// every word as equally important — so a preacher dropping "For" off the
+// front of a quote costs exactly as much confidence as dropping the one
+// genuinely distinctive word in the verse would. That's backwards: the
+// Bible is fixed text and no two verses share the same wording, so what
+// actually identifies a verse is its RARE words, not its common ones — STT
+// mishearing "for"/"and"/"the" (constant background noise across every
+// accent and every engine) shouldn't move confidence much; losing the one
+// word that makes this verse distinguishable from every other verse should.
+// idfMap (built in init(), same IDF used by the fingerprint layer) already
+// scores exactly that per word, so this reuses it instead of counting words.
+function idfWeightedSpan(rawWords, start, len) {
+  let sum = 0;
+  for (let i = start; i < start + len; i++) sum += idfMap.get(rawWords[i]) || 0;
+  return sum;
+}
+function idfTotal(rawWords) {
+  let sum = 0;
+  for (const w of rawWords) sum += idfMap.get(w) || 0;
+  return sum || 1; // guards divide-by-zero on the (essentially nonexistent) all-stopword verse
+}
+
+// How much matched IDF weight counts as "plenty of evidence" on its own —
+// roughly one strongly distinctive word ("meditate" ≈ 7.6, "fulness" ≈ 6.5)
+// plus a bit of surrounding structure. This replaces raw phrase-length as
+// the "how much did we actually hear" term: a 9-word match that captured
+// 18 points of IDF weight (a rare word plus its neighbors) is much stronger
+// evidence than a coincidental 9-word run of all-common words would be, so
+// scoring by matched-word-COUNT was the wrong signal even before coverage
+// came into it. Once matched weight clears this bar, length stops being the
+// limiting factor and idfCoverage (how much of the VERSE's identity was
+// captured, not just how many words) takes over as the deciding number.
+const IDF_FULL_CONFIDENCE = 8;
+
+// Gate for the anchor-trie's own "confirmed" auto-send (see the alignment
+// loop below) — kept separate from IDF_FULL_CONFIDENCE above, which also
+// sets the denominator for verbatimSearch's score curve.
+const ANCHOR_CONFIRM_IDF = 12;
+
 // ── Verbatim search (inverted index + phrase window) ──────────────────────
 function verbatimSearch(transcript, minWords = 6, limit = 3) {
-  const norm   = s => s.toLowerCase().replace(RE_NORM, '').replace(RE_WS, ' ').trim();
   const tNorm  = norm(transcript);
   const tWords = tNorm.split(' ').filter(Boolean);
   if (tWords.length < minWords) return [];
 
+  // Stemmed transcript words — matched against verseStemText/verseStemNlt
+  // below instead of the raw verse text, so a spoken tense/inflection that
+  // differs from the KJV's own wording ("keeping" vs "kept") still lines up.
+  // Word count is unaffected by stemming, so every length/coverage
+  // calculation downstream stays correct either way.
+  const tWordsStemmed = tWords.map(healWord);
+
   // Overlapping phrase windows, longest first
   const phrases = [];
-  for (let len = Math.min(12, tWords.length); len >= minWords; len--) {
-    for (let i = 0; i <= tWords.length - len; i++) {
-      phrases.push(tWords.slice(i, i + len).join(' '));
+  for (let len = Math.min(12, tWordsStemmed.length); len >= minWords; len--) {
+    for (let i = 0; i <= tWordsStemmed.length - len; i++) {
+      phrases.push(tWordsStemmed.slice(i, i + len).join(' '));
     }
   }
 
@@ -677,32 +948,110 @@ function verbatimSearch(transcript, minWords = 6, limit = 3) {
   const seen    = new Set();
   for (const idx of candidates) {
     if (seen.has(idx)) continue;
-    const v    = verseMetadata[idx];
-    const kjvN = verseNormText.get(idx);
-    const nltN = verseNormNlt.get(idx) || '';
+    const kjvS = verseStemText.get(idx);
+    const nltS = verseStemNlt.get(idx) || '';
+    // Verses longer than the 12-word window cap are handled entirely by the
+    // long-verse pass below, which searches windows up to the verse's real
+    // length — letting this pass claim them first at a capped, worse score
+    // (transcript-side windows can't exceed 12 words) would block that
+    // better pass from ever getting a turn on the same candidate.
+    if (verseStemWords.get(idx).length > 12) continue;
+    const v         = verseMetadata[idx];
+    const rawKjv    = verseNormWords.get(idx);   // same length/order as kjvS's words — for IDF lookup
+    const rawNlt    = nltS ? verseNormNltWords.get(idx) : null;
     for (const phrase of phrases) {
-      if (kjvN.includes(phrase) || nltN.includes(phrase)) {
-        const phraseLenWords = phrase.split(' ').length;
-        const verseLenWords  = kjvN.split(' ').filter(Boolean).length;
-
-        // Coverage ratio: what fraction of the verse did we actually match?
-        // A 12-word match on a 12-word verse = 1.0 (full).
-        // A 12-word match on a 28-word verse = 0.43 (partial tail).
-        // √coverage softens the curve: full = 1.0, 50% ≈ 0.71, 25% = 0.50.
-        // This prevents short common phrases ("In the name of Jesus Christ of
-        // Nazareth") from scoring 0.99 just because 12 words were matched when
-        // the verse has 28 words and the preceding words weren't spoken at all.
-        const coverageRatio  = Math.min(1, phraseLenWords / Math.max(1, verseLenWords));
-        const lengthScore    = phraseLenWords / 12;
-        const rawScore       = 0.75 + lengthScore * 0.24;
-        const score          = Math.min(0.99, rawScore * Math.sqrt(coverageRatio));
-
-        results.push(formatVerse(v, score, 'verbatim'));
-        seen.add(idx);
-        break;
+      let charIdx = kjvS.indexOf(phrase);
+      let sourceText = kjvS, sourceRaw = rawKjv;
+      if (charIdx === -1 && nltS) {
+        charIdx = nltS.indexOf(phrase);
+        sourceText = nltS; sourceRaw = rawNlt;
       }
+      if (charIdx === -1) continue;
+
+      const phraseLenWords = phrase.split(' ').length;
+      const wordStart = charIdx === 0 ? 0 : sourceText.slice(0, charIdx).split(' ').filter(Boolean).length;
+
+      // IDF-weighted coverage: what fraction of the verse's IDENTIFYING
+      // content did we actually match, not just what fraction of its raw
+      // word count. Missing "for"/"and" barely moves this (near-zero IDF);
+      // missing the verse's one distinctive word does — see the comment on
+      // idfWeightedSpan/idfTotal above for why that's the right lens here.
+      const matchedIdf     = idfWeightedSpan(sourceRaw, wordStart, phraseLenWords);
+      const coverageRatio  = Math.min(1, matchedIdf / idfTotal(sourceRaw));
+      const lengthScore    = Math.min(1, matchedIdf / IDF_FULL_CONFIDENCE);
+      const rawScore       = 0.75 + lengthScore * 0.24;
+      const score          = Math.min(0.99, rawScore * Math.sqrt(coverageRatio));
+
+      // matchedIdf carried alongside the coverage-diluted score — see
+      // server.js's use of it (VERBATIM_CERTAIN_IDF) for why raw sequential
+      // evidence strength matters independently of how much of the verse
+      // was captured.
+      results.push({ ...formatVerse(v, score, 'verbatim'), matchedIdf });
+      seen.add(idx);
+      break;
     }
     if (results.length >= limit) break;
+  }
+
+  // ── Long-verse full-coverage pass ────────────────────────────────────────
+  // The exact-phrase pass above only ever tests TRANSCRIPT-side windows up to
+  // 12 words — fine when the verse itself is ≤12 words (the window can cover
+  // it entirely), but most KJV verses run well past that (20-30+ words is
+  // common). A preacher reading one of those verses word-for-word could never
+  // score as "fully covered" there: the window physically can't get long
+  // enough, so coverageRatio gets stuck at max ~12/verseLen even for a
+  // complete, exact reading (e.g. a full 31-word verse read verbatim capped
+  // out around 0.5-0.6 under the old scoring — nowhere near reflecting that
+  // it was an exact quote).
+  //
+  // This pass flips direction for whatever the fast pass above missed: it
+  // tests windows of the VERSE's OWN text (bounded by the verse's real
+  // length, not an arbitrary cap) against the full transcript, so a genuinely
+  // complete verbatim reading scores on its true coverage. Only runs for
+  // long-verse candidates the fast pass didn't already resolve, so the common
+  // (short-verse) case pays none of this extra cost.
+  if (results.length < limit) {
+    const tStemmedText   = tWordsStemmed.join(' ');
+    const LONG_VERSE_SCAN_MAX = 45;   // bound the search span for pathologically long verses (a few KJV verses run to 80-90 words) while covering the common 15-45 word range in full
+
+    for (const idx of candidates) {
+      if (seen.has(idx)) continue;
+      const verseWordsArr = verseStemWords.get(idx);
+      if (verseWordsArr.length <= 12) continue;   // fast pass above already covers these fully
+      const nltWordsArr = verseStemNltWords.get(idx) || [];
+      const searchStart = Math.min(verseWordsArr.length, LONG_VERSE_SCAN_MAX);
+      const rawKjv = verseNormWords.get(idx);   // same length/order as verseWordsArr — for IDF lookup
+      const rawNlt = nltWordsArr.length ? verseNormNltWords.get(idx) : null;
+
+      let matchedLen = 0, matchedStart = -1, matchedRaw = null;
+      for (let len = searchStart; len >= minWords; len--) {
+        let found = false;
+        for (let i = 0; i <= verseWordsArr.length - len; i++) {
+          if (tStemmedText.includes(verseWordsArr.slice(i, i + len).join(' '))) { found = true; matchedStart = i; matchedRaw = rawKjv; break; }
+        }
+        if (!found && nltWordsArr.length) {
+          for (let i = 0; i <= nltWordsArr.length - len; i++) {
+            if (tStemmedText.includes(nltWordsArr.slice(i, i + len).join(' '))) { found = true; matchedStart = i; matchedRaw = rawNlt; break; }
+          }
+        }
+        if (found) { matchedLen = len; break; }
+      }
+
+      if (matchedLen) {
+        const v              = verseMetadata[idx];
+        // Same IDF-weighted coverage + evidence scoring as the fast pass
+        // above — see the comments on idfWeightedSpan/idfTotal/
+        // IDF_FULL_CONFIDENCE for why this replaced raw word-count.
+        const matchedIdf     = idfWeightedSpan(matchedRaw, matchedStart, matchedLen);
+        const coverageRatio  = Math.min(1, matchedIdf / idfTotal(matchedRaw));
+        const lengthScore    = Math.min(1, matchedIdf / IDF_FULL_CONFIDENCE);
+        const rawScore       = 0.75 + lengthScore * 0.24;
+        const score          = Math.min(0.99, rawScore * Math.sqrt(coverageRatio));
+        results.push({ ...formatVerse(v, score, 'verbatim'), matchedIdf });
+        seen.add(idx);
+      }
+      if (results.length >= limit) break;
+    }
   }
 
   // ── N-gram coverage fallback ────────────────────────────────────────────
@@ -720,12 +1069,14 @@ function verbatimSearch(transcript, minWords = 6, limit = 3) {
   if (results.length < limit) {
     const NGRAM_N        = 4;
     const NGRAM_MIN_COV  = 0.40;   // at least 40% of verse 4-grams spoken
-    const tNgramSet      = buildNgramSet(tWords, NGRAM_N);
+    // Stemmed here too — same tense/inflection reasoning as the exact-phrase
+    // pass above.
+    const tNgramSet      = buildNgramSet(tWordsStemmed, NGRAM_N);
 
     for (const idx of candidates) {
       if (seen.has(idx)) continue;
       const v         = verseMetadata[idx];
-      const verseWords = verseNormText.get(idx).split(' ').filter(Boolean);
+      const verseWords = verseStemWords.get(idx);
       if (verseWords.length < NGRAM_N) continue;
 
       const cov = ngramCoverage(tNgramSet, verseWords, NGRAM_N);
@@ -820,11 +1171,21 @@ function scoreFingerprint(matchedWeight, matchedWordCount, contextHint, limit, f
   // false positives on short verses like "thy years shall have no end").
   const COVERAGE_THRESHOLD = 0.35;
   const MIN_WORD_HITS      = 2;
+  // A relative floor alone lets a short, low-information verse hit ~100%
+  // coverage from generic vocabulary alone — e.g. Psalms 56:10 ("praise
+  // his word... praise his word") has a total signature weight of just
+  // ~9.8, so ANY "praise...word...LORD"-flavored filler phrase (constant
+  // in charismatic preaching, not a citation) covers nearly all of it and
+  // scores as if it were a confident match. Same fix as verbatim's
+  // VERBATIM_CERTAIN_IDF / the anchor trie's ANCHOR_CONFIRM_IDF: require
+  // real absolute evidence, not just "covered most of a small target."
+  const MIN_ABS_WEIGHT = 15;
 
   const coverage = new Map();
   for (const [idx, matched] of matchedWeight) {
     const cov = matched / (verseSignatureWeight.get(idx) || 1);
-    if (cov >= COVERAGE_THRESHOLD && (matchedWordCount.get(idx) || 0) >= MIN_WORD_HITS) {
+    if (cov >= COVERAGE_THRESHOLD && (matchedWordCount.get(idx) || 0) >= MIN_WORD_HITS
+        && matched >= MIN_ABS_WEIGHT) {
       coverage.set(idx, cov);
     }
   }
@@ -874,7 +1235,6 @@ function scoreFingerprint(matchedWeight, matchedWordCount, contextHint, limit, f
 }
 
 function fingerprintSearch(transcript, limit = 5, contextHint = null) {
-  const norm = s => s.toLowerCase().replace(RE_NORM, '').replace(RE_WS, ' ').trim();
   const speechWords = [...new Set(
     norm(transcript).split(' ')
       .filter(w => w.length >= 4 && !STOP_WORDS.has(w))
@@ -952,7 +1312,6 @@ function buildTopicLibrary(topicWords) {
 function fingerprintSearchInLibrary(transcript, limit = 5, contextHint = null) {
   if (!topicLibrary || !topicLibrary.size) return { results: [], confidence: 'none' };
 
-  const norm = s => s.toLowerCase().replace(RE_NORM, '').replace(RE_WS, ' ').trim();
   const speechWords = [...new Set(
     norm(transcript).split(' ')
       .filter(w => w.length >= 4 && !STOP_WORDS.has(w))
@@ -966,6 +1325,16 @@ function fingerprintSearchInLibrary(transcript, limit = 5, contextHint = null) {
   if (!matchedWeight.size) return { results: [], confidence: 'none' };
 
   return scoreFingerprint(matchedWeight, matchedWordCount, contextHint, limit, true);
+}
+
+// ── Semantic search (meaning, not words) ───────────────────────────────────
+// Thin wrapper: delegates the actual embedding + nearest-neighbor work to
+// semantic_engine.js and maps its {idx, score} results onto the same verse
+// object shape every other search layer returns (formatVerse).
+async function semanticSearch(transcript, limit = 5) {
+  if (!semanticEngine.isReady()) return [];
+  const hits = await semanticEngine.search(transcript, limit);
+  return hits.map(({ idx, score }) => formatVerse(verseMetadata[idx], score, 'semantic'));
 }
 
 // ── Message handler ───────────────────────────────────────────────────────
@@ -1081,8 +1450,8 @@ parentPort.on('message', async (msg) => {
         // Word-by-word streaming into the anchor trie + alignment candidates.
         // No buffering, no throttle — every word is processed the instant it arrives.
         const words = String(msg.text || '').toLowerCase().split(/\s+/).filter(Boolean);
-        const anchorsByVerse   = new Map();   // idx → { depth, df }
-        const confirmedByVerse = new Map();   // idx → matched
+        const anchorsByVerse   = new Map();   // idx → { depth, df, idf }
+        const confirmedByVerse = new Map();   // idx → { matched, matchedIdf }
 
         for (const w of words) {
           const { anchors, confirmed } = streamWord(w);
@@ -1090,12 +1459,14 @@ parentPort.on('message', async (msg) => {
             const prev = anchorsByVerse.get(a.verseIdx);
             // Keep the most distinctive (lowest df) anchor seen for this verse
             if (!prev || a.df < prev.df || (a.df === prev.df && a.depth > prev.depth)) {
-              anchorsByVerse.set(a.verseIdx, { depth: a.depth, df: a.df });
+              anchorsByVerse.set(a.verseIdx, { depth: a.depth, df: a.df, idf: a.idf });
             }
           }
           for (const c of confirmed) {
-            const prev = confirmedByVerse.get(c.verseIdx) || 0;
-            if (c.matched > prev) confirmedByVerse.set(c.verseIdx, c.matched);
+            const prev = confirmedByVerse.get(c.verseIdx);
+            if (!prev || c.matched > prev.matched) {
+              confirmedByVerse.set(c.verseIdx, { matched: c.matched, matchedIdf: c.matchedIdf });
+            }
           }
         }
 
@@ -1114,25 +1485,27 @@ parentPort.on('message', async (msg) => {
 
         const results = [];
         const seen = new Set();
-        for (const [idx, matched] of confirmedByVerse) {
+        for (const [idx, { matched, matchedIdf }] of confirmedByVerse) {
           const similarity = Math.min(0.97, 0.90 + (matched - ALIGN_CONFIRM_AT) * 0.01);
           results.push({
             ...formatVerse(verseMetadata[idx], similarity, 'stream'),
             depth: matched,
             matched,
+            matchedIdf,
             df: 0,
             confirmed: true,
             inTopicLibrary: !!(topicLibrary && topicLibrary.has(idx)),
           });
           seen.add(idx);
         }
-        for (const [idx, { depth, df }] of anchorsByVerse) {
+        for (const [idx, { depth, df, idf }] of anchorsByVerse) {
           if (seen.has(idx)) continue;
           results.push({
             ...formatVerse(verseMetadata[idx], anchorSimilarity(df), 'stream'),
             depth,
             matched: depth,
             df,
+            idf,
             confirmed: false,
             inTopicLibrary: !!(topicLibrary && topicLibrary.has(idx)),
           });
@@ -1144,6 +1517,11 @@ parentPort.on('message', async (msg) => {
       case 'streamReset': {
         streamReset();
         parentPort.postMessage({ type: 'streamResetAck', id: msg.id });
+        break;
+      }
+      case 'semanticSearch': {
+        const results = await semanticSearch(msg.text, msg.limit || 5);
+        parentPort.postMessage({ type: 'semanticResults', id: msg.id, results });
         break;
       }
       case 'ping':

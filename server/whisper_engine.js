@@ -25,8 +25,15 @@
 
 const path = require('path');
 const fs   = require('fs');
+const os   = require('os');
 
 const SAMPLE_RATE = 16000;
+
+// Generous upper bound on a single transcribe call — well above what even a
+// full MAX_UTTERANCE_MS window should take on CPU. Without this, a hung
+// native binding call leaves `_busy` true forever and silently freezes all
+// further partial/final output for the rest of the service.
+const TRANSCRIBE_TIMEOUT_MS = 20_000;
 
 // ── Streaming / VAD tuning ──────────────────────────────────────────────────
 const PARTIAL_INTERVAL_MS = 850;    // re-transcribe the open window this often
@@ -230,13 +237,27 @@ class WhisperEngine {
   // changes; the streaming machinery above is binding-agnostic.
   async _transcribeWindow(float32) {
     if (!this._whisper || !float32.length) return '';
-    const task = await this._whisper.transcribe(float32, {
-      language: this.language,
-      // whisper.cpp knobs: single segment keeps latency down for short windows.
-      n_threads: Math.max(2, (require('os').cpus().length || 4) - 1),
+    const work = (async () => {
+      const task = await this._whisper.transcribe(float32, {
+        language: this.language,
+        // whisper.cpp knobs: single segment keeps latency down for short windows.
+        n_threads: Math.max(2, (os.cpus().length || 4) - 1),
+      });
+      const segments = await task.result;
+      return (segments || []).map(s => (s.text || '').trim()).join(' ').replace(/\s+/g, ' ').trim();
+    })();
+    // We can't cancel the native call itself if it hangs, but racing it means
+    // the caller's finally block still runs and frees `_busy` so the engine
+    // doesn't get stuck silently ignoring all further audio.
+    let timer;
+    const timeout = new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error('Whisper transcribe timed out')), TRANSCRIBE_TIMEOUT_MS);
     });
-    const segments = await task.result;
-    return (segments || []).map(s => (s.text || '').trim()).join(' ').replace(/\s+/g, ' ').trim();
+    try {
+      return await Promise.race([work, timeout]);
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   async stop() {
@@ -252,7 +273,7 @@ class WhisperEngine {
     } catch {}
     this._resetUtterance();
     if (this._whisper) {
-      try { await this._whisper.free(); } catch {}
+      try { await this._whisper.free(); } catch (err) { console.warn('[Whisper] free() failed:', err.message); }
       this._whisper = null;
     }
   }

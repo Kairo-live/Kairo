@@ -383,7 +383,7 @@ function parseSpokenReference(text, inBibleMode = false) {
     if (!bookName) continue;
 
     let idx = i + consumed;
-    const skippedChapterKw = (idx < words.length && words[idx] === 'chapter');
+    let skippedChapterKw = (idx < words.length && words[idx] === 'chapter');
     if (skippedChapterKw) idx++;
 
     // Single-chapter books (Obadiah, Philemon, 2 John, 3 John, Jude) have no
@@ -434,7 +434,34 @@ function parseSpokenReference(text, inBibleMode = false) {
       // No verse number present — fall through to bare-book handling below.
     }
 
-    const chRes = consumeNumber(words, idx, MAX_CHAPTERS[bookName] || Infinity);
+    let chRes = consumeNumber(words, idx, MAX_CHAPTERS[bookName] || Infinity);
+    // Book heard, but nothing chapter-shaped immediately follows — the
+    // preacher may have inserted a quote/aside before the chapter number
+    // ("John — 'God so loved the world' — chapter 3"). Give that a bounded
+    // amount of tolerance rather than abandoning the match outright, but
+    // require the literal word "chapter" to reappear: a coincidentally
+    // nearby number with no verbal cue is exactly the shape of the Esther/
+    // Obadiah false-positive incidents documented below and above — this
+    // stays just as strict about that, only more patient about *where*
+    // the cue shows up.
+    if (!chRes && !skippedChapterKw) {
+      const HOLD_WINDOW = 12;
+      for (let k = idx; k < words.length && k < idx + HOLD_WINDOW; k++) {
+        if (words[k] === 'chapter') {
+          const held = consumeNumber(words, k + 1, MAX_CHAPTERS[bookName] || Infinity);
+          // Also updates skippedChapterKw itself — a downstream check
+          // (the AMBIGUOUS_BOOKS verse-bail-out below) used to re-derive
+          // "was there a chapter keyword" from the ORIGINAL adjacent
+          // position only, which silently defeated this whole hold for
+          // every AMBIGUOUS_BOOKS entry (John/Mark/Luke/Acts/James/
+          // Genesis/Exodus/... — a much bigger list than it sounds,
+          // and includes the exact book in the motivating example).
+          if (held) { chRes = held; idx = k + 1; skippedChapterKw = true; }
+          break;
+        }
+        if (SINGLE_WORD_BOOKS.has(words[k])) break; // a second book mention ends the hold
+      }
+    }
     if (!chRes) continue;
     const chapter = chRes.value;
     idx += chRes.consumed;
@@ -489,9 +516,31 @@ function parseSpokenReference(text, inBibleMode = false) {
       }
     }
 
+    // Same tolerance as the book→chapter hold above, one step later:
+    // chapter is already confirmed, but nothing verse-shaped immediately
+    // follows — a quote/aside may sit between "chapter 3" and "verse 16".
+    // Still requires the literal word "verse" to reappear, not a bare
+    // nearby number, for the same reason.
+    if (!vRes && !hasVerseKeyword) {
+      const HOLD_WINDOW = 12;
+      for (let k = idx; k < words.length && k < idx + HOLD_WINDOW; k++) {
+        if (['verse', 'verses', 'vers'].includes(words[k])) {
+          const held = consumeNumber(words, k + 1);
+          if (held) { vRes = held; idx = k + 1; hasVerseKeyword = true; }
+          break;
+        }
+        if (SINGLE_WORD_BOOKS.has(words[k])) break;
+      }
+    }
+
     if (!vRes) {
       const rawBookWord = words[i];
-      const hadChapterKeyword = (i + consumed < words.length && words[i + consumed] === 'chapter');
+      // Reuses skippedChapterKw (set above, including by the hold-window
+      // search) rather than re-deriving "was there a chapter keyword"
+      // from scratch against only the original adjacent position — that
+      // duplicate computation used to silently ignore a chapter number
+      // recovered via the hold, undoing it for every AMBIGUOUS_BOOKS entry.
+      const hadChapterKeyword = skippedChapterKw;
       // inBibleMode used to also exempt ambiguous books from needing an
       // explicit "chapter" keyword nearby — but inBibleMode stays true for
       // 30s after ANY book mention, which is most of a sermon, so it barely

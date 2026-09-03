@@ -10,6 +10,7 @@
     "core:default",
     "core:event:default",
     "updater:default",
+    "dialog:allow-open",
     "core:window:allow-create",
     "core:window:allow-show",
     "core:window:allow-set-focus",

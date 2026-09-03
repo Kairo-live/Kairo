@@ -10,6 +10,18 @@
 
 const zlib = require('zlib');
 
+// Caps a single decompressed zip entry — slide/presentation XML/protobuf
+// members are at most a few MB in every real file; a crafted entry claiming
+// a tiny compressed size but a huge decompressed size could otherwise
+// exhaust server memory from one uploaded file.
+const MAX_INFLATED_ENTRY_BYTES = 200 * 1024 * 1024;
+
+// Bounds recursion depth when walking untrusted, deeply-nestable formats
+// (ProPresenter's protobuf Cue trees). A legitimate slide is nested at most a
+// few levels deep; this exists purely to stop a maliciously crafted file
+// from stack-overflowing the process.
+const MAX_WALK_DEPTH = 200;
+
 // ── Minimal ZIP reader ────────────────────────────────────────────────────
 // Walks the central directory and inflates the entries we ask for. Enough for
 // OOXML, which only ever uses store (0) or deflate (8).
@@ -82,8 +94,8 @@ function unzip(buf, wantRe) {
     const start = lho + 30 + lNameLen + lExtraLen;
     const raw = buf.slice(start, start + compSize);
     try {
-      out.set(name, method === 0 ? raw : zlib.inflateRawSync(raw));
-    } catch { /* skip unreadable member */ }
+      out.set(name, method === 0 ? raw : zlib.inflateRawSync(raw, { maxOutputLength: MAX_INFLATED_ENTRY_BYTES }));
+    } catch { /* skip unreadable/oversized member */ }
   }
   return out;
 }
@@ -115,6 +127,26 @@ function rtfToText(rtf) {
     .replace(/\\[a-z]+-?\d* ?/gi, '')
     .replace(/[{}]/g, '')
     .trim();
+}
+
+// Reads a run's actual authored text color straight out of the RTF, before
+// rtfToText above deletes the \colortbl group and strips \cfN control words
+// as part of producing plain text. Parses \colortbl's semicolon-separated
+// \redN\greenN\blueN entries into an index->hex table, then resolves the
+// first \cfN reference in the run against it. Returns null if there's no
+// color table or no \cf reference at all (callers should fall back to
+// whatever non-RTF color source they already have).
+function firstRtfColor(rtf) {
+  const tbl = /\{\\colortbl([^{}]*)\}/.exec(String(rtf || ''));
+  if (!tbl) return null;
+  const entries = tbl[1].split(';').map(entry => {
+    const r = /\\red(\d+)/.exec(entry), g = /\\green(\d+)/.exec(entry), b = /\\blue(\d+)/.exec(entry);
+    if (!r || !g || !b) return null;
+    return '#' + [r[1], g[1], b[1]].map(v => Math.max(0, Math.min(255, +v)).toString(16).padStart(2, '0')).join('');
+  });
+  const cf = /\\cf(\d+)/.exec(rtf);
+  if (!cf) return null;
+  return entries[+cf[1]] || null;
 }
 
 // ── Plain text ────────────────────────────────────────────────────────────
@@ -217,6 +249,13 @@ function fromPro6(buf) {
 // anything that doesn't parse as a valid message — used both to walk real
 // submessages and, deliberately, to fail closed on opaque leaves (media
 // bytes, thumbnails) that happen to also be length-delimited fields.
+//
+// Every field type is recorded (not just wire-2/length-delimited) — theme_import.js
+// needs varint/fixed64/fixed32 values (positions, sizes, colors) that the
+// original .pro7 slide/text-only use of this reader never did. Safe for
+// every existing caller here: they all explicitly check `f.wire !== 2`
+// before touching `.raw`, so the extra varint/fixed32/fixed64 entries this
+// now includes are simply skipped by code that never asked for them.
 function pbFields(buf) {
   const fields = [];
   let pos = 0;
@@ -230,9 +269,11 @@ function pbFields(buf) {
     if (wire === 0) {
       const v = pbVarint(buf, pos);
       if (!v) return null;
+      fields.push({ num, wire, value: v[0] });
       pos = v[1];
     } else if (wire === 1) {
       if (pos + 8 > buf.length) return null;
+      fields.push({ num, wire, raw: buf.slice(pos, pos + 8) });
       pos += 8;
     } else if (wire === 2) {
       const len = pbVarint(buf, pos);
@@ -243,6 +284,7 @@ function pbFields(buf) {
       pos = afterLen + n;
     } else if (wire === 5) {
       if (pos + 4 > buf.length) return null;
+      fields.push({ num, wire, raw: buf.slice(pos, pos + 4) });
       pos += 4;
     } else {
       return null; // group wire types (3/4) — not used by this format
@@ -309,7 +351,8 @@ function pro7ArrangementOrder(rootFields) {
 // built from 2-3 separate small text boxes (e.g. reference + verse number +
 // body) — this flattens all of them into one block's lines, same as the
 // pro6/pptx importers already do without trying to reconstruct layout.
-function pbCollectRtfLines(buf, out) {
+function pbCollectRtfLines(buf, out, depth = 0) {
+  if (depth > MAX_WALK_DEPTH) return;
   const fields = pbFields(buf);
   if (!fields) return;
   for (const f of fields) {
@@ -319,11 +362,44 @@ function pbCollectRtfLines(buf, out) {
       if (text) out.push(...text.split('\n').map(l => l.trim()).filter(Boolean));
       continue; // an RTF blob is never also a nested submessage worth descending into
     }
-    pbCollectRtfLines(f.raw, out);
+    pbCollectRtfLines(f.raw, out, depth + 1);
   }
 }
 
-function fromPro7(buf) {
+// Best-effort media detection — unlike RTF (a documented, stable "{\rtf"
+// signature), there is no known field number or wrapper shape for how a Cue
+// references its background image; this is genuinely unverified against a
+// real sample file. Uses the same content-signature technique as RTF
+// detection: a wire-type-2 field that decodes as a short, printable UTF-8
+// string ending in a known image extension is assumed to be a file path
+// (bundles store media "under its original absolute path" per fromProBundle
+// below, so a plain path string is the plausible shape). Degrades silently —
+// if this guess is wrong, no path is found and behavior is unchanged from
+// before (no images), never worse.
+const IMAGE_PATH_RE = /\.(?:jpe?g|png|gif|bmp|tiff?)$/i;
+function looksLikeImagePath(raw) {
+  if (raw.length < 5 || raw.length > 1024) return false; // real paths aren't RTF-blob-sized
+  let s;
+  try { s = raw.toString('utf8'); } catch { return false; }
+  if (!IMAGE_PATH_RE.test(s)) return false;
+  return !/[\x00-\x08\x0e-\x1f]/.test(s); // reject binary — real paths are plain text
+}
+function pbCollectMediaPaths(buf, out, depth = 0) {
+  if (depth > MAX_WALK_DEPTH) return;
+  const fields = pbFields(buf);
+  if (!fields) return;
+  for (const f of fields) {
+    if (f.wire !== 2) continue;
+    if (looksLikeImagePath(f.raw)) { out.push(f.raw.toString('utf8')); continue; }
+    pbCollectMediaPaths(f.raw, out, depth + 1);
+  }
+}
+
+// `resolveMedia`, when provided (only by fromProBundle — a standalone .pro/
+// .pro6/.pro7 file has no accompanying zip of media to resolve against),
+// maps a path found inside a Cue to a data: URL, or null if no matching zip
+// entry was found.
+function fromPro7(buf, resolveMedia) {
   const rootFields = pbFields(buf);
   if (!rootFields) throw new Error('could not parse this ProPresenter 7 file');
 
@@ -340,7 +416,13 @@ function fromPro7(buf) {
     const label = labelField && labelField.wire === 2 ? labelField.raw.toString('utf8').trim() : '';
     const lines = [];
     pbCollectRtfLines(f.raw, lines);
-    const entry = { label, lines };
+    let image = null;
+    if (resolveMedia) {
+      const paths = [];
+      pbCollectMediaPaths(f.raw, paths);
+      for (const p of paths) { image = resolveMedia(p); if (image) break; }
+    }
+    const entry = { label, lines, image };
     if (uuid) cuesByUuid.set(uuid, entry);
     rawOrder.push(entry);
   }
@@ -351,8 +433,18 @@ function fromPro7(buf) {
 
   const blocks = [];
   for (const cue of ordered) {
-    if (!cue.lines.length) continue; // media-only/blank cues have nothing presentable
-    blocks.push({ label: cue.label || `Slide ${blocks.length + 1}`, lines: cue.lines });
+    // A pure-image cue (no text) used to be dropped entirely ("media-only
+    // cues have nothing presentable") — now it surfaces as an image block.
+    // A cue with BOTH text and an image keeps today's text-only behavior;
+    // rendering the image as a background behind that same slide's text is
+    // a follow-up once a real sample file confirms this reference shape is
+    // actually correct, rather than compounding an unverified guess.
+    if (!cue.lines.length && !cue.image) continue;
+    if (!cue.lines.length && cue.image) {
+      blocks.push({ label: cue.label || `Slide ${blocks.length + 1}`, lines: [], image: cue.image });
+    } else {
+      blocks.push({ label: cue.label || `Slide ${blocks.length + 1}`, lines: cue.lines });
+    }
   }
   if (!blocks.length) throw new Error('no slide text found in this ProPresenter 7 file');
   return blocks;
@@ -365,22 +457,50 @@ function looksLikePro6Xml(buf) {
   return /^\s*<\?xml/.test(head) || head.includes('RVPresentationDocument');
 }
 
-function parsePresentationBuffer(buf) {
-  return looksLikePro6Xml(buf) ? fromPro6(buf) : fromPro7(buf);
+function parsePresentationBuffer(buf, resolveMedia) {
+  // pro6 is plain XML with no reverse-engineered media reference at all
+  // (only pro7's protobuf Cue tree has the content-signature media
+  // detection above) — resolveMedia is a no-op for that path.
+  return looksLikePro6Xml(buf) ? fromPro6(buf) : fromPro7(buf, resolveMedia);
+}
+
+const IMAGE_ENTRY_RE = /\.(?:jpe?g|png|gif|bmp|tiff?)$/i;
+const IMAGE_MIME_BY_EXT = { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif', bmp: 'image/bmp', tif: 'image/tiff', tiff: 'image/tiff' };
+
+// Builds a resolveMedia(path) => data:URL|null closure from every non-.pro
+// zip entry that looks like an image, keyed by basename — a Cue's in-file
+// path reference and the zip's own entry name won't necessarily share a full
+// absolute-path prefix, but should share a basename (per fromProBundle's own
+// comment: media is stored "under its original absolute path", i.e. the
+// path recorded in the Cue is presumed to be that same original path).
+function makeMediaResolver(files) {
+  const byBasename = new Map();
+  for (const [name, content] of files) {
+    if (!IMAGE_ENTRY_RE.test(name)) continue;
+    byBasename.set(name.split('/').pop().toLowerCase(), content);
+  }
+  if (!byBasename.size) return null;
+  return (path) => {
+    const base = String(path).split(/[\\/]/).pop().toLowerCase();
+    const bytes = byBasename.get(base);
+    if (!bytes) return null;
+    const ext = (base.match(/\.(\w+)$/) || [, 'jpg'])[1].toLowerCase();
+    const mime = IMAGE_MIME_BY_EXT[ext] || 'application/octet-stream';
+    return `data:${mime};base64,${bytes.toString('base64')}`;
+  };
 }
 
 // ── ProPresenter bundle (.probundle) ──────────────────────────────────────
 // A bundle is just a zip of one presentation plus the media it references,
-// media stored under its original absolute path. We only need the
-// presentation; the linked media isn't something Kairo re-renders.
+// media stored under its original absolute path.
 function fromProBundle(buf) {
-  const files = unzip(buf, /\.pro6?$/i);
+  const files = unzip(buf, /\.pro6?$|\.(?:jpe?g|png|gif|bmp|tiff?)$/i);
   const entries = [...files.entries()].filter(([name]) => /\.pro6?$/i.test(name));
   if (!entries.length) throw new Error('no presentation found in this ProPresenter bundle');
   // If more than one somehow made it in, the root-most (shortest path) one
   // is the actual bundled presentation rather than an incidental extra.
   entries.sort((a, b) => a[0].length - b[0].length);
-  return parsePresentationBuffer(entries[0][1]);
+  return parsePresentationBuffer(entries[0][1], makeMediaResolver(files));
 }
 
 // ── ProPresenter playlist (.proplaylist) ──────────────────────────────────
@@ -407,7 +527,8 @@ function pro7FileRefRelPath(buf) {
   return null;
 }
 
-function walkPlaylistManifest(fields, out) {
+function walkPlaylistManifest(fields, out, depth = 0) {
+  if (depth > MAX_WALK_DEPTH) return;
   for (const f of fields) {
     if (f.wire !== 2) continue;
     const sub = pbFields(f.raw);
@@ -418,12 +539,12 @@ function walkPlaylistManifest(fields, out) {
       const relPath = pro7FileRefRelPath(fileRefField.raw);
       if (relPath) { out.push({ name: nameField.raw.toString('utf8'), relPath }); continue; }
     }
-    walkPlaylistManifest(sub, out); // folders, the playlist's own header, etc.
+    walkPlaylistManifest(sub, out, depth + 1); // folders, the playlist's own header, etc.
   }
 }
 
 function fromProPlaylist(buf) {
-  const files = unzip(buf, /(^|\/)data$|\.pro6?$/i);
+  const files = unzip(buf, /(^|\/)data$|\.pro6?$|\.(?:jpe?g|png|gif|bmp|tiff?)$/i);
   const manifest = files.get('data');
   if (!manifest) throw new Error('no playlist data found in this ProPresenter playlist');
   const manifestFields = pbFields(manifest);
@@ -438,6 +559,7 @@ function fromProPlaylist(buf) {
     if (!/\.pro6?$/i.test(name)) continue;
     byBasename.set(name.split('/').pop().toLowerCase(), content);
   }
+  const resolveMedia = makeMediaResolver(files);
 
   const presentations = [];
   for (const item of items) {
@@ -445,7 +567,7 @@ function fromProPlaylist(buf) {
     const proBuf = byBasename.get(base) || byBasename.get(`${item.name}.pro`.toLowerCase());
     if (!proBuf) continue; // referenced presentation wasn't included in this export
     try {
-      const blocks = parsePresentationBuffer(proBuf);
+      const blocks = parsePresentationBuffer(proBuf, resolveMedia);
       if (blocks.length) presentations.push({ name: item.name, blocks });
     } catch { /* skip presentations we can't read rather than failing the whole playlist */ }
   }
@@ -484,4 +606,10 @@ function importSlides(filename, buf) {
   }
 }
 
-module.exports = { importSlides, fromText };
+module.exports = {
+  importSlides, fromText,
+  // Shared with theme_import.js (.protheme is the same zip-of-protobuf
+  // family as .pro7/.probundle/.proplaylist) so the wire-format reader has
+  // one implementation, not two drifting copies.
+  unzip, pbFields, pbVarint, pbFirst, rtfToText, firstRtfColor, MAX_WALK_DEPTH,
+};

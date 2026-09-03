@@ -102,6 +102,12 @@ pub struct SyphonHandle {
     pix: CGLPixelFormatObj,
     tex_id: u32,
     pixmap: Option<Pixmap>,
+    // FontSystem::new() scans and loads every system font (tens to hundreds
+    // of ms) — created once in start() and reused across every update()
+    // instead of per-frame, which used to add directly to seconds-to-screen
+    // latency on every verse change.
+    font_system: Option<FontSystem>,
+    swash_cache: Option<SwashCache>,
 }
 
 impl Default for SyphonHandle {
@@ -112,6 +118,8 @@ impl Default for SyphonHandle {
             pix: std::ptr::null_mut(),
             tex_id: 0,
             pixmap: None,
+            font_system: None,
+            swash_cache: None,
         }
     }
 }
@@ -190,12 +198,32 @@ pub fn start(source_name: &str, shared: Arc<Mutex<SyphonHandle>>) -> Result<(), 
     }
 
     // 4. Allocate a reusable tiny-skia pixmap.
-    h.pixmap = Some(Pixmap::new(FRAME_W, FRAME_H).ok_or("pixmap alloc failed")?);
+    h.pixmap = match Pixmap::new(FRAME_W, FRAME_H) {
+        Some(p) => Some(p),
+        None => {
+            free_native_resources(&mut h);
+            return Err("pixmap alloc failed".into());
+        }
+    };
+
+    // 4b. FontSystem::new() scans and loads every system font — created once
+    // here (not per-frame in render_frame, see update()) since that used to
+    // add directly to seconds-to-screen latency on every verse change.
+    h.font_system = Some(FontSystem::new());
+    h.swash_cache = Some(SwashCache::new());
 
     // 5. Spin up SyphonOpenGLServer.
+    // Every failure path below frees whatever native resources steps 1-4
+    // already allocated (CGL context, pixel format, texture) — previously a
+    // failure here returned early via `?` and leaked them.
     unsafe {
-        let cls = AnyClass::get("SyphonOpenGLServer")
-            .ok_or("SyphonOpenGLServer class not found — is Syphon.framework linked?")?;
+        let cls = match AnyClass::get("SyphonOpenGLServer") {
+            Some(c) => c,
+            None => {
+                free_native_resources(&mut h);
+                return Err("SyphonOpenGLServer class not found — is Syphon.framework linked?".into());
+            }
+        };
         let name = NSString::from_str(source_name);
         let alloc: *mut AnyObject = msg_send![cls, alloc];
         let server: *mut AnyObject = msg_send![
@@ -205,12 +233,16 @@ pub fn start(source_name: &str, shared: Arc<Mutex<SyphonHandle>>) -> Result<(), 
             options: std::ptr::null::<NSDictionary<NSString, AnyObject>>(),
         ];
         if server.is_null() {
+            free_native_resources(&mut h);
             return Err("SyphonOpenGLServer init returned nil".into());
         }
-        h.server = Some(
-            Retained::from_raw(server.cast::<NSObject>())
-                .ok_or("Retained::from_raw failed")?,
-        );
+        h.server = match Retained::from_raw(server.cast::<NSObject>()) {
+            Some(s) => Some(s),
+            None => {
+                free_native_resources(&mut h);
+                return Err("Retained::from_raw failed".into());
+            }
+        };
     }
 
     // 6. Push an initial blank frame so receivers see something on connect.
@@ -221,8 +253,12 @@ pub fn start(source_name: &str, shared: Arc<Mutex<SyphonHandle>>) -> Result<(), 
     Ok(())
 }
 
-pub fn stop(shared: Arc<Mutex<SyphonHandle>>) -> Result<(), String> {
-    let mut h = shared.lock().map_err(|e| e.to_string())?;
+/// Frees whatever native resources are currently held on `h` — safe to call
+/// with any subset already unset/null, since each is checked before being
+/// freed. Shared by stop() and by start()'s failure paths (a partial init
+/// that failed partway through used to leak the CGL context/pixel format/
+/// texture already allocated by earlier steps).
+fn free_native_resources(h: &mut SyphonHandle) {
     if let Some(server) = h.server.take() {
         unsafe {
             let _: () = msg_send![&*server, stop];
@@ -244,6 +280,13 @@ pub fn stop(shared: Arc<Mutex<SyphonHandle>>) -> Result<(), String> {
         }
     }
     h.pixmap = None;
+    h.font_system = None;
+    h.swash_cache = None;
+}
+
+pub fn stop(shared: Arc<Mutex<SyphonHandle>>) -> Result<(), String> {
+    let mut h = shared.lock().map_err(|e| e.to_string())?;
+    free_native_resources(&mut h);
     Ok(())
 }
 
@@ -258,10 +301,20 @@ pub fn update(verse: &str, reference: &str, shared: Arc<Mutex<SyphonHandle>>) ->
     let ctx    = h.ctx;
     let tex_id = h.tex_id;
 
-    // Render via tiny-skia + cosmic-text (same look as ndi.rs).
+    // Render via tiny-skia + cosmic-text (same look as ndi.rs). font_system/
+    // swash_cache are created once in start() and reused here rather than
+    // per-frame (see the SyphonHandle field comments).
+    // Deref the MutexGuard to a plain `&mut SyphonHandle` first — borrowing
+    // three Option fields via repeated `h.field.as_mut()` calls directly on
+    // the guard doesn't borrow-check as disjoint (each goes through
+    // MutexGuard's DerefMut), but field projections through one plain
+    // reference do.
     let pixels_ptr = {
-        let pixmap = h.pixmap.as_mut().ok_or("pixmap missing")?;
-        render_frame(pixmap, verse, reference);
+        let handle: &mut SyphonHandle = &mut h;
+        let pixmap      = handle.pixmap.as_mut().ok_or("pixmap missing")?;
+        let font_system = handle.font_system.as_mut().ok_or("font system missing")?;
+        let swash_cache = handle.swash_cache.as_mut().ok_or("swash cache missing")?;
+        render_frame(pixmap, verse, reference, font_system, swash_cache);
         pixmap.data().as_ptr()
     };
 
@@ -302,7 +355,13 @@ pub fn update(verse: &str, reference: &str, shared: Arc<Mutex<SyphonHandle>>) ->
 // Same visual style as the NDI sender: black background, lower-third band,
 // red brand-colored reference, white verse text. Rendered fresh every
 // `update`, but the pixmap allocation is reused.
-fn render_frame(pixmap: &mut Pixmap, verse: &str, reference: &str) {
+fn render_frame(
+    pixmap: &mut Pixmap,
+    verse: &str,
+    reference: &str,
+    font_system: &mut FontSystem,
+    swash_cache: &mut SwashCache,
+) {
     pixmap.fill(SkColor::from_rgba8(0, 0, 0, 230));
 
     // Subtle bottom 38% darker band — lower-third look.
@@ -314,12 +373,9 @@ fn render_frame(pixmap: &mut Pixmap, verse: &str, reference: &str) {
         pixmap.fill_rect(band, &band_paint, Transform::identity(), None);
     }
 
-    let mut font_system = FontSystem::new();
-    let mut swash_cache = SwashCache::new();
-
     if !reference.is_empty() {
         draw_text(
-            pixmap, &mut font_system, &mut swash_cache,
+            pixmap, font_system, swash_cache,
             reference,
             28.0, 700,
             CtColor::rgb(232, 64, 74),
@@ -329,7 +385,7 @@ fn render_frame(pixmap: &mut Pixmap, verse: &str, reference: &str) {
     }
     if !verse.is_empty() {
         draw_text(
-            pixmap, &mut font_system, &mut swash_cache,
+            pixmap, font_system, swash_cache,
             verse,
             40.0, 500,
             CtColor::rgb(255, 255, 255),

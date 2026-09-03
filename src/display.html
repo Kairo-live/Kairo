@@ -45,15 +45,19 @@
             to   { transform: translateX(-100%); }
         }
 
-        /* Two independently-controlled layers, PP-style: media (image/video)
-           sits behind, the slide (theme background/text) renders on top.
-           Each clears/updates without touching the other. */
-        #media-layer, #slide-layer {
+        /* Independently-controlled layers, PP-style: media (image/video) sits
+           behind, the slide (theme background/text) on top of it, and the
+           timer layer on top of that. Each clears/updates without touching
+           the others — a running stage timer never disturbs the scripture or
+           lyrics on the slide layer, and Clear Timer removes only this one. */
+        #media-layer, #slide-layer, #timer-layer {
             position: absolute;
             inset: 0;
         }
         #media-layer { z-index: 0; }
         #slide-layer { z-index: 1; }
+        #timer-layer { z-index: 2; pointer-events: none; }
+        #timer-layer:empty { display: none; }
         #media-layer video, #media-layer img {
             position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain;
         }
@@ -101,15 +105,69 @@
         #conn-status.visible { opacity: 1; }
         #conn-status.reconnecting { color: rgba(245, 158, 11, 0.6); }
         #conn-status.connected { color: rgba(255, 255, 255, 0.15); }
+
+        /* Timer/clock — a real third layer alongside #slide-layer and
+           #media-layer (see clear-layer handling below), just rendered as
+           a small fixed corner readout rather than a full-stage layer.
+           Two independent badges, not one shared slot — a segment
+           countdown and the live clock can be relevant at the same time
+           and shouldn't fight over the same element, overwriting each
+           other every tick. Same visual register as #kairo-label/
+           #conn-status (fixed, high z-index, low-emphasis). */
+        #timer-badge, #clock-badge {
+            position: fixed;
+            right: 18px;
+            font-family: var(--mono, monospace);
+            font-size: 22px;
+            font-weight: 700;
+            letter-spacing: 0.04em;
+            color: rgba(255, 255, 255, 0.82);
+            text-shadow: 0 1px 6px rgba(0,0,0,0.6);
+            z-index: 9999;
+        }
+        #timer-badge { top: 14px; }
+        /* Clock sits below the timer when both are showing, rather than
+           overlapping it. */
+        #clock-badge { top: 72px; }
+        #timer-badge.hidden, #clock-badge.hidden { display: none; }
+        /* Overtime — past the segment's end time but still running until
+           explicitly stopped, so it reads as "running long," not broken. */
+        #timer-badge.is-overtime { color: #ff5c5c; text-shadow: 0 1px 6px rgba(255,0,0,0.35); }
+        #timer-badge.is-overtime .badge-label { color: rgba(255, 92, 92, 0.6); }
+        /* Warning — inside the last minute, still counting down. A step
+           between "normal" and "overtime" so the operator sees it coming
+           rather than the color jumping straight from plain to red at 0. */
+        #timer-badge.is-warning { color: #ffcf4d; text-shadow: 0 1px 6px rgba(255,196,0,0.3); }
+        #timer-badge.is-warning .badge-label { color: rgba(255, 207, 77, 0.6); }
+        /* The themed on-stage timer layer keeps the THEME's own colour — a
+           warning/overtime state is signalled with a glow + gentle pulse, not
+           by overriding the operator's chosen colour. (The fixed corner badge
+           above, which is unthemed, still recolours since it has no theme to
+           respect.) */
+        [data-binding="timer"].is-warning  { text-shadow: 0 0 14px rgba(255,196,0,0.55); }
+        [data-binding="timer"].is-overtime { text-shadow: 0 0 16px rgba(255,60,60,0.6); animation: timer-otp 1s ease-in-out infinite; }
+        @keyframes timer-otp { 50% { opacity: 0.55; } }
+        #timer-badge .badge-label, #clock-badge .badge-label {
+            display: block;
+            font-size: 10px;
+            font-weight: 700;
+            letter-spacing: 0.15em;
+            text-transform: uppercase;
+            color: rgba(255, 255, 255, 0.45);
+            text-align: right;
+        }
     </style>
 </head>
 <body>
     <div id="stage">
         <div id="media-layer"></div>
         <div id="slide-layer"></div>
+        <div id="timer-layer"></div>
     </div>
     <div id="kairo-label">KAIRO</div>
     <div id="conn-status" class="visible reconnecting">Connecting…</div>
+    <div id="timer-badge" class="hidden"></div>
+    <div id="clock-badge" class="hidden"></div>
 
     <script src="design_space.js"></script>
     <script src="word_split.js"></script>
@@ -155,12 +213,14 @@
     let currentVerseRef  = '';
     let currentTranslatedText = ''; // right-panel text for the Multi-Language theme
     let currentStyleByLayerId = {}; // per-slide, per-layer-id overrides (Full Edit) for whatever's currently shown
+    let currentTimerText = ''; // last value sent for a 'timer'-bound layer — the per-second tick (handleActionBadge) updates the DOM directly and doesn't touch this
     let activeLook       = null;
     let pendingFade      = false;
 
     const stage      = document.getElementById('stage');
     const slideLayer = document.getElementById('slide-layer');
     const mediaLayer = document.getElementById('media-layer');
+    const timerLayer = document.getElementById('timer-layer');
     const connStatus = document.getElementById('conn-status');
 
     // ── Media layer state (independent of the slide/text layer) ────────────
@@ -211,7 +271,7 @@
     // "Full Edit" feature) — a specific playlist item's specific slide can
     // override any text layer's position/font/align/color/shadow/outline/
     // visibility without touching the theme itself.
-    function buildLayerDOM(look, verseText, verseRef, translatedText, styleByLayerId = {}) {
+    function buildLayerDOM(look, verseText, verseRef, translatedText, styleByLayerId = {}, timerText = '', skipBackground = false) {
         const frag    = document.createDocumentFragment();
         const layout  = look.layout || 'fullscreen';
         let   isTransparent = false;
@@ -250,6 +310,10 @@
             }
 
             if (layer.type === 'background') {
+                // The timer layer is a transparent overlay on top of the live
+                // slide — its theme's background must never paint over the
+                // scripture/lyrics underneath.
+                if (skipBackground) return;
                 // Only a full-canvas background keys the output transparent —
                 // a positioned shape with a transparent fill is just invisible.
                 if (layer.fill === 'transparent') {
@@ -336,6 +400,7 @@
                 if (layer.binding === 'verse')     content = verseText;
                 else if (layer.binding === 'verse_translated') content = translatedText || '';
                 else if (layer.binding === 'reference') content = verseRef;
+                else if (layer.binding === 'timer') content = timerText || '';
                 else content = layer.customText || '';
 
                 const div = document.createElement('div');
@@ -388,6 +453,16 @@
                     div.style.webkitTextStroke = `${outline.width}px ${outline.color}`;
                 }
 
+                // Timer state colours travel on the element so the per-second
+                // 'action' tick (handleActionBadge) can recolour it as the
+                // countdown enters warning / overtime — the theme owns all
+                // three colours; these are just the classic defaults.
+                if (layer.binding === 'timer') {
+                    div.dataset.baseColor     = hexOpacity(color, opacity);
+                    div.dataset.warnColor     = ov.warnColor     || layer.warnColor     || '#ffcf4d';
+                    div.dataset.overtimeColor = ov.overtimeColor || layer.overtimeColor || '#ff5c5c';
+                }
+
                 // Positioning by layout
                 if (layout === 'fullscreen') {
                     div.style.left  = '0';
@@ -400,6 +475,8 @@
                     } else if (layer.binding === 'reference') {
                         div.style.top       = '50%';
                         div.style.transform = 'translateY(40%)';
+                    } else if (layer.binding === 'timer') {
+                        div.style.left = 'auto'; div.style.right = '4%'; div.style.top = '5%';
                     } else {
                         div.style.top       = '50%';
                         div.style.transform = 'translateY(-50%)';
@@ -412,6 +489,8 @@
                         div.style.bottom = '14%';
                     } else if (layer.binding === 'reference') {
                         div.style.bottom = '5%';
+                    } else if (layer.binding === 'timer') {
+                        div.style.left = 'auto'; div.style.right = '4%'; div.style.bottom = 'auto'; div.style.top = '5%';
                     } else {
                         div.style.bottom = '10%';
                     }
@@ -508,6 +587,8 @@
                     } else if (layer.binding === 'reference') {
                         div.style.top       = '50%';
                         div.style.transform = 'translateY(120%)';
+                    } else if (layer.binding === 'timer') {
+                        div.style.top = '5%';
                     } else {
                         div.style.top       = '50%';
                         div.style.transform = 'translateY(-50%)';
@@ -695,7 +776,7 @@
     // Targets #slide-layer specifically, not the whole #stage — the media
     // layer behind it (an independently-sent image/video) must not fade or
     // clear just because the slide's text changed.
-    function renderStage(verseText, verseRef, animate = true, translatedText = '', styleByLayerId = {}) {
+    function renderStage(verseText, verseRef, animate = true, translatedText = '', styleByLayerId = {}, timerText = '') {
         const look = activeLook || FALLBACK_LOOK;
 
         const doRender = () => {
@@ -711,9 +792,12 @@
             // wasn't enough, since the very next look-update repainted the
             // "empty" background right back in, silently undoing it and
             // burying whatever media had been sent in the meantime.
-            if (!verseText && !verseRef) { fitVerse(); return; }
+            // A timer segment has no verse/reference at all, only timerText
+            // — must NOT be treated as "nothing to show" just because those
+            // two are blank.
+            if (!verseText && !verseRef && !timerText) { fitVerse(); return; }
 
-            const { frag, isTransparent } = buildLayerDOM(look, verseText, verseRef, translatedText, styleByLayerId);
+            const { frag, isTransparent } = buildLayerDOM(look, verseText, verseRef, translatedText, styleByLayerId, timerText);
             if (isTransparent) document.body.classList.add('transparent-bg');
             slideLayer.appendChild(frag);
             fitVerse();
@@ -765,6 +849,26 @@
         } else {
             doRender();
         }
+    }
+
+    // ── Timer layer: the timer theme's OWN independent layer ──────────────
+    // Renders the segment's full theme (background included) exactly as the
+    // Edit view shows it — but on its own layer, NOT #slide-layer. So:
+    //  • whether it overlays or covers the slide is the THEME's choice (a
+    //    transparent/lower-third timer theme overlays; a full-bleed one
+    //    covers) — not something forced here;
+    //  • Clear Timer removes just this, and the scripture/lyrics on the
+    //    slide layer are still there underneath, no re-send needed.
+    // The per-second value arrives via the 'action' broadcast
+    // (handleActionBadge writes into [data-binding="timer"], which lives in
+    // this layer). renderTimerLayer runs once, at segment start.
+    function renderTimerLayer(look, styleByLayerId, timerText) {
+        timerLayer.innerHTML = '';
+        timerLayer.classList.remove('transparent');
+        if (!look) return;
+        const { frag, isTransparent } = buildLayerDOM(look, '', '', '', styleByLayerId || {}, timerText || '');
+        if (isTransparent) timerLayer.classList.add('transparent');
+        timerLayer.appendChild(frag);
     }
 
     // ── Image slide: full-frame picture, bypassing the theme's text layers ──
@@ -876,7 +980,7 @@
     }
 
     // ── Update only the text content in existing layers (no re-render) ──────
-    function updateTextContent(verseText, verseRef, translatedText = '') {
+    function updateTextContent(verseText, verseRef, translatedText = '', timerText = '') {
         // Same "no caption without a verse line" rule buildLayerDOM applies
         // at initial render — re-checked here so it still holds as verseText
         // changes slide-to-slide along this in-place (no-rebuild) path. Only
@@ -898,27 +1002,36 @@
             el.textContent = verseRef;
             el.style.display = showCaptions ? 'flex' : 'none';
         });
+        // Only writes when a real value is passed — the per-second countdown
+        // tick (handleActionBadge, below) writes into these same elements
+        // far more often than any actual slide change does, and shouldn't
+        // get blanked out by an ordinary verse update that has nothing to
+        // do with the timer at all.
+        if (timerText) {
+            stage.querySelectorAll('[data-binding="timer"]').forEach(el => { el.textContent = timerText; });
+        }
     }
 
     // ── Apply a new look (re-render with existing text) ────────────────────
     function applyLook(look, animate = true) {
         activeLook = look;
-        renderStage(currentVerseText, currentVerseRef, animate, currentTranslatedText, currentStyleByLayerId);
+        renderStage(currentVerseText, currentVerseRef, animate, currentTranslatedText, currentStyleByLayerId, currentTimerText);
     }
 
     // ── Show verse (smart update: re-render on first verse, in-place after) ──
-    function showVerse(text, ref, isRangeActive = false, translatedText = '', styleByLayerId = {}) {
-        const wasEmpty = !currentVerseText && !currentVerseRef;
+    function showVerse(text, ref, isRangeActive = false, translatedText = '', styleByLayerId = {}, timerText = '') {
+        const wasEmpty = !currentVerseText && !currentVerseRef && !currentTimerText;
         // Also compare the style override — the exact same slide re-sent
         // after only tweaking its per-slide layout (Full Edit) must still
         // pick up the new override, not take the text-only in-place path
         // below (which never touches position/font).
         const styleChanged = JSON.stringify(styleByLayerId || {}) !== JSON.stringify(currentStyleByLayerId || {});
-        const changed  = text !== currentVerseText || ref !== currentVerseRef || translatedText !== currentTranslatedText || styleChanged;
+        const changed  = text !== currentVerseText || ref !== currentVerseRef || translatedText !== currentTranslatedText || styleChanged || timerText !== currentTimerText;
         currentVerseText = text;
         currentVerseRef  = ref;
         currentTranslatedText = translatedText;
         currentStyleByLayerId = styleByLayerId || {};
+        currentTimerText = timerText;
 
         if (!changed) {
             if (isRangeActive) setRangeActive(true);
@@ -927,12 +1040,12 @@
 
         if (wasEmpty || stage.children.length === 0) {
             // First verse or blank stage — do a full render with fade
-            renderStage(text, ref, true, translatedText, currentStyleByLayerId);
+            renderStage(text, ref, true, translatedText, currentStyleByLayerId, timerText);
         } else if (styleChanged) {
             // Text unchanged but the layout override changed — the in-place
             // path below only ever swaps textContent, so a style-only change
             // needs the full rebuild too.
-            renderStage(text, ref, true, translatedText, currentStyleByLayerId);
+            renderStage(text, ref, true, translatedText, currentStyleByLayerId, timerText);
         } else {
             // Stage already has layers — fade (+ slide, for 'slide-up') text,
             // swap, fade back in. This in-place path (not renderStage, which
@@ -951,7 +1064,7 @@
             // this Transition) still runs inside updateTextContent either
             // way — Fade/Slide + a Text Animation is a valid combination.
             if (animType === 'cut') {
-                updateTextContent(text, ref, translatedText);
+                updateTextContent(text, ref, translatedText, timerText);
                 fitVerse();
                 if (isRangeActive) setRangeActive(true);
                 return;
@@ -965,7 +1078,7 @@
             });
 
             setTimeout(() => {
-                updateTextContent(text, ref, translatedText);
+                updateTextContent(text, ref, translatedText, timerText);
                 fitVerse();
                 if (animType === 'slide-up') {
                     // Same forced-reflow trick as renderStage's own slide-up
@@ -1099,7 +1212,7 @@
                     currentVerseRef  = verse.reference || verse.ref || '';
                     renderImageStage(verse.image, true, verse.fit || 'contain');
                 } else {
-                    showVerse(verse.text || verse.verse || '', verse.reference || verse.ref || '', false, verse.translatedText || '', verse.slideStyle || {});
+                    showVerse(verse.text || verse.verse || '', verse.reference || verse.ref || '', false, verse.translatedText || '', verse.slideStyle || {}, verse.timerText || '');
                 }
             }
             return;
@@ -1132,11 +1245,31 @@
         if (msg.type === 'clear-layer') {
             if (msg.layer === 'slide' || msg.layer === 'all') clearDisplay();
             if (msg.layer === 'media' || msg.layer === 'all') renderMediaStage(null);
+            // Cosmetic only — the server-side clear-timer/clear-all handlers
+            // actually stop the live segment's trigger *before* sending this,
+            // so nothing broadcasts a fresh remainingMs a moment later to
+            // silently bring the badge back.
+            if (msg.layer === 'timer' || msg.layer === 'all') {
+                timerBadgeEl?.classList.add('hidden');
+                clockBadgeEl?.classList.add('hidden');
+                if (timerLayer) timerLayer.innerHTML = ''; // clear the full-screen countdown too
+            }
             return;
         }
 
         if (msg.type === 'media' && msg.target === 'viewer') {
             renderMediaStage(msg.src, msg.kind, msg.fit);
+            return;
+        }
+
+        // A segment went live — paint its themed countdown into the
+        // independent timer layer (or clear it). The slide layer is left
+        // exactly as it was.
+        if (msg.type === 'timer-slide') {
+            // Uses the look carried in the message directly — never touches
+            // activeLook, so the slide layer's own theme is unaffected.
+            if (msg.clear) { timerLayer.innerHTML = ''; }
+            else renderTimerLayer(msg.look, msg.style || {}, msg.timerText || '0:00');
             return;
         }
 
@@ -1156,6 +1289,94 @@
             const mine = pickLook(msg);
             if (mine) { assignedLook = mine; try { applyLook(mine, true); } catch {} }
             return;
+        }
+
+        // Generic action/trigger broadcast (server/triggers.js) — a
+        // segment's stage-timer countdown or the system-clock message.
+        // Two independent badges (see #timer-badge/#clock-badge above),
+        // not one shared slot, so both can be showing at once without
+        // overwriting each other every tick.
+        if (msg.type === 'action') {
+            handleActionBadge(msg);
+            return;
+        }
+    }
+
+    const timerBadgeEl = document.getElementById('timer-badge');
+    const clockBadgeEl = document.getElementById('clock-badge');
+    function formatMs(ms) {
+        const totalSec = Math.max(0, Math.ceil(ms / 1000));
+        const m = Math.floor(totalSec / 60);
+        const s = totalSec % 60;
+        return `${m}:${String(s).padStart(2, '0')}`;
+    }
+    function handleActionBadge(msg) {
+        if (msg.actionId === 'stage-timer') {
+            const { remainingMs, label, cleared, style } = msg.payload || {};
+            // Two independent render targets share this one tick: the fixed
+            // corner badge (always available, no theme needed) and — if this
+            // segment was actually sent to the slide layer with a theme that
+            // has a real 'timer'-bound layer (sendSlide/toggleSegment in
+            // service.js) — that on-stage layer too. Both need to clear on
+            // an explicit stop, so that has to happen before either one's
+            // early-return, not stop at the badge and leave the on-stage
+            // layer frozen on its last value forever.
+            const overtime = remainingMs < 0;
+            // Inside the last minute but not yet at zero — a heads-up step
+            // before overtime, not just a jump from plain to red at 0:00.
+            const warning = !overtime && remainingMs <= 60000;
+            const formatted = cleared ? '' : (overtime ? '+' : '') + formatMs(Math.abs(remainingMs));
+            // The themed on-stage layer needs the same warning/overtime
+            // treatment as the fixed corner badge below — it was only
+            // getting a textContent update before, so a themed timer (any
+            // color chosen in Full-scale edit) stayed that color forever
+            // instead of ever changing as the countdown ran down.
+            stage.querySelectorAll('[data-binding="timer"]').forEach(el => {
+                el.textContent = formatted;
+                el.classList.toggle('is-overtime', overtime && !cleared);
+                el.classList.toggle('is-warning', warning && !cleared);
+                // Recolour to the theme's warning / overtime colour (or the
+                // base colour otherwise) — the countdown going red at 0 is
+                // half the point of a stage timer.
+                const base = el.dataset.baseColor;
+                if (base) {
+                    el.style.color = cleared ? base
+                        : overtime ? (el.dataset.overtimeColor || '#ff5c5c')
+                        : warning  ? (el.dataset.warnColor || '#ffcf4d')
+                        : base;
+                }
+            });
+            currentTimerText = formatted;
+
+            if (!timerBadgeEl) return;
+            if (cleared) { timerBadgeEl.classList.add('hidden'); return; }
+            timerBadgeEl.classList.remove('hidden');
+            // Overtime, not "ended" — the countdown keeps going past zero
+            // (see triggers.js) until the operator actually stops it, so it
+            // switches to counting up in red instead of just disappearing.
+            timerBadgeEl.classList.toggle('is-overtime', overtime);
+            timerBadgeEl.classList.toggle('is-warning', warning);
+            // A custom font style is per-segment (see the countdown-style
+            // popover in service.js); warning/overtime color always wins
+            // over it — clearing the inline color lets the .is-warning /
+            // .is-overtime CSS rules apply instead of a same-priority
+            // inline color fighting them.
+            timerBadgeEl.style.fontFamily = style?.fontFamily || '';
+            timerBadgeEl.style.fontSize   = style?.fontSize ? style.fontSize + 'px' : '';
+            timerBadgeEl.style.fontWeight = style?.fontWeight || '';
+            timerBadgeEl.style.color      = (!overtime && !warning && style?.color) ? style.color : '';
+            // No segment name in the output — the congregation just needs the
+            // number. (Operator still sees which segment is live in-app.)
+            timerBadgeEl.textContent = formatted;
+        } else if (msg.actionId === 'clock-message') {
+            if (!clockBadgeEl) return;
+            const { now, format, cleared } = msg.payload || {};
+            if (cleared) { clockBadgeEl.classList.add('hidden'); return; }
+            const d = new Date(now || Date.now());
+            const text = format === '12h' ? d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+                                           : d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+            clockBadgeEl.classList.remove('hidden');
+            clockBadgeEl.textContent = text;
         }
     }
 

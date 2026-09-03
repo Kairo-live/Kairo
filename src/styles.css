@@ -1601,6 +1601,89 @@ html, body {
   line-height: 1.6;
 }
 
+/* Media tab first-run prompt — shown until a folder is linked. Spans the
+   whole grid and centres itself rather than sitting in the first cell. */
+.media-first-run {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  max-width: 400px;
+  margin: 56px auto;
+}
+.media-first-run-title {
+  font-size: var(--fs-lg);
+  font-weight: 600;
+  color: var(--text-1);
+  margin-bottom: 8px;
+}
+.media-first-run-body {
+  color: var(--text-3);
+  font-size: var(--fs-sm);
+  line-height: 1.6;
+}
+.svc-link-btn {
+  background: none;
+  border: none;
+  color: var(--text-3);
+  font-size: var(--fs-sm);
+  text-decoration: underline;
+  cursor: pointer;
+}
+.svc-link-btn:hover { color: var(--text-1); }
+
+/* Lyric follower status chip — floats bottom-left while a song is live. */
+.lyric-follow-hud {
+  position: fixed;
+  left: 14px;
+  bottom: 14px;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: var(--surface-2, rgba(20,20,24,0.92));
+  border: 1px solid var(--border, rgba(255,255,255,0.08));
+  font-size: var(--fs-xs, 11px);
+  box-shadow: 0 6px 20px rgba(0,0,0,0.35);
+}
+.lfh-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: none;
+  border: none;
+  color: var(--text-3);
+  cursor: pointer;
+  font-size: inherit;
+}
+.lfh-toggle.on { color: var(--text-1); }
+.lfh-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--text-3);
+  box-shadow: 0 0 0 0 currentColor;
+}
+.lfh-dot.tracking { background: #35c46a; animation: lfh-pulse 1.6s ease-out infinite; color: #35c46a; }
+.lfh-dot.armed    { background: #ffcf4d; color: #ffcf4d; }
+.lfh-dot.frozen   { background: #ff5c5c; color: #ff5c5c; }
+.lfh-dot.idle     { background: var(--text-3); }
+@keyframes lfh-pulse { 0% { box-shadow: 0 0 0 0 currentColor; } 70% { box-shadow: 0 0 0 5px rgba(53,196,106,0); } 100% { box-shadow: 0 0 0 0 rgba(53,196,106,0); } }
+.lfh-info { display: flex; align-items: center; gap: 6px; color: var(--text-2, #aaa); }
+.lfh-bar { width: 42px; height: 4px; border-radius: 2px; background: var(--border, rgba(255,255,255,0.1)); overflow: hidden; }
+.lfh-bar i { display: block; height: 100%; background: #35c46a; transition: width .25s ease; }
+
+/* Monitoring panel's timer layer — mirrors the real output's #timer-layer,
+   rendered by paintLookLayers with the segment's full theme. */
+.live-screen-timer {
+  position: absolute;
+  inset: 0;
+  z-index: 4;           /* above #slide-preview-themed and -media */
+  overflow: hidden;
+}
+.live-screen-timer.hidden { display: none; }
+
 /* Running-order rows */
 .svc-item {
   display: flex;
@@ -2093,6 +2176,21 @@ html, body {
    full-edit canvas (which no longer exists). */
 .svc-canvas-text { outline: none; white-space: pre-wrap; }
 .svc-canvas-text.is-verse:focus { box-shadow: 0 0 0 1px var(--blue); border-radius: 4px; }
+
+/* Recently Used / All-section dividers shared by the Songs and Media
+   pickers — plain sibling in .hymn-list's block flow, but .media-grid is
+   itself a CSS grid, so it needs an explicit full-width span there. */
+.svc-section-label {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  color: var(--text-3);
+  padding: 4px 2px;
+  margin: 10px 0 6px;
+}
+.svc-section-label:first-child { margin-top: 0; }
+.media-grid .svc-section-label { grid-column: 1 / -1; }
 
 /* Hymn picker */
 .hymn-list { flex: 1; overflow-y: auto; padding: 10px 16px 16px; }
@@ -3630,6 +3728,90 @@ select {
   z-index: 5;
 }
 
+/* Timer tab — segment cards mirror the slide-thumbnail visual language
+   (.ts-item-slide-thumb: black 16:9 preview + bottom-left label) so a
+   segment reads as "a layer" the same way a slide does, rather than a
+   plain settings-style row. */
+.timer-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+  gap: 14px;
+}
+.timer-card {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  transition: border-color var(--trans);
+}
+.timer-card.is-live { border-color: var(--blue); box-shadow: 0 0 0 1px var(--blue); }
+.timer-card.is-done { opacity: 0.55; }
+
+.timer-card-preview {
+  position: relative;
+  width: 100%;
+  aspect-ratio: var(--kairo-output-aspect, 16 / 9);
+  background: #000;
+  border-radius: 6px;
+  overflow: hidden;
+  border: 1px solid var(--border-md);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer; /* double-click starts/stops it, same "the thumbnail is the action" cue as .svc-slide */
+  transition: border-color var(--trans);
+}
+.timer-card-preview:hover { border-color: var(--blue); }
+.timer-card-readout {
+  font-family: var(--mono);
+  font-size: 22px;
+  font-weight: 700;
+  color: rgba(255, 255, 255, 0.85);
+  letter-spacing: 0.04em;
+}
+.timer-card-preview.is-pending .timer-card-readout { color: rgba(255, 255, 255, 0.25); font-size: 13px; font-weight: 600; }
+/* Overtime/warning — matches display.html's #timer-badge treatment, so the
+   operator's own card agrees with what's on the real output. */
+.timer-card-preview.is-overtime .timer-card-readout { color: #ff5c5c; }
+.timer-card-preview.is-overtime .timer-card-status { color: #ff5c5c; }
+.timer-card-preview.is-warning .timer-card-readout { color: #ffcf4d; }
+.timer-card-preview.is-warning .timer-card-status { color: #ffcf4d; }
+.timer-card-label {
+  position: absolute;
+  left: 8px;
+  bottom: 7px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.65);
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text);
+  line-height: 1.4;
+  pointer-events: none; /* clicks pass through to .timer-card-preview — rename is a right-click action now, not a direct click on the label */
+}
+.timer-card-status {
+  position: absolute;
+  top: 7px; right: 8px;
+  font-size: 9px; font-weight: 800; letter-spacing: 0.1em; text-transform: uppercase;
+  padding: 2px 6px; border-radius: 3px;
+  background: rgba(0, 0, 0, 0.5); color: var(--text-3);
+  display: flex; align-items: center;
+}
+.timer-card-status.is-live { color: #5fd6a8; }
+.timer-card-status.is-live::before {
+  content: '';
+  display: inline-block; width: 5px; height: 5px; border-radius: 999px;
+  background: #5fd6a8; margin-right: 4px;
+  animation: pulse-osp 1.4s ease-in-out infinite;
+}
+
+/* The card face is just the thumbnail + this one button now — set time/
+   rename/style/delete all moved to right-click, matching how a Slides
+   card keeps its own actions off the face (see buildSegmentCard). */
+
 .media-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
@@ -4972,6 +5154,35 @@ select {
   gap: 10px;
 }
 
+/* Tab filtering for the props panel (renderProps in app.js) — a class, not
+   a direct style.display write, so it composes with a section's own
+   enabled/disabled inline display (Shadow/Outline/Scroll's collapsible
+   detail rows) instead of fighting it: !important wins regardless of what
+   that inline style says, and removing the class hands control right back
+   to it. */
+.ts-tab-hidden { display: none !important; }
+
+.ts-props-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 10px 14px 0;
+}
+.ts-props-tabs .ts-tab-btn {
+  flex: 1;
+  padding: 6px 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-3);
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background var(--trans), color var(--trans);
+}
+.ts-props-tabs .ts-tab-btn:hover { background: var(--bg-hover); color: var(--text); }
+.ts-props-tabs .ts-tab-btn.active { background: var(--blue); color: white; }
+.ts-props-tabs.hidden { display: none; }
+
 .ts-props-section-label {
   font-size: 9px;
   font-weight: 800;
@@ -5250,34 +5461,10 @@ select {
 }
 .upd-snooze:hover { color: #a9ddd7; }
 
-/* ══════════════════════════════════════
-   CONTENT STUDIO MODAL
-══════════════════════════════════════ */
-.cs-modal { width: 1080px; max-width: 96vw; height: 720px; max-height: 90vh; }
-
-.cs-body {
-  flex: 1;
-  display: grid;
-  grid-template-columns: 280px 1fr;
-  min-height: 0;
-}
-
-/* ── Sidebar (sessions list) ── */
-.cs-sidebar {
-  border-right: 1px solid var(--border);
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-  background: var(--bg);
-}
-
-.cs-sidebar-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 12px 14px 8px;
-}
-
+/* Shared section-header label — used by Slides/Songs/Media/Timer's own
+   headers (see .cs-section-header usages in index.html), not just wherever
+   the "cs-" prefix originated. Kept standalone here after the Content
+   Studio modal that used to sit around it was removed. */
 .cs-section-label {
   font-size: 10px;
   font-weight: 700;
@@ -5285,331 +5472,13 @@ select {
   text-transform: uppercase;
   color: var(--text-3);
 }
-
-.cs-llm-status {
-  margin: 0 14px 10px;
-  padding: 8px 10px;
-  background: var(--bg-input);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  font-size: 11px;
-  color: var(--text-2);
-  line-height: 1.45;
-}
-.cs-llm-status code {
-  font-family: var(--mono);
-  font-size: 10.5px;
-  background: rgba(255,255,255,0.05);
-  padding: 1px 5px;
-  border-radius: 3px;
-  color: var(--text);
-}
-.cs-llm-status a { color: #4db6ac; text-decoration: none; }
-.cs-llm-status a:hover { text-decoration: underline; }
-
-.cs-pill {
-  display: inline-block;
-  font-size: 8px;
-  vertical-align: middle;
-  margin-right: 4px;
-}
-.cs-pill-ok   { color: #5fd6a8; }
-.cs-pill-warn { color: var(--orange); }
-.cs-pill-err  { color: var(--red); }
-
-.cs-session-list {
-  flex: 1;
-  overflow-y: auto;
-  padding: 0 8px 8px;
-}
-
-.cs-empty-list {
-  padding: 14px;
-  font-size: 11.5px;
-  color: var(--text-3);
-  line-height: 1.55;
-}
-
-.cs-session-row {
-  display: flex;
-  gap: 10px;
-  align-items: center;
-  padding: 10px 10px;
-  border-radius: var(--radius-sm);
-  cursor: pointer;
-  transition: background var(--trans);
-  margin-bottom: 2px;
-}
-.cs-session-row:hover  { background: var(--bg-hover); }
-.cs-session-row.active { background: var(--red-dim); }
-
-.cs-session-row-main { flex: 1; min-width: 0; }
-.cs-session-row-title {
-  font-size: 12.5px;
-  font-weight: 600;
-  color: var(--text);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.cs-session-row-meta {
-  font-size: 10.5px;
-  color: var(--text-3);
-  margin-top: 2px;
-}
-.cs-session-row-tags { display: flex; gap: 4px; flex-shrink: 0; }
-.cs-tag {
-  font-size: 9px;
-  font-weight: 700;
-  letter-spacing: 0.4px;
-  padding: 2px 6px;
-  border-radius: 3px;
-  background: rgba(77,182,172,0.14);
-  color: #4db6ac;
-  text-transform: uppercase;
-}
-
-/* ── Main pane ── */
-.cs-main {
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-  background: var(--bg);
-}
-
-.cs-empty-pane {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  text-align: center;
-  padding: 40px;
-  color: var(--text-2);
-}
-.cs-empty-pane svg  { margin-bottom: 16px; }
-.cs-empty-pane p    { margin: 4px 0; font-size: 12.5px; }
-.cs-empty-pane .cs-hint {
-  font-size: 11px;
-  color: var(--text-3);
-  max-width: 380px;
-  line-height: 1.55;
-  margin-top: 10px;
-}
-
-.cs-detail-pane {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-}
-
-.cs-detail-header {
-  padding: 14px 18px 10px;
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 12px;
-  border-bottom: 1px solid var(--border);
-}
-.cs-detail-title {
-  font-size: 14px;
-  font-weight: 700;
-  color: var(--text);
-  margin: 0 0 2px;
-}
-.cs-detail-meta {
-  font-size: 11px;
-  color: var(--text-3);
-}
-.cs-detail-actions { flex-shrink: 0; }
-
-.cs-tabs {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  padding: 8px 14px;
-  border-bottom: 1px solid var(--border);
-}
-.cs-tab {
-  background: transparent;
-  border: 1px solid transparent;
-  color: var(--text-2);
-  font-size: 11.5px;
-  font-weight: 600;
-  padding: 6px 12px;
-  border-radius: var(--radius-sm);
-  cursor: pointer;
-  transition: all var(--trans);
-}
-.cs-tab:hover  { background: var(--bg-hover); color: var(--text); }
-.cs-tab.active { background: var(--red-dim); color: var(--red); }
-.cs-tab-spacer { flex: 1; }
-
-.cs-preview {
-  flex: 1;
-  overflow-y: auto;
-  padding: 22px 28px;
-  background: var(--bg-input);
-  position: relative;
-}
-.cs-preview.cs-loading::after {
-  content: 'Generating with local model — this can take 20–60s on first run…';
-  position: absolute;
-  inset: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: rgba(22,22,24,0.85);
-  font-size: 12px;
-  color: var(--text-2);
-  text-align: center;
-  padding: 0 40px;
-}
-
-.cs-preview-empty {
-  text-align: center;
-  padding: 40px;
-  color: var(--text-3);
-  font-size: 12px;
-}
-.cs-preview-empty .cs-hint {
-  font-size: 11px;
-  color: var(--text-3);
-  max-width: 420px;
-  margin: 8px auto 0;
-  line-height: 1.55;
-}
-
-/* ── Document preview styling (mirrors print stylesheet, dark theme) ── */
-.cs-doc { max-width: 700px; margin: 0 auto; color: var(--text); }
-.cs-doc-header {
-  border-bottom: 1.5px solid var(--border-md);
-  padding-bottom: 12px;
-  margin-bottom: 20px;
-}
-.cs-h1 {
-  font-size: 22px;
-  font-weight: 800;
-  letter-spacing: -0.01em;
-  margin: 0 0 4px;
-}
-.cs-doc-meta {
-  font-size: 10px;
-  color: var(--text-3);
-  text-transform: uppercase;
-  letter-spacing: 1.2px;
-  font-weight: 700;
-}
-.cs-summary {
-  margin-top: 12px;
-  font-style: italic;
-  color: var(--text-2);
-  font-size: 12.5px;
-  line-height: 1.6;
-}
-.cs-section { margin-bottom: 18px; }
-.cs-h2 {
-  font-size: 13px;
-  font-weight: 700;
-  margin: 18px 0 10px;
-  text-transform: uppercase;
-  letter-spacing: 0.6px;
-  color: var(--text-2);
-}
-.cs-h3 {
-  font-size: 13px;
-  font-weight: 700;
-  margin: 0 0 6px;
-  color: var(--text);
-}
-.cs-body {
-  font-size: 12.5px;
-  line-height: 1.65;
-  color: var(--text);
-  margin: 0 0 6px;
-}
-.cs-scripture-row { margin: 4px 0 8px; }
-.cs-scripture-chip {
-  display: inline-block;
-  font-size: 10px;
-  font-weight: 600;
-  background: var(--bg-hover);
-  border: 1px solid var(--border-md);
-  border-radius: 3px;
-  padding: 2px 8px;
-  margin-right: 6px;
-  color: var(--text-2);
-}
-.cs-points { list-style: none; padding: 0; margin: 0; }
-.cs-point {
-  display: flex;
-  gap: 14px;
-  margin-bottom: 18px;
-}
-.cs-point-num {
-  flex: 0 0 28px;
-  font-size: 18px;
-  font-weight: 800;
-  color: var(--text-3);
-  line-height: 1;
-}
-.cs-point-body { flex: 1; }
-.cs-point-title {
-  font-size: 13.5px;
-  font-weight: 700;
-  margin-bottom: 2px;
-  color: var(--text);
-}
-.cs-point-scripture {
-  font-size: 10.5px;
-  font-weight: 600;
-  color: #4db6ac;
-  margin-bottom: 6px;
-  letter-spacing: 0.3px;
-}
-.cs-quote {
-  border-left: 2px solid var(--border-md);
-  padding: 4px 12px;
-  margin: 8px 0;
-  color: var(--text-2);
-  font-style: italic;
-  font-size: 11.5px;
-}
-.cs-closing {
-  margin-top: 18px;
-  padding-top: 14px;
-  border-top: 1px solid var(--border);
-}
-.cs-verse-list {
-  list-style: none;
-  padding: 0;
-  margin: 0 0 16px;
-}
-.cs-verse-list li {
-  padding: 6px 0;
-  border-bottom: 1px solid var(--border);
-  font-size: 12px;
-  line-height: 1.55;
-  color: var(--text-2);
-}
-.cs-verse-list li strong { color: var(--text); }
-.cs-verse-list .cs-source-empty { color: var(--text-3); border: none; padding: 8px 0; }
-.cs-source-time {
-  font-family: var(--mono);
-  font-size: 10px;
-  color: var(--text-3);
-  margin-left: 6px;
-}
-.cs-transcript {
-  font-size: 12px;
-  line-height: 1.7;
-  color: var(--text-2);
-  white-space: pre-wrap;
-}
-
 /* ══════════════════════════════════════
-   OLLAMA STATUS PANEL (Settings)
+   INLINE STATUS CARD (.osp family)
+   Used by the inline "download this translation" upsell (app.js,
+   renderInlineTranslateUpsell) — originally built for an Ollama/Content
+   Studio status panel that no longer exists, but the card shape (a
+   status row + message + progress bar + actions) is generic enough that
+   it was reused rather than duplicated.
 ══════════════════════════════════════ */
 .osp {
   border: 1px solid var(--border-md);
@@ -5809,11 +5678,3 @@ select {
   margin: 6px 0;
 }
 
-/* Hint shown in Content Studio tabs row, where the old Export PDF button was. */
-.cs-export-hint {
-  font-size: 10.5px;
-  color: var(--text-3);
-  letter-spacing: 0.2px;
-  margin-right: 8px;
-  align-self: center;
-}

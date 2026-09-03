@@ -156,6 +156,17 @@ pub enum NdiCmd {
 #[derive(Default)]
 pub struct NdiHandle {
     tx: Option<Sender<NdiCmd>>,
+    // Set while a start() call has been accepted but the background thread
+    // hasn't reached the point of installing `tx` yet. Without this, two
+    // near-simultaneous ndi_start calls could both see `tx.is_none()` and
+    // both spawn a sender thread — the second overwrites `tx`, orphaning the
+    // first thread with no way to stop it.
+    starting: bool,
+    // Join handle for the background sender thread — lets stop_and_join()
+    // (used on app quit) actually wait for NDIlib_send_destroy/NDIlib_destroy
+    // to run before the process exits, instead of firing NdiCmd::Stop and
+    // hoping the thread gets to it in time.
+    thread_handle: Option<thread::JoinHandle<()>>,
 }
 
 impl NdiHandle {
@@ -165,11 +176,47 @@ impl NdiHandle {
         }
     }
     pub fn stop(&mut self) {
+        self.starting = false;
         if let Some(tx) = self.tx.take() {
             let _ = tx.send(NdiCmd::Stop);
         }
     }
-    pub fn is_running(&self) -> bool { self.tx.is_some() }
+    /// Same as stop(), but also waits (up to `timeout`) for the background
+    /// thread to actually finish — used on app quit so the native
+    /// NDIlib_send_destroy/NDIlib_destroy calls run before the process exits
+    /// rather than being merely requested. Never blocks past `timeout`: a
+    /// native call that hangs shouldn't hang app shutdown right along with it.
+    pub fn stop_and_join(&mut self, timeout: Duration) {
+        self.stop();
+        if let Some(handle) = self.thread_handle.take() {
+            let start = std::time::Instant::now();
+            while !handle.is_finished() && start.elapsed() < timeout {
+                thread::sleep(Duration::from_millis(10));
+            }
+            if handle.is_finished() {
+                let _ = handle.join();
+            }
+        }
+    }
+    pub fn is_running(&self) -> bool { self.starting || self.tx.is_some() }
+
+    /// Atomically checks-and-reserves: returns true (and marks `starting`)
+    /// only if nothing is currently running or already starting. The caller
+    /// must hold the lock across this call for the reservation to actually
+    /// close the race — see ndi_start in lib.rs.
+    pub fn try_reserve_start(&mut self) -> bool {
+        if self.is_running() { return false; }
+        self.starting = true;
+        true
+    }
+
+    /// Clears a reservation made by try_reserve_start without ever starting
+    /// — used when the caller's start() attempt fails before reaching the
+    /// point where it would install `tx` (e.g. libndi not found), so a retry
+    /// isn't permanently blocked.
+    pub fn clear_starting(&mut self) {
+        self.starting = false;
+    }
 }
 
 pub fn is_libndi_available() -> bool {
@@ -185,7 +232,7 @@ pub fn start(source_name: &str, shared: Arc<Mutex<NdiHandle>>) -> Result<(), Str
     let (tx, rx) = bounded::<NdiCmd>(64);
 
     let name = source_name.to_string();
-    thread::spawn(move || {
+    let handle = thread::spawn(move || {
         unsafe {
             if !(lib.initialize)() {
                 eprintln!("[NDI] NDIlib_initialize() returned false — aborting sender thread.");
@@ -214,8 +261,15 @@ pub fn start(source_name: &str, shared: Arc<Mutex<NdiHandle>>) -> Result<(), Str
             let mut buf: Vec<u8> = vec![0u8; (FRAME_W * FRAME_H * 4) as usize];
             let mut latest_verse = String::new();
             let mut latest_ref   = String::new();
+            // FontSystem::new() scans and loads every system font — tens to
+            // hundreds of ms. Created once here rather than per render_frame
+            // call, since that used to happen on every verse update and added
+            // directly to seconds-to-screen latency.
+            use cosmic_text::{FontSystem, SwashCache};
+            let mut font_system = FontSystem::new();
+            let mut swash_cache = SwashCache::new();
             // Render initial empty/idle frame
-            render_frame(&mut buf, &latest_verse, &latest_ref);
+            render_frame(&mut buf, &latest_verse, &latest_ref, &mut font_system, &mut swash_cache);
 
             let frame_period = Duration::from_millis(1000 / SEND_FPS_N as u64);
             loop {
@@ -234,7 +288,7 @@ pub fn start(source_name: &str, shared: Arc<Mutex<NdiHandle>>) -> Result<(), Str
                 }
                 if should_stop { break; }
                 if got_update {
-                    render_frame(&mut buf, &latest_verse, &latest_ref);
+                    render_frame(&mut buf, &latest_verse, &latest_ref, &mut font_system, &mut swash_cache);
                 }
 
                 // Send the current frame.
@@ -264,7 +318,27 @@ pub fn start(source_name: &str, shared: Arc<Mutex<NdiHandle>>) -> Result<(), Str
     });
 
     if let Ok(mut g) = shared.lock() {
-        g.tx = Some(tx);
+        if g.starting {
+            // Still the same start attempt that was reserved — install the
+            // sender and mark it running.
+            g.tx = Some(tx);
+            g.thread_handle = Some(handle);
+            g.starting = false;
+        } else {
+            // ndi_stop() ran concurrently while we were loading libndi and
+            // spawning the thread above (try_load + thread::spawn happen
+            // without holding the lock) — stop() found `tx` still None at
+            // that point, so it had nothing to signal and just reset
+            // `starting`. Left alone, we'd now install `tx` anyway and the
+            // thread we just spawned would broadcast indefinitely with no
+            // way left to reach it. Cancel it directly via our own local
+            // `tx` instead of ever handing it to the shared handle.
+            let _ = tx.send(NdiCmd::Stop);
+        }
+    } else {
+        // Lock poisoned — same cancellation as above rather than leaking a
+        // broadcasting thread nobody can reach through the shared handle.
+        let _ = tx.send(NdiCmd::Stop);
     }
     Ok(())
 }
@@ -273,8 +347,14 @@ pub fn start(source_name: &str, shared: Arc<Mutex<NdiHandle>>) -> Result<(), Str
 // Pure Rust 2D rendering with tiny-skia + cosmic-text. Black background,
 // red brand accent on the reference, white verse below. Lower-third style.
 
-fn render_frame(buf: &mut [u8], verse: &str, reference: &str) {
-    use cosmic_text::{Color as CtColor, FontSystem, SwashCache};
+fn render_frame(
+    buf: &mut [u8],
+    verse: &str,
+    reference: &str,
+    font_system: &mut cosmic_text::FontSystem,
+    swash_cache: &mut cosmic_text::SwashCache,
+) {
+    use cosmic_text::Color as CtColor;
     use tiny_skia::{Color as SkColor, Pixmap, Rect, Transform};
 
     // Skia pixmap that aliases our shared buffer. We re-use the same allocation
@@ -292,14 +372,14 @@ fn render_frame(buf: &mut [u8], verse: &str, reference: &str) {
     pixmap.fill_rect(band, &band_paint, Transform::identity(), None);
 
     // Text: render with cosmic-text into the pixmap. We treat each glyph as
-    // an alpha mask drawn with the layer's color.
-    let mut font_system = FontSystem::new();
-    let mut swash_cache = SwashCache::new();
+    // an alpha mask drawn with the layer's color. font_system/swash_cache are
+    // owned by the caller (created once, not per frame — see the sender
+    // thread setup above).
 
     // Reference — small, uppercase-style (caller should pass uppercase).
     if !reference.is_empty() {
         draw_text(
-            &mut pixmap, &mut font_system, &mut swash_cache,
+            &mut pixmap, font_system, swash_cache,
             reference,
             "sans-serif", 28.0, 700,
             CtColor::rgb(232, 64, 74), // brand red
@@ -310,7 +390,7 @@ fn render_frame(buf: &mut [u8], verse: &str, reference: &str) {
     // Verse — larger, white.
     if !verse.is_empty() {
         draw_text_wrapped(
-            &mut pixmap, &mut font_system, &mut swash_cache,
+            &mut pixmap, font_system, swash_cache,
             verse,
             "sans-serif", 40.0, 500,
             CtColor::rgb(255, 255, 255),
@@ -320,18 +400,17 @@ fn render_frame(buf: &mut [u8], verse: &str, reference: &str) {
     }
 
     // Skia stores RGBA premul; NDI BGRA expects byte-order B,G,R,A. Swap.
+    // chunks_exact + zip over 4-byte pixels (rather than indexing scalar
+    // r/g/b/a one at a time) gives the compiler a much better shot at
+    // auto-vectorizing this per-frame pass.
     let src = pixmap.data();
     let n   = (FRAME_W * FRAME_H) as usize * 4;
     let copy_len = n.min(src.len()).min(buf.len());
-    for i in 0..(copy_len / 4) {
-        let r = src[i * 4 + 0];
-        let g = src[i * 4 + 1];
-        let b = src[i * 4 + 2];
-        let a = src[i * 4 + 3];
-        buf[i * 4 + 0] = b;
-        buf[i * 4 + 1] = g;
-        buf[i * 4 + 2] = r;
-        buf[i * 4 + 3] = a;
+    for (dst_px, src_px) in buf[..copy_len].chunks_exact_mut(4).zip(src[..copy_len].chunks_exact(4)) {
+        dst_px[0] = src_px[2];
+        dst_px[1] = src_px[1];
+        dst_px[2] = src_px[0];
+        dst_px[3] = src_px[3];
     }
     // Helpers for text drawing
     fn draw_text(
