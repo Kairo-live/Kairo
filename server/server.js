@@ -4530,6 +4530,38 @@ async function broadcastDetection(verses, method, topScore, target) {
     target = 'suggestions';
   }
 
+  // Real incident (Isaiah 1:18/1:19, live 2026-09-13): "Isaiah 1:18" cited,
+  // sent to viewer. Preacher keeps reading and says "...verse 19" — the bare
+  // number correctly advances the display to Isaiah 1:19 via
+  // resolvePartialReference (method 'direct-partial'). Moments later the
+  // FINAL transcript's joined-segment reconstruction re-parses the WHOLE
+  // utterance — which still opens with "...verse 18..." — and extracts
+  // "Isaiah 1:18" as a fresh 'direct' hit (the first citation the parser
+  // finds in that joined text). Being 'direct', it unconditionally bypasses
+  // every gate below, including the backward-already-shown hard cap
+  // (scoreCandidate's own isBackwardAlreadyShown, bugs #11/#12) that every
+  // OTHER method is already subject to — so it silently dragged the display
+  // back to the verse BEFORE the one the preacher had already progressed
+  // past. This isn't a mis-hearing to correct (18 was never wrong) — it's a
+  // stale internal reference re-surfacing from reconstructing text that's
+  // already been fully processed and superseded by real, independent
+  // forward progress. Same accepted tradeoff bugs #11/#12 already apply to
+  // every non-direct method — extended here narrowly: only fires for the
+  // exact shape of "same book/chapter, behind the current verse, AND that
+  // behind verse was already shown before" — a genuinely fresh, later
+  // re-citation of the same verse (a new utterance, not a reconstruction of
+  // already-seen text) is a different broadcastDetection call entirely and
+  // is untouched.
+  const directBackwardAlreadyShown = target === 'viewer' && method === 'direct' && lastOutputVerse
+    && verses[0].book    === lastOutputVerse.book
+    && verses[0].chapter === lastOutputVerse.chapter
+    && verses[0].verse   <  lastOutputVerse.verse
+    && sentVerseKeysThisBook.has(topKey);
+  if (directBackwardAlreadyShown) {
+    console.log(`[Guard] Blocked 'direct' re-send of "${verses[0].reference}" — already superseded by "${lastOutputVerse.reference}" (real forward progress since), likely a joined-segment re-parse of already-processed text — demoted to Candidates`);
+    target = 'suggestions';
+  }
+
   if (target === 'viewer') {
     const dedupMs = method === 'direct' ? DIRECT_DEDUP_MS : DETECT_DEDUP_MS;
     const incomingBook = verses[0]?.book || null;
