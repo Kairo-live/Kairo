@@ -1065,7 +1065,7 @@
                                 <select id="audio-source-settings" class="setting-input" style="flex:1;min-width:0;">
                                     <option value="">Loading devices…</option>
                                 </select>
-                                <button id="refresh-devices-settings" class="modal-btn secondary" style="white-space:nowrap;font-size:11px;" title="Refresh device list">↻</button>
+                                <button id="refresh-devices-settings" class="modal-btn secondary audio-refresh-btn" title="Refresh device list">↻</button>
                             </div>
                             <p class="setting-hint">The line-in or interface feed the app listens to.</p>
                         </div>
@@ -1076,7 +1076,7 @@
                                 <select id="media-output-settings" class="setting-input" style="flex:1;min-width:0;">
                                     <option value="">System default</option>
                                 </select>
-                                <button id="refresh-output-devices-settings" class="modal-btn secondary" style="white-space:nowrap;font-size:11px;" title="Refresh device list">↻</button>
+                                <button id="refresh-output-devices-settings" class="modal-btn secondary audio-refresh-btn" title="Refresh device list">↻</button>
                             </div>
                             <p class="setting-hint">Where video sent to the Media layer plays out. Falls back to system default.</p>
                         </div>
@@ -1434,9 +1434,8 @@
                     it later under Settings.
                 </p>
                 <label for="first-run-deepgram-key" style="display:block;margin-bottom:6px;font-size:12px;font-weight:600;">Deepgram API Key</label>
-                <input id="first-run-deepgram-key" type="password" autocomplete="off" spellcheck="false"
-                       placeholder="Paste your Deepgram API key"
-                       style="width:100%;box-sizing:border-box;" />
+                <input id="first-run-deepgram-key" type="password" class="setting-input" autocomplete="off" spellcheck="false"
+                       placeholder="Paste your Deepgram API key" style="width:100%;" />
                 <a href="https://console.deepgram.com/signup" target="_blank" rel="noopener"
                    style="display:inline-block;margin-top:10px;font-size:12px;color:var(--accent,#6aa6ff);text-decoration:none;">
                     Get a free Deepgram key →

@@ -2416,6 +2416,19 @@ select.setting-input option {
   color: var(--text);
 }
 
+/* Audio settings' device-refresh (↻) buttons — sit inline next to a
+   select.setting-input and must match its height exactly. .modal-btn's own
+   padding (7px) + font-size (12px) computes ~2-3px shorter than the
+   select's (8px padding, same font-size) once borders are counted on both
+   — noticeable side by side. Match the select's vertical rhythm exactly
+   rather than relying on the two independently drifting. */
+.audio-refresh-btn {
+  padding: 8px 10px;
+  font-size: 12px;
+  line-height: 1;
+  white-space: nowrap;
+}
+
 /* All selects app-wide */
 select {
   -webkit-appearance: none;
