@@ -29,6 +29,11 @@ databases/songs/songs.json
 # Whisper offline-STT models (downloaded by scripts/download-whisper-model.js on first use)
 server/models/
 
+# Eval harness run output — timestamped raw results from
+# server/eval/run_eval.js, regenerated on every run. The harness code and
+# fixtures (ground truth) are source; individual run snapshots aren't.
+server/eval/results/
+
 # Tauri build output
 src-tauri/target/
 

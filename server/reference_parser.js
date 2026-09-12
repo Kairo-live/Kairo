@@ -322,10 +322,69 @@ function cleanReferenceText(text) {
     .replace(/\s+/g, ' ').trim().toLowerCase();
 }
 
+// Requires the digit immediately before "zero" to itself repeat (e.g. "one
+// ONE zero one") — the actual Deepgram artifact this exists for is a run of
+// the SAME repeated digit word with a spurious extra zero inserted partway
+// through. A plain 3-digit chapter/verse composition like "one zero four"
+// (=104) has no such repetition and must NOT match this — consumeNumber's
+// own 3-word lookahead already parses "one zero four" correctly on its own;
+// this regex used to strip the zero out from under it too, silently
+// truncating "Psalm 104" down to "Psalm 1". Real incident this caused:
+// "Psalm one zero four verse twenty-four" (Psalm 104:24) parsed as Psalm
+// 1:24 — an invalid verse (Psalm 1 only has 6) that still silently
+// "succeeded" instead of erroring. Replacement keeps both repeated
+// occurrences of the leading digit (only the spurious zero is dropped).
 const DIGIT_WORDS_RE = (function() {
   const DIGIT_WORDS = 'zero|one|two|three|four|five|six|seven|eight|nine';
-  return new RegExp(`\\b(${DIGIT_WORDS})\\s+zero\\s+(${DIGIT_WORDS})\\b`, 'g');
+  return new RegExp(`\\b(${DIGIT_WORDS})\\s+\\1\\s+zero\\s+(${DIGIT_WORDS})\\b`, 'g');
 })();
+
+// Handles "chapter 7 of Luke" (chapter-then-book word order) by rewriting
+// it to "Luke chapter 7" — the order every downstream check in this file
+// expects. Preachers say it both ways ("Luke chapter 7" / "chapter 7 of
+// Luke"); only the first form was ever recognized — the second silently
+// produced ZERO references, falling through to a stale direct-partial
+// guess against whatever book was active from an earlier, unrelated
+// citation. Real incident (2026-09-07, real sermon audio): "chapter 7 of
+// Luke from verse 1-6" (Luke 7:1-6, the centurion's servant) produced
+// nothing here, and the caller's fallback resolved the bare "verse 1"
+// against a stale "Psalms 45" context instead, sending "Psalms 45:1" —
+// wrong book entirely, not just a wrong verse. Deliberately requires the
+// token right after "of" to be a RECOGNIZED book alias (numbered-prefix
+// pair or single-word book), not just any noun, so this can't misfire on
+// an unrelated "chapter 7 of the book" type phrase.
+function normalizeChapterOfBook(text) {
+  const words = text.split(' ');
+  const out = [];
+  let i = 0;
+  while (i < words.length) {
+    if (words[i] === 'chapter') {
+      let j = i + 1;
+      const numTokens = [];
+      while (j < words.length && numTokens.length < 4 && words[j] !== 'of') {
+        numTokens.push(words[j]);
+        j++;
+      }
+      if (numTokens.length && j < words.length && words[j] === 'of' && j + 1 < words.length) {
+        const num = getNumberedPrefix(words[j + 1]);
+        let bookTokens = null;
+        if (num && j + 2 < words.length && BOOK_ALIASES[`${num} ${words[j + 2]}`]) {
+          bookTokens = [words[j + 1], words[j + 2]];
+        } else if (SINGLE_WORD_BOOKS.has(words[j + 1])) {
+          bookTokens = [words[j + 1]];
+        }
+        if (bookTokens) {
+          out.push(...bookTokens, 'chapter', ...numTokens);
+          i = j + 1 + bookTokens.length;
+          continue;
+        }
+      }
+    }
+    out.push(words[i]);
+    i++;
+  }
+  return out.join(' ');
+}
 
 function getNumberedPrefix(word) {
   if (word === 'first' || word === '1' || word === '1st') return '1';
@@ -341,6 +400,9 @@ function parseSpokenReference(text, inBibleMode = false) {
     if (!cleanText.includes(find)) continue;
     regex.lastIndex = 0;
     cleanText = cleanText.replace(regex, replace);
+  }
+  if (cleanText.includes('chapter') && cleanText.includes(' of ')) {
+    cleanText = normalizeChapterOfBook(cleanText);
   }
 
   const words = cleanText.split(/\s+/);
@@ -533,6 +595,34 @@ function parseSpokenReference(text, inBibleMode = false) {
       }
     }
 
+    // Fallback: Deepgram occasionally mis-hears "verse(s)" as an unrelated
+    // single word RIGHT where a verse-range marker belongs — confirmed
+    // live (2026-09-07): "Psalm chapter one Numbers one to three" for an
+    // actual "...chapter one and verse one to three" (the real book name
+    // "Numbers" substituted for "verses"). The HOLD_WINDOW search above
+    // deliberately stops at any recognized book name, since that's
+    // normally a genuine second reference — but a LONE stray word
+    // immediately followed by a clean, ascending "N to M" numeric range,
+    // right where the verse marker is expected, is a much stronger signal
+    // of a garbled verse-range than of an intentional, keyword-less
+    // second book mention (which this parser doesn't otherwise support
+    // anywhere else). Deliberately narrow: exactly one word may be
+    // skipped, and what follows must be an unambiguous "to"/"through"
+    // range, not just a bare number — a coincidental stray word before an
+    // unrelated lone number is far more likely noise than a garbled verse
+    // marker, but a stray word directly before "N to M" is not.
+    if (!vRes && !hasVerseKeyword && idx < words.length) {
+      const strayThenStart = consumeNumber(words, idx + 1);
+      if (strayThenStart) {
+        const afterStart = idx + 1 + strayThenStart.consumed;
+        if (afterStart < words.length && ['to', 'through'].includes(words[afterStart])) {
+          vRes = strayThenStart;
+          idx = idx + 1;
+          hasVerseKeyword = true;
+        }
+      }
+    }
+
     if (!vRes) {
       const rawBookWord = words[i];
       // Reuses skippedChapterKw (set above, including by the hold-window
@@ -570,7 +660,24 @@ function parseSpokenReference(text, inBibleMode = false) {
 
     let scanIdx = idx;
     while (scanIdx < words.length) {
+      // Real incident (live test, 2026-09-07): "Ephesians six verse 12,
+      // for we wrestle not against flesh and blood..." — the connector
+      // skip below is OPTIONAL (a plain while, zero-or-more), so with no
+      // connector present at all this fell straight through to
+      // consumeNumber on whatever word came next — and "for" is a
+      // deliberate, necessary homophone of "four" (consumeNumber maps it
+      // to 4, for legitimate cases like "john for verse one"). Since "for"
+      // is also just an ordinary, extremely common English word — and the
+      // KJV itself constantly opens a verse's own continuing clause with
+      // "For..." — that turned an explicit single-verse citation into a
+      // bogus 2-verse range ("12" and "4") with zero real signal a second
+      // verse was ever intended. A genuine compound citation is always
+      // marked by an explicit connector ("and 17 to 19", ", verse 20");
+      // require one to have actually been consumed before even attempting
+      // to parse a continuation number, rather than trying regardless.
+      const beforeConnector = scanIdx;
       while (scanIdx < words.length && ['and',',','verse','verses'].includes(words[scanIdx])) scanIdx++;
+      if (scanIdx === beforeConnector) break; // no connector consumed — not a real continuation
       const nextStartRes = consumeNumber(words, scanIdx);
       if (!nextStartRes) break;
       scanIdx += nextStartRes.consumed;
@@ -617,6 +724,9 @@ function parseAllSpokenReferences(text, inBibleMode = false) {
     regex.lastIndex = 0;
     cleanText = cleanText.replace(regex, replace);
   }
+  if (cleanText.includes('chapter') && cleanText.includes(' of ')) {
+    cleanText = normalizeChapterOfBook(cleanText);
+  }
   const words = cleanText.split(/\s+/);
   const refs = [];
   let i = 0;
@@ -634,7 +744,26 @@ function parseAllSpokenReferences(text, inBibleMode = false) {
 
     let nextBookIdx = words.length;
     for (let j = i+consumed; j < words.length; j++) {
-      if (SINGLE_WORD_BOOKS.has(words[j]) && j > i+consumed) { nextBookIdx = j; break; }
+      if (SINGLE_WORD_BOOKS.has(words[j]) && j > i+consumed) {
+        // A recognized book name here is normally a genuine second
+        // reference starting, so we stop and hand off there — EXCEPT when
+        // it's immediately followed by a clean "N to M" numeric range,
+        // which is a much stronger signal that this "book name" is
+        // actually Deepgram mis-hearing "verse(s)" right where a
+        // verse-range marker belongs than that the preacher just named a
+        // second book with no "chapter"/"verse" keyword at all (a pattern
+        // this parser doesn't otherwise support anywhere). Confirmed live
+        // (2026-09-07): "Psalm chapter one Numbers one to three" for an
+        // actual "...chapter one and verse one to three" — without this,
+        // the whole tail ("Numbers one to three") was truncated away
+        // before parseSpokenReference ever saw it, silently degrading a
+        // full verse range down to a bare, verseless chapter citation.
+        const rangeStart = consumeNumber(words, j + 1);
+        const looksLikeGarbledVerseMarker = !!rangeStart &&
+          words[j + 1 + rangeStart.consumed] &&
+          ['to', 'through'].includes(words[j + 1 + rangeStart.consumed]);
+        if (!looksLikeGarbledVerseMarker) { nextBookIdx = j; break; }
+      }
       const jNum = getNumberedPrefix(words[j]);
       if (jNum && j+1 < words.length && BOOK_ALIASES[`${jNum} ${words[j+1]}`]) { nextBookIdx = j; break; }
     }
@@ -646,7 +775,21 @@ function parseAllSpokenReferences(text, inBibleMode = false) {
       const hadPrefix = consumed > 1;
       const variants = NUMBERED_BOOK_VARIANTS[bareWord];
       if (variants && !hadPrefix) {
-        for (const v of variants) refs.push({ ...ref, book: v });
+        // Genuinely ambiguous — "Timothy" alone (no "first"/"second") could
+        // mean either book, and this parser has no session context to
+        // prefer one. Tagged (not silently picking variants[0]) so the
+        // caller — which DOES have context via referenceContext — can
+        // disambiguate using what book was actually active, rather than
+        // every ambiguous mention blindly resolving to whichever book
+        // happens to be listed first. Real incident this replaces: "Timothy
+        // three one to five" pushed BOTH "1 Timothy 3:1-5" and "2 Timothy
+        // 3:1-5" as independent refs, and the caller (server.js's
+        // processForReferences) had no way to know they were mutually
+        // exclusive alternatives rather than two real separate citations —
+        // both got sent to the live viewer seconds apart, one guaranteed
+        // wrong. ambiguousGroup lets the caller recognize and collapse them.
+        const ambiguousGroup = `${bareWord}@${i}`;
+        for (const v of variants) refs.push({ ...ref, book: v, ambiguousGroup });
       } else {
         refs.push(ref);
       }
@@ -749,16 +892,29 @@ function detectBookMentions(text, inBibleMode = false) {
 // ── Reference Context ─────────────────────────────────────────────────────
 // Tracks the last cited book/chapter so bare verse references like
 // "verse 17" or "and verse 18 says" can be resolved in context.
-// Context expires after 20 seconds of no explicit citation. Used to be 180s
+// Context expires after 45 seconds of no explicit citation. Used to be 180s
 // ("long enough to bridge a monologue between a bare book mention and the
-// eventual chapter/verse call") — but a bare "verse N" resolved against a
-// book cited up to 3 minutes ago is exactly how a stale, unrelated citation
-// (e.g. a leftover "Acts" context resolving a much-later, unrelated "verse
-// eight") reaches the direct-send path, which — see resolvePartialReference
-// callers in server.js — is now gated (method 'direct-partial'), but keeping
-// the window tight is still the first line of defense: most real follow-up
-// citations land within a few seconds of the book mention, not minutes.
-const CONTEXT_EXPIRE_MS = 20000;
+// eventual chapter/verse call"), tightened to 20s on the reasoning that
+// "most real follow-up citations land within a few seconds of the book
+// mention, not minutes" — but real live testing (2026-09-07) directly
+// contradicted that: a preacher explaining "verse 12" for 20 seconds
+// before saying "verse 15" landed EXACTLY on the boundary, and real-world
+// processing delay pushed it just past expiry — the bare "verse 15"
+// trigger silently never fired at all. Per the owner's own spec:
+// "speech 'verse 15' - this should go to verse 15 of the already sent
+// scripture... that's a trigger along with 'next verse'" — i.e. this
+// needs to reliably survive a normal expository pause, not just a few
+// seconds. Raised to 45s (comfortable margin over the exact incident,
+// still well short of the original 180s that motivated tightening this in
+// the first place). The downstream protection this comment originally
+// worried about is unchanged and still real: resolvePartialReference's
+// result only ever reaches broadcastDetection as method 'direct-partial'
+// (server.js), calibrated at 0.75 — below VIEWER_MIN_SCORE on its own,
+// still needs D()/A() corroboration to auto-send — so widening this
+// window doesn't reopen the stale-citation risk the 20s value was chosen
+// to guard against, it only changes how long a bare verse NUMBER is even
+// attempted against the last real book/chapter.
+const CONTEXT_EXPIRE_MS = 45000;
 
 class ReferenceContext {
   constructor() {
@@ -803,7 +959,7 @@ const referenceContext = new ReferenceContext();
 // "and verse eighteen" and resolves them against the current context.
 // Returns null if no context or no bare verse pattern found.
 
-function resolvePartialReference(text) {
+function resolvePartialReference(text, { allowBareNumber = true } = {}) {
   if (!referenceContext.isValid) return null;
 
   // Tokenize through the same cleaner the full parser uses, then resolve
@@ -847,6 +1003,51 @@ function resolvePartialReference(text) {
       }
     }
     return { book, chapter, verse: verseStart, partial: true };
+  }
+
+  // Pattern 3 (LEAST specific, tried last): a genuinely BARE number, no
+  // "verse"/"chapter" keyword at all. Owner's explicit spec: "if it hears a
+  // number or 'verse n' it goes to the verse of that book and chapter
+  // already displayed" — a preacher calling out just "...fifteen..." as its
+  // own standalone utterance (Deepgram naturally endpoints a short pause
+  // like that into its own final segment) is meant to work exactly like an
+  // explicit "verse 15" would.
+  //
+  // Deliberately narrow so it can't fire on an ordinary sentence that
+  // happens to CONTAIN a number ("he waited twenty years then said..."):
+  // the number must consume the segment all the way to its end, and must
+  // start within the first 3 words. A number buried mid-sentence, or one
+  // followed by any other real word, never matches this pattern at all —
+  // only a segment that IS (up to at most 2 leading filler words) just the
+  // number itself. This still only ever produces method 'direct-partial'
+  // (0.75, below VIEWER_MIN_SCORE alone) downstream, so a false match here
+  // still needs real corroboration before it could ever auto-send.
+  //
+  // allowBareNumber=false disables this pattern specifically for INTERIM
+  // callers. Real incident (owner testing, 2026-09-07): a sermon with
+  // enumerated points ("One attribute we saw in Isaac..." / "What is
+  // meditation number two? It is...") produces exactly the shape this
+  // pattern is designed to catch — a lone number — for the split second
+  // Deepgram's interim transcript is JUST "One" before the rest of the
+  // sentence streams in and the "consumes to the very end" check starts
+  // failing again. The FINAL transcript never has this problem (a settled
+  // final segment that's genuinely just "...fifteen..." IS the intended
+  // case; "One attribute we saw..." as a final segment never matches at
+  // all, since real words follow in the same segment) — only the fleeting
+  // interim snapshot does. Caught here safely (direct-partial's 0.75 never
+  // cleared VIEWER_MIN_SCORE alone), but a false match should not depend on
+  // the score gate alone to stay harmless — Pattern 2 (explicit "verse N")
+  // stays enabled on interim either way, since the word "verse" itself is
+  // strong enough signal that a transient interim catch of it isn't the
+  // same risk.
+  if (allowBareNumber && referenceContext.chapter) {
+    for (let i = 0; i < words.length && i <= 2; i++) {
+      const nRes = consumeNumber(words, i);
+      if (!nRes || i + nRes.consumed !== words.length) continue;
+      const verseStart = nRes.value;
+      if (verseStart < 1 || verseStart > 176) continue;
+      return { book: referenceContext.book, chapter: referenceContext.chapter, verse: verseStart, partial: true };
+    }
   }
 
   return null;

@@ -19,7 +19,7 @@ const path = require('path');
 const fs   = require('fs');
 const semanticEngine = require('./semantic_engine');
 
-const DATA_DIR = workerData?.dataDir || path.join(__dirname, '..', 'databases', 'logos');
+const DATA_DIR = workerData?.dataDir || path.join(__dirname, '..', 'databases', 'bibles');
 const MAP_PATH = path.join(DATA_DIR, 'map.json');
 
 // ── Cached regex (avoid re-compilation in hot paths) ─────────────────────
@@ -103,6 +103,16 @@ let anchorTerminals  = null;   // Map<node, Array<{idx, pos}>> at depth ≥ ANCH
 let verseHealedWords = null;   // Map<idx, string[]> — pre-healed word list per verse (Layer 2)
 let activeStates     = [];     // Array<{ node, depth }> — persists across streamText calls
 let recentHitVerses  = new Map();   // Map<verseIdx, lastFireTime> — local dedupe
+
+// Rolling history of recently-streamed (healed) words, oldest first — feeds
+// extendBackward() below. An anchor only ever fires on the word that
+// completes its own 4-gram, so without this, everything the preacher said
+// BEFORE that point is invisible to the alignment tracker, which only ever
+// extends forward from cand.cursor. Bounded well past ANCHOR_N + a
+// reasonable backward-extension span; cheap to maintain (push + trim once
+// per streamed word).
+let recentWordHistory   = [];
+const WORD_HISTORY_MAX  = 24;
 
 // Layer 2 — alignment candidates track verses whose anchor fired and whose
 // subsequent words continue to match the transcript in sequence. Cheap to
@@ -617,6 +627,99 @@ function buildAnchorTrie() {
   console.log(`[Anchor] Trie built in ${Date.now() - t0}ms — ${kept} distinctive 4-grams kept, ${skipped} common skipped.`);
 }
 
+// An anchor only ever fires on the word that completes its own 4-gram, and
+// the alignment candidate it opens only ever extends FORWARD from there
+// (cand.cursor advances, never retreats) — so anything the preacher said
+// BEFORE the anchor point was structurally invisible to this whole layer,
+// no matter how well it actually matched. Real incident: "come and let us
+// reason together" (Isaiah 1:18's real text: "Come NOW, and let us reason
+// together") — the dropped "now" sits exactly where a 4-gram anchor would
+// need to start on "come", so the anchor only ever fires later, on "and
+// let us reason" — and the genuinely-matching "come" spoken before it was
+// never credited. Owner's own framing: "it should fill gaps or fuse things
+// when 4/5 are correct as long as they match a scripture verse sequence."
+//
+// Mirrors the forward tolerance in streamWord's per-tick loop (skip one
+// verse word on mismatch, burn a miss, stop when misses run out) but walks
+// BACKWARD from the anchor's own start position through recentWordHistory
+// — the same words the forward loop can already see, just the ones that
+// arrived before this exact verse's candidate was born. Bounded by
+// WORD_HISTORY_MAX; returns zero contribution (not an error) once the
+// history or the verse's own text runs out.
+// Below this per-word IDF, a match doesn't count toward `matched`/
+// `matchedIdf` at all — it still lets the backward walk continue (a real
+// grammatical-word match isn't a "miss," no reason to burn budget on it),
+// it just can't be the THING that promotes a candidate to confirmed.
+// Real regression this closes: the harness (all 5 real-sermon fixtures)
+// showed backward extension alone traded +22 wrong auto-sends for only +1
+// true positive before this floor existed — common words ("the," "and,"
+// "of," "in," "to," "is," "it," "a," "he," all well under 2 here) were
+// padding the RAW WORD-COUNT floor (ALIGN_CONFIRM_AT) against completely
+// unrelated verses purely by coincidence, the exact false-positive shape
+// this codebase has fought all night ("our father in the" / "praise the
+// Lord"). Calibrated directly against the real corpus's own idfMap: "the"
+// 0.25, "and" 0.26, "of" 0.52, "in" 1.16, "to" 1.13, "is" 1.70, "it" 1.87,
+// "a" 1.57, "he" 1.40 — all excluded. "come" 2.83, "now" 3.15, "let" 3.22,
+// "us" 3.34 — the actual words needed for the real "come and let us reason
+// together" incident this whole mechanism exists for — all included.
+const MEANINGFUL_BACKWARD_WORD_IDF = 2.0;
+// Deliberately small — the real incident this exists for ("come and let us
+// reason together," one dropped word) only ever needs 1-2 words of
+// backward credit. Harness comparison (all 5 real fixtures) showed even
+// the IDF-floored version still traded meaningfully more wrong auto-sends
+// than the one true positive it gained was worth once the walk was allowed
+// to range further back — capping the total distance keeps this narrowly
+// scoped to "the anchor started one word late," not a general-purpose
+// long-range fuzzy matcher.
+const BACKWARD_EXTENSION_MAX_WORDS = 2;
+
+function extendBackward(verseIdx, versePos) {
+  const words    = verseHealedWords.get(verseIdx) || [];
+  const rawWords = verseNormWords.get(verseIdx);
+  const contributedWords = new Set();
+  let matched = 0;
+  let matchedIdf = 0;
+  if (versePos <= 0) return { matched, matchedIdf, contributedWords };
+
+  let vIdx   = versePos - 1;                          // verse word just before the anchor
+  let hIdx   = recentWordHistory.length - 1 - ANCHOR_N; // transcript word just before the anchor's own ANCHOR_N words
+  let misses = ALIGN_MISS_BUDGET;
+
+  while (vIdx >= 0 && hIdx >= 0 && matched < BACKWARD_EXTENSION_MAX_WORDS) {
+    if (words[vIdx] === recentWordHistory[hIdx]) {
+      const w = rawWords[vIdx];
+      const wIdf = idfMap.get(w) || 0;
+      if (wIdf >= MEANINGFUL_BACKWARD_WORD_IDF && !contributedWords.has(w)) {
+        matchedIdf += wIdf;
+        contributedWords.add(w);
+        matched++;
+      }
+      vIdx--; hIdx--;
+    } else if (misses > 0 && vIdx - 1 >= 0 && words[vIdx - 1] === recentWordHistory[hIdx]) {
+      // The verse has one extra word here the transcript is missing (an
+      // STT-dropped word — the exact "come NOW, and" shape) — skip past it
+      // and keep walking backward.
+      const w = rawWords[vIdx - 1];
+      const wIdf = idfMap.get(w) || 0;
+      if (wIdf >= MEANINGFUL_BACKWARD_WORD_IDF && !contributedWords.has(w)) {
+        matchedIdf += wIdf;
+        contributedWords.add(w);
+        matched++;
+      }
+      vIdx -= 2; hIdx--;
+      misses--;
+    } else if (misses > 0) {
+      // The preacher said a word here that doesn't align at all — burn a
+      // miss on the transcript side, don't move the verse cursor.
+      misses--;
+      hIdx--;
+    } else {
+      break;
+    }
+  }
+  return { matched, matchedIdf, contributedWords };
+}
+
 // Hoisted out of streamWord so V8 doesn't re-allocate a fresh closure on
 // every spoken word — streamWord runs at audio-tick rate (~3-5×/s during
 // speech) so the GC churn was non-trivial. `next` and `anchors` are passed
@@ -641,11 +744,40 @@ function _advanceAnchor(node, depth, word, now, next, anchors) {
         // through to server.js's df=1 fast-share gate for the same reason
         // ALIGN_CONFIRM_AT got an IDF floor above.
         const idf = idfWeightedSpan(verseNormWords.get(idx), pos, ANCHOR_N);
-        anchors.push({ verseIdx: idx, depth: newDepth, df: terminal.df, idf });
+
+        // Backward extension (see extendBackward's own comment for the
+        // real "come and let us reason together" incident) — credit
+        // whatever the preacher said immediately before this anchor that
+        // also matches the verse's own preceding words, tolerating the
+        // same kind of gap the forward loop already tolerates.
+        // ALWAYS COMPUTED now (previously disabled by default entirely —
+        // see git history / BACKWARD_EXTENSION_MAX_WORDS's comment for the
+        // full story: unconditionally trusting a backward-extended
+        // confirmation the same as a purely-forward one traded +14 to +22
+        // wrong auto-sends for only +1 true positive against the real
+        // 191-item ground truth). Re-enabled with the owner's own suggested
+        // fix from that writeup: don't trust it ALONE — `viaBackwardExtension`
+        // below tags exactly which confirmations only happened BECAUSE of
+        // this seed (would never have reached ALIGN_CONFIRM_AT/
+        // ANCHOR_CONFIRM_IDF from forward words alone); server.js only lets
+        // those auto-send when a second, independent method has also,
+        // separately hit the exact same verse (EvidenceLedger corroboration)
+        // — otherwise they're demoted to the same Candidates-only "moderate"
+        // tier bug #30/#31 already built for exactly this shape of evidence.
+        // A confirmation that WOULD have happened from forward words alone
+        // is untouched either way — `viaBackwardExtension` is only ever true
+        // for the genuinely backward-dependent case, so nothing already-safe
+        // gets slower or stricter; it can only ever reach confirmation a
+        // word or two SOONER now, never later.
+        const back = extendBackward(idx, pos);
+        const totalMatched = ANCHOR_N + back.matched;
+        const totalIdf     = idf + back.matchedIdf;
+
+        anchors.push({ verseIdx: idx, depth: newDepth, df: terminal.df, idf: totalIdf });
 
         // Open an alignment candidate so subsequent words can promote this
-        // anchor to confirmed. Starts already at ANCHOR_N words matched —
-        // matchedIdf seeded from the same idf just computed above.
+        // anchor to confirmed. Starts already at ANCHOR_N (+ any backward-
+        // extended) words matched — matchedIdf seeded the same way.
         // contributedWords tracks which distinct verse-words have already
         // paid into matchedIdf — without it, a verse built from a couple of
         // repeated common words ("praise... the LORD... Praise ye the
@@ -655,12 +787,19 @@ function _advanceAnchor(node, depth, word, now, next, anchors) {
         // (filler, not a citation) cleared the confirm bar against Psalms
         // 150:6 this way even after the bar itself was raised twice.
         const seedWords = (verseNormWords.get(idx) || []).slice(pos, pos + ANCHOR_N);
+        const seedSet = new Set(seedWords);
+        for (const w of back.contributedWords) seedSet.add(w);
         alignmentCandidates.push({
           idx,
           cursor:     pos + ANCHOR_N,
-          matched:    ANCHOR_N,
-          matchedIdf: idf,
-          contributedWords: new Set(seedWords),
+          matched:    totalMatched,
+          matchedIdf: totalIdf,
+          // Fixed seed contribution from this anchor's own backward
+          // extension — never changes after candidate creation, used at
+          // confirm time to test "would this have confirmed without it."
+          backwardSeedMatched: back.matched,
+          backwardSeedIdf:     back.matchedIdf,
+          contributedWords: seedSet,
           misses:     ALIGN_MISS_BUDGET,
           confirmed:  false,
           firedAt:    now,
@@ -682,6 +821,9 @@ function streamWord(raw) {
     String(raw || '').toLowerCase().replace(/[^a-z0-9]/g, '')
   );
   if (!word) return { anchors: [], confirmed: [] };
+
+  recentWordHistory.push(word);
+  if (recentWordHistory.length > WORD_HISTORY_MAX) recentWordHistory.shift();
 
   const now       = Date.now();
   const anchors   = [];   // new 4-gram anchor fires from this word
@@ -743,7 +885,16 @@ function streamWord(raw) {
     if (matchedThisTick && !cand.confirmed
         && cand.matched >= ALIGN_CONFIRM_AT && cand.matchedIdf >= ANCHOR_CONFIRM_IDF) {
       cand.confirmed = true;
-      confirmed.push({ verseIdx: cand.idx, matched: cand.matched, matchedIdf: cand.matchedIdf });
+      // Would this candidate have confirmed WITHOUT its backward-extension
+      // seed? Subtract the fixed seed contribution and re-check the exact
+      // same bar. See the comment above `back`'s own computation for why
+      // this distinction matters — only a confirmation that genuinely
+      // depends on backward extension needs the extra corroboration gate
+      // server.js applies downstream.
+      const viaBackwardExtension = cand.backwardSeedMatched > 0
+        && !(cand.matched - cand.backwardSeedMatched >= ALIGN_CONFIRM_AT
+             && cand.matchedIdf - cand.backwardSeedIdf >= ANCHOR_CONFIRM_IDF);
+      confirmed.push({ verseIdx: cand.idx, matched: cand.matched, matchedIdf: cand.matchedIdf, viaBackwardExtension });
     }
     kept.push(cand);
   }
@@ -768,6 +919,7 @@ function streamReset() {
   activeStates         = [];
   alignmentCandidates  = [];
   recentHitVerses.clear();
+  recentWordHistory    = []; // a new session must not credit backward extension from a previous, unrelated sermon's tail words
   // Without this, a worker reused across services (no explicit
   // buildTopicLibrary call yet) keeps the previous sermon's topic bias for up
   // to 60s into the new session, skewing fingerprint scoring toward the wrong
@@ -1465,7 +1617,12 @@ parentPort.on('message', async (msg) => {
           for (const c of confirmed) {
             const prev = confirmedByVerse.get(c.verseIdx);
             if (!prev || c.matched > prev.matched) {
-              confirmedByVerse.set(c.verseIdx, { matched: c.matched, matchedIdf: c.matchedIdf });
+              // viaBackwardExtension: if a LATER, higher-matched confirmation
+              // for the same verse within this same call didn't need
+              // backward extension, prefer that — it's strictly stronger
+              // evidence (see streamWord's own comment on what this flag
+              // means) than an earlier one that did.
+              confirmedByVerse.set(c.verseIdx, { matched: c.matched, matchedIdf: c.matchedIdf, viaBackwardExtension: c.viaBackwardExtension });
             }
           }
         }
@@ -1485,7 +1642,7 @@ parentPort.on('message', async (msg) => {
 
         const results = [];
         const seen = new Set();
-        for (const [idx, { matched, matchedIdf }] of confirmedByVerse) {
+        for (const [idx, { matched, matchedIdf, viaBackwardExtension }] of confirmedByVerse) {
           const similarity = Math.min(0.97, 0.90 + (matched - ALIGN_CONFIRM_AT) * 0.01);
           results.push({
             ...formatVerse(verseMetadata[idx], similarity, 'stream'),
@@ -1494,6 +1651,7 @@ parentPort.on('message', async (msg) => {
             matchedIdf,
             df: 0,
             confirmed: true,
+            viaBackwardExtension: !!viaBackwardExtension,
             inTopicLibrary: !!(topicLibrary && topicLibrary.has(idx)),
           });
           seen.add(idx);
@@ -1522,6 +1680,31 @@ parentPort.on('message', async (msg) => {
       case 'semanticSearch': {
         const results = await semanticSearch(msg.text, msg.limit || 5);
         parentPort.postMessage({ type: 'semanticResults', id: msg.id, results });
+        break;
+      }
+      // Sent by server.js right after /api/semantic-model/install finishes —
+      // that route runs in the MAIN process, which never loads
+      // semantic_engine.js at all (only this worker does), so it can't just
+      // call ensureLoaded() itself. retryLoaded() also clears out a cached
+      // REJECTED load promise from server boot (before anything was
+      // installed), which a plain ensureLoaded() would otherwise keep
+      // replaying forever.
+      //
+      // Posts exactly ONE id-correlated message either way — 'reloadSemanticAck'
+      // is what settles server.js's workerCall(). It used to ALSO post an
+      // 'error' message with the same id on failure; server.js's generic
+      // handler resolves (never rejects) on the first message matching an
+      // id, so that 'error' message — arriving first and carrying no `ok`
+      // field — settled the call, and the real ack landed on nothing,
+      // making the install route log success even when the reload failed.
+      case 'reloadSemantic': {
+        try {
+          await semanticEngine.retryLoaded();
+          parentPort.postMessage({ type: 'semanticReady' });
+          parentPort.postMessage({ type: 'reloadSemanticAck', id: msg.id, ok: semanticEngine.isReady() });
+        } catch (err) {
+          parentPort.postMessage({ type: 'reloadSemanticAck', id: msg.id, ok: false, error: err.message });
+        }
         break;
       }
       case 'ping':
