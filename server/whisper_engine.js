@@ -42,6 +42,34 @@ const MIN_SPEECH_MS       = 300;    // ignore blips shorter than this
 const MAX_UTTERANCE_MS    = 18000;  // hard cap → force a final, bound latency
 const VAD_RMS_THRESH      = 0.012;  // normalized RMS above this counts as speech
 const CARRY_TAIL_MS       = 250;    // audio kept after a forced cut for continuity
+// Continuous singing (unlike speech) rarely produces the SILENCE_MS of quiet
+// that would otherwise end an utterance, so the open window can grow toward
+// the full MAX_UTTERANCE_MS before a natural cut ever happens. _emitPartial
+// used to re-transcribe that WHOLE growing window every PARTIAL_INTERVAL_MS
+// — cheap at 1s in, but by 15s in each call itself takes long enough that
+// results start arriving noticeably behind real time and keep falling
+// further behind for the rest of the utterance (real live symptom: lyrics
+// never sent because the recognized text arrived too late to matter). Long
+// unbroken windows also measurably raise whisper.cpp's own repetition-loop
+// risk on sustained tonal/musical audio (observed live: dozens of
+// hallucinated "oh"s in one window). Bounding what a PARTIAL transcribes to
+// this many recent ms — not the whole accumulated buffer — keeps every
+// partial's cost roughly constant regardless of how long the utterance has
+// been running. _finalize() still uses the COMPLETE buffer, unchanged: it
+// only runs at a real utterance boundary (natural silence or the
+// MAX_UTTERANCE_MS cap), rare enough to afford transcribing the whole thing
+// for one accurate final pass.
+// Owner, live: "I want whisper to be better with its transcription speed —
+// the transcript buffers before it's locked." Even bounded, re-transcribing
+// a full 8s window every single PARTIAL_INTERVAL_MS (850ms) is real,
+// felt compute cost on every cycle, not just the old unbounded-growth case —
+// that's the actual source of the perceived buffering/delay before a
+// partial settles. Cut to 4s: half the per-call cost, still comfortably
+// enough audio for whisper.cpp to produce a coherent multi-word result
+// (this is a PREVIEW that gets replaced every cycle anyway — _finalize()
+// below is unaffected and still transcribes the true complete buffer for
+// the one accurate final pass per utterance).
+const PARTIAL_WINDOW_MS   = 4000;
 
 // ── PCM s16le (mono) → Float32 [-1, 1] ──────────────────────────────────────
 function pcm16ToFloat32(buf) {
@@ -66,6 +94,28 @@ function concatFloat32(chunks, total) {
   let off = 0;
   for (const c of chunks) { out.set(c, off); off += c.length; }
   return out;
+}
+
+// smart-whisper's prebuilt native binding loads whisper.cpp's Metal shader
+// SOURCE file from disk at GPU-init time (it isn't embedded in the compiled
+// .node binary in the version this app bundles) — a plain `npm install`
+// without a full `node-gyp rebuild` of the whisper.cpp submodule can leave
+// that file missing even though the binding itself loads fine. When it's
+// missing, whisper.cpp doesn't throw — it logs `ggml_metal_init: error:
+// ... couldn't be opened` and `failed to allocate context`, then silently
+// falls back to CPU on every single transcribe call, since nothing caches
+// that the attempt already failed. Harmless to output, but it re-attempts
+// (and re-fails) GPU init on every call, spamming stderr and paying a
+// wasted init cost each time. Checked once at start() and used to skip the
+// doomed GPU attempt outright — if a future proper rebuild restores the
+// file, this simply starts returning true again with no code change needed.
+function metalShaderAvailable() {
+  try {
+    const smartWhisperDir = path.dirname(require.resolve('smart-whisper/package.json'));
+    return fs.existsSync(path.join(smartWhisperDir, 'whisper.cpp', 'ggml', 'src', 'ggml-metal.metal'));
+  } catch {
+    return false;
+  }
 }
 
 class WhisperEngine {
@@ -114,7 +164,17 @@ class WhisperEngine {
       e.code = 'WHISPER_BINDING_MISSING';
       throw e;
     }
-    this._whisper = new this._Whisper(this.modelPath, { gpu: this.gpu });
+    // On macOS, only request Metal if its shader source is actually present —
+    // see metalShaderAvailable()'s comment. Other platforms' GPU backends
+    // (CUDA/Vulkan) don't depend on this file, so leave them as the caller
+    // requested.
+    let useGpu = this.gpu;
+    if (useGpu && os.platform() === 'darwin' && !metalShaderAvailable()) {
+      useGpu = false;
+      console.warn('[Whisper] Metal shader source missing from smart-whisper install — running on CPU. ' +
+        'Reinstall smart-whisper with a full `node-gyp rebuild` to restore GPU acceleration.');
+    }
+    this._whisper = new this._Whisper(this.modelPath, { gpu: useGpu });
     this._resetUtterance();
     this._running = true;
   }
@@ -188,7 +248,12 @@ class WhisperEngine {
   async _emitPartial() {
     if (this._busy || !this._running) return;
     this._busy = true;
-    const window = concatFloat32(this._chunks, this._chunkSamples);
+    // Bounded recent tail, not the whole growing utterance — see
+    // PARTIAL_WINDOW_MS's own comment. _finalize() below still transcribes
+    // the complete buffer; only the frequent partial re-transcription is capped.
+    const window = this._chunkSamples > (PARTIAL_WINDOW_MS / 1000) * SAMPLE_RATE
+      ? this._tail(PARTIAL_WINDOW_MS)
+      : concatFloat32(this._chunks, this._chunkSamples);
     try {
       const text = await this._transcribeWindow(window);
       if (text && text !== this._lastPartialText && this._running) {
