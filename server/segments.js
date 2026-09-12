@@ -31,10 +31,11 @@ function loadSegments() {
     const data = JSON.parse(fs.readFileSync(SEGMENTS_FILE, 'utf8'));
     segments = Array.isArray(data) ? data : [];
   } catch { segments = []; }
-  // Backfill segments saved before themeId/slideStyles existed.
+  // Backfill segments saved before themeId/slideStyles/scenes existed.
   segments.forEach(s => {
     if (s.themeId === undefined) s.themeId = null;
     if (s.slideStyles === undefined) s.slideStyles = {};
+    if (s.scenes === undefined) s.scenes = [];
   });
 }
 
@@ -78,6 +79,16 @@ function addSegment(name, opts = {}) {
     // has the one slide (index 0).
     themeId: opts.themeId ?? null,
     slideStyles: opts.slideStyles ?? {},
+    // A storyboard alternative to themeId/slideStyles — a sequence of
+    // {id, name, durationSec, layers} scenes, each a standalone layer set
+    // (its own background/image-cycle/text layers, edited the same way a
+    // theme's are — see app.js's scene-mode Theme Studio integration)
+    // played in order across the segment's live countdown, each with its
+    // own explicit duration rather than one repeating cycle. Empty by
+    // default: a plain segment with no scenes falls back to themeId/
+    // slideStyles exactly as before — scenes are opt-in, not a
+    // replacement for the simple single-theme case.
+    scenes: opts.scenes ?? [],
   };
   segments.push(segment);
   saveSegments();
@@ -104,6 +115,7 @@ function updateSegment(id, record) {
   if (record.params !== undefined) triggers.updateTrigger(s.triggerId, { params: record.params });
   if (record.themeId !== undefined) s.themeId = record.themeId;
   if (record.slideStyles !== undefined) s.slideStyles = record.slideStyles;
+  if (record.scenes !== undefined) s.scenes = record.scenes;
   saveSegments();
   return withTrigger(s);
 }

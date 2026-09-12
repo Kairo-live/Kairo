@@ -45,6 +45,26 @@
             to   { transform: translateX(-100%); }
         }
 
+        /* Image Cycle's "Ken Burns" motion option (layer.motion — see
+           startCycleMotion/renderImageCycleProps) — a slow, continuous
+           zoom+pan on the image itself, alternating back and forth via
+           the animation's own 'alternate' direction rather than a hard
+           reset on every image swap. */
+        @keyframes kairo-kenburns {
+            from { transform: scale(1) translate(0, 0); }
+            to   { transform: scale(1.12) translate(-2%, -2%); }
+        }
+
+        /* A text layer's one-time entrance (layer.entrance) — fade + rise
+           when a slide/scene first shows, as opposed to Ken Burns above
+           (continuous). Same keyframe app.js's canvas and service.js's
+           preview also use, from styles.css — duplicated here since this
+           file keeps its own separate stylesheet. */
+        @keyframes kairo-text-in {
+            from { opacity: 0; transform: translateY(24px); }
+            to   { opacity: 1; transform: translateY(0); }
+        }
+
         /* Independently-controlled layers, PP-style: media (image/video) sits
            behind, the slide (theme background/text) on top of it, and the
            timer layer on top of that. Each clears/updates without touching
@@ -132,20 +152,20 @@
         #timer-badge.hidden, #clock-badge.hidden { display: none; }
         /* Overtime — past the segment's end time but still running until
            explicitly stopped, so it reads as "running long," not broken. */
-        #timer-badge.is-overtime { color: #ff5c5c; text-shadow: 0 1px 6px rgba(255,0,0,0.35); }
-        #timer-badge.is-overtime .badge-label { color: rgba(255, 92, 92, 0.6); }
+        #timer-badge.is-overtime { color: #e8404a; text-shadow: 0 1px 6px rgba(232,64,74,0.35); }
+        #timer-badge.is-overtime .badge-label { color: rgba(232, 64, 74, 0.6); }
         /* Warning — inside the last minute, still counting down. A step
            between "normal" and "overtime" so the operator sees it coming
            rather than the color jumping straight from plain to red at 0. */
-        #timer-badge.is-warning { color: #ffcf4d; text-shadow: 0 1px 6px rgba(255,196,0,0.3); }
-        #timer-badge.is-warning .badge-label { color: rgba(255, 207, 77, 0.6); }
+        #timer-badge.is-warning { color: #e8a64a; text-shadow: 0 1px 6px rgba(232,166,74,0.3); }
+        #timer-badge.is-warning .badge-label { color: rgba(232, 166, 74, 0.6); }
         /* The themed on-stage timer layer keeps the THEME's own colour — a
            warning/overtime state is signalled with a glow + gentle pulse, not
            by overriding the operator's chosen colour. (The fixed corner badge
            above, which is unthemed, still recolours since it has no theme to
            respect.) */
-        [data-binding="timer"].is-warning  { text-shadow: 0 0 14px rgba(255,196,0,0.55); }
-        [data-binding="timer"].is-overtime { text-shadow: 0 0 16px rgba(255,60,60,0.6); animation: timer-otp 1s ease-in-out infinite; }
+        [data-binding="timer"].is-warning  { text-shadow: 0 0 14px rgba(232,166,74,0.55); }
+        [data-binding="timer"].is-overtime { text-shadow: 0 0 16px rgba(232,64,74,0.6); animation: timer-otp 1s ease-in-out infinite; }
         @keyframes timer-otp { 50% { opacity: 0.55; } }
         #timer-badge .badge-label, #clock-badge .badge-label {
             display: block;
@@ -172,6 +192,7 @@
     <script src="design_space.js"></script>
     <script src="word_split.js"></script>
     <script src="color_utils.js"></script>
+    <script src="layer_geometry.js"></script>
     <script>
     'use strict';
 
@@ -216,6 +237,14 @@
     let currentTimerText = ''; // last value sent for a 'timer'-bound layer — the per-second tick (handleActionBadge) updates the DOM directly and doesn't touch this
     let activeLook       = null;
     let pendingFade      = false;
+    // Bumped by every renderStage/showVerse call that will paint (whether
+    // immediately or after a fade-out setTimeout). renderStage/showVerse's
+    // deferred callbacks capture the value at schedule time and bail if a
+    // NEWER call has since bumped it — without this, two calls close
+    // together (fast successive slide advances, e.g. the lyric follower)
+    // could let the FIRST call's now-stale paint land after the second
+    // call's own fade-out already started, flashing old content back in.
+    let renderGen = 0;
 
     const stage      = document.getElementById('stage');
     const slideLayer = document.getElementById('slide-layer');
@@ -228,6 +257,20 @@
     let mediaVolume = 1;
     let mediaSinkId = null;
     function currentMediaVideo() { return mediaLayer.querySelector('video'); }
+
+    // ── Output-level slide transition (Fade/Slide/Cut + speed) ─────────────
+    // Deliberately a DISPLAY setting now, not a per-theme one — every theme
+    // used to carry its own look.animation/animationSpeed, which meant
+    // "how slides transition" silently changed depending on which theme
+    // happened to be live, with no single place to just set it for the
+    // output once. No separate fetch needed to learn the initial value —
+    // the server sends it as a WS snapshot the instant this window
+    // connects (same 'output-transition' message type an operator's live
+    // change broadcasts — see server.js's ws connection handler and its
+    // /api/settings POST), and every later change arrives the same way,
+    // live, no reload needed.
+    let outputAnimation = 'fade';
+    let outputAnimationSpeed = 1;
 
     // ── Font loader ────────────────────────────────────────────────────────
     const loadedFonts = new Set(['Manrope', 'system-ui']);
@@ -266,6 +309,16 @@
         if (pos.h > 0) div.style.height = (pos.h / DESIGN_H * 100) + '%';
     }
 
+    // isVideoLayerSrc, applyShapeGeometry, applyLayerOrder — see
+    // src/layer_geometry.js for the shared implementation (loaded via a
+    // <script> tag above, resolved here via normal global scope since this
+    // file's own script has no wrapping function). Was a byte-identical
+    // copy-paste across this file, app.js, and service.js. This file has no
+    // px-based pxScale like the editor canvas does — free-canvas geometry
+    // here is already expressed in vh off DESIGN_H — so applyShapeGeometry
+    // is called below with a vh-converting closure instead of a scale number.
+    function shapeRadiusVh(r) { return (r / DESIGN_H * 100) + 'vh'; }
+
     // ── Build layer DOM from look ──────────────────────────────────────────
     // `styleByLayerId` is a per-slide, per-layer-id override map (Kairo's
     // "Full Edit" feature) — a specific playlist item's specific slide can
@@ -280,7 +333,22 @@
         // layers) ride along inside styleByLayerId rather than a parallel
         // field — appended last so they paint on top, same as every other
         // "new layer" convention.
-        const layers = [...(look.layers || []), ...((styleByLayerId || {}).__customLayers || [])];
+        let layers = [...(look.layers || []), ...((styleByLayerId || {}).__customLayers || [])];
+        if ((styleByLayerId || {}).__layerOrder) layers = applyLayerOrder(layers, styleByLayerId.__layerOrder);
+        // Media Bin "set as background" (see app.js's applyBgMediaOverride /
+        // service.js's paintLookLayers) — same field, same synthetic full-
+        // canvas layer shape, so the real output agrees with the editor
+        // canvas and the operator preview instead of showing the theme's
+        // own flat fill underneath.
+        if ((styleByLayerId || {}).bgMedia?.src) {
+            const bgMedia = styleByLayerId.bgMedia;
+            layers = [
+                { id: '__bg-media', type: 'image', name: 'Background (Media Bin)', visible: true,
+                  src: bgMedia.src, fit: 'cover', opacity: 100, radius: 0,
+                  pos: { x: 0, y: 0, w: DESIGN_W, h: DESIGN_H } },
+                ...layers.filter(l => l.type !== 'background'),
+            ];
+        }
         // Only themes that actually pair a reference/translation caption with
         // a verse layer get the "no caption without a verse line" guard below
         // — a theme deliberately built with ONLY a reference/citation layer
@@ -292,19 +360,134 @@
             if (!layer.visible) return;
 
             // Image layer — always free-positioned, drawn in layer order.
+            // Video is added the same way (Theme Studio's file picker/native
+            // dialog doesn't hard-block it, and drag-and-drop never
+            // respected the accept="image/*" hint) but a CSS background-image
+            // can't play a video at all — WebKit just renders whatever still
+            // frame it decides to, which is exactly "frozen background,
+            // it's a video" with no error anywhere to explain why. Render a
+            // real <video> for those instead of a background-image div.
             if (layer.type === 'image') {
                 if (!layer.src) return;
+                const p = layer.pos || { x: 0, y: 0, w: DESIGN_W, h: DESIGN_H };
+                const fit = layer.fit === 'fill' ? 'fill' : (layer.fit || 'contain');
+                if (isVideoLayerSrc(layer.src)) {
+                    const v = document.createElement('video');
+                    v.className = 'display-layer';
+                    v.autoplay = true; v.loop = true; v.muted = true; v.playsInline = true;
+                    v.style.cssText = 'position:absolute;z-index:1;';
+                    // object-fit accepts the literal 'fill' keyword natively —
+                    // unlike background-size (used for the <img> branch
+                    // above), no translation to 100%/100% needed.
+                    v.style.objectFit = fit;
+                    v.style.opacity = (layer.opacity ?? 100) / 100;
+                    if (layer.radius) v.style.borderRadius = (layer.radius / DESIGN_H * 100) + 'vh';
+                    applyPos(v, p);
+                    v.style.height = (p.h / DESIGN_H * 100) + '%';
+                    if (layer.rotation) v.style.transform = `rotate(${layer.rotation}deg)`;
+                    v.src = layer.src;
+                    frag.appendChild(v);
+                    // Belt-and-suspenders alongside the declarative autoplay
+                    // attribute — caught, not awaited, so a decode failure
+                    // can't throw out of this render pass.
+                    v.play().catch((err) => console.warn('[Display] Layer video play() rejected:', err.message));
+                    return;
+                }
+                // A still image with Ken Burns motion (layer.motion — same
+                // option Image Cycle has, see startCycleMotion) needs the
+                // same outer-wrapper/inner-art split: the wrapper clips
+                // (overflow:hidden) at the layer's own bounds, the inner
+                // art div is what actually zooms/pans so the motion never
+                // bleeds past this layer's box into whatever's next to it.
+                // Every other still image keeps the single-div shape it
+                // always had — only opts into the split when motion is on.
+                if (layer.motion === 'kenburns') {
+                    const wrap = document.createElement('div');
+                    wrap.className = 'display-layer';
+                    wrap.style.cssText = 'position:absolute;z-index:1;overflow:hidden;';
+                    wrap.style.opacity = (layer.opacity ?? 100) / 100;
+                    if (layer.radius) wrap.style.borderRadius = (layer.radius / DESIGN_H * 100) + 'vh';
+                    applyPos(wrap, p);
+                    wrap.style.height = (p.h / DESIGN_H * 100) + '%';
+                    if (layer.rotation) wrap.style.transform = `rotate(${layer.rotation}deg)`;
+                    const art = document.createElement('div');
+                    art.style.cssText = 'position:absolute;inset:0;background-repeat:no-repeat;background-position:center;';
+                    art.style.backgroundImage = `url('${layer.src}')`;
+                    art.style.backgroundSize  = fit === 'fill' ? '100% 100%' : fit;
+                    art.style.animation = 'kairo-kenburns 18s ease-in-out infinite alternate';
+                    wrap.appendChild(art);
+                    frag.appendChild(wrap);
+                    return;
+                }
                 const div = document.createElement('div');
                 div.className = 'display-layer';
-                const p = layer.pos || { x: 0, y: 0, w: DESIGN_W, h: DESIGN_H };
                 div.style.cssText = 'position:absolute;z-index:1;background-repeat:no-repeat;background-position:center;';
                 div.style.backgroundImage = `url('${layer.src}')`;
-                div.style.backgroundSize  = layer.fit === 'fill' ? '100% 100%' : (layer.fit || 'contain');
+                div.style.backgroundSize  = fit === 'fill' ? '100% 100%' : fit;
                 div.style.opacity         = (layer.opacity ?? 100) / 100;
                 if (layer.radius) div.style.borderRadius = (layer.radius / DESIGN_H * 100) + 'vh';
                 applyPos(div, p);
                 div.style.height = (p.h / DESIGN_H * 100) + '%';
                 if (layer.rotation) div.style.transform = `rotate(${layer.rotation}deg)`;
+                frag.appendChild(div);
+                return;
+            }
+
+            // Image Cycle — a slideshow that advances on its own as a live
+            // Timer segment's countdown runs. Two spacing modes:
+            //  - no intervalSec (the plain single-theme case): evenly
+            //    spaces `sources` across the WHOLE countdown (totalMs).
+            //  - intervalSec set (a scene's own layer — see segments.js's
+            //    `scenes` and handleActionBadge's per-scene advance below):
+            //    a fixed seconds-per-image pace, independent of how long
+            //    the countdown or the scene itself runs, looping back to
+            //    frame 0 if the scene has more time than images to fill it.
+            // This initial paint always shows frame 0; the actual per-tick
+            // advance happens in handleActionBadge via [data-cycle-images],
+            // a lightweight background-image swap rather than a full
+            // buildLayerDOM rebuild every tick.
+            if (layer.type === 'image-cycle') {
+                const sources = layer.sources || [];
+                if (!sources.length) return;
+                // Preload every frame up front (this runs once per scene
+                // paint, not per swap) — without it, each swap only starts
+                // fetching/decoding its image at the exact moment
+                // handleActionBadge's tick decides to show it, the worst
+                // possible time for a stutter on the live output.
+                sources.forEach(src => { const pre = new Image(); pre.src = src; });
+                const p = layer.pos || { x: 0, y: 0, w: DESIGN_W, h: DESIGN_H };
+                const fit = layer.fit === 'fill' ? 'fill' : (layer.fit || 'cover');
+                // Outer wrapper: position/size/opacity/rotation/radius, and
+                // overflow:hidden — clips BOTH the 'slide' transition (a
+                // second frame animates across this box) and 'kenburns'
+                // motion (the inner .cycle-art div below is slightly
+                // oversized and slowly panned/zoomed, which would otherwise
+                // bleed past this layer's own bounds into whatever's next
+                // to it). [data-cycle-images] etc. live here, queried by
+                // handleActionBadge every tick — swapCycleImage finds the
+                // inner .cycle-art itself to actually swap/animate.
+                const div = document.createElement('div');
+                div.className = 'display-layer';
+                div.dataset.cycleImages = JSON.stringify(sources);
+                div.dataset.cycleIndex = '0';
+                if (layer.intervalSec > 0) div.dataset.cycleInterval = String(layer.intervalSec);
+                div.dataset.cycleTransition = (layer.transition === 'slide' || layer.transition === 'crossfade') ? layer.transition : 'cut';
+                div.dataset.cycleFit = fit;
+                div.dataset.cycleMotion = layer.motion === 'kenburns' ? 'kenburns' : 'none';
+                div.style.cssText = 'position:absolute;z-index:1;overflow:hidden;';
+                div.style.opacity = (layer.opacity ?? 100) / 100;
+                if (layer.radius) div.style.borderRadius = (layer.radius / DESIGN_H * 100) + 'vh';
+                applyPos(div, p);
+                div.style.height = (p.h / DESIGN_H * 100) + '%';
+                if (layer.rotation) div.style.transform = `rotate(${layer.rotation}deg)`;
+
+                const art = document.createElement('div');
+                art.className = 'cycle-art';
+                art.style.cssText = 'position:absolute;inset:0;background-repeat:no-repeat;background-position:center;';
+                art.style.backgroundImage = `url('${sources[0]}')`;
+                art.style.backgroundSize  = fit === 'fill' ? '100% 100%' : fit;
+                div.appendChild(art);
+                startCycleMotion(div, art);
                 frag.appendChild(div);
                 return;
             }
@@ -381,7 +564,7 @@
                     applyPos(div, layer.pos);
                     div.style.height  = (layer.pos.h / DESIGN_H * 100) + '%';
                     div.style.zIndex  = '1';
-                    if (layer.radius) div.style.borderRadius = (layer.radius / DESIGN_H * 100) + 'vh';
+                    applyShapeGeometry(div, layer, shapeRadiusVh);
                     if (layer.rotation) div.style.transform = `rotate(${layer.rotation}deg)`;
                 }
 
@@ -397,15 +580,30 @@
 
                 // Pick content for this layer
                 let content = '';
+                // A Custom layer whose text contains the literal "{timer}"
+                // placeholder gets that substituted with the live countdown
+                // on every tick (handleActionBadge) — this is what actually
+                // weaves the number INTO a sentence ("Worship begins in
+                // {timer}") instead of it only ever being its own separate
+                // element next to the copy. hasTimerTemplate flags which
+                // ones need that per-tick substitution below.
+                const hasTimerTemplate = layer.binding === 'custom' && typeof layer.customText === 'string' && layer.customText.includes('{timer}');
                 if (layer.binding === 'verse')     content = verseText;
                 else if (layer.binding === 'verse_translated') content = translatedText || '';
                 else if (layer.binding === 'reference') content = verseRef;
                 else if (layer.binding === 'timer') content = timerText || '';
+                // Individual hour/minute/second parts (see timeParts,
+                // handleActionBadge) — no live remainingMs at initial-paint
+                // time, only once the first per-second tick lands right
+                // after, so this is just a zeroed placeholder either way.
+                else if (layer.binding === 'timer-h' || layer.binding === 'timer-m' || layer.binding === 'timer-s') content = '00';
+                else if (hasTimerTemplate) content = layer.customText.replace('{timer}', timerText || '0:00');
                 else content = layer.customText || '';
 
                 const div = document.createElement('div');
                 div.className = 'display-layer';
                 div.dataset.binding = layer.binding || 'custom';
+                if (hasTimerTemplate) div.dataset.timerTemplate = layer.customText;
                 div.dataset.layerId = layer.id || '';
 
                 // Field-by-field merges — a partial override (just font.size,
@@ -416,9 +614,15 @@
                 const color = ov.color || layer.color;
                 const opacity = ov.opacity ?? layer.opacity;
                 const align = ov.align || layer.align;
-                const shadowStr = shadow.enabled
-                    ? `${shadow.x}px ${shadow.y}px ${shadow.blur}px ${hexOpacity(shadow.color, shadow.opacity)}`
-                    : 'none';
+                // Outline is folded into this SAME text-shadow (as a ring of
+                // sharp offset shadows via outlineShadows — see
+                // layer_geometry.js) rather than -webkit-text-stroke, which
+                // this WebKit build corrupts on bold/large text — see that
+                // helper's own comment.
+                const shadowParts = [];
+                if (outline && outline.enabled) shadowParts.push(...outlineShadows(outline.width, outline.color));
+                if (shadow.enabled) shadowParts.push(`${shadow.x}px ${shadow.y}px ${shadow.blur}px ${hexOpacity(shadow.color, shadow.opacity)}`);
+                const shadowStr = shadowParts.length ? shadowParts.join(', ') : 'none';
 
                 // A reference/translation caption with no verse line to
                 // caption reads as orphaned floating text (e.g. just a song
@@ -448,19 +652,14 @@
                     z-index: 10;
                 `;
 
-                // Outline via webkit-text-stroke
-                if (outline && outline.enabled) {
-                    div.style.webkitTextStroke = `${outline.width}px ${outline.color}`;
-                }
-
                 // Timer state colours travel on the element so the per-second
                 // 'action' tick (handleActionBadge) can recolour it as the
                 // countdown enters warning / overtime — the theme owns all
                 // three colours; these are just the classic defaults.
-                if (layer.binding === 'timer') {
+                if (layer.binding === 'timer' || layer.binding === 'timer-h' || layer.binding === 'timer-m' || layer.binding === 'timer-s') {
                     div.dataset.baseColor     = hexOpacity(color, opacity);
-                    div.dataset.warnColor     = ov.warnColor     || layer.warnColor     || '#ffcf4d';
-                    div.dataset.overtimeColor = ov.overtimeColor || layer.overtimeColor || '#ff5c5c';
+                    div.dataset.warnColor     = ov.warnColor     || layer.warnColor     || '#e8a64a';
+                    div.dataset.overtimeColor = ov.overtimeColor || layer.overtimeColor || '#e8404a';
                 }
 
                 // Positioning by layout
@@ -604,6 +803,14 @@
                     applyPos(div, effectivePos);
                     div.style.transform = 'none';
                     div.style.padding   = '0';
+                    // Entrance (layer.entrance, renderTextProps' Effects
+                    // tab) — only safe for a free-positioned layer, since a
+                    // layout preset elsewhere may already be using
+                    // `transform` for its own centering and this would
+                    // replace, not compose with, that. transform is always
+                    // reset to 'none' right above when there's an explicit
+                    // pos, so nothing to conflict with here.
+                    if (layer.entrance === 'fade-up') div.style.animation = 'kairo-text-in 700ms ease-out both';
                 }
 
                 // Remember the designed size (already override-aware via `fs`
@@ -777,6 +984,7 @@
     // layer behind it (an independently-sent image/video) must not fade or
     // clear just because the slide's text changed.
     function renderStage(verseText, verseRef, animate = true, translatedText = '', styleByLayerId = {}, timerText = '') {
+        const myGen = ++renderGen;
         const look = activeLook || FALLBACK_LOOK;
 
         const doRender = () => {
@@ -803,13 +1011,14 @@
             fitVerse();
         };
 
-        // look.animation ('fade'/'slide-up'/'cut') picks the transition shape;
-        // look.animationSpeed (a multiplier — 1 = the original fixed 300ms
-        // this used to be hardcoded to, <1 faster, >1 slower) picks its pace.
-        // Themes saved before either field existed fall back to exactly
-        // today's old behavior (plain 300ms fade).
-        const animType = look.animation || 'fade';
-        const speedMs = Math.round(300 * (typeof look.animationSpeed === 'number' && look.animationSpeed > 0 ? look.animationSpeed : 1));
+        // outputAnimation/outputAnimationSpeed ('fade'/'slide-up'/'cut' + a
+        // multiplier on the original fixed 300ms, <1 faster, >1 slower) —
+        // a display-level setting now (see its own comment near the top of
+        // this file), not read off the theme anymore: how slides transition
+        // used to silently change depending on which theme happened to be
+        // live, with no one place to just set it for the output.
+        const animType = outputAnimation;
+        const speedMs = Math.round(300 * outputAnimationSpeed);
 
         // 'cut' skips this whole-slide-layer fade/slide choreography
         // entirely (and the synchronous offsetHeight forced-reflow below).
@@ -831,6 +1040,7 @@
             slideLayer.style.transform  = animType === 'slide-up' ? `translateY(${outY})` : 'none';
 
             setTimeout(() => {
+                if (myGen !== renderGen) return; // superseded by a newer render — don't paint stale content
                 doRender();
                 if (animType === 'slide-up') {
                     // Land the new content NOT quite in place first (no
@@ -871,6 +1081,134 @@
         timerLayer.appendChild(frag);
     }
 
+    // ── Scene storyboard (segment.scenes — see segments.js) ────────────────
+    // A segment can carry a SEQUENCE of scenes instead of one theme, each
+    // with its own explicit duration and its own complete layer set (own
+    // background/image-cycle/text — a real per-scene layout and caption,
+    // not just a swapped image). Played in order across the live
+    // countdown: scene 0 from t=0, scene 1 once scene 0's duration is up,
+    // and so on: the LAST scene just keeps showing (looping its own
+    // images) for any time left over once every scene's duration is
+    // accounted for, rather than erroring if they don't add up to the
+    // segment's actual countdown length.
+    let timerScenes = null;      // [{id, name, durationSec, layers}] | null
+    let activeSceneIndex = -1;   // -1 = nothing painted yet this run
+
+    // A scene's own full-bleed backdrop (its 'bg' layer) goes out through
+    // the SAME independent media layer/slot Media Bin sends use
+    // (renderMediaStage — see msg.type === 'media' above), not a second,
+    // scene-private image baked into the timer layer on top of it. Two
+    // reasons this matters, not just tidiness: (1) #timer-layer sits ABOVE
+    // #media-layer on purpose (z-index 2 vs 0 — see the comment by their
+    // CSS) so a countdown/verse can overlay playing media; a scene with its
+    // OWN opaque image in that same top layer defeated that and made
+    // "send a video from the Media Bin while a scene is live" always
+    // render blank — the scene's art was covering it. (2) it makes the two
+    // features genuinely the same mechanism: an operator sending a Media
+    // Bin item while a scene is live now just swaps what's on that shared
+    // backdrop slot, with the scene's own copy/countdown still layered on
+    // top exactly as designed, instead of two competing, inconsistent
+    // paths for "what's the background."
+    function renderTimerScene(index) {
+        const scene = timerScenes && timerScenes[index];
+        if (!scene) return;
+        const layers = scene.layers || [];
+        // Only a plain single-image/video backdrop reroutes — an
+        // image-cycle bg still needs its own cycling/interval logic, which
+        // only exists in the timer layer's own render path, so it stays put.
+        const bg = layers.find(l => l.id === 'bg' && l.type === 'image' && l.src);
+        const rest = bg ? layers.filter(l => l !== bg) : layers;
+        // A scene switch FROM one with a bg backdrop TO one without must
+        // clear the media layer too, or the previous scene's image/video
+        // keeps showing through underneath this scene's own layers.
+        if (bg) renderMediaStage(bg.src, isVideoLayerSrc(bg.src) ? 'video' : 'image', bg.fit || 'cover', bg.motion);
+        else renderMediaStage(null);
+        renderTimerLayer({ layers: rest }, {}, currentTimerText);
+    }
+
+    // elapsedMs counts up from 0 (segment start) — the countdown's own
+    // remainingMs counts DOWN, so this is just totalMs - remainingMs,
+    // clamped so overtime (remainingMs < 0) doesn't push it past totalMs
+    // and off the end of the last scene.
+    function activeSceneForElapsed(elapsedMs) {
+        if (!timerScenes || !timerScenes.length) return { index: 0, sceneElapsedMs: elapsedMs };
+        let cum = 0;
+        for (let i = 0; i < timerScenes.length; i++) {
+            const durMs = Math.max(0, Number(timerScenes[i].durationSec) || 0) * 1000;
+            if (i === timerScenes.length - 1 || elapsedMs < cum + durMs) {
+                return { index: i, sceneElapsedMs: Math.max(0, elapsedMs - cum) };
+            }
+            cum += durMs;
+        }
+        return { index: timerScenes.length - 1, sceneElapsedMs: 0 };
+    }
+
+    // 'cut' (default) just swaps the background-image outright. 'slide'
+    // animates a second frame sliding in left-to-right over the first.
+    // 'crossfade' dissolves the new frame in over the old one instead of
+    // a hard cut or a directional slide — closest achievable read on
+    // PowerPoint's Morph transition for a RAPID stream of unrelated
+    // photos (different people, no shared shape/object for Morph's own
+    // object-matching trick to actually interpolate between): Morph's real
+    // magic is tweening the SAME object's position/size/rotation across
+    // two slides, which has nothing to key off between two different
+    // faces, so the honest equivalent here is a fast, fluid dissolve
+    // layered on top of one CONTINUOUS Ken Burns drift that never resets
+    // between swaps (startCycleMotion runs once, on the wrapper's .cycle-art
+    // child, and every swap below only ever changes ITS backgroundImage —
+    // never restarts the animation) — the sequence reads as one ongoing
+    // camera move panning across many faces, not a slideshow stopping and
+    // starting on each one.
+    // Both animated transitions clip to the layer's own box via the
+    // wrapper's own overflow:hidden (set at build time, above), not
+    // whatever's next to it. `el` is the OUTER wrapper ([data-cycle-images]
+    // etc. — the thing handleActionBadge queries every tick); the actual
+    // background-image lives on its inner .cycle-art child instead (see the
+    // image-cycle branch above).
+    function swapCycleImage(el, newSrc, transition) {
+        const art = el.querySelector('.cycle-art') || el;
+        if (transition === 'crossfade') {
+            const fit = el.dataset.cycleFit || 'cover';
+            const incoming = document.createElement('div');
+            incoming.style.cssText = `position:absolute;inset:0;background-repeat:no-repeat;background-position:center;background-size:${fit === 'fill' ? '100% 100%' : fit};opacity:0;transition:opacity 420ms ease;`;
+            incoming.style.backgroundImage = `url('${newSrc}')`;
+            el.appendChild(incoming);
+            requestAnimationFrame(() => { incoming.style.opacity = '1'; });
+            setTimeout(() => {
+                art.style.backgroundImage = `url('${newSrc}')`;
+                incoming.remove();
+            }, 440);
+            return;
+        }
+        if (transition !== 'slide') { art.style.backgroundImage = `url('${newSrc}')`; return; }
+        const fit = el.dataset.cycleFit || 'cover';
+        const incoming = document.createElement('div');
+        incoming.style.cssText = `position:absolute;inset:0;background-repeat:no-repeat;background-position:center;background-size:${fit === 'fill' ? '100% 100%' : fit};transform:translateX(100%);transition:transform 500ms ease;`;
+        incoming.style.backgroundImage = `url('${newSrc}')`;
+        el.appendChild(incoming);
+        requestAnimationFrame(() => { incoming.style.transform = 'translateX(0)'; });
+        setTimeout(() => {
+            art.style.backgroundImage = `url('${newSrc}')`;
+            incoming.remove();
+        }, 520);
+    }
+
+    // A continuous slow drift/zoom on the image itself — "borrowed" as a
+    // component idea (Remotion/HyperFrames-style motion primitives) but
+    // reimplemented as a plain CSS animation rather than anything
+    // frame-rendered, since this has to keep running live and in sync
+    // with a countdown that can be re-timed at any moment, not play back
+    // a fixed pre-rendered timeline. Deliberately decoupled from exact
+    // per-image swap timing (a fixed loop length instead of matching
+    // whichever spacing mode — interval vs whole-countdown — this layer
+    // happens to use) — simpler, and restarting the animation on every
+    // swap would just look like an abrupt snap back to scale 1 rather
+    // than a continuous drift.
+    function startCycleMotion(wrapper, art) {
+        if (wrapper.dataset.cycleMotion !== 'kenburns') return;
+        art.style.animation = 'kairo-kenburns 18s ease-in-out infinite alternate';
+    }
+
     // ── Image slide: full-frame picture, bypassing the theme's text layers ──
     // Still honours the theme's canvas transparency, so an image slide over a
     // chroma/alpha rig keys the same way a verse slide would. This is a
@@ -909,9 +1247,20 @@
     // from whatever the slide layer is showing. No native <video> controls —
     // this is the output the congregation sees; every control lives in the
     // operator's window and reaches here via WS (see handleMessage below).
-    function renderMediaStage(src, kind, fit) {
+    function renderMediaStage(src, kind, fit, motion) {
         mediaLayer.innerHTML = '';
-        if (!src) return;
+        // The operator's transport bar (mute/play/seek/volume) only makes
+        // sense while an actual <video> is showing — it used to just stay
+        // visible-but-dead once the media layer's content changed to a
+        // plain image or was cleared entirely (a scene switch overwriting
+        // this SAME shared slot — see renderTimerScene — is exactly how
+        // that happens now), since nothing ever told it to hide again: an
+        // <img> never fires the play/pause/timeupdate events the transport
+        // bar listens for, so the seek bar just sat frozen at 0:00/0:00
+        // looking broken instead of disappearing. One explicit "here's what
+        // the layer holds now" message covers every path (clear, image, or
+        // video) instead of only the video side ever speaking up.
+        if (!src) { try { ws?.send(JSON.stringify({ type: 'media-status', kind: 'none' })); } catch {} return; }
         // object-fit accepts the literal 'fill' keyword natively (unlike
         // background-size, which needs the 100%/100% translation elsewhere
         // in this file) — inline style here wins over the CSS default
@@ -923,12 +1272,27 @@
             v.src = src;
             v.autoplay = true;
             v.loop = true;
-            v.muted = mediaMuted;
+            // Every modern engine (Chrome, and WebKit — what Tauri actually
+            // renders through on macOS) silently refuses to autoplay an
+            // UNMUTED video with no prior user gesture on the page, which a
+            // passive output window never gets. There's no error, no event —
+            // the element just never starts, which is exactly "the video
+            // doesn't play" with nothing in the console to explain why.
+            // Always start muted so autoplay is guaranteed to actually
+            // happen, then un-mute right after playback begins if that's
+            // the desired state — browsers only gate the INITIAL autoplay
+            // request, not a later programmatic unmute of a video that's
+            // already playing.
+            v.muted = true;
             v.volume = mediaVolume;
             v.playsInline = true;
             v.style.objectFit = objectFit;
+            if (motion === 'kenburns') v.style.animation = 'kairo-kenburns 18s ease-in-out infinite alternate';
             if (mediaSinkId && typeof v.setSinkId === 'function') {
                 v.setSinkId(mediaSinkId).catch(() => {});
+            }
+            if (!mediaMuted) {
+                v.addEventListener('playing', () => { v.muted = false; }, { once: true });
             }
             // Throttled status reports so the operator's window can drive a
             // real seek slider without polling — see server.js's ws.on('message').
@@ -943,18 +1307,25 @@
             v.addEventListener('pause', () => reportMediaStatus(v));
             v.addEventListener('loadedmetadata', () => reportMediaStatus(v));
             mediaLayer.appendChild(v);
+            // Belt-and-suspenders explicit play() alongside the declarative
+            // `autoplay` attribute, called after the element is actually in
+            // the document — caught, not awaited, so a rejection (e.g. the
+            // source failing to decode) can't throw out of this function.
+            v.play().catch((err) => console.warn('[Display] Video play() rejected:', err.message));
         } else {
             const img = document.createElement('img');
             img.src = src;
             img.style.objectFit = objectFit;
+            if (motion === 'kenburns') img.style.animation = 'kairo-kenburns 18s ease-in-out infinite alternate';
             mediaLayer.appendChild(img);
+            try { ws?.send(JSON.stringify({ type: 'media-status', kind: 'image' })); } catch {}
         }
     }
 
     function reportMediaStatus(v) {
         try {
             ws?.send(JSON.stringify({
-                type: 'media-status',
+                type: 'media-status', kind: 'video',
                 currentTime: v.currentTime, duration: v.duration || 0, paused: v.paused,
             }));
         } catch {}
@@ -1037,6 +1408,12 @@
             if (isRangeActive) setRangeActive(true);
             return;
         }
+        // Shares renderStage's own generation counter — a superseded call
+        // here needs to invalidate a still-pending renderStage fade just as
+        // much as renderStage invalidating one of its own (rapid successive
+        // advances, e.g. the lyric follower, can call either path back to
+        // back).
+        const myGen = ++renderGen;
 
         if (wasEmpty || stage.children.length === 0) {
             // First verse or blank stage — do a full render with fade
@@ -1052,12 +1429,14 @@
             // rebuilds the whole layer stack) is what actually runs for
             // every ordinary slide-to-slide change once the stage is
             // already showing something — a plain hardcoded 250ms opacity
-            // fade here used to silently ignore whatever look.animation/
-            // animationSpeed renderStage itself already respects, so a
-            // theme like Lyrics — Motion never visibly animated in real use,
-            // only on the very first slide of a service.
-            const animType = (activeLook && activeLook.animation) || 'fade';
-            const speedMs = Math.round(300 * ((activeLook && typeof activeLook.animationSpeed === 'number' && activeLook.animationSpeed > 0) ? activeLook.animationSpeed : 1));
+            // fade here used to silently ignore whatever transition
+            // renderStage itself already respects, so a theme like Lyrics
+            // — Motion never visibly animated in real use, only on the
+            // very first slide of a service. Reads the same display-level
+            // outputAnimation/outputAnimationSpeed renderStage uses now
+            // (see that comment) rather than a per-theme field.
+            const animType = outputAnimation;
+            const speedMs = Math.round(300 * outputAnimationSpeed);
 
             // 'cut' skips this whole-block opacity/transform choreography
             // entirely. Text Animation (a separate per-theme setting from
@@ -1078,6 +1457,7 @@
             });
 
             setTimeout(() => {
+                if (myGen !== renderGen) return; // superseded by a newer render — don't paint stale content
                 updateTextContent(text, ref, translatedText, timerText);
                 fitVerse();
                 if (animType === 'slide-up') {
@@ -1253,6 +1633,15 @@
                 timerBadgeEl?.classList.add('hidden');
                 clockBadgeEl?.classList.add('hidden');
                 if (timerLayer) timerLayer.innerHTML = ''; // clear the full-screen countdown too
+                // A scene's backdrop lives on the shared media layer (see
+                // renderTimerScene) — this is the actual "Clear Timer" button's
+                // path (clearOutputLayer('timer') → clear-layer, not
+                // timer-slide{clear:true}), so it needs the same media/state
+                // reset that branch already does, or a scene's image/video
+                // stays stuck full-screen after the countdown is cleared.
+                if (timerScenes && timerScenes.length) renderMediaStage(null);
+                timerScenes = null;
+                activeSceneIndex = -1;
             }
             return;
         }
@@ -1268,13 +1657,40 @@
         if (msg.type === 'timer-slide') {
             // Uses the look carried in the message directly — never touches
             // activeLook, so the slide layer's own theme is unaffected.
-            if (msg.clear) { timerLayer.innerHTML = ''; }
-            else renderTimerLayer(msg.look, msg.style || {}, msg.timerText || '0:00');
+            if (msg.clear) {
+                timerLayer.innerHTML = '';
+                // A scene's backdrop lives on the shared media layer now
+                // (see renderTimerScene) — clear that too, or it'd be left
+                // showing with nothing on top once the countdown stops.
+                if (timerScenes && timerScenes.length) renderMediaStage(null);
+                timerScenes = null;
+                activeSceneIndex = -1;
+            } else if (msg.scenes && msg.scenes.length) {
+                timerScenes = msg.scenes;
+                activeSceneIndex = 0;
+                currentTimerText = msg.timerText || '0:00';
+                renderTimerScene(0);
+            } else {
+                // A plain (non-scene) segment starting right after a scene
+                // segment was live — clear any scene backdrop the previous
+                // segment left on the shared media layer, or it stays stuck
+                // full-screen underneath this segment's own theme.
+                if (timerScenes && timerScenes.length) renderMediaStage(null);
+                timerScenes = null;
+                activeSceneIndex = -1;
+                renderTimerLayer(msg.look, msg.style || {}, msg.timerText || '0:00');
+            }
             return;
         }
 
         if (msg.type === 'media-control') {
             applyMediaControl(msg.action, msg.value);
+            return;
+        }
+
+        if (msg.type === 'output-transition') {
+            if (msg.animation) outputAnimation = msg.animation;
+            if (typeof msg.speed === 'number' && msg.speed > 0) outputAnimationSpeed = msg.speed;
             return;
         }
 
@@ -1306,13 +1722,46 @@
     const clockBadgeEl = document.getElementById('clock-badge');
     function formatMs(ms) {
         const totalSec = Math.max(0, Math.ceil(ms / 1000));
-        const m = Math.floor(totalSec / 60);
+        const h = Math.floor(totalSec / 3600);
+        const m = Math.floor((totalSec % 3600) / 60);
         const s = totalSec % 60;
-        return `${m}:${String(s).padStart(2, '0')}`;
+        return h > 0
+            ? `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
+            : `${m}:${String(s).padStart(2, '0')}`;
+    }
+    // The individual hour/minute/second digits, zero-padded — lets a text
+    // layer bind to just one part (binding: 'timer-h'/'timer-m'/'timer-s',
+    // see renderTextProps' "Binds to" chips) instead of only the combined
+    // string 'timer' gives. That's what actually lets an operator stack
+    // the hour over the minute (or build any other layout of the pieces):
+    // two independently positioned/sized/styled text layers, one per part,
+    // rather than one fixed "H:MM:SS" string with no layout control at all
+    // beyond the one text box it lives in.
+    function timeParts(ms) {
+        const totalSec = Math.max(0, Math.ceil(ms / 1000));
+        const h = Math.floor(totalSec / 3600);
+        const m = Math.floor((totalSec % 3600) / 60);
+        const s = totalSec % 60;
+        return { h: String(h).padStart(2, '0'), m: String(m).padStart(2, '0'), s: String(s).padStart(2, '0') };
+    }
+    // Shared by every timer-bound element (the combined 'timer' string AND
+    // each individual 'timer-h'/'timer-m'/'timer-s' part) — one place for
+    // the warning/overtime class + recolour logic instead of copy-pasting
+    // it once per binding.
+    function applyTimerStateStyle(el, overtime, warning, cleared) {
+        el.classList.toggle('is-overtime', overtime && !cleared);
+        el.classList.toggle('is-warning', warning && !cleared);
+        const base = el.dataset.baseColor;
+        if (base) {
+            el.style.color = cleared ? base
+                : overtime ? (el.dataset.overtimeColor || '#e8404a')
+                : warning  ? (el.dataset.warnColor || '#e8a64a')
+                : base;
+        }
     }
     function handleActionBadge(msg) {
         if (msg.actionId === 'stage-timer') {
-            const { remainingMs, label, cleared, style } = msg.payload || {};
+            const { remainingMs, label, cleared, style, totalMs } = msg.payload || {};
             // Two independent render targets share this one tick: the fixed
             // corner badge (always available, no theme needed) and — if this
             // segment was actually sent to the slide layer with a theme that
@@ -1333,23 +1782,102 @@
             // instead of ever changing as the countdown ran down.
             stage.querySelectorAll('[data-binding="timer"]').forEach(el => {
                 el.textContent = formatted;
-                el.classList.toggle('is-overtime', overtime && !cleared);
-                el.classList.toggle('is-warning', warning && !cleared);
-                // Recolour to the theme's warning / overtime colour (or the
-                // base colour otherwise) — the countdown going red at 0 is
-                // half the point of a stage timer.
-                const base = el.dataset.baseColor;
-                if (base) {
-                    el.style.color = cleared ? base
-                        : overtime ? (el.dataset.overtimeColor || '#ff5c5c')
-                        : warning  ? (el.dataset.warnColor || '#ffcf4d')
-                        : base;
-                }
+                applyTimerStateStyle(el, overtime, warning, cleared);
             });
+            // Individual hour/minute/second parts — same state styling,
+            // just a single zero-padded piece per element instead of the
+            // whole formatted string. Sign (+ for overtime) only makes
+            // sense on the combined string above; a lone "+05" minutes
+            // reads as confusing, so these three just keep counting the
+            // way they were rather than carrying their own sign.
+            if (!cleared) {
+                const parts = timeParts(Math.abs(remainingMs));
+                stage.querySelectorAll('[data-binding="timer-h"]').forEach(el => { el.textContent = parts.h; applyTimerStateStyle(el, overtime, warning, cleared); });
+                stage.querySelectorAll('[data-binding="timer-m"]').forEach(el => { el.textContent = parts.m; applyTimerStateStyle(el, overtime, warning, cleared); });
+                stage.querySelectorAll('[data-binding="timer-s"]').forEach(el => { el.textContent = parts.s; applyTimerStateStyle(el, overtime, warning, cleared); });
+            } else {
+                stage.querySelectorAll('[data-binding="timer-h"],[data-binding="timer-m"],[data-binding="timer-s"]').forEach(el => {
+                    el.textContent = '';
+                    applyTimerStateStyle(el, overtime, warning, cleared);
+                });
+            }
             currentTimerText = formatted;
 
+            // Custom text with a "{timer}" placeholder (see the
+            // hasTimerTemplate note in buildLayerDOM) — substitutes the
+            // live formatted countdown into that ONE spot in an otherwise
+            // static sentence, on every tick, same as the plain 'timer'
+            // binding's own textContent update above just for a whole
+            // sentence instead of only the number. Deliberately no
+            // warning/overtime recolour here — degrading a full sentence
+            // to red/yellow at the end reads as broken, not urgent, the
+            // way it does for a lone number.
+            stage.querySelectorAll('[data-timer-template]').forEach(el => {
+                el.textContent = el.dataset.timerTemplate.replace('{timer}', formatted);
+            });
+
+            // Scene storyboard (segment.scenes) — switch the WHOLE layer
+            // set the moment elapsed time crosses into the next scene's
+            // window, then advance that scene's own image-cycle layer(s)
+            // on THEIR fixed intervalSec pace rather than the whole-
+            // countdown spacing the plain single-theme case (below) uses.
+            // Runs even in overtime/cleared-adjacent ticks so the last
+            // scene keeps looping instead of freezing mid-cycle the
+            // instant the countdown crosses zero.
+            if (!cleared && timerScenes && timerScenes.length && typeof totalMs === 'number' && totalMs > 0) {
+                const elapsed = Math.max(0, totalMs - remainingMs);
+                const { index, sceneElapsedMs } = activeSceneForElapsed(elapsed);
+                if (index !== activeSceneIndex) {
+                    activeSceneIndex = index;
+                    renderTimerScene(index);
+                } else {
+                    stage.querySelectorAll('[data-cycle-images][data-cycle-interval]').forEach(el => {
+                        let sources;
+                        try { sources = JSON.parse(el.dataset.cycleImages); } catch { return; }
+                        if (!sources || !sources.length) return;
+                        const intervalMs = Math.max(200, parseFloat(el.dataset.cycleInterval) * 1000);
+                        const idx = Math.floor(sceneElapsedMs / intervalMs) % sources.length;
+                        if (String(idx) === el.dataset.cycleIndex) return;
+                        el.dataset.cycleIndex = String(idx);
+                        swapCycleImage(el, sources[idx], el.dataset.cycleTransition);
+                    });
+                }
+            }
+
+            // Image Cycle — advance the pre-service slideshow evenly across
+            // the whole countdown (totalMs, captured once at fire time by
+            // triggers.js) rather than on a fixed interval, so the last
+            // image lands right as the countdown hits zero. cleared/overtime
+            // both freeze on whichever frame is already showing — there's
+            // no "whole countdown" left to space across in either case.
+            // Excludes [data-cycle-interval] layers — those are a scene's
+            // own, spaced and advanced by the block above instead.
+            if (!cleared && typeof totalMs === 'number' && totalMs > 0 && !overtime) {
+                const elapsed = Math.min(totalMs, Math.max(0, totalMs - remainingMs));
+                stage.querySelectorAll('[data-cycle-images]:not([data-cycle-interval])').forEach(el => {
+                    let sources;
+                    try { sources = JSON.parse(el.dataset.cycleImages); } catch { return; }
+                    if (!sources || !sources.length) return;
+                    const idx = Math.min(sources.length - 1, Math.floor((elapsed / totalMs) * sources.length));
+                    if (String(idx) === el.dataset.cycleIndex) return;
+                    el.dataset.cycleIndex = String(idx);
+                    swapCycleImage(el, sources[idx], el.dataset.cycleTransition);
+                });
+            }
+
+            // The fixed corner badge is the FALLBACK countdown display for a
+            // plain segment with no theme ("always available, no theme
+            // needed" — see the comment above). Once a segment ships a real
+            // scene storyboard, the scene owns the countdown's presentation
+            // entirely — its own corner readout, or the countdown woven
+            // right into a headline via {timer} — so leaving this fixed
+            // badge showing too just draws the same number a second (or
+            // third) time in the corner. Hide it whenever scenes are driving
+            // the layer; #clock-badge is untouched, since that's the
+            // operator's own separate Live Clock/clock-message toggle, not
+            // part of this redundancy.
             if (!timerBadgeEl) return;
-            if (cleared) { timerBadgeEl.classList.add('hidden'); return; }
+            if (cleared || (timerScenes && timerScenes.length)) { timerBadgeEl.classList.add('hidden'); return; }
             timerBadgeEl.classList.remove('hidden');
             // Overtime, not "ended" — the countdown keeps going past zero
             // (see triggers.js) until the operator actually stops it, so it

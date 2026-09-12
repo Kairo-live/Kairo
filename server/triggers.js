@@ -191,13 +191,18 @@ registerTriggerType('stage-timer', {
     // time (not per-tick) — re-deriving it every tick would restart the
     // countdown every second instead of counting down.
     const endAt = resolveEndAt(trigger);
+    // The full original span, captured once at the same moment as endAt —
+    // an Image Cycle layer (display.html) needs this to space its frames
+    // evenly across the WHOLE countdown, which a per-tick remainingMs alone
+    // can't tell it (it has no idea how long the countdown started at).
+    const totalMs = endAt != null ? endAt - Date.now() : null;
     // Deliberately doesn't stop itself at zero — a real stage timer
     // doesn't vanish the moment time's up, it goes into overtime (see
     // remainingMs going negative here, rendered red+counting-up in
     // display.html) until the operator actually stops it.
     const tick = () => {
       const remainingMs = endAt - Date.now();
-      broadcast({ remainingMs, label: trigger.label, style: trigger.params.style || null });
+      broadcast({ remainingMs, label: trigger.label, style: trigger.params.style || null, totalMs });
     };
     tick();
     const intervalId = setInterval(tick, 1000);

@@ -66,6 +66,23 @@
     return String(text || '').split(/\s+/).map(key).filter(Boolean);
   }
 
+  // Same key() folding as tokenizeKeys, but keeps each surviving key's real
+  // audio-relative start/end (seconds) alongside it. Fed from Deepgram's own
+  // `words` array (always present on a transcript event, no config needed)
+  // or Whisper's word-level timestamps — threaded through server.js -> WS ->
+  // onTranscript's meta.words. Built directly from the source `words` array
+  // (not a separate map-then-filter pass against tokenizeKeys' own output),
+  // so a dropped empty-key word can never desync a key from the wrong
+  // timestamp the way two independently-filtered parallel arrays could.
+  function tokenizeKeysWithTimes(words) {
+    const out = [];
+    for (const w of (words || [])) {
+      const k = key(w && w.word);
+      if (k) out.push({ key: k, start: w.start, end: w.end });
+    }
+    return out;
+  }
+
   // Two keys "match" if equal, or one is a prefix of the other and the
   // shorter is at least 4 chars (catches "believ"/"believed", "sing"/
   // "singing" that survived the -ing fold, etc.) — never for short keys,
@@ -140,6 +157,16 @@
     minRunWeight: 1.1,   // ...whose distinctiveness weight sums to >= this
     headHitsToCatchUp: 2,// this many of the next block's head keys, heard recently → advance
     emitThrottleMs: 200,
+    // How many blocks ahead of the immediate next one a catch-up may skip
+    // past in one jump. 1 (the historical, unconfigurable behavior — only
+    // blockIdx+2 was ever considered) is right for songs: a verse genuinely
+    // dropped live is the rare case, and a real arrangement change further
+    // out is much more likely to be an unrelated word collision than a
+    // deliberate multi-verse skip. A caller tracking a deck presented in
+    // whatever order the presenter chooses (announcement slides, not sung
+    // in a fixed arrangement) sets this higher to search the whole rest of
+    // the deck instead.
+    maxBlockSkip: 1,
   };
 
   function LyricsFollower(song, opts) {
@@ -156,7 +183,16 @@
     this.rate = 2.3;         // tokens/sec, EMA
     this.armed = false;
     this._lastMatchAt = 0;
-    this._lastAdvanceAt = 0;
+    // null, not 0 — this class is fed either real Date.now() or (see
+    // scripts/follow-replay.js) a synthetic clock starting near 0, and
+    // there's no absolute timestamp that's safely "in the past" for both
+    // domains. null is a sentinel _maybeAdvance checks for explicitly:
+    // the dwell floor simply doesn't apply until a real advance/resync has
+    // actually set this once, in whatever clock domain ingest() is being
+    // called with — fixes the very first advance being either completely
+    // dwell-unprotected (a literal 0 under a real epoch) or permanently
+    // dwell-BLOCKED (0 under a synthetic clock that starts near 0 itself).
+    this._lastAdvanceAt = null;
     this._lastEmitAt = 0;
     this.onPosition = opts.onPosition || function () {};
     this.onAdvance = opts.onAdvance || function () {};
@@ -223,7 +259,11 @@
         if (run < 2) continue;
         // A contiguity + weight score; long clean runs of distinctive words win.
         const score = weight / (1 + gaps * 0.5);
-        if (!best || score > best.score) best = { endPos: lastLi + 1, run, weight, gaps, score };
+        // r0/riEnd: the [start, end) span of THIS call's `recent` array that
+        // the winning run actually matched — lets ingest() look up the real
+        // audio timestamps of exactly those words (see tokenizeKeysWithTimes)
+        // rather than the lyric tokens, which have no timestamps of their own.
+        if (!best || score > best.score) best = { endPos: lastLi + 1, run, weight, gaps, score, r0, riEnd: ri };
         break; // first landing point for this s is enough
       }
     }
@@ -252,28 +292,61 @@
     const b = this.blocks[this.blockIdx];
     const next = this.blocks[this.blockIdx + 1];
     if (!b || !next) return;
-    if (now - this._lastAdvanceAt < this._dwell()) return;
-    if (this.confidence < this.cfg.confHold) return; // frozen — wait for lock
+    if (this._lastAdvanceAt !== null && now - this._lastAdvanceAt < this._dwell()) return;
 
-    if (this.pos >= b.end - this.cfg.tailN) this.armed = true;
+    // A block's own distinctive opening words being clearly heard is
+    // checked BEFORE the frozen/confidence gate below, and can override it
+    // — deliberately, for BOTH the immediate next block and any farther one
+    // maxBlockSkip allows. Confidence is built entirely by _alignForward's
+    // windowed search against blocks NEAR the current position (see its own
+    // `hi` bound), so it structurally can never rise on its own from a
+    // presenter/singer who's jumped ahead without ever touching the blocks
+    // in between, OR from real ASR noise degrading the in-block alignment
+    // right at a transition (Whisper re-transcribing its whole growing
+    // window can revise/drop earlier words between calls — see this file's
+    // own top-of-file note — which the smooth, always-appending replay
+    // harness doesn't fully exercise). A direct headHits hit against a
+    // specific block is independent, self-contained evidence either way —
+    // the same "trust this strong automatic signal" reasoning resync()
+    // already applies for a manual operator jump (which also bumps
+    // confidence directly rather than waiting for the normal path to earn
+    // it), now leaned on more than the fragile continuous-tracking
+    // confidence path, closer to how a music app trusts a confirmed lyric
+    // match over guessed playback position. Farthest first, so a block
+    // that's genuinely been skipped past wins over a partial coincidence on
+    // a nearer one; blockIdx+1 is checked last (maxBlockSkip defaults to 1,
+    // so ordinarily this only ever considers +1 — the loop still runs for
+    // it, just with a single iteration).
+    // far ranges maxBlockSkip .. 0 so idx covers blockIdx+1+maxBlockSkip down
+    // to blockIdx+1 itself (far=0) — farthest-first throughout, the same
+    // order the original code used for its own blockIdx+2-before-blockIdx+1
+    // tie-break, just unified into one sweep instead of two separate checks.
+    let target = null;
+    for (let far = this.cfg.maxBlockSkip; far >= 0; far--) {
+      const idx = this.blockIdx + 1 + far;
+      if (!this.blocks[idx]) continue;
+      if (this._headHits(recent, idx) >= this.cfg.headHitsToCatchUp) { target = idx; break; }
+    }
+    if (target != null) this.confidence = Math.max(this.confidence, 0.5); // trust it, like resync()
 
-    // Catch-up: the next block's opening distinctive words were just heard.
-    const nextHits = this._headHits(recent, this.blockIdx + 1);
-    const skipHits = this._headHits(recent, this.blockIdx + 2);
-    const catchUp = nextHits >= this.cfg.headHitsToCatchUp;
+    if (target == null) {
+      if (this.confidence < this.cfg.confHold) return; // frozen — wait for lock
 
-    // Anticipation: armed, confident, predicted block end is near.
-    const secsToEnd = Math.max(0, b.end - this.pos) / Math.max(0.6, this.rate);
-    const anticipate = this.armed
-      && this.confidence >= this.cfg.confAdvance
-      && secsToEnd <= this.cfg.lookaheadSec;
+      if (this.pos >= b.end - this.cfg.tailN) this.armed = true;
 
-    if (!catchUp && !anticipate) return;
+      // Anticipation only — armed, confident, predicted block end is near.
+      // The ordinary next-block catch-up is already covered by the
+      // anchor-confirm loop above; this is genuinely the only path left
+      // that depends on the continuous position/rate estimate.
+      const secsToEnd = Math.max(0, b.end - this.pos) / Math.max(0.6, this.rate);
+      const anticipate = this.armed
+        && this.confidence >= this.cfg.confAdvance
+        && secsToEnd <= this.cfg.lookaheadSec;
 
-    // Almost always +1. Only skip a block when the block-after-next's own
-    // head words were also clearly heard (a verse genuinely dropped live).
-    const target = (skipHits >= this.cfg.headHitsToCatchUp && this.blocks[this.blockIdx + 2])
-      ? this.blockIdx + 2 : this.blockIdx + 1;
+      if (!anticipate) return;
+      target = this.blockIdx + 1;
+    }
+
     this.blockIdx = target;
     if (this.pos < this.blocks[target].start) this.pos = this.blocks[target].start;
     this.armed = false;
@@ -290,12 +363,21 @@
   // text: the transcript segment (full text of the current window is fine —
   // we only look at its tail). isFinal is accepted for parity with the WS
   // payload but doesn't change handling: every call re-aligns the tail.
+  // meta.words (optional): [{word, start, end}] real per-word timestamps
+  // (seconds) — Deepgram always includes these; Whisper can via word/token
+  // timestamps. When present, `rate` is updated from the actual elapsed
+  // AUDIO time of the matched words instead of wall-clock arrival timing,
+  // which is a poor proxy since ASR delivers text in irregular bursts, not
+  // smoothly. Falls back to the previous wall-clock estimate when absent.
   LyricsFollower.prototype.ingest = function (text, meta) {
     if (!this.enabled) return;
     const now = (meta && meta.now) || Date.now();
-    const keys = tokenizeKeys(text);
+    const timed = meta && Array.isArray(meta.words) && meta.words.length
+      ? tokenizeKeysWithTimes(meta.words) : null;
+    const keys = timed ? timed.map(t => t.key) : tokenizeKeys(text);
     if (!keys.length) { this._emit(now); return; }
     const recent = keys.slice(-this.cfg.tailWords);
+    const recentTimes = timed ? timed.slice(-this.cfg.tailWords) : null;
     const curBlock = this.blocks[this.blockIdx];
 
     const m = this._alignForward(recent);
@@ -306,7 +388,19 @@
       const crossesOut = curBlock && m.endPos > curBlock.end;
       const mayMove = m.endPos > this.pos && (m.locked || !crossesOut);
       if (mayMove) {
-        if (this._lastMatchAt) {
+        let usedRealTime = false;
+        if (recentTimes) {
+          const startT = recentTimes[m.r0] && recentTimes[m.r0].start;
+          const endT = recentTimes[m.riEnd - 1] && recentTimes[m.riEnd - 1].end;
+          if (startT != null && endT != null && endT > startT) {
+            const elapsed = endT - startT;
+            if (elapsed > 0.15) {
+              const inst = (m.endPos - this.pos) / elapsed;
+              if (inst > 0 && inst < 12) { this.rate = this.rate * 0.7 + inst * 0.3; usedRealTime = true; }
+            }
+          }
+        }
+        if (!usedRealTime && this._lastMatchAt) {
           const dt = (now - this._lastMatchAt) / 1000;
           if (dt > 0.15) {
             const inst = (m.endPos - this.pos) / dt;
@@ -326,7 +420,7 @@
     this._emit(now);
   };
 
-  const API = { LyricsFollower, flattenSong, key, keyMatch, tokenizeKeys, DEFAULTS };
+  const API = { LyricsFollower, flattenSong, key, keyMatch, tokenizeKeys, tokenizeKeysWithTimes, DEFAULTS };
 
   if (typeof module !== 'undefined' && module.exports) module.exports = API;
   if (root) root.KairoLyricsFollow = API;

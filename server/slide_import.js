@@ -149,6 +149,57 @@ function firstRtfColor(rtf) {
   return entries[+cf[1]] || null;
 }
 
+// ── Section labels (ProPresenter-style annotation) ─────────────────────────
+// Recognizes the same Verse/Chorus/Pre-Chorus/Bridge/Tag/etc. section
+// markers ProPresenter itself annotates songs with — the convention most
+// worship teams already type into their own lyric sheets, either as a bare
+// line of its own ("Chorus" on one line, its lyrics on the next, a blank
+// line between) or as the opening line of a block that also carries its
+// lyrics ("Verse 1\nAmazing grace...", no blank line between). Matched
+// loosely enough to catch "[Chorus]", "Chorus:", "CHORUS", "Verse 2" etc.
+// without also matching an ordinary lyric line that happens to contain one
+// of these words — it must be the WHOLE line, nothing else.
+const SECTION_LABEL_RE = /^\[?\s*(verse\s*\d*|chorus|pre-?chorus|bridge|tag|outro|ending|intro|interlude|refrain|solo|vamp|breakdown)\s*\]?\s*:?\s*$/i;
+
+function normalizeSectionLabel(line) {
+  return line.replace(/[[\]:]/g, '').replace(/\s+/g, ' ').trim()
+    .replace(/\b\w/g, c => c.toUpperCase());
+}
+
+// Most imports arrive as one block per slide already (PPTX slides, .pro6
+// cues) — here the label, if present, is only ever the block's OWN first
+// line (no separate label-only block to merge in). Returns
+// { label, lines } with the marker line stripped when found, or null when
+// the block doesn't open with one.
+function extractLeadingSectionLabel(lines) {
+  if (lines.length > 1 && SECTION_LABEL_RE.test(lines[0])) {
+    return { label: normalizeSectionLabel(lines[0]), lines: lines.slice(1) };
+  }
+  return null;
+}
+
+// Freeform text (and anything routed through fromText, like .docx) can
+// ALSO carry the label as its own separate blank-line-delimited block, one
+// "Chorus" line with nothing else, followed by its lyrics as the NEXT
+// block — a real, common shape for hand-typed lyric sheets. A bare label
+// block never becomes its own (near-empty) slide; it's folded into
+// whichever block follows it.
+function applySectionLabels(blocks) {
+  const out = [];
+  let pendingLabel = null;
+  for (const lines of blocks) {
+    if (lines.length === 1 && SECTION_LABEL_RE.test(lines[0])) {
+      pendingLabel = normalizeSectionLabel(lines[0]);
+      continue;
+    }
+    const leading = extractLeadingSectionLabel(lines);
+    const label = leading?.label || pendingLabel || `Slide ${out.length + 1}`;
+    pendingLabel = null;
+    out.push({ label, lines: leading?.lines || lines });
+  }
+  return out;
+}
+
 // ── Plain text ────────────────────────────────────────────────────────────
 // A blank line starts a new slide — the convention every worship team already
 // uses when they email lyrics.
@@ -158,7 +209,7 @@ function fromText(text) {
     .split(/\n\s*\n/)
     .map(chunk => chunk.split('\n').map(l => l.trim()).filter(Boolean))
     .filter(lines => lines.length);
-  return blocks.map((lines, i) => ({ label: `Slide ${i + 1}`, lines }));
+  return applySectionLabels(blocks);
 }
 
 // ── DOCX ──────────────────────────────────────────────────────────────────
@@ -196,7 +247,10 @@ function fromPptx(buf) {
       .map(p => [...p[1].matchAll(/<a:t\b[^>]*>([\s\S]*?)<\/a:t>/g)]
         .map(t => decode(t[1])).join('').trim())
       .filter(Boolean);
-    if (lines.length) blocks.push({ label: `Slide ${i + 1}`, lines });
+    if (lines.length) {
+      const leading = extractLeadingSectionLabel(lines);
+      blocks.push(leading ? { label: leading.label, lines: leading.lines } : { label: `Slide ${i + 1}`, lines });
+    }
   });
   return blocks;
 }
@@ -215,7 +269,10 @@ function fromPro6(buf) {
     let rtf = '';
     try { rtf = Buffer.from(b64, 'base64').toString('utf8'); } catch { return; }
     const lines = rtfToText(rtf).split('\n').map(l => l.trim()).filter(Boolean);
-    if (lines.length) blocks.push({ label: `Slide ${i + 1}`, lines });
+    if (lines.length) {
+      const leading = extractLeadingSectionLabel(lines);
+      blocks.push(leading ? { label: leading.label, lines: leading.lines } : { label: `Slide ${i + 1}`, lines });
+    }
   });
   if (!blocks.length) throw new Error('slide text could not be decoded');
   return blocks;
