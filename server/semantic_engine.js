@@ -10,7 +10,7 @@
 // literal words with it.
 //
 // This is suggestions-only, same as fingerprint — it never drives an
-// auto-send decision. See databases/logos/build_verse_embeddings.mjs for
+// auto-send decision. See databases/bibles/build_verse_embeddings.mjs for
 // how the corpus-side vectors were produced (same model, same settings, so
 // query and corpus vectors are directly comparable).
 'use strict';
@@ -18,10 +18,18 @@
 const fs   = require('fs');
 const path = require('path');
 
-const DATA_DIR    = path.join(__dirname, '..', 'databases', 'logos');
+const DATA_DIR    = path.join(__dirname, '..', 'databases', 'bibles');
 const EMB_BIN      = path.join(DATA_DIR, 'verse_embeddings.f32');
 const EMB_META     = path.join(DATA_DIR, 'verse_embeddings.json');
-const MODEL_DIR    = path.join(DATA_DIR, 'model', 'embeddinggemma');
+// cache_dir root, NOT the model's own folder — @huggingface/transformers
+// nests every download under <cache_dir>/<org>/<repo>/... itself (confirmed
+// against mt_engine.js's real on-disk layout, e.g.
+// models/mt/opus-mt-en-fr/Xenova/opus-mt-en-fr/...), so MODEL_DIR below is
+// derived, not something ensureLoaded/installModel pass in directly.
+const MODEL_CACHE_BASE = path.join(DATA_DIR, 'model');
+const MODEL_ID         = 'onnx-community/embeddinggemma-300m-ONNX';
+const MODEL_DIR         = path.join(MODEL_CACHE_BASE, ...MODEL_ID.split('/'));
+const MODEL_WEIGHTS_FILE = path.join(MODEL_DIR, 'onnx', 'model_q4.onnx_data');
 
 // @huggingface/transformers is ESM-only — same dynamic-import pattern
 // mt_engine.js already uses for the same reason.
@@ -36,6 +44,19 @@ let _loadPromise = null;
 let _corpus       = null;   // Float32Array, flat [verseCount * dims]
 let _dims          = 0;
 let _count          = 0;
+// Serializes retryLoaded() calls (see the comment on retryLoaded below) —
+// starts resolved so the first call's .then() runs on the next microtask
+// with nothing to wait for.
+let _retryChain = Promise.resolve();
+
+// Passive, local-files-only presence check — a real file-existence test,
+// not a pipeline load, so a Settings-panel status poll never risks
+// triggering network access or the ~1-2s ONNX session init just to answer
+// "is this installed yet?".
+function isModelPresent() {
+  return fs.existsSync(MODEL_WEIGHTS_FILE) && fs.statSync(MODEL_WEIGHTS_FILE).size > 1_000_000;
+}
+function embeddingsPresent() { return fs.existsSync(EMB_BIN) && fs.existsSync(EMB_META); }
 
 // Kicks off model + corpus loading in the background. Safe to call more
 // than once — subsequent calls reuse the in-flight/completed promise.
@@ -43,12 +64,45 @@ let _count          = 0;
 // layers (direct/verbatim/fingerprint/anchor) must stay on their existing
 // startup timeline; this loads a ~200MB model on top and shouldn't delay
 // "seconds to screen" for the very start of a service. isReady() is the
-// gate every caller checks instead.
+// gate every caller checks instead. Never downloads anything itself
+// (local_files_only: true) — semantic_installer.js is the only path that
+// fetches the model/builds the embeddings on a fresh install; this only
+// ever loads what's already on disk, and fails soft (isReady() stays
+// false, semanticSearch calls just no-op) when nothing's there yet.
+// ensureLoaded() caches its promise forever, including a REJECTED one — a
+// server that booted before the installer ever ran would otherwise be
+// stuck replaying that same "not found" failure for the rest of the
+// process's life even after semantic_installer.js finishes. Called once,
+// right after a successful install, from the same worker process that
+// actually serves semanticSearch (see detection_worker.js's 'reloadSemantic'
+// handler) — retryLoaded() must run there, not in server.js's main
+// process, since this whole module's state is per-process/per-thread.
+//
+// Chains onto _retryChain rather than resetting state immediately — two
+// retryLoaded() calls back to back (e.g. two 'reloadSemantic' worker
+// messages) would otherwise both see the same in-flight/stale _loadPromise,
+// both reset it, and both start their own ensureLoaded() concurrently: two
+// loads racing over the same module-level _extractor/_corpus, with
+// isReady() able to flip true on whichever happens to finish first and the
+// other's late completion silently overwriting it afterward. Chaining off
+// a shared promise (rather than just awaiting whatever _loadPromise was at
+// call time) closes that gap — each retry's reset+reload only begins once
+// the previous one has fully finished, so at most one load ever runs.
+function retryLoaded() {
+  _retryChain = _retryChain.catch(() => {}).then(() => {
+    _loadPromise = null;
+    _extractor = null;
+    _corpus = null;
+    return ensureLoaded();
+  });
+  return _retryChain;
+}
+
 function ensureLoaded() {
   if (_loadPromise) return _loadPromise;
   _loadPromise = (async () => {
-    if (!fs.existsSync(EMB_BIN) || !fs.existsSync(EMB_META)) {
-      throw new Error('verse_embeddings.f32/.json not found — run server/build_verse_embeddings.mjs first');
+    if (!embeddingsPresent()) {
+      throw new Error('verse_embeddings.f32/.json not found — run the semantic-layer installer (Settings) or server/build_verse_embeddings.mjs first');
     }
     const meta = JSON.parse(fs.readFileSync(EMB_META, 'utf8'));
     _dims  = meta.dims;
@@ -60,17 +114,29 @@ function ensureLoaded() {
       throw new Error(`verse_embeddings.f32 size mismatch: expected ${_count * _dims} floats, got ${_corpus.length}`);
     }
 
-    const { pipeline, env } = await loadHf();
-    env.allowLocalModels  = true;
-    env.allowRemoteModels = false;
-    env.localModelPath    = path.dirname(MODEL_DIR);
-    _extractor = await pipeline('feature-extraction', path.basename(MODEL_DIR), {
-      local_files_only: true,
+    const { pipeline } = await loadHf();
+    _extractor = await pipeline('feature-extraction', MODEL_ID, {
       dtype: 'q4',
+      cache_dir: MODEL_CACHE_BASE,
+      local_files_only: true,
     });
     console.log(`[Semantic] Ready — ${_count} verse embeddings (${_dims}d) + model loaded.`);
   })();
   return _loadPromise;
+}
+
+// The one path that's allowed to hit the network — used only by
+// semantic_installer.js. `onProgress` receives the library's own
+// {status, file, progress, loaded, total} events, same shape mt_engine.js
+// already forwards for the MT installer's progress bar.
+async function installModel(onProgress) {
+  const { pipeline } = await loadHf();
+  await pipeline('feature-extraction', MODEL_ID, {
+    dtype: 'q4',
+    cache_dir: MODEL_CACHE_BASE,
+    local_files_only: false,
+    progress_callback: onProgress,
+  });
 }
 
 function isReady() { return !!(_extractor && _corpus); }
@@ -109,4 +175,8 @@ async function search(text, limit = 5) {
   return top;
 }
 
-module.exports = { ensureLoaded, isReady, embed, search };
+module.exports = {
+  ensureLoaded, retryLoaded, isReady, embed, search,
+  isModelPresent, embeddingsPresent, installModel,
+  MODEL_DIR, MODEL_WEIGHTS_FILE, EMB_BIN, EMB_META,
+};

@@ -53,8 +53,11 @@
     "resources": {
       "../server": "server",
       "../src": "src",
-      "../databases/logos/map.json": "databases/logos/map.json",
-      "../databases/logos/kjv.json": "databases/logos/kjv.json"
+      "../databases/bibles/map.json": "databases/bibles/map.json",
+      "../databases/bibles/kjv.json": "databases/bibles/kjv.json",
+      "../databases/bibles/model": "databases/bibles/model",
+      "../databases/bibles/verse_embeddings.f32": "databases/bibles/verse_embeddings.f32",
+      "../databases/bibles/verse_embeddings.json": "databases/bibles/verse_embeddings.json"
     },
     "externalBin": [
       "bin/node"

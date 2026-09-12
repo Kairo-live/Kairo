@@ -17,17 +17,23 @@
 //
 // Usage: node server/build_verse_embeddings.mjs
 'use strict';
-import { pipeline, env } from '@huggingface/transformers';
+import { pipeline } from '@huggingface/transformers';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const DATA_DIR   = path.join(__dirname, '..', 'databases', 'logos');
+const DATA_DIR   = path.join(__dirname, '..', 'databases', 'bibles');
 const MAP_PATH   = path.join(DATA_DIR, 'map.json');
 const OUT_BIN    = path.join(DATA_DIR, 'verse_embeddings.f32');
 const OUT_META   = path.join(DATA_DIR, 'verse_embeddings.json');
-const MODEL_DIR  = path.join(DATA_DIR, 'model', 'embeddinggemma');
+// Must match semantic_engine.js's MODEL_CACHE_BASE/MODEL_ID — a
+// @huggingface/transformers cache_dir nests every download under
+// <cache_dir>/<org>/<repo>/... itself, so this is that resolved path, not
+// a directory this script owns the shape of.
+const MODEL_CACHE_BASE = path.join(DATA_DIR, 'model');
+const MODEL_ID   = 'onnx-community/embeddinggemma-300m-ONNX';
+const MODEL_DIR  = path.join(MODEL_CACHE_BASE, ...MODEL_ID.split('/'));
 
 const RE_HEADING = /\[[^\]]*\]/g;   // [A Psalm of David.] etc — not spoken, strip before embedding
 const BATCH_SIZE = 48;
@@ -39,14 +45,11 @@ async function main() {
   const verses = raw.verses;
   console.log(`[Embed] ${verses.length} verses to embed.`);
 
-  env.allowLocalModels  = true;
-  env.allowRemoteModels = false;
-  env.localModelPath    = path.dirname(MODEL_DIR);
-
   console.log('[Embed] Loading embeddinggemma…');
-  const extractor = await pipeline('feature-extraction', path.basename(MODEL_DIR), {
-    local_files_only: true,
+  const extractor = await pipeline('feature-extraction', MODEL_ID, {
     dtype: 'q4',
+    cache_dir: MODEL_CACHE_BASE,
+    local_files_only: true,
   });
   console.log(`[Embed] Model loaded in ${((Date.now() - t0) / 1000).toFixed(1)}s.`);
 

@@ -6,6 +6,7 @@
 mod ndi;
 #[cfg(target_os = "macos")]
 mod syphon;
+mod fonts;
 
 use std::process::{Child, Command};
 use std::sync::{Arc, Mutex};
@@ -359,14 +360,14 @@ fn start_server(app: &AppHandle, port: u16, token: &str) -> Option<Child> {
         }
     };
 
-    // Database dir — bundled map.json lives at resource_dir/databases/logos/
+    // Database dir — bundled map.json lives at resource_dir/databases/bibles/
     let db_dir = {
-        let bundled = resource_dir.join("databases").join("logos");
+        let bundled = resource_dir.join("databases").join("bibles");
         if bundled.exists() {
             bundled
         } else {
-            // Dev: project root databases/logos
-            cwd().join("databases").join("logos")
+            // Dev: project root databases/bibles
+            cwd().join("databases").join("bibles")
         }
     };
 
@@ -660,6 +661,20 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        // "Paste from clipboard" imports (service.js's quickImportClipboard)
+        // — see the Cargo.toml comment next to this dependency.
+        .plugin(tauri_plugin_clipboard_manager::init())
+        // See the Cargo.toml comment next to this dependency: only the
+        // native right-click menu is suppressed, so the app's own
+        // JS-based context menus (Timer/Slides/Songs/Media cards) are
+        // what the operator actually sees on right-click, in dev builds
+        // too — not just release builds where WRY's devtools menu never
+        // gets compiled in to begin with.
+        .plugin(
+            tauri_plugin_prevent_default::Builder::new()
+                .with_flags(tauri_plugin_prevent_default::Flags::CONTEXT_MENU)
+                .build(),
+        )
         .manage(ServerProcess(Arc::new(Mutex::new(None))))
         .manage(server_config)
         .manage(NdiState(Arc::new(Mutex::new(ndi::NdiHandle::default()))));
@@ -676,6 +691,7 @@ pub fn run() {
             get_server_config,
             list_monitors,
             signal_main_ready,
+            fonts::list_system_fonts,
             install_update,
             ndi_available,
             ndi_start,

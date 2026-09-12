@@ -11,11 +11,11 @@ server/node_modules/
 databases/settings.json
 
 # Large binary / model files
-databases/logos/ivf.faiss
-databases/logos/verses.bin
-databases/logos/verse_embeddings.f32
-databases/logos/verse_embeddings.json
-databases/logos/model/
+databases/bibles/ivf.faiss
+databases/bibles/verses.bin
+databases/bibles/verse_embeddings.f32
+databases/bibles/verse_embeddings.json
+databases/bibles/model/
 # map.json and kjv.json are required by the Tauri bundle — committed.
 
 # Operator runtime state — regenerated on first run (segments.js seeds
@@ -46,3 +46,5 @@ scripts/kairo-updater.key
 
 # Claude Code working dir (per-clone state, never shared)
 .claude/
+
+.scratch_preview/
