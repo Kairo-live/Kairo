@@ -6,7 +6,7 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { parseAllSpokenReferences, resolvePartialReference, referenceContext } = require('./reference_parser');
+const { parseAllSpokenReferences, resolvePartialReference, referenceContext, detectBookMentions } = require('./reference_parser');
 
 test('a single-verse citation immediately followed by ordinary continuation text starting with "for" does NOT become a bogus 2-verse range (real incident, 2026-09-07)', () => {
   // "for" is a deliberate, necessary homophone of "four" (consumeNumber
@@ -121,4 +121,25 @@ test('"chapter N of Book" word order still resolves (regression check for the ea
   assert.equal(refs[0].chapter, 7);
   assert.equal(refs[0].verseStart, 1);
   assert.equal(refs[0].verseEnd, 6);
+});
+
+// Real live incident: "Corinthians ten three to five" (actually 2 Corinthians
+// 10:3-5) got silently resolved and auto-sent as "1 Corinthians" — traced to
+// detectBookMentions resolving an EARLIER, bare, unprefixed "Corinthians"
+// mention (no chapter/verse yet, from a growing interim transcript) via
+// BOOK_ALIASES's own blind NUMBERED_BOOK_VARIANTS[b][0] default fallback,
+// writing "1 Corinthians" into referenceContext BEFORE the full citation
+// ever reached resolveAmbiguousRefs's real, context-aware disambiguation —
+// which then dutifully "resolved via active context" to the wrong book.
+test('a bare, unprefixed numbered-book mention ("Corinthians", "Timothy"...) never sets context via detectBookMentions — only an explicit citation with its own chapter/verse may resolve which one (real incident, 2026-09-13)', () => {
+  assert.deepEqual(detectBookMentions('the book of Corinthians', true), [],
+    'a trigger-phrase + bare numbered-book stem must not silently default to the #1 variant');
+  assert.deepEqual(detectBookMentions('read Timothy chapter three', true), [],
+    'same for every other numbered-book stem (Timothy, Kings, Samuel, Peter, Chronicles, Thessalonians)');
+
+  referenceContext.reset();
+  const refs = parseAllSpokenReferences('corinthians ten three to five');
+  assert.equal(refs.length, 2, 'no active context means the full citation is genuinely ambiguous — both variants, not a silent default');
+  assert.deepEqual(new Set(refs.map(r => r.book)), new Set(['1 Corinthians', '2 Corinthians']));
+  assert.ok(refs.every(r => r.ambiguousGroup), 'both must be tagged ambiguous, not one confidently chosen');
 });

@@ -843,7 +843,19 @@ function detectBookMentions(text, inBibleMode = false) {
           books.push(BOOK_ALIASES[key]);
           seen.add(BOOK_ALIASES[key]);
         }
-      } else if (afterWords[0] && SINGLE_WORD_BOOKS.has(afterWords[0])) {
+      } else if (afterWords[0] && SINGLE_WORD_BOOKS.has(afterWords[0]) && !NUMBERED_BOOK_VARIANTS[afterWords[0]]) {
+        // A bare numbered-book STEM ("Corinthians", "Timothy", "Kings"...)
+        // with no 1st/2nd prefix is excluded even here, unlike ordinary
+        // AMBIGUOUS_BOOKS — see this function's own header comment above
+        // AMBIGUOUS_BOOKS for why a trigger phrase alone can resolve "is
+        // this really a citation" but never "which numbered book," so
+        // there's no safe default to fall back on the way there is for a
+        // single-word ambiguous book. Real incident: "the book of
+        // Corinthians" (no number) silently resolved to "1 Corinthians" via
+        // BOOK_ALIASES's own blind default (NUMBERED_BOOK_VARIANTS[b][0]),
+        // poisoning referenceContext before the real citation ("Corinthians
+        // 10:3-5", actually 2 Corinthians) ever got a chance to go through
+        // resolveAmbiguousRefs's real, context-aware disambiguation.
         const resolved = BOOK_ALIASES[afterWords[0]];
         if (resolved && !seen.has(resolved)) { books.push(resolved); seen.add(resolved); }
       }
@@ -881,7 +893,11 @@ function detectBookMentions(text, inBibleMode = false) {
       // (Luke 4) and wipe the chapter, breaking later "verse N" fusion. Genuine
       // ambiguous-book callouts arrive with a trigger phrase (handled in pass 1)
       // or a chapter (handled by the full parser, not here).
-      if (AMBIGUOUS_BOOKS.has(w)) continue;
+      // Numbered-book stems ("corinthians", "timothy", "kings"...) are
+      // excluded unconditionally, same reasoning as pass 1's own check
+      // just above — no default is safe for "which numbered book," only
+      // resolveAmbiguousRefs's real context-aware resolution is.
+      if (AMBIGUOUS_BOOKS.has(w) || NUMBERED_BOOK_VARIANTS[w]) continue;
       const resolved = BOOK_ALIASES[w];
       if (resolved && !seen.has(resolved)) { books.push(resolved); seen.add(resolved); }
     }
