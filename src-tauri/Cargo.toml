@@ -17,6 +17,21 @@ tauri = { version = "2", features = ["webview-data-url"] }
 tauri-plugin-shell = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-updater = "2"
+# "Paste from clipboard" imports (service.js's quickImportClipboard) used
+# plain navigator.clipboard.readText() — the web Clipboard API, which a
+# Tauri webview never grants without this plugin, so it silently threw every
+# time and the operator was dumped into the manual paste-textarea fallback
+# on EVERY use, not just when the OS clipboard genuinely couldn't be read.
+tauri-plugin-clipboard-manager = "2"
+# Suppresses WRY's own native right-click menu (Reload/Inspect Element) —
+# in a dev/debug build that menu wins over the page's contextmenu listener
+# unconditionally, no matter what the JS does (confirmed: preventDefault()
+# has no effect on it), so the app's own custom menu (Quick edit/Rename/
+# Edit/Duplicate/Delete — Timer, Slides, Songs, Media cards) never even
+# got a chance to show. Only CONTEXT_MENU is disabled — Cmd+Option+I still
+# opens devtools directly, this just stops right-click from being
+# intercepted before the page ever sees it.
+tauri-plugin-prevent-default = "5"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 reqwest = { version = "0.12", features = ["blocking"] }

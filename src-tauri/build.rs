@@ -16,6 +16,7 @@ fn main() {
                 "get_server_port",
                 "get_server_token",
                 "get_server_config",
+                "list_system_fonts",
                 "signal_main_ready",
                 "install_update",
                 "ndi_available",
