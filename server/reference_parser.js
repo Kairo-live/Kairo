@@ -393,6 +393,90 @@ function getNumberedPrefix(word) {
   return null;
 }
 
+// Shared by parseSpokenReference's own scan AND parseAllSpokenReferences's
+// outer segmenting loop (previously two independently-maintained copies of
+// this exact logic — a fix to one silently never reached the other; see the
+// numbered-book fuzzy fallback below, which was originally added only here
+// and had no effect at all through parseAllSpokenReferences until this was
+// extracted). Returns { bookName, consumed } (bookName null if nothing
+// matched at position i) — never mutates `words`.
+function matchBookAt(words, i) {
+  let bookName = null, consumed = 0;
+
+  if (i + 1 < words.length) {
+    const num = getNumberedPrefix(words[i]);
+    if (num) {
+      const key = `${num} ${words[i+1]}`;
+      if (BOOK_ALIASES[key]) { bookName = BOOK_ALIASES[key]; consumed = 2; }
+      else {
+        // Exact stem match failed — the numbered PREFIX itself
+        // ("first"/"1st"/"two"/...) is already strong, deliberate intent
+        // that's rarely a coincidence, so a fuzzy match on just the stem
+        // word is safe to attempt here even without a "chapter" keyword,
+        // unlike the bare single-word case below. Real incident this
+        // fixes: local-STT mishearings of "Kings"/"Samuel"/"Corinthians"/
+        // etc. that survive as something close but not exact ("kings" ->
+        // "king's", "corinthians" -> "corinthian"). Tight distance either
+        // way — this is still guessing at which book, not just whether
+        // one was named.
+        const stem = words[i+1];
+        let bestDist = Infinity, bestStem = null;
+        for (const s of Object.keys(NUMBERED_BOOK_VARIANTS)) {
+          const maxDist = s.length >= 9 ? 2 : 1;
+          if (Math.abs(s.length - stem.length) > maxDist) continue;
+          if (stem[0] !== s[0]) continue;
+          const d = cachedLevenshtein(stem, s);
+          if (d <= maxDist && d < bestDist) { bestDist = d; bestStem = s; }
+        }
+        if (bestStem) {
+          // getNumberedPrefix returns a STRING ('1'/'2'/'3'); every
+          // NUMBERED_BOOK_VARIANTS entry only ever has 2 real variants
+          // (no book goes past "2nd"), so a spoken "third" here is
+          // already a mishearing itself — fall back to the 1st variant
+          // rather than indexing past the array.
+          const variants = NUMBERED_BOOK_VARIANTS[bestStem];
+          bookName = variants[Number(num) - 1] || variants[0];
+          consumed = 2;
+        }
+      }
+    }
+  }
+  if (!bookName && SINGLE_WORD_BOOKS.has(words[i])) { bookName = BOOK_ALIASES[words[i]]; consumed = 1; }
+
+  if (!bookName && words[i].length >= 4) {
+    const nextWord = words[i+1] || '';
+    // "chapter" immediately after is a strong intent signal — allow looser
+    // matching there. A bare number after an ordinary long word is weak
+    // evidence (sermons are full of "<word> four", "<word> forty"), so we
+    // require a near-exact match (dist ≤ 1) in that case to avoid turning
+    // words like "strategical" / "accessed" into phantom book references.
+    const hasChapterKw = nextWord === 'chapter';
+    const hasNumber    = /^\d+$/.test(nextWord) || WORD_TO_NUM[nextWord] !== undefined;
+    // Short candidate words (under 6 chars — Ruth, Mark, Luke, Acts, Amos,
+    // Joel, Jude...) carry much higher false-positive risk per fuzzy
+    // attempt: plenty of ordinary short words sit within edit-distance-1
+    // of a short book name. Require the explicit "chapter" keyword (the
+    // strongest available signal) for those; a bare trailing number alone
+    // isn't enough evidence at that length. Longer words (the original
+    // >=6 behavior) keep the more permissive bare-number allowance too.
+    const isShort = words[i].length < 6;
+    if (hasChapterKw || (hasNumber && !isShort)) {
+      const candidate = words[i];
+      const maxDist = isShort ? 1 : (hasChapterKw ? (candidate.length >= 8 ? 2 : 1) : 1);
+      let bestDist = Infinity, bestAlias = null;
+      for (const alias of SINGLE_WORD_BOOKS) {
+        if (Math.abs(alias.length - candidate.length) > maxDist) continue;
+        if (candidate[0] !== alias[0]) continue;   // STT rarely changes the first phoneme
+        const d = cachedLevenshtein(candidate, alias);
+        if (d <= maxDist && d < bestDist) { bestDist = d; bestAlias = alias; }
+      }
+      if (bestAlias) { bookName = BOOK_ALIASES[bestAlias]; consumed = 1; }
+    }
+  }
+
+  return { bookName, consumed };
+}
+
 function parseSpokenReference(text, inBibleMode = false) {
   let cleanText = cleanReferenceText(text);
 
@@ -408,39 +492,8 @@ function parseSpokenReference(text, inBibleMode = false) {
   const words = cleanText.split(/\s+/);
 
   for (let i = 0; i < words.length; i++) {
-    let bookName = null, consumed = 0;
-
-    if (i + 1 < words.length) {
-      const num = getNumberedPrefix(words[i]);
-      if (num) {
-        const key = `${num} ${words[i+1]}`;
-        if (BOOK_ALIASES[key]) { bookName = BOOK_ALIASES[key]; consumed = 2; }
-      }
-    }
-    if (!bookName && SINGLE_WORD_BOOKS.has(words[i])) { bookName = BOOK_ALIASES[words[i]]; consumed = 1; }
-
-    if (!bookName && words[i].length >= 6) {
-      const nextWord = words[i+1] || '';
-      // "chapter" immediately after is a strong intent signal — allow looser
-      // matching there. A bare number after an ordinary long word is weak
-      // evidence (sermons are full of "<word> four", "<word> forty"), so we
-      // require a near-exact match (dist ≤ 1) in that case to avoid turning
-      // words like "strategical" / "accessed" into phantom book references.
-      const hasChapterKw = nextWord === 'chapter';
-      const hasNumber    = /^\d+$/.test(nextWord) || WORD_TO_NUM[nextWord] !== undefined;
-      if (hasChapterKw || hasNumber) {
-        const candidate = words[i];
-        const maxDist = hasChapterKw ? (candidate.length >= 8 ? 2 : 1) : 1;
-        let bestDist = Infinity, bestAlias = null;
-        for (const alias of SINGLE_WORD_BOOKS) {
-          if (Math.abs(alias.length - candidate.length) > maxDist) continue;
-          if (candidate[0] !== alias[0]) continue;   // STT rarely changes the first phoneme
-          const d = cachedLevenshtein(candidate, alias);
-          if (d <= maxDist && d < bestDist) { bestDist = d; bestAlias = alias; }
-        }
-        if (bestAlias) { bookName = BOOK_ALIASES[bestAlias]; consumed = 1; }
-      }
-    }
+    const matched = matchBookAt(words, i);
+    const bookName = matched.bookName, consumed = matched.consumed;
 
     if (!bookName) continue;
 
@@ -559,6 +612,21 @@ function parseSpokenReference(text, inBibleMode = false) {
 
     let hasVerseKeyword = idx < words.length && ['verse','verses','vers',':'].includes(words[idx]);
     if (hasVerseKeyword) idx++;
+    else if (idx < words.length && words[idx] === 'and' && idx + 1 < words.length
+        && consumeNumber(words, idx + 1)
+        && !(referenceContext.book === bookName && referenceContext.chapter != null)) {
+      // "Book N and M" ("John 15 and 16") — no "chapter"/"verse" keyword at
+      // all between the two numbers, a common plain-spoken citation shape.
+      // Owner's spec: assume chapter N, verse M — UNLESS this book's
+      // chapter is already an active, established context, in which case a
+      // bare "N and M" more plausibly means two VERSES within the
+      // already-known chapter (a compound verse citation), not a fresh
+      // chapter number smuggled in via "and" — so this fallback is
+      // deliberately skipped there and falls through to the normal
+      // hold-window/stray-word paths below instead.
+      hasVerseKeyword = true;
+      idx++;   // skip "and" — consumeNumber below picks up the number right after it
+    }
 
     let vRes = consumeNumber(words, idx);
     let lookAheadRepositioned = false;
@@ -731,15 +799,14 @@ function parseAllSpokenReferences(text, inBibleMode = false) {
   const refs = [];
   let i = 0;
   while (i < words.length) {
-    let bookName = null, consumed = 0;
-    if (i+1 < words.length) {
-      const num = getNumberedPrefix(words[i]);
-      if (num) {
-        const key = `${num} ${words[i+1]}`;
-        if (BOOK_ALIASES[key]) { bookName = BOOK_ALIASES[key]; consumed = 2; }
-      }
-    }
-    if (!bookName && SINGLE_WORD_BOOKS.has(words[i])) { bookName = BOOK_ALIASES[words[i]]; consumed = 1; }
+    // See matchBookAt's own comment — this used to be its own independent
+    // copy of the exact-match-only logic, which meant the fuzzy numbered-
+    // book/short-book fallbacks (added to parseSpokenReference) never had
+    // any effect here: this outer loop decides where a candidate reference
+    // even STARTS, so a book matchBookAt would have fuzzy-caught never got
+    // as far as parseSpokenReference at all.
+    const matched = matchBookAt(words, i);
+    const bookName = matched.bookName, consumed = matched.consumed;
     if (!bookName) { i++; continue; }
 
     let nextBookIdx = words.length;

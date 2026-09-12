@@ -143,3 +143,80 @@ test('a bare, unprefixed numbered-book mention ("Corinthians", "Timothy"...) nev
   assert.deepEqual(new Set(refs.map(r => r.book)), new Set(['1 Corinthians', '2 Corinthians']));
   assert.ok(refs.every(r => r.ambiguousGroup), 'both must be tagged ambiguous, not one confidently chosen');
 });
+
+// Fuzzy book-name correction for the local (Nemotron) offline engine, which
+// mishears book names more often than Deepgram — but only ever a LIGHT
+// mishearing (a dropped/added letter), never the total garbling a heavier
+// ASR failure produces (e.g. "1 Kings 19" -> "Fourth case nineteen" is not
+// fixable by any lightweight fuzzy pass; that's a much deeper failure). Two
+// separate gaps closed together:
+//   1. Numbered-book STEMS (Kings, Samuel, Corinthians, Thessalonians,
+//      Timothy, Peter, Chronicles) had zero fuzzy tolerance at all — an
+//      exact BOOK_ALIASES miss on the stem word silently dropped the whole
+//      citation, no fallback attempted.
+//   2. SHORT single-word books (Ruth, Mark, Luke, Acts, Amos, Joel, Jude —
+//      under 6 chars) were excluded from the pre-existing longer-word fuzzy
+//      matcher entirely, purely by an arbitrary length gate.
+// Both must ALSO exercise parseAllSpokenReferences specifically, not just
+// parseSpokenReference — the two functions used to carry independent
+// copies of the book-matching scan (matchBookAt didn't exist yet), and a
+// fix added to only one had zero effect through the other, which is the
+// live entry point every real transcript actually goes through.
+test('numbered-book stem fuzzy correction (real local-model mishearings) — only through the fuzzy path when the exact word is wrong, never blocking exact matches', () => {
+  assert.deepEqual(parseAllSpokenReferences('first king nineteen and verse four'),
+    [{ book: '1 Kings', chapter: 19, verse: 4 }]);
+  assert.deepEqual(parseAllSpokenReferences('second corinthian ten verse three'),
+    [{ book: '2 Corinthians', chapter: 10, verse: 3 }]);
+  assert.deepEqual(parseAllSpokenReferences('first timothi three sixteen')[0],
+    { book: '1 Timothy', chapter: 3, verse: 16 });
+  // Still resolves the exact spelling normally — the fuzzy path is a
+  // fallback, not a replacement for the existing exact match.
+  assert.equal(parseAllSpokenReferences('first kings nineteen and verse four')[0].book, '1 Kings');
+});
+
+test('short single-word book fuzzy correction — only with an explicit "chapter" keyword, never from a bare trailing number', () => {
+  // "mork"/"ruthe" (not real words, not pre-existing aliases) are each one
+  // edit away from "Mark"/"Ruth" — genuinely exercises the NEW fuzzy path,
+  // unlike "luk", which was already a registered exact abbreviation for
+  // Luke before this change (BOOK_ALIASES already had 'luk':'Luke').
+  assert.equal(parseAllSpokenReferences('mork chapter two verse one')[0]?.book, 'Mark');
+  assert.equal(parseAllSpokenReferences('ruthe chapter one verse sixteen')[0]?.book, 'Ruth');
+  // No "chapter" keyword — a short word followed by a bare number is FAR
+  // too common in ordinary sermon speech ("<word> four", "<word> forty") to
+  // safely guess from at this length; must not resolve at all.
+  assert.deepEqual(parseAllSpokenReferences('mork two verse one'), []);
+});
+
+test('the widened fuzzy matchers still do not false-positive on ordinary sentences with no real citation intent', () => {
+  assert.deepEqual(parseAllSpokenReferences('he had a great job chapter closing today'), []);
+  assert.deepEqual(parseAllSpokenReferences('first time nineteen ninety nine'), []);
+  assert.deepEqual(parseAllSpokenReferences('the first game nineteen to twenty'), []);
+});
+
+// Owner's spec (2026-09-13, live): "John 15 and 16 should be assumed as
+// chapter 15 v 16 of the book of john unless the chapter was called
+// earlier." "Book N and M" with no "chapter"/"verse" keyword at all between
+// the numbers is a common plain-spoken citation shape that previously
+// resolved to nothing (no "chapter" keyword -> rejected outright for
+// AMBIGUOUS_BOOKS like John) or a bare, verseless chapter (with "chapter" ->
+// the "and M" half was silently dropped).
+test('"Book N and M" with no chapter/verse keyword resolves as chapter N, verse M — unless that book\'s chapter is already an established context', () => {
+  referenceContext.reset();
+  assert.deepEqual(parseAllSpokenReferences('john fifteen and sixteen'),
+    [{ book: 'John', chapter: 15, verse: 16 }]);
+  // Works identically whether "chapter" was said or not.
+  referenceContext.reset();
+  assert.deepEqual(parseAllSpokenReferences('john chapter fifteen and sixteen'),
+    [{ book: 'John', chapter: 15, verse: 16 }]);
+
+  // Chapter already active for this exact book — the fallback must NOT
+  // fire (falls through to the existing, stricter paths instead of
+  // guessing), per the owner's own "unless" clause.
+  referenceContext.reset();
+  referenceContext.update('John', 15);
+  assert.deepEqual(parseAllSpokenReferences('john fifteen and sixteen'), []);
+
+  // Must not affect ordinary sentences with no real citation shape.
+  referenceContext.reset();
+  assert.deepEqual(parseAllSpokenReferences('mark was born in nineteen and eighty'), []);
+});
