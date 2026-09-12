@@ -116,8 +116,32 @@ let isListening    = false;
 let mediaStream    = null;
 let audioContext   = null;
 let audioProcessor = null;
+// Real, sustained silence reaching Kairo while listening — owner: "are you
+// going to do something about hymn not coming through, or will you keep
+// gaslighting me." Confirmed live (databases/debug.log's own audio-peak
+// diagnostic): 43 straight seconds of a genuine flat 0 on the raw captured
+// mic buffer during a real test, no exception thrown anywhere, so nothing
+// existing surfaced it — the only way to know was reading the log after
+// the fact. This makes it visible the MOMENT it happens instead, and
+// self-heals the one client-side cause that's cheap and safe to guard
+// against regardless of root cause: the AudioContext getting suspended by
+// the browser mid-session (only ever checked once, at startup, before
+// this — see startAudioCapture's own resume() call).
+let lastRealAudioAt = 0;
+let audioSilenceWatchdog = null;
+let audioSilenceWarning = false;
+const AUDIO_SILENCE_WARN_MS = 15000;
+const AUDIO_PEAK_NOISE_FLOOR = 50; // int16 units — well above dither/pure-zero, well below real speech (typically 2000-18000 in this app's own logged peaks)
 let workerReady    = false;
 let settings       = {};
+// True once loadSettings() has actually populated `settings` from the
+// server at least once. loadSettings() only runs inside ws.onopen (after
+// auth + the WebSocket connects), so `settings` stays `{}` for a real
+// stretch of app startup — code that reads settings-derived state (like
+// wireExternalDisplayStatus's auto-reopen below) must wait for this, not
+// just for its own script line to run. See that IIFE's own comment for the
+// real incident this flag fixes.
+let settingsLoaded = false;
 let elapsedInterval = null;
 let startTime      = null;
 let wordCount      = 0;
@@ -159,6 +183,7 @@ const clearSuggestionsBtn = document.getElementById('clear-suggestions-btn');
 const clearTranscriptBtn = document.getElementById('clear-transcript');
 const previewVerseText   = document.getElementById('preview-verse-text');
 const previewVerseRef    = document.getElementById('preview-verse-ref');
+const previewSectionBadge = document.getElementById('preview-section-badge');
 
 // ── Native NDI bridge ────────────────────────────────────────────────────
 // Whenever the live preview verse changes, push it to the native Rust NDI
@@ -343,7 +368,7 @@ function handleServerMessage(msg) {
     // mirroring it in this window's own preview so a media send has some
     // visible confirmation here too, not just on the actual output.
     case 'media':
-      if (msg.target === 'viewer') renderMediaPreview(msg.src, msg.kind);
+      if (msg.target === 'viewer') renderMediaPreview(msg.src, msg.kind, msg.fit);
       break;
 
     // A live segment's themed countdown — mirror it into the Monitoring
@@ -355,6 +380,16 @@ function handleServerMessage(msg) {
     case 'clear-layer':
       if (msg.layer === 'media' || msg.layer === 'all') clearMediaPreview();
       if (msg.layer === 'timer' || msg.layer === 'all') window.KairoService?.onTimerSlide?.({ clear: true });
+      break;
+
+    // Same broadcast display.html's real output listens for (see its own
+    // comment) — keeps this window's own outputAnimation/outputAnimationSpeed
+    // (used by renderPreviewScreen, the sidebar Live Preview panel) in sync
+    // live, the same way the picker's own POST already updates the real
+    // output immediately, no reload.
+    case 'output-transition':
+      if (msg.animation) outputAnimation = msg.animation;
+      if (typeof msg.speed === 'number' && msg.speed > 0) outputAnimationSpeed = msg.speed;
       break;
 
   }
@@ -381,6 +416,17 @@ function handleConnectionState(state, error) {
       elapsedInterval = setInterval(updateElapsed, 1000);
     }
     showEmptyTranscript(false);
+    // Owner: "Start Listening [should be] the universal control" — scripture
+    // detection was already unconditional the moment audio starts; the
+    // hymn/song lookup + auto-advance engines (content_lookup.js/
+    // lyrics_follow.js/sermon_follow.js) used to need a SEPARATE "Auto-
+    // follow" toggle remembered on top of this, which is exactly the kind
+    // of silently-off state this whole product's philosophy has been
+    // fighting all session ("a wrong send is worse than a missed one" cuts
+    // both ways — a MISSED auto-advance because a second switch was
+    // forgotten is its own real failure mode). Tying it directly to the
+    // same control that already gates everything else.
+    window.KairoService?.setAutoFollow?.(true);
   } else if (state === 'disconnected' || state === 'error') {
     isListening = false;
     if (listenText) listenText.textContent = 'Start Listening';
@@ -389,6 +435,7 @@ function handleConnectionState(state, error) {
     if (lsBcastDot) lsBcastDot.classList.remove('broadcasting');
     if (lsBcastLbl) { lsBcastLbl.classList.remove('broadcasting'); lsBcastLbl.textContent = 'Idle'; }
     stopAudioCapture();
+    window.KairoService?.setAutoFollow?.(false);
     if (state === 'error' && error) toast(error, 'error');
   } else if (state === 'connecting') {
     if (listenText) listenText.textContent = 'Connecting…';
@@ -497,6 +544,20 @@ let lastPreviewKey = null;
 let lastPreviewWasThemed = false;
 let lastPreviewHadOwnLook = false; // true only when `look` itself was truthy, not the output-default fallback
 
+// Display-level Transition (Fade/Slide/Cut + speed) — this window's own copy
+// of the same state display.html keeps (see its own comment), so the sidebar
+// Live Preview panel (renderPreviewScreen, below) matches the real output
+// instead of falling back to whatever the live item's THEME still carries in
+// its now-legacy look.animation/animationSpeed fields. Fetched once at boot
+// and kept live off the same 'output-transition' broadcast the real output
+// listens for (see handleServerMessage's case below) — no per-file polling.
+let outputAnimation = 'fade';
+let outputAnimationSpeed = 1;
+fetch(`${SERVER}/api/settings`).then(r => r.json()).then(s => {
+  if (s.outputAnimation) outputAnimation = s.outputAnimation;
+  if (typeof s.outputAnimationSpeed === 'number' && s.outputAnimationSpeed > 0) outputAnimationSpeed = s.outputAnimationSpeed;
+}).catch(() => {});
+
 // Bumped on every renderPreviewScreen() call so a delayed setTimeout paint()
 // from an earlier call can tell it's been superseded and bail instead of
 // flashing stale content over whatever the latest call already painted —
@@ -560,7 +621,33 @@ document.getElementById('live-preview-output-select')?.addEventListener('change'
   }
 });
 
-function renderPreviewScreen(text, reference, look, translatedText = '', image = null, fit = 'contain', styleByLayerId = {}, timerText = '') {
+// ProPresenter-style song section annotation — mirrors slide_import.js's
+// own SECTION_LABEL_RE (server-side, applied at import time) so a block's
+// label ("Verse 1", "Chorus", "Bridge · 2" when split across multiple
+// slides) maps onto the same CSS color classes here. Kept as a separate,
+// looser client-side match (not shared code with the server) since this
+// only needs to classify an ALREADY-derived label for display, not detect
+// one from raw scanned text.
+const SECTION_TYPE_RE = /^(verse|chorus|refrain|solo|pre-?chorus|bridge|tag|intro|outro|ending)/i;
+function sectionTypeClass(label) {
+  const m = SECTION_TYPE_RE.exec(String(label || '').trim());
+  if (!m) return null;
+  const t = m[1].toLowerCase().replace(/-/g, '');
+  if (t === 'prechorus') return 'sec-prechorus';
+  if (t === 'ending') return 'sec-outro';
+  return `sec-${t}`;
+}
+// Cycling the label itself needs playlists/activeItemId/liveSlideKey/
+// slidesFor/sendSlide, all private to service.js's own IIFE closure — this
+// file (app.js) runs as a separate top-level script and can't reach into
+// them directly. window.KairoService is the existing, established bridge
+// for exactly this (see its own definition at the bottom of service.js —
+// slidesFor/sendSlide/renderStack and friends are already exposed there
+// for other app.js callers); the real implementation lives there, this is
+// just the click entry point.
+previewSectionBadge?.addEventListener('click', () => window.KairoService?.cycleSectionLabel?.());
+
+function renderPreviewScreen(text, reference, look, translatedText = '', image = null, fit = 'contain', styleByLayerId = {}, timerText = '', sectionLabel = '') {
   const myGen = ++previewRenderGen;
   const effectiveLook = look || primaryOutputLook();
   const newPreviewKey = `${reference || ''} ${text || ''}`;
@@ -584,9 +671,20 @@ function renderPreviewScreen(text, reference, look, translatedText = '', image =
   // bind (mirrors display.html's renderImageStage), so blank it here too.
   if (previewVerseText) previewVerseText.textContent = image ? '' : text;
   if (previewVerseRef)  previewVerseRef.textContent  = reference || '';
+  if (previewSectionBadge) {
+    const cls = sectionTypeClass(sectionLabel);
+    previewSectionBadge.textContent = sectionLabel || '';
+    previewSectionBadge.className = 'live-screen-section-badge' + (cls ? ` ${cls}` : '') + (sectionLabel ? '' : ' hidden');
+  }
 
-  const animType = (effectiveLook && effectiveLook.animation) || 'fade';
-  const speedMs = Math.round(300 * ((effectiveLook && typeof effectiveLook.animationSpeed === 'number' && effectiveLook.animationSpeed > 0) ? effectiveLook.animationSpeed : 1));
+  // Display-level Transition now (this file's own outputAnimation/
+  // outputAnimationSpeed, kept live off the 'output-transition' broadcast —
+  // see handleServerMessage), not read off the theme anymore. This used to
+  // read effectiveLook.animation/animationSpeed, which is why a song's own
+  // (older, per-theme) Lyrics look kept animating here exactly as it always
+  // had regardless of what the Transition picker was set to.
+  const animType = outputAnimation;
+  const speedMs = Math.round(300 * outputAnimationSpeed);
   // Only animate an actual slide-to-slide change, on an already-painted
   // panel, when the theme asks for it — not the first paint (nothing to
   // transition from), not a same-content re-broadcast, not 'cut'. Text
@@ -676,7 +774,7 @@ function renderPreviewScreen(text, reference, look, translatedText = '', image =
 // preview — sending media had no feedback anywhere in the operator's own
 // UI before this (nothing here ever changed on a media send), which made a
 // working send look identical to a failed one.
-function renderMediaPreview(src, kind) {
+function renderMediaPreview(src, kind, fit) {
   const host = document.getElementById('slide-preview-media');
   if (!host) return;
   host.innerHTML = '';
@@ -692,22 +790,42 @@ function renderMediaPreview(src, kind) {
   // real media now showing, it would just sit as stray text over the
   // image/video. Actual verse text (if any is genuinely live) is untouched.
   if (previewVerseText?.textContent === 'Nothing on display') previewVerseText.textContent = '';
+  // .live-screen-media's CSS hardcodes object-fit:contain — this mirror
+  // never carried the actual chosen Fit Mode at all, so picking Cover or
+  // Stretch (Fit Mode's fill) sent correctly to the real output (see
+  // display.html's renderMediaStage, which always has) but never showed
+  // that way here, which read as "Stretch doesn't actually stretch".
+  const objectFit = fit === 'fill' ? 'fill' : (fit || 'contain');
   if (kind === 'video') {
     const v = document.createElement('video');
     v.src = src; v.autoplay = true; v.loop = true; v.muted = true; v.playsInline = true;
+    v.style.objectFit = objectFit;
     host.appendChild(v);
   } else {
     const img = document.createElement('img');
     img.src = src;
+    img.style.objectFit = objectFit;
     host.appendChild(img);
   }
 }
-function clearMediaPreview() { renderMediaPreview(null); }
+// The transport bar (mute/play/seek/volume) is normally only shown/hidden
+// reactively via onMediaStatus's WS round-trip from the actual output
+// display reporting what it's rendering (see service.js's setMediaTransportVisible).
+// That round-trip only fires off real video events (timeupdate/play/pause/
+// loadedmetadata) — clearing the layer produces none of those from a
+// display that's just gone blank, so the bar was silently left showing,
+// frozen at its last position, with nothing left to control. sendMediaItem
+// already optimistically shows the bar the moment a video is sent, without
+// waiting on that same round-trip; this is the symmetric optimistic hide.
+function clearMediaPreview() {
+  renderMediaPreview(null);
+  window.KairoService?.setMediaTransportVisible?.(false);
+}
 
 // Update only the viewer display (preview panel) without touching queue order.
 // Use this for dblclick on already-queued cards so they don't reorder.
 function updateViewerDisplay(v) {
-  renderPreviewScreen(cleanVerseText(v.text), v.reference, null, v.translatedText || '');
+  renderPreviewScreen(cleanVerseText(v.text), v.reference, null, v.translatedText || '', null, 'contain', {}, '', v.label || '');
 }
 
 function showInViewer(verses, method, topScore, correctedFrom = null, look = null) {
@@ -717,7 +835,7 @@ function showInViewer(verses, method, topScore, correctedFrom = null, look = nul
   // (service.js sendTimerSegmentToSlideLayer); the per-second countdown then
   // updates that same [data-binding="timer"] element via onTimerAction, the
   // same split display.html uses (renderStage seeds it, handleActionBadge ticks it).
-  renderPreviewScreen(cleanVerseText(v.text), v.reference, look, v.translatedText || '', v.image || null, v.fit || 'contain', v.slideStyle || {}, v.timerText || '');
+  renderPreviewScreen(cleanVerseText(v.text), v.reference, look, v.translatedText || '', v.image || null, v.fit || 'contain', v.slideStyle || {}, v.timerText || '', v.label || '');
 
   // A playlist send (song/slide deck/announcement/scripture item run from
   // the service) isn't a scripture detection — the Bible tab's Live Queue,
@@ -798,6 +916,18 @@ function showInSuggestions(verses, method) {
   const frag = document.createDocumentFragment();
   for (const v of verses) {
     if (queueList.querySelector(`[data-ref="${CSS.escape(v.reference)}"]`)) continue;
+    // Already live in the Live Queue (showInViewer's own dedup, lines above,
+    // only removes an EXISTING candidate card when something NEW goes live —
+    // it can't help the reverse: a re-detection of a verse that's already
+    // been live for a while, after enough time/narrative has passed that the
+    // continuity gate no longer treats it as "sequential", landing here as a
+    // seemingly-fresh candidate for something the operator is already
+    // looking at. Real incident: re-reading Psalm 1:3 aloud a second time
+    // (after the SAME_BOOK_WINDOW_MS gap) demoted straight back to
+    // Candidates as "non-sequential" even though it was still the exact verse
+    // on screen. Matches the owner's own framing: "if any from the candidate
+    // already live, they shouldn't remain in candidate."
+    if (currentDisplayCard?.querySelector(`[data-ref="${CSS.escape(v.reference)}"]`)) continue;
     frag.appendChild(buildCandidateCard(v, method));
   }
   if (frag.childNodes.length) queueList.insertBefore(frag, queueList.firstChild);
@@ -1149,6 +1279,19 @@ async function checkPP() {
 // already did that update directly and locally before this call — the
 // broadcast only needs to reach OTHER surfaces (the real display window),
 // not redundantly re-touch the panel that triggered the send.
+// Media Bin "set as background" for Bible mode (see service.js's Media
+// Bin) — scripture has no discrete "item" to hang a per-slide bgMedia
+// override on the way a Slides/Timer entry does (buildSyntheticLook,
+// above), so this applies to whichever theme is currently assigned to the
+// primary output for scripture instead. Only takes effect starting with
+// the NEXT manual send below — sendVerseToServer is "the shared 'push this
+// verse everywhere' call for every manual send" per its own comment (Send
+// button, double-click, Candidates promote, range cards, direct search
+// hits), so this reaches all of those. It does NOT reach the fully-
+// automatic live-listening path, which broadcasts through server.js's own
+// detection pipeline and relies on the display window's own stored theme
+// rather than a look sent per-request — a real limitation of this
+// interpretation, not yet covered.
 async function sendVerseToServer(verse, look = null) {
   try {
     await fetch(`${SERVER}/api/service/send`, {
@@ -1188,10 +1331,27 @@ async function startListening() {
   const serverEngine = (engine === 'offline' || engine === 'browser') ? 'offline' : 'deepgram';
   try {
     const deviceId = audioSourceSettings?.value || '';
+    // echoCancellation/noiseSuppression/autoGainControl are voice-call DSP
+    // effects tuned for a real mic in a real room. A confirmed incident:
+    // applied to BlackHole (a pure virtual loopback), they crushed real,
+    // strong signal (independent ffmpeg capture showed -2.9dB peaks at the
+    // same moment) down to a peak of ~1/32767 — near total silence,
+    // explaining "input level shows something, transcript shows nothing"
+    // exactly. The app is line-in-first now (a board/interface feed, not a
+    // room mic) — a fixed sound-desk output that these effects only harm,
+    // never help — and autoGainControl in particular is a plausible cause
+    // of intermittent "audio just stopped" reports as it hunts the level.
+    // So: DSP off, unconditionally. A room-mic user loses noise
+    // suppression, an acceptable trade for never silently crushing a clean
+    // line feed.
     const constraints = {
-      audio: deviceId
-        ? { deviceId: { exact: deviceId }, echoCancellation: true, noiseSuppression: true, sampleRate: 16000 }
-        : { echoCancellation: true, noiseSuppression: true, sampleRate: 16000 },
+      audio: {
+        ...(deviceId ? { deviceId: { exact: deviceId } } : {}),
+        echoCancellation: false,
+        noiseSuppression: false,
+        autoGainControl: false,
+        sampleRate: 16000,
+      },
     };
     mediaStream = await navigator.mediaDevices.getUserMedia(constraints);
     if (micDisplay) micDisplay.textContent = mediaStream.getAudioTracks()[0]?.label || 'Microphone';
@@ -1207,19 +1367,65 @@ async function startListening() {
 
     // Stream PCM16 to server via WebSocket — same path for both engines.
     audioContext  = new AudioContext({ sampleRate: 16000 });
+    // This runs several `await`s deep in an async click handler (getUserMedia,
+    // then a fetch, above) — well outside the synchronous user-gesture window
+    // WebKit requires to auto-start an AudioContext. Without an explicit
+    // resume(), WebKit can silently create it already 'suspended': the audio
+    // graph never actually runs, onaudioprocess below never fires, and ZERO
+    // bytes ever reach the server — no error, nothing to catch, it just looks
+    // like "connected but no audio" forever (confirmed: this is what was
+    // happening — Deepgram genuinely never received a single byte, every
+    // single reconnect attempt).
+    if (audioContext.state === 'suspended') await audioContext.resume();
+    if (audioContext.state !== 'running') console.error('[KAIRO] AudioContext still not running after resume():', audioContext.state);
+    // Diagnostic: WebKit doesn't always honor the requested sampleRate above
+    // (a device's own native rate — BlackHole is 48kHz — can silently win),
+    // and every sample here gets declared to Deepgram as 16kHz regardless of
+    // what it actually is. A mismatch would still send real, non-throwing
+    // bytes (so nothing else here would catch it) but produce a garbled
+    // stream Deepgram can't recognize as valid audio at all. Posted to
+    // /api/debug-log (server/server.js) — same mechanism service.js's own
+    // debugLog uses — so it lands in databases/debug.log, not just this
+    // window's own devtools console, which nobody may have open.
+    const _trackSettings = mediaStream.getAudioTracks()[0]?.getSettings() || {};
+    console.log('[KAIRO] AudioContext.sampleRate:', audioContext.sampleRate, '| track settings:', JSON.stringify(_trackSettings));
+    fetch(`${SERVER}/api/debug-log`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ event: 'audio-context-info', data: { contextSampleRate: audioContext.sampleRate, trackSettings: _trackSettings } }),
+    }).catch(() => {});
     const source  = audioContext.createMediaStreamSource(mediaStream);
+    watchAudioTrackHealth();   // OS-level "track died" → immediate rebuild
     // 1024 samples @ 16 kHz = 64 ms of buffering latency (down from 256 ms
     // with the previous 4096 setting). Detection feels noticeably snappier
     // on direct citations. A future AudioWorklet migration would also move
     // this off the main UI thread, but 1024 is a safe drop-in.
     audioProcessor = audioContext.createScriptProcessor(1024, 1, 1);
 
+    let _lastLevelLogAt = 0;
     audioProcessor.onaudioprocess = (e) => {
       if (!ws || ws.readyState !== WebSocket.OPEN) return;
       const float32 = e.inputBuffer.getChannelData(0);
       const int16   = new Int16Array(float32.length);
+      let peak = 0;
       for (let i = 0; i < float32.length; i++) {
-        int16[i] = Math.max(-32768, Math.min(32767, float32[i] * 32768));
+        const s = Math.max(-32768, Math.min(32767, float32[i] * 32768));
+        int16[i] = s;
+        peak = Math.max(peak, Math.abs(s));
+      }
+      if (peak > AUDIO_PEAK_NOISE_FLOOR) lastRealAudioAt = Date.now();
+      // Diagnostic — rate-limited: confirms real (non-zero) samples are
+      // actually being read off the captured device, separately from
+      // whether the bytes reach the server/Deepgram correctly. 32767 = max.
+      // Also posted to /api/debug-log — see the sampleRate diagnostic above
+      // for why (nobody may have this window's devtools console open).
+      const now = performance.now();
+      if (now - _lastLevelLogAt > 3000) {
+        _lastLevelLogAt = now;
+        console.log('[KAIRO] audio peak this frame:', peak, '/ 32767');
+        fetch(`${SERVER}/api/debug-log`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ event: 'audio-peak', data: { peak, bufferLength: float32.length } }),
+        }).catch(() => {});
       }
       ws.send(int16.buffer);
     };
@@ -1227,8 +1433,18 @@ async function startListening() {
     source.connect(audioProcessor);
     audioProcessor.connect(audioContext.destination);
 
+    lastRealAudioAt = Date.now(); // don't warn before real audio has had a chance to arrive at all
+    audioSilenceWarning = false;
+    clearInterval(audioSilenceWatchdog);
+    audioSilenceWatchdog = setInterval(checkAudioSilence, 5000);
+
     showEmptyTranscript(false);
   } catch (err) {
+    // toast() is a deliberate no-op (see its own definition) — without
+    // this, a mic-acquisition failure (a stale/invalid selected device,
+    // permission denied, device unplugged) was completely invisible: no
+    // popup, no console line, nothing. Doesn't touch toast() itself.
+    console.error('[KAIRO] Mic error:', err.name, err.message);
     toast('Mic error: ' + err.message, 'error');
     stopAudioCapture();
   }
@@ -1244,6 +1460,147 @@ function stopAudioCapture() {
   if (audioProcessor) { try { audioProcessor.disconnect(); } catch {} audioProcessor = null; }
   if (audioContext)   { try { audioContext.close(); }       catch {} audioContext   = null; }
   if (mediaStream)    { mediaStream.getTracks().forEach(t => t.stop()); mediaStream = null; }
+  clearInterval(audioSilenceWatchdog);
+  audioSilenceWatchdog = null;
+  setAudioSilenceWarning(false);
+}
+
+// Real, sustained silence on the raw captured buffer, made immediately
+// visible on the same status pill the operator already watches for
+// "Broadcasting"/"Idle" (handleConnectionState) — not a popup (toast()
+// stays a deliberate no-op — see feedback_no_toasts). Also self-heals the
+// one client-side cause that's cheap and safe to guard against regardless
+// of root cause: startAudioCapture only ever called audioContext.resume()
+// once, at the very start — if the browser suspends it again later for any
+// reason, nothing before this ever noticed or retried.
+function setAudioSilenceWarning(on) {
+  if (audioSilenceWarning === on) return;
+  audioSilenceWarning = on;
+  const dot = document.getElementById('ls-bcast-dot');
+  const lbl = document.getElementById('ls-bcast-label');
+  if (on) {
+    dot?.classList.remove('broadcasting');
+    dot?.classList.add('warning');
+    if (lbl) { lbl.classList.remove('broadcasting'); lbl.classList.add('warning'); lbl.textContent = 'No audio!'; }
+  } else {
+    dot?.classList.remove('warning');
+    dot?.classList.add('broadcasting');
+    if (lbl) { lbl.classList.remove('warning'); lbl.classList.add('broadcasting'); lbl.textContent = 'Broadcasting'; }
+  }
+}
+
+let _audioHealAt = 0;
+let _audioHealing = false;
+function _healLog(msg, extra) {
+  console.warn('[KAIRO]', msg);
+  fetch(`${SERVER}/api/debug-log`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ event: 'audio-heal', data: { msg, ...(extra || {}) } }),
+  }).catch(() => {});
+}
+
+function checkAudioSilence() {
+  if (!isListening) return;
+  if (audioContext && audioContext.state !== 'running') {
+    audioContext.resume().catch(() => {});
+  }
+  const silentMs = Date.now() - lastRealAudioAt;
+  setAudioSilenceWarning(silentMs > AUDIO_SILENCE_WARN_MS);
+
+  // getUserMedia tracks on WKWebView (Tauri's macOS webview) silently go to
+  // exact zero and stay there — no 'ended'/'mute' event — after working for
+  // a few seconds, which is precisely the "it stopped after a few words"
+  // report. The context is still 'running', onaudioprocess still fires,
+  // just with all-zero buffers. Only a full re-acquire recovers it. Heal
+  // after 12s of dead air (a long time to lose in a live service already),
+  // throttled to once per 20s so a genuinely unplugged input doesn't thrash.
+  if (silentMs > 12000 && audioContext && audioContext.state === 'running'
+      && !_audioHealing && Date.now() - _audioHealAt > 20000) {
+    _audioHealAt = Date.now();
+    restartAudioCapture('silence-watchdog');
+  }
+}
+
+// Fires the moment the OS reports a captured track died/muted — faster than
+// waiting for the silence watchdog. Attached fresh on every (re)build.
+function watchAudioTrackHealth() {
+  const track = mediaStream?.getAudioTracks?.()[0];
+  if (!track) return;
+  const onDead = () => {
+    if (!isListening || _audioHealing) return;
+    if (Date.now() - _audioHealAt < 5000) return;
+    _audioHealAt = Date.now();
+    restartAudioCapture('track-' + (track.muted ? 'muted' : 'ended'));
+  };
+  track.addEventListener('ended', onDead);
+  track.addEventListener('mute', onDead);
+}
+
+// Tear down just the capture graph (NOT the WS or the server-side engine,
+// which are both still fine) and rebuild it. Self-contained — does not touch
+// startListening()'s session-reset / start-listening POST / WS setup, only
+// the getUserMedia + AudioContext + ScriptProcessor chain that stalls. Falls
+// back to the system-default input if the explicitly-selected device keeps
+// coming back silent.
+async function restartAudioCapture(reason, allowDeviceFallback = true) {
+  if (_audioHealing || !isListening) return;
+  _audioHealing = true;
+  try {
+    _healLog('rebuilding audio capture', { reason });
+    try { if (audioProcessor) { audioProcessor.disconnect(); audioProcessor.onaudioprocess = null; } } catch {}
+    audioProcessor = null;
+    try { mediaStream?.getTracks().forEach(t => t.stop()); } catch {}
+    try { await audioContext?.close(); } catch {}
+    audioContext = null; mediaStream = null;
+
+    const deviceId = audioSourceSettings?.value || '';
+    mediaStream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        ...(deviceId ? { deviceId: { exact: deviceId } } : {}),
+        echoCancellation: false, noiseSuppression: false, autoGainControl: false, sampleRate: 16000,
+      },
+    });
+    audioContext = new AudioContext({ sampleRate: 16000 });
+    if (audioContext.state === 'suspended') await audioContext.resume();
+    const source = audioContext.createMediaStreamSource(mediaStream);
+    watchAudioTrackHealth();
+    audioProcessor = audioContext.createScriptProcessor(1024, 1, 1);
+    audioProcessor.onaudioprocess = (e) => {
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      const float32 = e.inputBuffer.getChannelData(0);
+      const int16 = new Int16Array(float32.length);
+      let peak = 0;
+      for (let i = 0; i < float32.length; i++) {
+        const s = Math.max(-32768, Math.min(32767, float32[i] * 32768));
+        int16[i] = s;
+        peak = Math.max(peak, Math.abs(s));
+      }
+      if (peak > AUDIO_PEAK_NOISE_FLOOR) lastRealAudioAt = Date.now();
+      ws.send(int16.buffer);
+    };
+    source.connect(audioProcessor);
+    audioProcessor.connect(audioContext.destination);
+    lastRealAudioAt = Date.now();
+    _healLog('audio capture rebuilt', { reason, device: deviceId || 'default' });
+
+    // Verify it's actually producing audio. If the explicitly-selected
+    // device still comes back dead after 3s, retry once on the default.
+    if (deviceId && allowDeviceFallback) {
+      const checkpoint = lastRealAudioAt;
+      setTimeout(() => {
+        if (isListening && lastRealAudioAt === checkpoint && !_audioHealing) {
+          _healLog('selected device still silent after rebuild — falling back to default input');
+          audioSourceSettings.value = '';
+          _audioHealAt = Date.now();
+          restartAudioCapture('device-fallback', false);
+        }
+      }, 3000);
+    }
+  } catch (err) {
+    _healLog('audio capture rebuild FAILED', { reason, error: err.message });
+  } finally {
+    _audioHealing = false;
+  }
 }
 
 // ── Custom Select Dropdowns ───────────────────────────────────────────────
@@ -1419,7 +1776,6 @@ async function loadSettings() {
     });
     // Restore toggle-group state from persisted settings
     syncToggleGroup('speech-engine-toggle', 'engine', settings.speechEngine || 'deepgram');
-    syncToggleGroup('audio-mode-toggle',    'mode',   settings.audioMode    || 'mic');
     updatePPTokenLabel();
     initCustomSelects();
     // Per-output theme pickers live inside each output card.
@@ -1446,6 +1802,7 @@ async function loadSettings() {
     // First-run: no Deepgram key → show a nudge banner so the user knows what to do.
     showFirstRunBannerIfNeeded(settings);
     if (typeof renderHotkeysList === 'function') renderHotkeysList(); // now that settings.hotkeys is real, not defaults
+    settingsLoaded = true;
   } catch (err) {
     console.warn('[Settings] Load failed:', err);
     toast('Could not load settings from server', 'error');
@@ -1518,7 +1875,6 @@ async function saveCurrentSettings() {
     obsPassword:         obsPasswordInput?.value   || '',
     obsTextSource:       obsTextSourceInput?.value || 'Scripture',
     speechEngine:        readToggleGroup('speech-engine-toggle', 'engine') || settings.speechEngine || 'deepgram',
-    audioMode:           readToggleGroup('audio-mode-toggle',    'mode')   || settings.audioMode    || 'mic',
     ollamaUrl:           document.getElementById('ollama-url')?.value || 'http://localhost:11434',
     ollamaModel:         document.getElementById('ollama-model')?.value || settings.ollamaModel || 'qwen2.5:7b-instruct',
   };
@@ -1640,7 +1996,20 @@ setInterval(pollOBSStatus, 5000);
     // dropdown, even though the assignment itself was never lost.
     // Matches how every other presentation app restores its output on
     // launch instead of requiring the operator to re-pick it.
-    if (!autoResumeDone) {
+    //
+    // Gated on settingsLoaded, not just "has refresh() run yet" — this
+    // IIFE's own refresh() call below fires SYNCHRONOUSLY at script load,
+    // well before loadSettings() (which only runs inside ws.onopen, after
+    // auth + the WebSocket connects) has populated `settings` at all. The
+    // old code marked itself "done" on that very first, always-empty
+    // attempt — outputScreenMap()[PRIMARY_DISPLAY] read from settings={},
+    // so primaryScreen was always undefined, the real auto-reopen never
+    // fired, and the one-shot flag then permanently blocked every later
+    // retry (including the 3s poll below, by which point settings HAD
+    // loaded) — the exact real incident: "I have to reset the output
+    // every time [the app restarts]." Now the attempt itself is what gets
+    // consumed, not just the opportunity to try.
+    if (!autoResumeDone && settingsLoaded) {
       autoResumeDone = true;
       const primaryScreen = outputScreenMap()[PRIMARY_DISPLAY];
       if (primaryScreen && typeof openDisplayOutput === 'function') {
@@ -1812,7 +2181,7 @@ function clearOutputLayer(layer) {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ layer }),
   }).catch(err => console.warn('[KAIRO] clear-layer request failed:', err.message));
-  if (layer === 'slide' || layer === 'all') clearPreviewScreen();
+  if (layer === 'slide' || layer === 'all') { clearPreviewScreen(); window.KairoService?.clearLive?.(); }
   if (layer === 'media' || layer === 'all') clearMediaPreview();
 }
 document.getElementById('clear-slide-layer-btn')?.addEventListener('click', () => clearOutputLayer('slide'));
@@ -1830,21 +2199,44 @@ clearTranscriptBtn?.addEventListener('click', () => {
 });
 
 // ── Audio device enumeration ───────────────────────────────────────────────
+// Same persistence pattern populateAudioOutputDevices (below) already uses
+// correctly for the media-output picker — this one had NONE: the dropdown
+// was rebuilt from scratch on every call with no restored selection, so it
+// silently fell back to whichever device enumerates first (typically the
+// built-in mic) on every app relaunch. A real, confirmed incident: an
+// operator explicitly selected BlackHole 2ch, then a later relaunch (a
+// server restart, closing and reopening the app — anything that reloads
+// this script) silently reverted capture to the built-in mic with the
+// dropdown never visibly indicating anything changed, and the transcript
+// picked up ambient room audio instead of the intended source.
+const AUDIO_INPUT_KEY = 'kairo-audio-input-device';
 async function populateAudioDevices() {
   if (!audioSourceSettings) return;
   try {
     await navigator.mediaDevices.getUserMedia({ audio: true });
     const devices = await navigator.mediaDevices.enumerateDevices();
     const mics    = devices.filter(d => d.kind === 'audioinput');
+    const saved   = localStorage.getItem(AUDIO_INPUT_KEY) || '';
     audioSourceSettings.innerHTML = '';
     mics.forEach(d => {
       const o = document.createElement('option');
       o.value = d.deviceId;
       o.textContent = d.label || `Microphone ${d.deviceId.slice(0, 6)}`;
+      if (d.deviceId === saved) o.selected = true;
       audioSourceSettings.appendChild(o);
     });
+    // The saved device may no longer be present (unplugged, driver
+    // reinstalled — BlackHole's own deviceId can change across a reinstall)
+    // — flag it loudly instead of silently capturing the wrong source.
+    if (saved && !mics.some(d => d.deviceId === saved)) {
+      console.error('[KAIRO] Saved audio input device not found among current devices — falling back to', audioSourceSettings.value);
+    }
   } catch {}
 }
+
+audioSourceSettings?.addEventListener('change', () => {
+  localStorage.setItem(AUDIO_INPUT_KEY, audioSourceSettings.value || '');
+});
 
 refreshDevicesBtn?.addEventListener('click', populateAudioDevices);
 
@@ -1936,8 +2328,14 @@ populateAudioOutputDevices();
     }
   }
 
-  // Show/hide the whole widget based on which engine is selected. The toggle
-  // dispatches a custom click; we just react to any click inside it.
+  // Show/hide the whole widget based on which engine is selected. Reacts to
+  // both a real click (bubbles up before the .active class updates, hence
+  // the setTimeout) AND syncToggleGroup's 'toggle-change' event, which fires
+  // when loadSettings() restores a previously-saved "Offline" engine
+  // programmatically on startup — that path never dispatches a real click,
+  // so without this listener the panel stayed hidden (and the download
+  // button with it) any time Offline was already the saved engine when
+  // Settings was opened, not just when the operator toggled it live.
   function syncVisibility() {
     const active = engineToggle?.querySelector('.toggle-btn.active');
     const isOffline = active?.dataset.engine === 'browser';
@@ -1945,6 +2343,7 @@ populateAudioOutputDevices();
     if (isOffline) refreshStatus();
   }
   engineToggle?.addEventListener('click', () => setTimeout(syncVisibility, 0));
+  engineToggle?.addEventListener('toggle-change', syncVisibility);
   syncVisibility();
 
   installBtn.addEventListener('click', async () => {
@@ -1989,6 +2388,8 @@ populateAudioOutputDevices();
         } else if (evt.phase === 'extract') {
           progressBar.style.width = '100%';
           progressText.textContent = 'Extracting…';
+        } else if (evt.phase === 'retry') {
+          progressText.textContent = `Connection dropped — resuming (attempt ${evt.attempt + 1}/${evt.maxAttempts})…`;
         } else if (evt.phase === 'done') {
           progressText.textContent = evt.already ? 'Already installed.' : 'Done.';
         } else if (evt.phase === 'complete') {
@@ -2229,6 +2630,137 @@ function _startInlineTranslateInstall(container, code, name) {
 
 renderMtModelList();
 
+// ── Semantic layer ("meaning-based Candidates") installer ────────────────
+// Same state-aware .osp card the Ollama status panel used to use (that
+// feature's gone — see Content Studio removal — but the card shape fit
+// this just as well): idle/checking → not-installed-with-a-download-button
+// → downloading (two phases, model then verse index) → ready. Backed by
+// /api/semantic-model/status + /install (server.js), which install into
+// server/semantic_installer.js.
+let _semanticPollTimer = null;
+
+function _semRow(dotClass, text) {
+  return `<div class="osp-row"><span class="osp-dot${dotClass ? ' ' + dotClass : ''}"></span><span class="osp-title">${text}</span></div>`;
+}
+
+async function refreshSemanticStatus() {
+  const panel = document.getElementById('semantic-status-panel');
+  if (!panel) return;
+  let s;
+  try {
+    s = await fetch(`${SERVER}/api/semantic-model/status`).then(r => r.json());
+  } catch {
+    panel.className = 'osp osp-err';
+    panel.innerHTML = _semRow('', 'Could not reach server');
+    return;
+  }
+
+  if (s.installed) {
+    clearInterval(_semanticPollTimer); _semanticPollTimer = null;
+    panel.className = 'osp osp-ok';
+    panel.innerHTML = _semRow('', 'Ready — meaning-based Candidates are active');
+    return;
+  }
+
+  if (s.installing) {
+    if (!_semanticPollTimer) _semanticPollTimer = setInterval(refreshSemanticStatus, 2000);
+    panel.className = 'osp osp-progress';
+    panel.innerHTML = _semRow('pulse', 'Installing — see progress below') +
+      '<div class="osp-progress-bar"><div class="osp-progress-fill" style="width:50%"></div></div>';
+    return;
+  }
+
+  clearInterval(_semanticPollTimer); _semanticPollTimer = null;
+  panel.className = 'osp osp-warn';
+  panel.innerHTML = _semRow('', 'Not installed (~300MB, one-time)') +
+    '<div class="osp-actions"><button class="osp-btn osp-btn-primary" id="semantic-install-btn">Download</button></div>';
+  document.getElementById('semantic-install-btn')?.addEventListener('click', installSemanticLayer);
+}
+
+async function installSemanticLayer() {
+  const panel = document.getElementById('semantic-status-panel');
+  if (!panel) return;
+  panel.className = 'osp osp-progress';
+  panel.innerHTML = _semRow('pulse', 'Connecting…') +
+    '<div class="osp-progress-bar"><div class="osp-progress-fill" id="semantic-progress-fill" style="width:0%"></div></div>' +
+    '<div class="osp-progress-meta" id="semantic-progress-meta"></div>';
+  const fillEl = document.getElementById('semantic-progress-fill');
+  const metaEl = document.getElementById('semantic-progress-meta');
+
+  let res;
+  try {
+    res = await fetch(`${SERVER}/api/semantic-model/install`, { method: 'POST' });
+  } catch (err) {
+    panel.className = 'osp osp-err';
+    panel.innerHTML = _semRow('', `Failed: ${escapeHtml(err.message)}`);
+    return;
+  }
+  if (res.status === 409) {
+    // Another install is already running (e.g. a previous attempt whose
+    // stream got dropped, still going server-side) — that's not a failure,
+    // refreshSemanticStatus's own 'installing' branch already knows how to
+    // show real progress and poll, so defer to it instead of a scary error.
+    await refreshSemanticStatus();
+    return;
+  }
+  if (!res.ok || !res.body) {
+    panel.className = 'osp osp-err';
+    panel.innerHTML = _semRow('', `Failed: HTTP ${res.status}`);
+    return;
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = '';
+  let failed = null;
+  // This stream can run 30-90 minutes (see the 'embed' phase note below) —
+  // long enough for a real network drop or laptop sleep. Unhandled, that's
+  // a rejected reader.read() with no on-screen recovery short of reloading
+  // the whole app window.
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      const lines = buf.split('\n');
+      buf = lines.pop();
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        let evt;
+        try { evt = JSON.parse(line); } catch { continue; }
+        if (evt.phase === 'download' && typeof evt.pct === 'number') {
+          if (fillEl) fillEl.style.width = evt.pct + '%';
+          if (metaEl) metaEl.textContent = `Downloading model… ${evt.pct}%`;
+        } else if (evt.phase === 'embed' && typeof evt.pct === 'number') {
+          if (fillEl) fillEl.style.width = evt.pct + '%';
+          // Measured against a real run: ~10% in 9 minutes of wall time on
+          // this dev machine, i.e. on the order of an hour total, not the
+          // "a couple minutes" a first guess (based on a single short-query
+          // benchmark, not this actual 31k-verse batched workload) suggested.
+          // Give a real range rather than repeat that mistake in the UI.
+          if (metaEl) metaEl.textContent = `Indexing every verse… ${evt.pct}% (can take 30-90 min depending on your machine, one time only)`;
+        } else if (evt.phase === 'complete' && !evt.ok) {
+          failed = evt.error || 'unknown error';
+        }
+      }
+    }
+  } catch (err) {
+    panel.className = 'osp osp-err';
+    panel.innerHTML = _semRow('', `Connection lost: ${escapeHtml(err.message)}`) +
+      '<div class="osp-actions"><button class="osp-btn osp-btn-primary" id="semantic-retry-btn">Retry</button></div>';
+    document.getElementById('semantic-retry-btn')?.addEventListener('click', installSemanticLayer);
+    return;
+  }
+  if (failed) {
+    panel.className = 'osp osp-err';
+    panel.innerHTML = _semRow('', `Failed: ${escapeHtml(failed)}`);
+  } else {
+    await refreshSemanticStatus();
+  }
+}
+
+refreshSemanticStatus();
+
 // Auto-refresh the mic list when a USB headset / interface is plugged in or
 // out. The OS fires a single `devicechange` for the event but Chromium often
 // emits 2-3 in quick succession during enumeration — debounce so we don't
@@ -2400,6 +2932,71 @@ function loadGoogleFont(family) {
   document.head.appendChild(link);
 }
 
+// Real, installed-on-this-machine font families (fonts.rs, macOS via Core
+// Text) merged into the curated Google Fonts list above — an operator's
+// own installed font (a church brand font, anything from a design pack)
+// had no way to even show up in Theme Studio's font picker before this,
+// even though the real output is just a WebKit view that would happily
+// render it by name if it were only in the list. Runs once at boot;
+// non-macOS (or this file open with no Tauri bridge at all, e.g. a plain
+// browser tab for testing) just keeps the curated list exactly as it was.
+// Retries with backoff rather than one attempt — same real bug as
+// loadAuthToken's own comment above documents: on a fresh/cold launch the
+// injected `window.__TAURI__` bridge can attach a tick or two after this
+// script starts running, and the original single `if (!inv) return;` check
+// treated that race as "not running in Tauri at all", giving up on system
+// fonts forever for the rest of the session with nothing to explain why
+// they'd sometimes show up and sometimes not, purely depending on load
+// timing. That established retry pattern just never got applied here when
+// this was added.
+async function loadSystemFonts(attempts = 5, delayMs = 200) {
+  // Visible outcome either way — this exact class of bug (a command that
+  // silently returns nothing, with no error to explain why) is what the
+  // display-lifecycle logging elsewhere in this file exists to catch; the
+  // same blind spot applied here with no way to tell "the bridge never
+  // came up" from "the command ran and genuinely found zero fonts" from
+  // "it threw" apart, short of a debugger.
+  const report = (outcome, extra) => {
+    fetch(`${SERVER}/api/debug-log`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ event: 'system-fonts', data: { outcome, ...extra } }),
+    }).catch(() => {});
+  };
+  for (let i = 0; i < attempts; i++) {
+    const inv = window.__TAURI__?.core?.invoke || window.__TAURI__?.invoke;
+    if (inv) {
+      try {
+        const names = await inv('list_system_fonts');
+        if (Array.isArray(names) && names.length) {
+          const known = new Set(FONTS.map(f => f.value));
+          let added = 0;
+          names.forEach(name => {
+            if (!name || known.has(name)) return;
+            known.add(name);
+            FONTS.push({ label: name, value: name, google: false });
+            added++;
+          });
+          FONTS.sort((a, b) => a.label.localeCompare(b.label));
+          report('ok', { returned: names.length, added, attempt: i + 1 });
+          // A font picker already open (sitting on the Style tab) just
+          // missed these — refresh it in place instead of requiring a
+          // re-select.
+          if (typeof renderProps === 'function' && activeLayer?.type === 'text') renderProps();
+          return;
+        }
+        report('empty-result', { attempt: i + 1, isArray: Array.isArray(names), length: names?.length });
+      } catch (err) {
+        report('invoke-threw', { attempt: i + 1, message: err?.message || String(err) });
+      }
+    } else {
+      report('no-bridge-yet', { attempt: i + 1 });
+    }
+    await new Promise(r => setTimeout(r, delayMs * (i + 1)));
+  }
+  report('gave-up', { attempts });
+}
+loadSystemFonts();
+
 // ── Canonical theme variants ──────────────────────────────────────────────
 // Deliberately a short, purposeful set rather than a sprawl of near-duplicates:
 //   1. Full — Background      opaque canvas, verse centred
@@ -2413,6 +3010,22 @@ const TXT_SHADOW_SOFT = { enabled: true,  color: '#000000', opacity: 70, blur: 1
 const TXT_SHADOW_NONE = { enabled: false, color: '#000000', opacity: 70, blur: 4,  x: 0, y: 1 };
 const NO_OUTLINE      = { enabled: false, color: '#000000', width: 2 };
 
+// Four small placeholder frames (complementary warm/cool gradients, no
+// real photos needed) so the "Timer — Pre-Service Split" preset below —
+// and Full-scale edit's "Load sample images" button for any Image Cycle
+// layer, see renderImageCycleProps — can be seen actually cycling right
+// away, without the operator having to source real images first. Declared
+// up here (not next to renderImageCycleProps, where it's also used) since
+// DEFAULT_LOOKS' own loadLooks() migration runs immediately at script
+// load, not later like everything else that forward-references code
+// further down this file — it needs this to already exist.
+const SAMPLE_CYCLE_IMAGES = [
+  'data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxOTIwIiBoZWlnaHQ9IjEwODAiIHZpZXdCb3g9IjAgMCAxOTIwIDEwODAiPgogIDxkZWZzPgogICAgPGxpbmVhckdyYWRpZW50IGlkPSJnIiB4MT0iMCIgeTE9IjAiIHgyPSIxIiB5Mj0iMSI+CiAgICAgIDxzdG9wIG9mZnNldD0iMCIgc3RvcC1jb2xvcj0iIzEyM2IzMiIvPgogICAgICA8c3RvcCBvZmZzZXQ9IjEiIHN0b3AtY29sb3I9IiMxZjVjNGQiLz4KICAgIDwvbGluZWFyR3JhZGllbnQ+CiAgPC9kZWZzPgogIDxyZWN0IHdpZHRoPSIxOTIwIiBoZWlnaHQ9IjEwODAiIGZpbGw9InVybCgjZykiLz4KICA8Y2lyY2xlIGN4PSIxNjUwIiBjeT0iMTgwIiByPSIyNjAiIGZpbGw9IiNlOGMyN2EiIG9wYWNpdHk9IjAuMDgiLz4KICA8Y2lyY2xlIGN4PSIyMjAiIGN5PSI5MjAiIHI9IjM0MCIgZmlsbD0iI2U4YzI3YSIgb3BhY2l0eT0iMC4wNiIvPgogIDx0ZXh0IHg9Ijk2MCIgeT0iNTAwIiBmb250LWZhbWlseT0iR2VvcmdpYSwgc2VyaWYiIGZvbnQtc2l6ZT0iMTUwIiBmaWxsPSIjZThjMjdhIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXdlaWdodD0iNzAwIj5XRUxDT01FPC90ZXh0PgogIDx0ZXh0IHg9Ijk2MCIgeT0iNjAwIiBmb250LWZhbWlseT0iQXJpYWwsIHNhbnMtc2VyaWYiIGZvbnQtc2l6ZT0iNDIiIGZpbGw9IiNmZmZmZmZjYyIgdGV4dC1hbmNob3I9Im1pZGRsZSIgbGV0dGVyLXNwYWNpbmc9IjIiPldlIGFyZSBnbGFkIHlvdSBhcmUgaGVyZTwvdGV4dD4KICA8cmVjdCB4PSI4NjAiIHk9IjY2MCIgd2lkdGg9IjIwMCIgaGVpZ2h0PSI0IiBmaWxsPSIjZThjMjdhIi8+Cjwvc3ZnPg==',
+  'data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxOTIwIiBoZWlnaHQ9IjEwODAiIHZpZXdCb3g9IjAgMCAxOTIwIDEwODAiPgogIDxkZWZzPgogICAgPGxpbmVhckdyYWRpZW50IGlkPSJnIiB4MT0iMCIgeTE9IjAiIHgyPSIxIiB5Mj0iMSI+CiAgICAgIDxzdG9wIG9mZnNldD0iMCIgc3RvcC1jb2xvcj0iIzVjM2ExZiIvPgogICAgICA8c3RvcCBvZmZzZXQ9IjEiIHN0b3AtY29sb3I9IiM4YTVhMmMiLz4KICAgIDwvbGluZWFyR3JhZGllbnQ+CiAgPC9kZWZzPgogIDxyZWN0IHdpZHRoPSIxOTIwIiBoZWlnaHQ9IjEwODAiIGZpbGw9InVybCgjZykiLz4KICA8Y2lyY2xlIGN4PSIxNjUwIiBjeT0iMTgwIiByPSIyNjAiIGZpbGw9IiNmNmU4Y2YiIG9wYWNpdHk9IjAuMDgiLz4KICA8Y2lyY2xlIGN4PSIyMjAiIGN5PSI5MjAiIHI9IjM0MCIgZmlsbD0iI2Y2ZThjZiIgb3BhY2l0eT0iMC4wNiIvPgogIDx0ZXh0IHg9Ijk2MCIgeT0iNTAwIiBmb250LWZhbWlseT0iR2VvcmdpYSwgc2VyaWYiIGZvbnQtc2l6ZT0iMTUwIiBmaWxsPSIjZjZlOGNmIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXdlaWdodD0iNzAwIj5TVEFSVElORyBTT09OPC90ZXh0PgogIDx0ZXh0IHg9Ijk2MCIgeT0iNjAwIiBmb250LWZhbWlseT0iQXJpYWwsIHNhbnMtc2VyaWYiIGZvbnQtc2l6ZT0iNDIiIGZpbGw9IiNmZmZmZmZjYyIgdGV4dC1hbmNob3I9Im1pZGRsZSIgbGV0dGVyLXNwYWNpbmc9IjIiPlBsZWFzZSBmaW5kIHlvdXIgc2VhdDwvdGV4dD4KICA8cmVjdCB4PSI4NjAiIHk9IjY2MCIgd2lkdGg9IjIwMCIgaGVpZ2h0PSI0IiBmaWxsPSIjZjZlOGNmIi8+Cjwvc3ZnPg==',
+  'data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxOTIwIiBoZWlnaHQ9IjEwODAiIHZpZXdCb3g9IjAgMCAxOTIwIDEwODAiPgogIDxkZWZzPgogICAgPGxpbmVhckdyYWRpZW50IGlkPSJnIiB4MT0iMCIgeTE9IjAiIHgyPSIxIiB5Mj0iMSI+CiAgICAgIDxzdG9wIG9mZnNldD0iMCIgc3RvcC1jb2xvcj0iIzBmMmQzZCIvPgogICAgICA8c3RvcCBvZmZzZXQ9IjEiIHN0b3AtY29sb3I9IiMxYzRmNjMiLz4KICAgIDwvbGluZWFyR3JhZGllbnQ+CiAgPC9kZWZzPgogIDxyZWN0IHdpZHRoPSIxOTIwIiBoZWlnaHQ9IjEwODAiIGZpbGw9InVybCgjZykiLz4KICA8Y2lyY2xlIGN4PSIxNjUwIiBjeT0iMTgwIiByPSIyNjAiIGZpbGw9IiNlOGMyN2EiIG9wYWNpdHk9IjAuMDgiLz4KICA8Y2lyY2xlIGN4PSIyMjAiIGN5PSI5MjAiIHI9IjM0MCIgZmlsbD0iI2U4YzI3YSIgb3BhY2l0eT0iMC4wNiIvPgogIDx0ZXh0IHg9Ijk2MCIgeT0iNTAwIiBmb250LWZhbWlseT0iR2VvcmdpYSwgc2VyaWYiIGZvbnQtc2l6ZT0iMTUwIiBmaWxsPSIjZThjMjdhIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXdlaWdodD0iNzAwIj5QUkUtU0VSVklDRTwvdGV4dD4KICA8dGV4dCB4PSI5NjAiIHk9IjYwMCIgZm9udC1mYW1pbHk9IkFyaWFsLCBzYW5zLXNlcmlmIiBmb250LXNpemU9IjQyIiBmaWxsPSIjZmZmZmZmY2MiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGxldHRlci1zcGFjaW5nPSIyIj5Xb3JzaGlwIGJlZ2lucyBzaG9ydGx5PC90ZXh0PgogIDxyZWN0IHg9Ijg2MCIgeT0iNjYwIiB3aWR0aD0iMjAwIiBoZWlnaHQ9IjQiIGZpbGw9IiNlOGMyN2EiLz4KPC9zdmc+',
+  'data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxOTIwIiBoZWlnaHQ9IjEwODAiIHZpZXdCb3g9IjAgMCAxOTIwIDEwODAiPgogIDxkZWZzPgogICAgPGxpbmVhckdyYWRpZW50IGlkPSJnIiB4MT0iMCIgeTE9IjAiIHgyPSIxIiB5Mj0iMSI+CiAgICAgIDxzdG9wIG9mZnNldD0iMCIgc3RvcC1jb2xvcj0iIzNhMWYyZSIvPgogICAgICA8c3RvcCBvZmZzZXQ9IjEiIHN0b3AtY29sb3I9IiM1YzJmNDciLz4KICAgIDwvbGluZWFyR3JhZGllbnQ+CiAgPC9kZWZzPgogIDxyZWN0IHdpZHRoPSIxOTIwIiBoZWlnaHQ9IjEwODAiIGZpbGw9InVybCgjZykiLz4KICA8Y2lyY2xlIGN4PSIxNjUwIiBjeT0iMTgwIiByPSIyNjAiIGZpbGw9IiNmMGM5YTAiIG9wYWNpdHk9IjAuMDgiLz4KICA8Y2lyY2xlIGN4PSIyMjAiIGN5PSI5MjAiIHI9IjM0MCIgZmlsbD0iI2YwYzlhMCIgb3BhY2l0eT0iMC4wNiIvPgogIDx0ZXh0IHg9Ijk2MCIgeT0iNTAwIiBmb250LWZhbWlseT0iR2VvcmdpYSwgc2VyaWYiIGZvbnQtc2l6ZT0iMTUwIiBmaWxsPSIjZjBjOWEwIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXdlaWdodD0iNzAwIj5BTE1PU1QgVElNRTwvdGV4dD4KICA8dGV4dCB4PSI5NjAiIHk9IjYwMCIgZm9udC1mYW1pbHk9IkFyaWFsLCBzYW5zLXNlcmlmIiBmb250LXNpemU9IjQyIiBmaWxsPSIjZmZmZmZmY2MiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGxldHRlci1zcGFjaW5nPSIyIj5TaWxlbmNlIHlvdXIgcGhvbmVzPC90ZXh0PgogIDxyZWN0IHg9Ijg2MCIgeT0iNjYwIiB3aWR0aD0iMjAwIiBoZWlnaHQ9IjQiIGZpbGw9IiNmMGM5YTAiLz4KPC9zdmc+',
+];
+
 const DEFAULT_LOOKS = [
   {
     id: 'full-bg', name: 'Full — Background', layout: 'fullscreen', animation: 'fade',
@@ -2420,13 +3033,22 @@ const DEFAULT_LOOKS = [
     layers: [
       { id: 'bg', type: 'background', name: 'Canvas', visible: true,
         fill: 'gradient', color: '#0b0b0f', opacity: 100, color2: '#1c1c30', angle: 160 },
+      // h bumped 440 -> 700 (y unchanged) — owner: "for full screen or block
+      // themes, the text area should use a sizable height by default so
+      // that text don't cut off due to the constraint." A fixed-height text
+      // box centers short verses fine but visibly overflows/clips a long
+      // one against the canvas edge once wrapped content exceeds it — this
+      // just gives real headroom before that risk, without going fully
+      // unconstrained (h:0) and losing the vertical-centering short verses
+      // rely on. Reference line's own y moved down to match (was directly
+      // under the old, shorter box).
       { id: 'verse', type: 'text', name: 'Verse', visible: true, binding: 'verse', customText: '',
-        pos: { x: 210, y: 80, w: 1500, h: 440 },
+        pos: { x: 210, y: 80, w: 1500, h: 700 },
         font: { family: 'Manrope', size: 64, weight: 500, italic: false, lineHeight: 1.35, letterSpacing: 0, transform: 'none' },
         color: '#ffffff', opacity: 100, align: 'center',
         shadow: { ...TXT_SHADOW_SOFT }, outline: { ...NO_OUTLINE } },
       { id: 'ref', type: 'text', name: 'Reference', visible: true, binding: 'reference', customText: '',
-        pos: { x: 210, y: 560, w: 1500, h: 0 },
+        pos: { x: 210, y: 820, w: 1500, h: 0 },
         font: { family: 'Manrope', size: 28, weight: 600, italic: false, lineHeight: 1.2, letterSpacing: 4, transform: 'uppercase' },
         color: '#ffffff', opacity: 60, align: 'center',
         shadow: { ...TXT_SHADOW_NONE }, outline: { ...NO_OUTLINE } },
@@ -2440,14 +3062,15 @@ const DEFAULT_LOOKS = [
     layers: [
       { id: 'bg', type: 'background', name: 'Canvas', visible: true,
         fill: 'transparent', fillBefore: 'solid', color: '#000000', opacity: 100, color2: '#1c1c30', angle: 160 },
+      // Same h/ref-y adjustment as Full — Background, see its own comment.
       { id: 'verse', type: 'text', name: 'Verse', visible: true, binding: 'verse', customText: '',
-        pos: { x: 210, y: 80, w: 1500, h: 440 },
+        pos: { x: 210, y: 80, w: 1500, h: 700 },
         font: { family: 'Manrope', size: 64, weight: 600, italic: false, lineHeight: 1.35, letterSpacing: 0, transform: 'none' },
         color: '#ffffff', opacity: 100, align: 'center',
         shadow: { enabled: true, color: '#000000', opacity: 85, blur: 18, x: 0, y: 4 },
         outline: { enabled: true, color: '#000000', width: 2 } },
       { id: 'ref', type: 'text', name: 'Reference', visible: true, binding: 'reference', customText: '',
-        pos: { x: 210, y: 560, w: 1500, h: 0 },
+        pos: { x: 210, y: 820, w: 1500, h: 0 },
         font: { family: 'Manrope', size: 28, weight: 700, italic: false, lineHeight: 1.2, letterSpacing: 4, transform: 'uppercase' },
         color: '#ffffff', opacity: 85, align: 'center',
         shadow: { enabled: true, color: '#000000', opacity: 85, blur: 10, x: 0, y: 2 },
@@ -2490,8 +3113,13 @@ const DEFAULT_LOOKS = [
     layers: [
       { id: 'bg', type: 'background', name: 'Canvas', visible: true,
         fill: 'transparent', fillBefore: 'solid', color: '#000000', opacity: 100, color2: '#000000', angle: 0 },
+      // h bumped 380 -> 600, grown symmetrically around its old vertical
+      // center (still leaves a real gap before the Song Title line below)
+      // — same "sizable height by default" fix as Full — Background/
+      // Transparent above; this heavy 96px block face was the tightest of
+      // the three named directly ("Lyrics — Block") in the owner's report.
       { id: 'verse', type: 'text', name: 'Lyrics', visible: true, binding: 'verse', customText: '',
-        pos: { x: 140, y: 360, w: 1640, h: 380 },
+        pos: { x: 140, y: 250, w: 1640, h: 600 },
         font: { family: 'Montserrat', size: 96, weight: 800, italic: false, lineHeight: 1.22, letterSpacing: 0, transform: 'uppercase' },
         color: '#ffffff', opacity: 100, align: 'center',
         shadow: { enabled: true, color: '#000000', opacity: 85, blur: 22, x: 0, y: 4 },
@@ -2518,12 +3146,12 @@ const DEFAULT_LOOKS = [
       { id: 'verse', type: 'text', name: 'Verse', visible: true, binding: 'verse', customText: '',
         pos: { x: 88, y: 300, w: 784, h: 430 },
         font: { family: 'Manrope', size: 44, weight: 500, italic: false, lineHeight: 1.4, letterSpacing: 0, transform: 'none' },
-        color: '#ffffff', opacity: 100, align: 'left',
+        color: '#ffffff', opacity: 100, align: 'center',
         shadow: { ...TXT_SHADOW_NONE }, outline: { ...NO_OUTLINE } },
       { id: 'ref', type: 'text', name: 'Reference', visible: true, binding: 'reference', customText: '',
         pos: { x: 88, y: 762, w: 784, h: 0 },
         font: { family: 'Manrope', size: 22, weight: 700, italic: false, lineHeight: 1.2, letterSpacing: 5, transform: 'uppercase' },
-        color: '#ffffff', opacity: 65, align: 'left',
+        color: '#ffffff', opacity: 65, align: 'center',
         shadow: { ...TXT_SHADOW_NONE }, outline: { ...NO_OUTLINE } },
     ],
   },
@@ -2540,12 +3168,12 @@ const DEFAULT_LOOKS = [
       { id: 'verse', type: 'text', name: 'Verse', visible: true, binding: 'verse', customText: '',
         pos: { x: 1048, y: 300, w: 784, h: 430 },
         font: { family: 'Manrope', size: 44, weight: 500, italic: false, lineHeight: 1.4, letterSpacing: 0, transform: 'none' },
-        color: '#ffffff', opacity: 100, align: 'left',
+        color: '#ffffff', opacity: 100, align: 'center',
         shadow: { ...TXT_SHADOW_NONE }, outline: { ...NO_OUTLINE } },
       { id: 'ref', type: 'text', name: 'Reference', visible: true, binding: 'reference', customText: '',
         pos: { x: 1048, y: 762, w: 784, h: 0 },
         font: { family: 'Manrope', size: 22, weight: 700, italic: false, lineHeight: 1.2, letterSpacing: 5, transform: 'uppercase' },
-        color: '#ffffff', opacity: 65, align: 'left',
+        color: '#ffffff', opacity: 65, align: 'center',
         shadow: { ...TXT_SHADOW_NONE }, outline: { ...NO_OUTLINE } },
     ],
   },
@@ -2573,22 +3201,22 @@ const DEFAULT_LOOKS = [
       { id: 'verse', type: 'text', name: 'Verse (source)', visible: true, binding: 'verse', customText: '',
         pos: { x: 88, y: 300, w: 784, h: 430 },
         font: { family: 'Manrope', size: 40, weight: 500, italic: false, lineHeight: 1.4, letterSpacing: 0, transform: 'none' },
-        color: '#ffffff', opacity: 100, align: 'left',
+        color: '#ffffff', opacity: 100, align: 'center',
         shadow: { ...TXT_SHADOW_NONE }, outline: { ...NO_OUTLINE } },
       { id: 'ref', type: 'text', name: 'Reference (source)', visible: true, binding: 'reference', customText: '',
         pos: { x: 88, y: 762, w: 784, h: 0 },
         font: { family: 'Manrope', size: 20, weight: 700, italic: false, lineHeight: 1.2, letterSpacing: 5, transform: 'uppercase' },
-        color: '#ffffff', opacity: 65, align: 'left',
+        color: '#ffffff', opacity: 65, align: 'center',
         shadow: { ...TXT_SHADOW_NONE }, outline: { ...NO_OUTLINE } },
       { id: 'verse-translated', type: 'text', name: 'Verse (translated)', visible: true, binding: 'verse_translated', customText: '',
         pos: { x: 1048, y: 300, w: 784, h: 430 },
         font: { family: 'Manrope', size: 40, weight: 500, italic: false, lineHeight: 1.4, letterSpacing: 0, transform: 'none' },
-        color: '#ffffff', opacity: 100, align: 'left',
+        color: '#ffffff', opacity: 100, align: 'center',
         shadow: { ...TXT_SHADOW_NONE }, outline: { ...NO_OUTLINE } },
       { id: 'ref-translated', type: 'text', name: 'Reference (translated)', visible: true, binding: 'reference', customText: '',
         pos: { x: 1048, y: 762, w: 784, h: 0 },
         font: { family: 'Manrope', size: 20, weight: 700, italic: false, lineHeight: 1.2, letterSpacing: 5, transform: 'uppercase' },
-        color: '#ffffff', opacity: 65, align: 'left',
+        color: '#ffffff', opacity: 65, align: 'center',
         shadow: { ...TXT_SHADOW_NONE }, outline: { ...NO_OUTLINE } },
     ],
   },
@@ -2851,6 +3479,63 @@ const DEFAULT_LOOKS = [
         shadow: { ...TXT_SHADOW_SOFT }, outline: { ...NO_OUTLINE } },
     ],
   },
+  {
+    // Pre-service: a rotating slideshow (announcements, sponsor slides,
+    // event photos — whatever the operator loads into the Image Cycle
+    // layer via Theme Studio's "Cycle" button) filling most of the screen,
+    // with the countdown held in a fixed panel alongside it rather than
+    // floating over the images — legible no matter what's cycling behind
+    // it. Ships with the same placeholder frames "Load sample images"
+    // uses (renderImageCycleProps) pre-loaded, so this preset actually
+    // shows the cycle working the first time it's opened, not an empty
+    // slideshow with nothing to demonstrate — swap in real photos any
+    // time the same way (Upload… / From Library…).
+    id: 'timer-preservice-split', name: 'Timer — Pre-Service Split', layout: 'fullscreen', animation: 'cut',
+    groupId: 'grp-timer', groupName: 'Timer',
+    layers: [
+      { id: 'bg', type: 'background', name: 'Canvas', visible: true,
+        fill: 'gradient', color: '#0b0b0f', opacity: 100, color2: '#1c1c30', angle: 160 },
+      { id: 'cycle', type: 'image-cycle', name: 'Image Cycle', visible: true,
+        sources: [...SAMPLE_CYCLE_IMAGES], fit: 'cover', opacity: 100, radius: 0,
+        pos: { x: 0, y: 0, w: 1440, h: 1080 } },
+      { id: 'timer', type: 'text', name: 'Countdown', visible: true, binding: 'timer', customText: '',
+        pos: { x: 1440, y: 0, w: 480, h: 1080 },
+        font: { family: 'Manrope', size: 130, weight: 800, italic: false, lineHeight: 1, letterSpacing: 0, transform: 'none' },
+        color: '#ffffff', opacity: 100, align: 'center',
+        shadow: { ...TXT_SHADOW_SOFT }, outline: { ...NO_OUTLINE } },
+    ],
+  },
+  {
+    // Each piece of the countdown as its OWN layer (timer-h/m/s bindings —
+    // see renderTextProps' "Binds to" chips) instead of one fixed "H:MM:SS"
+    // string, so they can be laid out however an operator wants — here,
+    // Minute stacked directly above Second with a plain separator between,
+    // rather than side by side. A layout variant available to any template
+    // the same way every other built-in theme is, not a one-off example.
+    id: 'timer-stacked-min-sec', name: 'Timer — Stacked Minute/Second', layout: 'fullscreen', animation: 'cut',
+    groupId: 'grp-timer', groupName: 'Timer',
+    layers: [
+      { id: 'bg', type: 'background', name: 'Canvas', visible: true,
+        fill: 'gradient', color: '#0b0b0f', opacity: 100, color2: '#1c1c30', angle: 160 },
+      { id: 'minute', type: 'text', name: 'Minute', visible: true, binding: 'timer-m', customText: '',
+        pos: { x: 760, y: 340, w: 400, h: 220 },
+        font: { family: 'Manrope', size: 180, weight: 800, italic: false, lineHeight: 1, letterSpacing: 0, transform: 'none' },
+        color: '#ffffff', opacity: 100, align: 'center',
+        shadow: { ...TXT_SHADOW_SOFT }, outline: { ...NO_OUTLINE } },
+      // A plain 'custom' text layer — double-click it on the canvas to
+      // change it to anything (":", "MIN", etc.).
+      { id: 'sep', type: 'text', name: 'Separator', visible: true, binding: 'custom', customText: '..',
+        pos: { x: 760, y: 560, w: 400, h: 80 },
+        font: { family: 'Manrope', size: 60, weight: 700, italic: false, lineHeight: 1, letterSpacing: 0, transform: 'none' },
+        color: '#ffffff88', opacity: 100, align: 'center',
+        shadow: { ...TXT_SHADOW_SOFT }, outline: { ...NO_OUTLINE } },
+      { id: 'second', type: 'text', name: 'Second', visible: true, binding: 'timer-s', customText: '',
+        pos: { x: 760, y: 640, w: 400, h: 220 },
+        font: { family: 'Manrope', size: 180, weight: 800, italic: false, lineHeight: 1, letterSpacing: 0, transform: 'none' },
+        color: '#ffffff', opacity: 100, align: 'center',
+        shadow: { ...TXT_SHADOW_SOFT }, outline: { ...NO_OUTLINE } },
+    ],
+  },
 ];
 
 // Load saved looks from localStorage and back-fill any NEW default-look IDs
@@ -2888,9 +3573,59 @@ let looks = (function loadLooks() {
     const SONGTITLE_MIGRATION_KEY = 'kairo-migrated-songtitle-default-off';
     const runSongTitleMigration = !localStorage.getItem(SONGTITLE_MIGRATION_KEY);
     if (runSongTitleMigration) localStorage.setItem(SONGTITLE_MIGRATION_KEY, '1');
+    // split-left/split-right/multi-language's verse+reference used to default
+    // to left-aligned (matching their filled half being a narrower column) —
+    // now centered under each other, matching full-bg/full-alpha's own
+    // convention, so the reference reads as centered under the verse across
+    // most Bible themes rather than only the fullscreen ones. Gated (like
+    // the Song Title migration above) so a later deliberate operator choice
+    // to go back to left-aligned isn't fought forever — but ALSO force-
+    // persisted immediately (unlike that migration, which only actually
+    // writes back the next time something else happens to call saveLooks()
+    // — a real gap: an install that never edits an unrelated theme keeps the
+    // old value in storage forever even though the gate key is already set,
+    // so the in-memory fix silently never re-applies on the next launch).
+    const ALIGN_MIGRATION_KEY = 'kairo-migrated-bible-center-align';
+    const runAlignMigration = !localStorage.getItem(ALIGN_MIGRATION_KEY);
+    if (runAlignMigration) localStorage.setItem(ALIGN_MIGRATION_KEY, '1');
+    let alignMigrated = false;
+    // Full — Background/Transparent and Lyrics — Block's verse text box grew
+    // (440->700, 380->600) — owner: "the text area should use a sizable
+    // height by default so that text don't cut off due to the constraint."
+    // Same idiom as the align migration above: gated so it runs exactly
+    // once, and only touches a stored theme whose verse box is STILL
+    // sitting at the exact old shipped default — an operator who already
+    // deliberately resized it keeps their own choice untouched.
+    const TEXTHEIGHT_MIGRATION_KEY = 'kairo-migrated-fullscreen-text-height';
+    const runTextHeightMigration = !localStorage.getItem(TEXTHEIGHT_MIGRATION_KEY);
+    if (runTextHeightMigration) localStorage.setItem(TEXTHEIGHT_MIGRATION_KEY, '1');
+    let textHeightMigrated = false;
+    // Same idea as the Song Title migration above, for installs that
+    // already have their own stored copy of 'timer-preservice-split' from
+    // before it shipped with SAMPLE_CYCLE_IMAGES pre-loaded (the back-fill
+    // above only ADDS ids that are entirely missing — an id already known
+    // keeps its stored copy exactly as saved, empty sources included).
+    // Deliberately NOT gated by a one-time key like the migration above —
+    // a first version of this WAS, and that was itself the bug: it mutated
+    // `stored` in memory but nothing here calls saveLooks() to persist
+    // that, so the very next reload read the same still-empty sources
+    // back from localStorage — except now the key already existed, so the
+    // migration no-opped forever after, and the theme's Image Cycle layer
+    // just silently stayed empty (which looks exactly like "the background
+    // isn't changing", because there was nothing in it to cycle through).
+    // Instead this just re-checks "is it still empty" on every load, which
+    // is naturally idempotent once populated, self-heals from that earlier
+    // broken state with no manual fix needed, and cycleSampleMigrated
+    // (below) makes sure it's saveLooks()'d so it isn't relying on that
+    // recheck to run again either.
+    let cycleSampleMigrated = false;
     stored.forEach(l => {
       const def = defaultsById.get(l.id);
       if (def && def.groupId && !l.groupId) { l.groupId = def.groupId; l.groupName = def.groupName; }
+      if (l.id === 'timer-preservice-split') {
+        const cycle = (l.layers || []).find(ly => ly.type === 'image-cycle');
+        if (cycle && !(cycle.sources || []).length) { cycle.sources = [...SAMPLE_CYCLE_IMAGES]; cycleSampleMigrated = true; }
+      }
       // Word/Activate/Karaoke/Typewriter/Impact/Bold Caption/Bounce/Highlight Box/
       // Shimmer used to be crammed into the same `animation` field as the
       // real Fade/Slide/Cut transitions — every install saved before that
@@ -2925,23 +3660,76 @@ let looks = (function loadLooks() {
         const ref = (l.layers || []).find(ly => ly.id === 'ref' && ly.binding === 'reference');
         if (ref) ref.visible = false;
       }
+      if (runAlignMigration && (l.id === 'split-left' || l.id === 'split-right' || l.id === 'multi-language')) {
+        (l.layers || []).forEach(ly => {
+          if (ly.type === 'text' && (ly.binding === 'verse' || ly.binding === 'verse_translated' || ly.binding === 'reference') && ly.align === 'left') {
+            ly.align = 'center';
+            alignMigrated = true;
+          }
+        });
+      }
+      if (runTextHeightMigration && (l.id === 'full-bg' || l.id === 'full-alpha')) {
+        const verse = (l.layers || []).find(ly => ly.id === 'verse');
+        const ref   = (l.layers || []).find(ly => ly.id === 'ref');
+        if (verse?.pos?.h === 440) { verse.pos.h = 700; textHeightMigrated = true; }
+        if (ref?.pos?.y === 560)   { ref.pos.y = 820;   textHeightMigrated = true; }
+      }
+      if (runTextHeightMigration && l.id === 'lyrics-block') {
+        const verse = (l.layers || []).find(ly => ly.id === 'verse');
+        if (verse?.pos?.h === 380 && verse?.pos?.y === 360) {
+          verse.pos.y = 250; verse.pos.h = 600; textHeightMigrated = true;
+        }
+      }
     });
-    return missing.length ? [...stored, ...missing] : stored;
+    const result = missing.length ? [...stored, ...missing] : stored;
+    // Persist the cycle-sample and align fixes directly (can't call
+    // saveLooks() here — it reads the module-level `looks` binding, which
+    // doesn't exist yet: this whole function is still IN THE MIDDLE of
+    // computing the value that assignment is waiting on). Every other
+    // migration above already gets written back out the ordinary way, the
+    // next time anything calls saveLooks() for an unrelated reason — these
+    // are the two migrations that need to survive even if nothing else ever
+    // does (the align one is gated, so without a forced write here it would
+    // silently never actually persist on an install that never happens to
+    // save an unrelated theme edit — the gate key alone doesn't get you that).
+    if (cycleSampleMigrated || alignMigrated || textHeightMigrated) {
+      try { localStorage.setItem(LOOKS_KEY, JSON.stringify(result)); } catch {}
+    }
+    return result;
   }
   // First run on v3 — carry over the operator's own themes from v2, if any.
-  // Also mark the Song Title migration as already applied: DEFAULT_LOOKS
-  // already ships with that layer off, so a genuinely fresh install has
-  // nothing to retroactively flip — without this, the FIRST save an operator
-  // makes (e.g. deliberately turning Song Title back on) would look like a
-  // pre-migration install on the next launch and get silently reverted by
-  // the migration above.
+  // Also mark the Song Title AND align migrations as already applied:
+  // DEFAULT_LOOKS already ships with both fixes baked in, so a genuinely
+  // fresh install has nothing to retroactively flip — without this, the
+  // FIRST save an operator makes (e.g. deliberately choosing left-align)
+  // would look like a pre-migration install on the next launch and get
+  // silently reverted by the migration above.
   localStorage.setItem('kairo-migrated-songtitle-default-off', '1');
+  localStorage.setItem('kairo-migrated-bible-center-align', '1');
+  localStorage.setItem('kairo-migrated-fullscreen-text-height', '1');
   const legacy = JSON.parse(localStorage.getItem('kairo-looks-v2') || 'null');
   const custom = Array.isArray(legacy) ? legacy.filter(l => l && !LEGACY_BUILTIN_IDS.has(l.id)) : [];
   return [...DEFAULT_LOOKS, ...custom];
 })();
 let activeLook  = looks[0];
-let activeLayer = null; // currently selected layer object
+let activeLayer = null; // currently selected (primary) layer object
+
+// The in-progress inline text edit (beginInlineTextEdit), if any — `null`
+// otherwise. CONFIRMED root cause of edits not saving: every mousedown
+// handler that starts a new selection/drag (tsDecorateLayerEl, tsBeginDrag)
+// calls e.preventDefault(), which — per spec — suppresses the browser's
+// OWN default "move focus, blur whatever was focused" behavior on
+// mousedown. That meant clicking a DIFFERENT layer (or empty canvas) while
+// editing never fired 'blur' on the field being edited at all, so the
+// commit handler attached to it never ran — the edit just vanished the
+// instant the canvas re-rendered out from under it. Tracking the active
+// edit here lets every one of those entry points force it to commit
+// itself FIRST, instead of relying on a blur event that preventDefault
+// was quietly cancelling.
+let tsActiveEdit = null; // { layerId, commit }
+function tsCommitActiveEdit(exceptLayerId) {
+  if (tsActiveEdit && tsActiveEdit.layerId !== exceptLayerId) tsActiveEdit.commit();
+}
 
 // Themes imported from one multi-slide bundle (a .protheme file's several
 // named theme-slides — HYMN 1, NOTES, CALL TO WORSHIP, etc.) share a
@@ -2958,9 +3746,14 @@ let collapsedThemeGroups = new Set();
 // Select-all/copy/paste for layers (Cmd/Ctrl+A/C/V while Theme Studio has
 // focus, mirroring the same gesture on native files/text) — lets an operator
 // pull layers from one theme into another instead of only ever duplicating
-// the whole theme. multiSelectedLayerIds is select-all's visual footprint;
-// a plain single click still only ever sets activeLayer, so Copy after a
-// normal click copies just that one layer.
+// the whole theme. Also the general multi-selection set — Shift/Cmd/Ctrl+
+// click a layer on the canvas (tsToggleMultiSelect) toggles it in here too,
+// alongside Select-All's "everything" and the Layers-list row click's own
+// handling — one shared set for all three entry points, read by Copy/
+// Paste/Delete (whole selection), the canvas highlight + group-drag +
+// Align toolbar (tsSelectedLayers/tsAlignSelection), and arrow-key nudging.
+// activeLayer is still the single "primary" the props panel edits; a plain
+// click always narrows back down to just that one.
 let multiSelectedLayerIds = new Set();
 let layerClipboard = [];
 
@@ -2976,7 +3769,18 @@ let tsItemCtx = null; // { item, slideIndex, baseLook } — set only while tsMod
 let itemUndoStack = [], itemRedoStack = [], itemPendingCheckpoint = null, itemAutosaveTimer = null;
 
 function saveLooks() {
-  localStorage.setItem(LOOKS_KEY, JSON.stringify(looks));
+  // A large embedded layer (e.g. an uncapped video data: URI — see
+  // loadVideoFile's own size cap) can push `looks` past the origin's
+  // storage quota; setItem throws SYNCHRONOUSLY. Uncaught, that used to
+  // abort the callers below for THIS edit and, since the quota stays over
+  // the limit, every theme edit for the rest of the session — with
+  // toast() a deliberate no-op, silently and invisibly.
+  try {
+    localStorage.setItem(LOOKS_KEY, JSON.stringify(looks));
+  } catch (err) {
+    console.warn('[KAIRO] saveLooks failed (storage quota?):', err.message);
+    return;
+  }
   // Keep the Settings pickers and every live output in step with the edit.
   try { renderOutputThemePickers(); renderDisplayOutputs(); applyOutputThemes(); } catch {}
 }
@@ -3139,7 +3943,7 @@ async function deleteThemeGroup(groupId, groupName, groupLooks) {
   looks = looks.filter(l => !ids.has(l.id));
   if (ids.has(activeLook?.id)) {
     activeLook  = looks[0];
-    activeLayer = null;
+    activeLayer = null; multiSelectedLayerIds.clear();
     resetThemeHistory();
   }
   saveLooks();
@@ -3167,8 +3971,9 @@ function renderLooksList() {
 }
 
 function selectLook(look) {
+  tsCommitActiveEdit(null);
   activeLook  = look;
-  activeLayer = null;
+  activeLayer = null; multiSelectedLayerIds.clear();
   resetThemeHistory();
   renderLooksList();
   renderLayersList();
@@ -3219,7 +4024,7 @@ function duplicateLook(look) {
   delete copy.groupName;
   looks.push(copy);
   activeLook  = copy;
-  activeLayer = null;
+  activeLayer = null; multiSelectedLayerIds.clear();
   resetThemeHistory();
   saveLooks();
   renderLooksList(); renderLayersList(); syncMetaRow(); renderPreview(); renderProps();
@@ -3235,7 +4040,7 @@ async function deleteLook(look) {
   looks = looks.filter(l => l.id !== look.id);
   if (activeLook?.id === look.id) {
     activeLook  = looks[0];
-    activeLayer = null;
+    activeLayer = null; multiSelectedLayerIds.clear();
     resetThemeHistory();
   }
   saveLooks();
@@ -3306,13 +4111,6 @@ function syncMetaRow() {
   if (!activeLook) return;
   document.querySelectorAll('#ts-layout-picker .ts-chip').forEach(b =>
     b.classList.toggle('active', b.dataset.layout === activeLook.layout));
-  document.querySelectorAll('#ts-anim-picker .ts-chip').forEach(b =>
-    b.classList.toggle('active', b.dataset.anim === activeLook.animation));
-  const speedSlider = document.getElementById('ts-anim-speed');
-  if (speedSlider) {
-    speedSlider.value = activeLook.animationSpeed || 1;
-    speedSlider.classList.toggle('hidden', (activeLook.animation || 'fade') === 'cut');
-  }
   const alphaBtn = document.getElementById('ts-alpha-toggle');
   if (alphaBtn) alphaBtn.classList.toggle('active', isAlphaCanvas());
   renderThemeCanvasSizeSelect();
@@ -3392,8 +4190,18 @@ function deleteLayer(layer) {
   const isBg = layer.type === 'background' && !layer.pos;
   const isCustom = isItemCustomLayer(layer);
   if (isBg || (tsMode === 'item' && !isCustom)) return;
+  const wasActive = activeLayer?.id === layer.id;
+  const idx = activeLook.layers.findIndex(l => l.id === layer.id);
   activeLook.layers = activeLook.layers.filter(l => l.id !== layer.id);
-  if (activeLayer?.id === layer.id) activeLayer = null;
+  // Auto-select whatever's left in its place — deleting used to just drop
+  // the selection entirely, leaving the props panel empty until the
+  // operator clicked something again. Whatever now sits at the deleted
+  // layer's own index IS "the next one" (everything after it shifted up
+  // one slot); falls back to the new last layer if it was the last one,
+  // or null once the list is genuinely empty.
+  if (wasActive) {
+    activeLayer = activeLook.layers[Math.min(idx, activeLook.layers.length - 1)] || null;
+  }
   renderLayersList();
   renderPreview();
   renderProps();
@@ -3405,15 +4213,16 @@ function renderLayersList() {
   if (!el) return;
   el.innerHTML = '';
   if (!activeLook) return;
-  // Render in reverse so background is at bottom visually (like PP). Item
-  // mode only ever lets an operator override TEXT layers of the theme for
-  // one slide — the theme's own background/image stays fixed, so those
-  // never appear in this list while tsMode === 'item' (still visible
-  // read-only on the canvas itself, see renderPreview) — but a custom layer
-  // the operator added to this slide (isItemCustomLayer) shows regardless
-  // of its type, since it's the operator's own, not the theme's.
-  const layers = tsMode === 'item' ? activeLook.layers.filter(l => l.type === 'text' || isItemCustomLayer(l)) : activeLook.layers;
-  const rev = [...layers].reverse();
+  // Render in reverse so background is at bottom visually (like PP). Used
+  // to filter to text-only (+ custom layers) in item mode, from back when
+  // a base theme's own background/image had no drag/resize wiring there
+  // at all (nothing to show them for) — now that those persist properly
+  // per-slide too (see writeItemSlideStyleFromSynthetic/buildSyntheticLook
+  // and tsDecorateLayerEl's call sites), every layer belongs in this list
+  // in item mode exactly the same as theme mode, or "the background isn't
+  // editable" just moves one step over into "the background isn't even
+  // visible in Layers to select".
+  const rev = [...activeLook.layers].reverse();
   rev.forEach(layer => {
     const row = document.createElement('div');
     row.className = 'ts-layer-row' + (layer.id === activeLayer?.id ? ' active' : '') + (multiSelectedLayerIds.has(layer.id) ? ' multi-selected' : '');
@@ -3422,9 +4231,12 @@ function renderLayersList() {
     const isText = layer.type === 'text';
     const isBg   = layer.type === 'background' && !layer.pos;   // base canvas only
 
-    // Visibility icon
+    // Visibility icon. The dimmed state uses 'is-off', NOT the app-wide
+    // 'hidden' utility class (display:none !important) — that collision
+    // used to make the toggle button itself vanish the moment a layer was
+    // switched off, leaving no way to turn it back on.
     const visBtn = document.createElement('button');
-    visBtn.className = 'ts-layer-vis' + (layer.visible ? '' : ' hidden');
+    visBtn.className = 'ts-layer-vis' + (layer.visible ? '' : ' is-off');
     visBtn.title = layer.visible ? 'Hide' : 'Show';
     visBtn.innerHTML = layer.visible
       ? `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>`
@@ -3445,6 +4257,7 @@ function renderLayersList() {
     const typeIcon = document.createElement('div');
     typeIcon.className = 'ts-layer-type-icon';
     typeIcon.textContent = layer.type === 'image' ? '▣'
+                         : layer.type === 'image-cycle' ? '▤'
                          : layer.type === 'background' ? '■'
                          : 'T';
 
@@ -3472,11 +4285,10 @@ function renderLayersList() {
 
     // Drag handle — reordering changes paint order (top of the list paints
     // last / in front, matching how the rows are shown). Works in item mode
-    // too now: only text/custom layers ever show as rows there (the theme's
-    // own background/image stay fixed, see the filter above), so this only
-    // ever reorders this slide's own content — persisted per-slide via
-    // __layerOrder (see writeItemSlideStyleFromSynthetic/buildSyntheticLook)
-    // rather than touching the theme's order.
+    // too — every layer shows as a row there now (see the note above where
+    // the old text-only filter used to live), and any reorder there is
+    // persisted per-slide via __layerOrder (see writeItemSlideStyleFromSynthetic/
+    // buildSyntheticLook) rather than touching the theme's own order.
     const grip = document.createElement('div');
     grip.className = 'ts-layer-grip';
     grip.title = 'Drag to reorder';
@@ -3520,7 +4332,15 @@ function renderLayersList() {
       reorderLayer(tsDragLayerId, layer.id, after);
     });
 
-    row.addEventListener('click', () => {
+    row.addEventListener('click', (e) => {
+      tsCommitActiveEdit(layer.id);
+      // Same modifier convention as the canvas itself (tsToggleMultiSelect)
+      // — the Layers list is a second place to build the same selection,
+      // not a separate mechanism with its own rules.
+      if (e.shiftKey || e.metaKey || e.ctrlKey) {
+        tsToggleMultiSelect(layer);
+        return;
+      }
       activeLayer = layer;
       multiSelectedLayerIds = new Set(); // a plain click always narrows back to one
       renderLayersList();
@@ -3575,22 +4395,11 @@ function reorderLayer(draggedId, targetId, after) {
   tsSave();
 }
 
-// Reconciles a stored id order against the layers actually present — any id
-// no longer present is dropped, any layer not mentioned (added since the
-// order was last saved) keeps its natural relative position, appended after
-// the ones the order does cover. Used by buildSyntheticLook to replay a
-// per-slide reorder recorded in item.slideStyles[slideIndex].__layerOrder.
-function applyLayerOrder(layers, orderIds) {
-  if (!orderIds || !orderIds.length) return layers;
-  const byId = new Map(layers.map(l => [l.id, l]));
-  const ordered = [];
-  orderIds.forEach(id => {
-    const l = byId.get(id);
-    if (l) { ordered.push(l); byId.delete(id); }
-  });
-  layers.forEach(l => { if (byId.has(l.id)) ordered.push(l); });
-  return ordered;
-}
+// applyLayerOrder — used by buildSyntheticLook to replay a per-slide
+// reorder recorded in item.slideStyles[slideIndex].__layerOrder. See
+// src/layer_geometry.js for the shared implementation (loaded via
+// index.html before this script) — was a byte-identical copy-paste across
+// this file, service.js, and display.html.
 
 // ── Render preview ────────────────────────────────────────────────────────
 const PREVIEW_TEXT_SAMPLE = 'For God so loved the world, that he gave his only begotten Son.';
@@ -3624,8 +4433,14 @@ function layerTextContent(layer) {
       if (layer.binding === 'verse') return s.text || '(empty slide)';
       if (layer.binding === 'reference') return s.reference || '';
       if (layer.binding === 'timer') return s.timerText || PREVIEW_TIMER_SAMPLE;
+      if (layer.binding === 'timer-h') return '00';
+      if (layer.binding === 'timer-m') return '12';
+      if (layer.binding === 'timer-s') return '34';
       if (layer.binding === 'verse_translated') {
         return TS_TRANSLATE_SAMPLES[tsItemCtx.item.translateTo] || '[No translation language set for this item]';
+      }
+      if (layer.binding === 'custom' && typeof layer.customText === 'string' && layer.customText.includes('{timer}')) {
+        return layer.customText.replace('{timer}', s.timerText || PREVIEW_TIMER_SAMPLE);
       }
       return layer.customText || '[Custom Text]';
     }
@@ -3633,8 +4448,18 @@ function layerTextContent(layer) {
   if (layer.binding === 'verse')     return PREVIEW_TEXT_SAMPLE;
   if (layer.binding === 'reference') return PREVIEW_REF_SAMPLE;
   if (layer.binding === 'timer')     return PREVIEW_TIMER_SAMPLE;
+  if (layer.binding === 'timer-h')   return '00';
+  if (layer.binding === 'timer-m')   return '12';
+  if (layer.binding === 'timer-s')   return '34';
   if (layer.binding === 'verse_translated') {
     return TS_TRANSLATE_SAMPLES[activeLook?.translateTo] || '[Pick a language below]';
+  }
+  // "{timer}" placeholder — lets an operator weave the live countdown INTO a
+  // sentence (e.g. "We begin in {timer}") instead of it only existing as its
+  // own separate element. Mirrors the same substitution in display.html's
+  // buildLayerDOM and service.js's paintLookLayers.
+  if (layer.binding === 'custom' && typeof layer.customText === 'string' && layer.customText.includes('{timer}')) {
+    return layer.customText.replace('{timer}', PREVIEW_TIMER_SAMPLE);
   }
   return layer.customText || '[Custom Text]';
 }
@@ -3672,6 +4497,13 @@ window.addEventListener('resize', () => {
   const stage = document.getElementById('looks-preview-stage');
   if (stage && activeLook) fitPreviewStage(stage, themeCanvasSize(activeLook).w, themeCanvasSize(activeLook).h);
 });
+
+// isVideoLayerSrc, applyShapeGeometry — see src/layer_geometry.js for the
+// shared implementation (loaded via index.html before this script). Was a
+// byte-identical copy-paste across this file, service.js, and
+// display.html; applyShapeGeometry's `scale` here is a px scale factor
+// (this canvas's own coordinate system) — see that file's own comment for
+// how display.html's vh-based coordinate system uses the same function.
 
 function renderPreview() {
   const stage = document.getElementById('looks-preview-stage');
@@ -3747,43 +4579,115 @@ function renderPreview() {
         div.style.height = (layer.pos.h / TS_DESIGN_H * 100) + '%';
         div.style.right  = 'auto';
         div.style.bottom = 'auto';
-        if (layer.radius) div.style.borderRadius = (layer.radius * pxScale).toFixed(1) + 'px';
+        applyShapeGeometry(div, layer, pxScale);
         if (layer.rotation) div.style.transform = `rotate(${layer.rotation}deg)`;
       }
 
       stage.appendChild(div);
-      // Full-stage backgrounds are select-only; positioned shapes are draggable.
-      // Item mode still renders the theme's background for visual context
-      // (contrast/positioning reference) but it belongs to the theme, not
-      // the item — no selection/drag wiring at all in that mode. A custom
-      // background-type layer the operator added to this slide is the
-      // exception (isItemCustomLayer) — it's the operator's own, so it gets
-      // full interactivity same as in theme mode.
-      if (tsMode !== 'item' || isItemCustomLayer(layer)) tsDecorateLayerEl(div, layer, !!layer.pos);
+      // Full-stage backgrounds are select-only; positioned shapes are
+      // draggable, in item mode same as theme mode — repositioning a base
+      // theme's own layer per-slide now actually persists (see
+      // writeItemSlideStyleFromSynthetic/buildSyntheticLook, which used to
+      // only diff text layers, the real reason this was item-mode-only
+      // before: dragging something that couldn't be saved would just look
+      // like it worked and silently revert).
+      tsDecorateLayerEl(div, layer, !!layer.pos);
       return;
     }
 
     if (layer.type === 'image') {
-      const div = document.createElement('div');
       const p = layer.pos || { x: 0, y: 0, w: TS_DESIGN_W, h: TS_DESIGN_H };
+      const fit = layer.fit === 'fill' ? 'fill' : (layer.fit || 'contain');
+      const posCss = `
+        position:absolute;
+        left:${(p.x / TS_DESIGN_W * 100)}%;
+        top:${(p.y / TS_DESIGN_H * 100)}%;
+        width:${(p.w / TS_DESIGN_W * 100)}%;
+        height:${(p.h / TS_DESIGN_H * 100)}%;
+        opacity:${(layer.opacity ?? 100) / 100};
+        border-radius:${((layer.radius || 0) * pxScale).toFixed(1)}px;
+        ${layer.rotation ? `transform: rotate(${layer.rotation}deg);` : ''}
+      `;
+      // A theme "image" layer's src is occasionally an actual video file —
+      // Theme Studio's own file picker doesn't hard-block it (native OS
+      // dialogs don't strictly enforce accept="image/*") and drag-and-drop
+      // never respected that hint either. background-image can't play a
+      // video at all, so this showed as a permanently frozen frame with no
+      // error to explain why — same fix as display.html/paintLookLayers.
+      const div = isVideoLayerSrc(layer.src) ? document.createElement('video') : document.createElement('div');
+      if (div.tagName === 'VIDEO') {
+        div.autoplay = true; div.loop = true; div.muted = true; div.playsInline = true;
+        div.style.cssText = posCss + `object-fit:${fit};`;
+        div.src = layer.src;
+      } else if (layer.motion === 'kenburns') {
+        // Live in the editor too, not just the real output — the whole
+        // point of a "does this feel dynamic" judgment call is seeing the
+        // motion while picking colors/copy, not only after starting a
+        // live countdown and switching to the actual display to check.
+        // Same outer-wrapper/inner-art split as display.html's own
+        // startCycleMotion, for the same clipping reason.
+        div.style.cssText = posCss + 'overflow:hidden;';
+        const art = document.createElement('div');
+        art.style.cssText = `position:absolute;inset:0;background-repeat:no-repeat;background-position:center;background-image:url('${layer.src}');background-size:${fit === 'fill' ? '100% 100%' : fit};animation:kairo-kenburns 18s ease-in-out infinite alternate;`;
+        div.appendChild(art);
+      } else {
+        div.style.cssText = posCss + `
+          background-image:url('${layer.src}');
+          background-size:${fit === 'fill' ? '100% 100%' : fit};
+          background-position:center;
+          background-repeat:no-repeat;
+        `;
+      }
+      stage.appendChild(div);
+      if (div.tagName === 'VIDEO') div.play().catch(() => {});
+      // Same as the background branch above — full drag/resize in item
+      // mode too, now that it actually persists.
+      tsDecorateLayerEl(div, layer, true);
+      return;
+    }
+
+    // Image Cycle — editing always shows the first frame as a stand-in; the
+    // live per-second advance (triggers.js's totalMs/remainingMs) only
+    // happens on the real output, not in this canvas. See
+    // renderImageCycleProps for the "Images" list that fills `sources`.
+    if (layer.type === 'image-cycle') {
+      const p = layer.pos || { x: 0, y: 0, w: TS_DESIGN_W, h: TS_DESIGN_H };
+      const fit = layer.fit === 'fill' ? 'fill' : (layer.fit || 'cover');
+      const first = (layer.sources || [])[0];
+      const div = document.createElement('div');
+      const kenBurns = layer.motion === 'kenburns' && !!first;
       div.style.cssText = `
         position:absolute;
         left:${(p.x / TS_DESIGN_W * 100)}%;
         top:${(p.y / TS_DESIGN_H * 100)}%;
         width:${(p.w / TS_DESIGN_W * 100)}%;
         height:${(p.h / TS_DESIGN_H * 100)}%;
-        background-image:url('${layer.src}');
-        background-size:${layer.fit === 'fill' ? '100% 100%' : layer.fit};
-        background-position:center;
-        background-repeat:no-repeat;
         opacity:${(layer.opacity ?? 100) / 100};
         border-radius:${((layer.radius || 0) * pxScale).toFixed(1)}px;
+        ${kenBurns ? 'overflow:hidden;' : (first ? `background-image:url('${first}');` : 'background:#1a1a1e;')}
+        ${kenBurns ? '' : `background-size:${fit === 'fill' ? '100% 100%' : fit};background-position:center;background-repeat:no-repeat;`}
         ${layer.rotation ? `transform: rotate(${layer.rotation}deg);` : ''}
       `;
+      // Live in the editor too — same reasoning as the plain 'image'
+      // branch above.
+      if (kenBurns) {
+        const art = document.createElement('div');
+        art.style.cssText = `position:absolute;inset:0;background-repeat:no-repeat;background-position:center;background-image:url('${first}');background-size:${fit === 'fill' ? '100% 100%' : fit};animation:kairo-kenburns 18s ease-in-out infinite alternate;`;
+        div.appendChild(art);
+      }
+      if ((layer.sources || []).length > 1) {
+        const badge = document.createElement('span');
+        badge.style.cssText = 'position:absolute;top:6px;right:6px;background:rgba(0,0,0,0.6);color:#fff;font-size:10px;font-weight:700;padding:2px 6px;border-radius:4px;pointer-events:none;';
+        badge.textContent = `1 / ${layer.sources.length}`;
+        div.appendChild(badge);
+      }
       stage.appendChild(div);
-      // Same exception as the background branch above — a custom image
-      // layer added to this slide gets full interactivity even in item mode.
-      if (tsMode !== 'item' || isItemCustomLayer(layer)) tsDecorateLayerEl(div, layer, true);
+      // Full drag/resize in item mode too — this is exactly the "the
+      // background isn't editable" gap: an Image Cycle layer is a base
+      // theme layer, same as any image/background, and those used to have
+      // no drag wiring at all in item mode because there was nowhere for
+      // the change to persist to (see writeItemSlideStyleFromSynthetic).
+      tsDecorateLayerEl(div, layer, true);
       return;
     }
 
@@ -3860,6 +4764,15 @@ function renderPreview() {
         div.style.transform = 'none';
         div.style.padding   = '0';
         if (layer.pos.h > 0) div.style.height = (layer.pos.h / TS_DESIGN_H * 100) + '%';
+        // Entrance (layer.entrance) only applies to a free-positioned
+        // layer — one of the layout presets above may already be using
+        // `transform` for its own centering, and a CSS animation on the
+        // same property would replace that (not compose with it) for as
+        // long as the animation runs and permanently once it ends, which
+        // would silently break that positioning. layer.pos always resets
+        // transform to 'none' right above, so there's nothing to conflict
+        // with here.
+        if (layer.entrance === 'fade-up') div.style.animation = 'kairo-text-in 700ms ease-out both';
       }
 
       if (layer.binding) div.dataset.binding = layer.binding;
@@ -3889,7 +4802,89 @@ function renderPreview() {
         div.textContent = layerTextContent(layer);
       }
       stage.appendChild(div);
+
+      // Auto-grow a free-canvas box the moment its content no longer fits
+      // it — increasing font size (or weight, or letter-spacing, or just
+      // typing more) previously left the box exactly as wide as it was,
+      // so the text silently overflowed past it with no visual sign the
+      // box and the actual rendered text had drifted apart, and no way to
+      // tell from the resize handles either (they still framed the OLD,
+      // now-wrong box). scrollWidth > clientWidth is specifically the
+      // right signal here because normal wrapping doesn't trip it — a
+      // genuinely multi-line wrapped block reports scrollWidth <=
+      // clientWidth just fine. Only a single run of text that literally
+      // can't break onto a new line (one long word, or any text at all
+      // once the font is bigger than the box) does — exactly the case
+      // that was reported.
+      if (layer.pos && div.scrollWidth > div.clientWidth + 1) {
+        const stageRectNow = stage.getBoundingClientRect();
+        if (stageRectNow.width > 0) {
+          // Capped at the canvas's own width — growing wasn't meant to be
+          // unbounded, just enough to stop a normal size bump from quietly
+          // drifting past its box. An absurd font size (some hundreds of
+          // px) can still ask for more than 1920 design-px wide; letting
+          // the box balloon past the canvas edge to chase that just moved
+          // the same "silently wrong" problem onto the BOX instead of the
+          // text, and dragged its own x off wherever centering happened to
+          // land. Past this cap the box holds still and the text clips
+          // (overflow:hidden below) with a warning outline instead —
+          // visible and correct, rather than invisibly wrong in a new way.
+          const neededW = Math.min(TS_DESIGN_W, Math.ceil(div.scrollWidth / stageRectNow.width * TS_DESIGN_W) + 4);
+          if (neededW > layer.pos.w) {
+            const grow = neededW - layer.pos.w;
+            // Grow from the box's own CENTER for centered text (the
+            // overwhelmingly common case), not just widening rightward —
+            // pinning x and only extending w drags a centered line's
+            // visual center off to the right as it grows, which read as
+            // the box growing in a lopsided, unexpected direction. Left/
+            // right-aligned text still anchors from its own edge, since
+            // that's the edge the text is actually reading from.
+            if (layer.align === 'center') layer.pos.x = Math.round(layer.pos.x - grow / 2);
+            else if (layer.align === 'right') layer.pos.x = Math.round(layer.pos.x - grow);
+            layer.pos.w = neededW;
+            div.style.left = (layer.pos.x / TS_DESIGN_W * 100) + '%';
+            div.style.width = (layer.pos.w / TS_DESIGN_W * 100) + '%';
+          }
+          // Still doesn't fit even at the cap — clip instead of spilling
+          // past the canvas edge uncontained, and outline it red so it
+          // reads as "this needs a smaller size", not a rendering bug.
+          const stillOverflows = div.scrollWidth > (layer.pos.w / TS_DESIGN_W * stageRectNow.width) + 1;
+          div.style.overflow = stillOverflows ? 'hidden' : '';
+          div.style.outline = stillOverflows ? '2px solid var(--red)' : '';
+        }
+      }
+
       tsDecorateLayerEl(div, layer, true);
+
+      // Double-click to type directly into the shape on the canvas —
+      // matches every other design tool (PowerPoint, Canva, Figma, Keynote)
+      // instead of forcing a trip to the props panel's separate "Text"
+      // field for a one-word edit. A 'custom' binding always qualifies
+      // (customText is the one free-typed string a layer has); a 'verse'
+      // binding ALSO qualifies, but only in item mode — there, "verse" is
+      // that specific song/slide's own lyric line (real words, backed by
+      // commitSlideText), not a live scripture auto-detection with nothing
+      // of the operator's own to edit. reference/timer/timer-h/m/s stay
+      // computed-only either way.
+      const editableInPlace = layer.binding === 'custom'
+        || (layer.binding === 'verse' && tsMode === 'item' && tsItemCtx);
+      if (editableInPlace) {
+        // A SEPARATE mousedown listener, timed by hand (tsHandleLayerDblClick)
+        // rather than a 'click'-based double-click helper — this element is
+        // draggable, and tsDecorateLayerEl's OWN mousedown (registered just
+        // above) always starts a real drag session first, regardless of
+        // what this click turns out to be. Whichever listener runs second
+        // still fires normally (stopPropagation only blocks bubbling to
+        // ancestors, not sibling listeners on the same element/event), so
+        // this can reliably detect "that was the second click" and cancel
+        // the drag tsBeginDrag already started before handing off to
+        // beginInlineTextEdit — without that cancellation, the pending
+        // mouseup still fires tsDragEnd's own full re-render a moment
+        // later, which destroyed the just-focused editable field before a
+        // single keystroke could land (the "looks like it's calling a
+        // transition" flash).
+        div.addEventListener('mousedown', (e) => tsHandleLayerDblClick(e, div, layer));
+      }
 
       // Load font
       if (layer.font.family !== 'system-ui') loadGoogleFont(layer.font.family);
@@ -3984,12 +4979,23 @@ function ensurePos(layer) {
 }
 
 // Rendered height in design px — for vertical alignment of auto-height text.
+// Confirmed root cause of the Align buttons producing garbage (Y:-1398 for
+// a "Middle" click, from Math.round((1080 - 3876) / 2) — 3876 is exactly
+// what this returned): `stage` and `el` are queried independently, and if
+// ANYTHING transient makes `stage`'s measured box shorter than it actually
+// is relative to `el` at that exact instant — a stale/duplicate element
+// still matching #looks-preview-stage from a just-torn-down previous
+// editor, a layout not yet settled — the ratio explodes silently and gets
+// written straight into layer.pos.y. A text layer's real rendered height
+// can NEVER legitimately exceed the canvas itself, so that's the one
+// invariant this can safely clamp to regardless of what caused a bad read.
 function tsEffectiveH(layer, p) {
-  if (p.h > 0) return p.h;
+  if (p.h > 0) return Math.min(p.h, TS_DESIGN_H);
   const stage = tsStageEl();
   const el = stage?.querySelector(`[data-layer-id="${CSS.escape(layer.id)}"]`);
   if (!el || !stage || !stage.clientHeight) return 100;
-  return Math.round(el.getBoundingClientRect().height / stage.getBoundingClientRect().height * TS_DESIGN_H);
+  const raw = Math.round(el.getBoundingClientRect().height / stage.getBoundingClientRect().height * TS_DESIGN_H);
+  return Math.min(Math.max(raw, 10), TS_DESIGN_H);
 }
 
 let tsDrag = null;   // { layer, mode:'move'|'resize', dir, startX, startY, start, stageRect }
@@ -4000,6 +5006,30 @@ let tsDrag = null;   // { layer, mode:'move'|'resize', dir, startX, startY, star
 let tsSnapGuides = { x: null, y: null };
 
 const TS_SNAP_TOLERANCE = 14; // design px — same feel as the old center-only snap
+
+// The ONE set of align icons, shared by renderLayoutProps' single-layer
+// "align to canvas" row and the multi-select Align panel (renderProps) —
+// those used to be two different controls (one icon-based, one plain text
+// chips), which read as two different features instead of the same one
+// applied to a bigger selection.
+const TS_ALIGN_ICONS = {
+  left:     { title: 'Left',   svg: '<line x1="4" y1="4" x2="4" y2="20"/><rect x="8" y="9" width="12" height="6"/>' },
+  'h-center': { title: 'Center', svg: '<line x1="12" y1="4" x2="12" y2="20"/><rect x="5" y="9" width="14" height="6"/>' },
+  right:    { title: 'Right',  svg: '<line x1="20" y1="4" x2="20" y2="20"/><rect x="4" y="9" width="12" height="6"/>' },
+  top:      { title: 'Top',    svg: '<line x1="4" y1="4" x2="20" y2="4"/><rect x="9" y="8" width="6" height="12"/>' },
+  'v-center': { title: 'Middle', svg: '<line x1="4" y1="12" x2="20" y2="12"/><rect x="9" y="5" width="6" height="14"/>' },
+  bottom:   { title: 'Bottom', svg: '<line x1="4" y1="20" x2="20" y2="20"/><rect x="9" y="4" width="6" height="12"/>' },
+};
+function tsAlignIconBtn(kind, onClick) {
+  const { title, svg } = TS_ALIGN_ICONS[kind];
+  const btn = document.createElement('button');
+  btn.className = 'ts-align-btn';
+  btn.type = 'button';
+  btn.title = title;
+  btn.innerHTML = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round">${svg}</svg>`;
+  btn.addEventListener('click', onClick);
+  return btn;
+}
 
 // Breakpoints every theme gets for free: canvas edges, quarters, and center —
 // the marks a slide deck's safe margins and balanced layouts actually land on.
@@ -4055,23 +5085,83 @@ function tsBestSnap(candidates, targets, tol) {
 function tsBeginDrag(e, layer, mode, dir) {
   if (e.button !== 0) return;
   e.preventDefault(); e.stopPropagation();
-  if (activeLayer !== layer) { activeLayer = layer; renderLayersList(); renderProps(); }
+  // Covers resize handles, which call this directly (bypassing
+  // tsDecorateLayerEl's own mousedown) — grabbing a DIFFERENT layer's
+  // handle while one is being edited must still commit that edit first.
+  tsCommitActiveEdit(layer.id);
+  // Option/Alt+drag duplicates first, then drags the copy — same gesture
+  // as Canva/Figma/PowerPoint/Keynote. Duplicates the WHOLE current
+  // selection when dragging a layer that's already part of one, otherwise
+  // just this one layer. The clone starts stacked exactly on top of its
+  // original (same position/layout-preset either way — deepClone copies
+  // `pos` too, or its absence) and this same drag gesture continues on
+  // it, so the very next mousemove pulls it away from the original.
+  if (e.altKey && mode === 'move') {
+    const toDuplicate = (multiSelectedLayerIds.size && multiSelectedLayerIds.has(layer.id))
+      ? tsSelectedLayers() : [layer];
+    const clones = toDuplicate.map((l, i) => {
+      const clone = deepClone(l);
+      clone.id = `layer-${Date.now()}-${i}-${Math.random().toString(36).slice(2, 7)}`;
+      return clone;
+    });
+    activeLook.layers.push(...clones);
+    layer = clones[toDuplicate.indexOf(layer)];
+    multiSelectedLayerIds = clones.length > 1 ? new Set(clones.map(c => c.id)) : new Set();
+    activeLayer = layer;
+    renderLayersList();
+    renderProps();
+    renderPreview();
+    if (tsMode === 'item') tsSave();
+  }
+  // renderPreview() tears down and rebuilds every layer's DOM element from
+  // scratch — only actually needed here when the SELECTION changes (a
+  // freshly-selected layer has no resize handles in the DOM yet). Calling
+  // it unconditionally on every mousedown, including a second click on a
+  // layer that's already selected, was destroying that exact element mid-
+  // gesture — which silently broke double-click-to-edit (beginInlineTextEdit/
+  // wireDoubleClickSend): the SECOND click's mousedown fired first, wiped
+  // out the div the first click's listener lived on, and replaced it with a
+  // brand-new element whose own double-click timer had never seen a first
+  // click at all, so the two clicks could never be recognized as a pair.
+  if (activeLayer !== layer) { activeLayer = layer; renderLayersList(); renderProps(); renderPreview(); }
   const stage = tsStageEl();
   if (!stage) return;
   const pos = ensurePos(layer);
+  // Moving (not resizing — group-resize isn't supported) a layer that's
+  // part of the current multi-selection drags every OTHER selected layer
+  // along with it, by the same delta. Each one's own starting position is
+  // captured up front (ensurePos forces free-canvas positioning for any
+  // that were still on a layout preset) so the whole group tracks the
+  // cursor together regardless of where each one started from.
+  const group = mode === 'move'
+    ? tsSelectedLayers().filter(l => l !== layer).map(l => ({ layer: l, start: { ...ensurePos(l) } }))
+    : [];
   tsDrag = {
     layer, mode, dir: dir || 'se',
     startX: e.clientX, startY: e.clientY,
     start: { ...pos },
     stageRect: stage.getBoundingClientRect(),
+    group,
   };
   document.addEventListener('mousemove', tsDragMove);
   document.addEventListener('mouseup', tsDragEnd);
-  renderPreview();
 }
 
 function tsDragMove(e) {
   if (!tsDrag) return;
+  // Every mousedown on a draggable layer starts a drag session, even the
+  // second click of a double-click — real hands never hold the exact same
+  // pixel between two clicks, so that sub-pixel jitter was being applied
+  // as an actual position change (a visible flicker/shift) right as
+  // beginInlineTextEdit was about to take over. A small dead zone (screen
+  // px, before any TS_DESIGN_W/H scaling) means a click — or a double-
+  // click — never nudges the layer; a real drag still starts the instant
+  // it crosses this, same threshold every design tool uses to tell "click"
+  // from "drag" apart.
+  if (!tsDrag.armed) {
+    if (Math.hypot(e.clientX - tsDrag.startX, e.clientY - tsDrag.startY) < 3) return;
+    tsDrag.armed = true;
+  }
   const { layer, mode, start, stageRect } = tsDrag;
   const dx = (e.clientX - tsDrag.startX) / stageRect.width  * TS_DESIGN_W;
   const dy = (e.clientY - tsDrag.startY) / stageRect.height * TS_DESIGN_H;
@@ -4102,6 +5192,19 @@ function tsDragMove(e) {
     if (yBest) { ny = Math.round(yBest.snap + yBest.offset); snappedY = yBest.snap; }
 
     layer.pos.x = nx; layer.pos.y = ny;
+
+    // Carry the rest of the multi-selection along by the SAME final delta
+    // (post-snap, so the whole group still snaps together as one unit
+    // rather than each member re-snapping independently against the
+    // others' new positions).
+    if (tsDrag.group.length) {
+      const appliedDx = nx - start.x;
+      const appliedDy = ny - start.y;
+      tsDrag.group.forEach(({ layer: gl, start: gs }) => {
+        gl.pos.x = Math.round(gs.x + appliedDx);
+        gl.pos.y = Math.round(gs.y + appliedDy);
+      });
+    }
   } else {
     // Resize from whichever handle was grabbed — the opposite edge stays put,
     // exactly like dragging a selection corner in a design tool.
@@ -4142,6 +5245,21 @@ function tsDragMove(e) {
       }
     }
 
+    // Corner-drag on an image with known natural dimensions: lock the box's
+    // aspect ratio to the image's own rather than letting nw/nh drift apart
+    // (independently derived from raw dx/dy above). That drift is exactly
+    // what made a contain-fit image look like it was zooming while being
+    // resized — the box's constraining dimension kept flipping between
+    // width and height as its aspect ratio wandered away from the image's.
+    // Edge-midpoint handles (a single character in `d`, e.g. just 'e' or
+    // 's') stay free-form — only corners scale as a unit, the same
+    // convention design tools use for image resize handles.
+    if (layer.type === 'image' && layer.naturalW && layer.naturalH && d.length === 2) {
+      const aspect = layer.naturalW / layer.naturalH;
+      nh = nw / aspect;
+      if (d.includes('n')) ny = start.y + baseH - nh; // bottom edge stays anchored
+    }
+
     // Clamp without letting the anchored edge drift.
     if (nw < MIN_W) { if (d.includes('w')) nx = start.x + (start.w - MIN_W); nw = MIN_W; }
     if (vertical && nh < MIN_H) { if (d.includes('n')) ny = start.y + (baseH - MIN_H); nh = MIN_H; }
@@ -4152,8 +5270,30 @@ function tsDragMove(e) {
     layer.pos.h = Math.round(nh);
   }
   tsSnapGuides = { x: snappedX, y: snappedY };
-  renderPreview();
-  tsSyncPosInputs(layer);
+  // The position/size math above runs synchronously on every mousemove (it
+  // has to — each event's numbers depend on that exact cursor position),
+  // but the render it feeds was ALSO running synchronously on every one of
+  // those events — a full teardown-and-rebuild of every layer's DOM node
+  // and every listener on it, dozens of times a second during a fast drag.
+  // That's the "wonky corner controls" feeling: the browser can't keep a
+  // full canvas rebuild pinned to every mousemove, so the handle visibly
+  // lags and stutters behind the actual cursor. Coalescing to one render
+  // per animation frame (still picks up whichever mousemove was most
+  // recent when the frame paints) fixes the visual lag without touching
+  // the drag math itself.
+  tsScheduleDragRender(layer);
+}
+
+let tsDragRenderQueued = false;
+function tsScheduleDragRender(layer) {
+  if (tsDragRenderQueued) return;
+  tsDragRenderQueued = true;
+  requestAnimationFrame(() => {
+    tsDragRenderQueued = false;
+    if (!tsDrag) return; // drag ended before this frame painted
+    renderPreview();
+    tsSyncPosInputs(layer);
+  });
 }
 
 function tsDragEnd() {
@@ -4164,12 +5304,22 @@ function tsDragEnd() {
     tsSnapGuides = { x: null, y: null };
     renderProps();
     renderPreview();
-    // Pre-existing gap in theme mode: a drag never called
-    // scheduleThemeAutosave() either — out of scope to fix here (see plan's
-    // "don't touch theme mode's behavior" note). Item mode needs this,
-    // additively, since dragging IS the primary way to set a position
-    // override.
-    if (tsMode === 'item') tsSave();
+    // A move/resize drag never called scheduleThemeAutosave() in THEME mode
+    // (only item mode did) — every other kind of edit (color, font, a
+    // slider) checkpoints itself via up()/tsSave(), but the mutation a drag
+    // makes happens entirely inside tsDragMove, with nothing calling tsSave()
+    // once the gesture ends. Real, reported consequence: "sometimes when I
+    // resize something, undo doesn't work" — the resize itself was never
+    // pushed to themeUndoStack, so undo had nothing to revert TO; it only
+    // *seemed* to work intermittently when some LATER, properly-checkpointed
+    // edit's snapshot happened to capture the state right after an untracked
+    // resize, and undoing THAT edit coincidentally looked like it also
+    // undid something, while the resize itself silently stuck around. Was
+    // previously deliberately left alone here as "out of scope" for an
+    // earlier, narrower plan — the owner's own report supersedes that.
+    // tsSave() already routes correctly by mode (item vs theme), matching
+    // every other mutation's own call site.
+    tsSave();
   }
 }
 
@@ -4189,6 +5339,35 @@ function tsDecorateLayerEl(div, layer, draggable) {
   div.style.cursor = draggable ? 'move' : 'pointer';
   div.addEventListener('mousedown', (e) => {
     if (e.target.classList && e.target.classList.contains('ts-handle')) return;
+    // A click landing INSIDE the layer currently being edited (beginInlineTextEdit)
+    // is normal text interaction — placing the caret, extending a selection
+    // to retype a word — not a new canvas selection/drag. Let it through
+    // untouched instead of hijacking it into tsBeginDrag, which would both
+    // start a pointless drag session AND (via e.preventDefault()) block the
+    // browser's own native caret placement.
+    if (tsActiveEdit && tsActiveEdit.layerId === layer.id) return;
+    // Clicking anywhere ELSE while a DIFFERENT layer is being edited must
+    // commit that edit first — see tsActiveEdit's declaration for why the
+    // field's own blur event can't be trusted to fire on its own once this
+    // handler's own e.preventDefault() runs below.
+    tsCommitActiveEdit(layer.id);
+    // Shift/Cmd/Ctrl+click toggles this layer into the multi-selection
+    // instead of replacing it — the standard modifier across every design
+    // tool (Figma, PowerPoint, Keynote, Canva). Never starts a drag by
+    // itself; a plain click-and-drag right after is a separate gesture.
+    if (e.shiftKey || e.metaKey || e.ctrlKey) {
+      e.preventDefault(); e.stopPropagation();
+      tsToggleMultiSelect(layer);
+      return;
+    }
+    // A plain click on a layer not already part of the current selection
+    // collapses back to single-select, same as everywhere else — only a
+    // modifier click extends a selection. Clicking one that's ALREADY
+    // in the selection leaves the group intact (so it can be dragged as a
+    // group — see tsBeginDrag's own group capture below).
+    if (multiSelectedLayerIds.size && !multiSelectedLayerIds.has(layer.id)) {
+      multiSelectedLayerIds = new Set();
+    }
     if (draggable) {
       tsBeginDrag(e, layer, 'move');
     } else {
@@ -4196,10 +5375,20 @@ function tsDecorateLayerEl(div, layer, draggable) {
       if (activeLayer !== layer) { activeLayer = layer; renderLayersList(); renderProps(); renderPreview(); }
     }
   });
+  // multiSelectedLayerIds is the COMPLETE selection whenever 2+ layers are
+  // selected (see tsToggleMultiSelect) — every member gets the same
+  // outline and NONE get resize handles while in that state (group-resize
+  // isn't supported; click one layer alone, with no modifier, to resize
+  // it). Below that, it's plain single-select: activeLayer gets the
+  // outline + the eight-point resize frame as it always did.
+  if (multiSelectedLayerIds.size >= 2) {
+    if (multiSelectedLayerIds.has(layer.id)) div.classList.add('ts-el-multi-selected');
+    return;
+  }
   if (activeLayer === layer) {
     div.classList.add('ts-el-selected');
-    // Eight-point selection frame: four corners + four edge midpoints, each
-    // resizing from the opposite anchor.
+    // Eight-point selection frame: four corners + four edge midpoints,
+    // each resizing from the opposite anchor.
     ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'].forEach(dir => {
       const h = document.createElement('div');
       h.className = `ts-handle ts-handle-${dir}`;
@@ -4209,19 +5398,268 @@ function tsDecorateLayerEl(div, layer, draggable) {
   }
 }
 
+// Toggles one layer's multi-selection membership. activeLayer (the
+// "primary") stays whatever every other single-target action already
+// reads; this just tracks who else is riding along for group move/align.
+function tsToggleMultiSelect(layer) {
+  // multiSelectedLayerIds is always the COMPLETE selection when it's in
+  // use (same contract Select-All already established) — activeLayer is
+  // never a separate "primary" excluded from it. Starting a multi-select
+  // from a plain single selection seeds the set with that layer first, so
+  // it isn't silently dropped by Copy/Delete/Align the moment a second
+  // layer joins.
+  if (!multiSelectedLayerIds.size && activeLayer) {
+    multiSelectedLayerIds = new Set([activeLayer.id]);
+  }
+  if (multiSelectedLayerIds.has(layer.id)) {
+    multiSelectedLayerIds.delete(layer.id);
+  } else {
+    multiSelectedLayerIds.add(layer.id);
+  }
+  // activeLayer just needs to point at SOME member of the selection (the
+  // props panel falls back to the Align view whenever 2+ are selected
+  // anyway — see renderProps — so which one barely matters until the
+  // selection collapses back down to exactly one).
+  activeLayer = multiSelectedLayerIds.size
+    ? (activeLook.layers || []).find(l => multiSelectedLayerIds.has(l.id)) || null
+    : null;
+  if (multiSelectedLayerIds.size === 1) multiSelectedLayerIds = new Set();
+  renderLayersList();
+  renderProps();
+  renderPreview();
+}
+
+// Every currently-selected layer, in canvas (z-)order — used by group-drag
+// and the Align toolbar. multiSelectedLayerIds is the complete selection
+// whenever 2+ are selected; otherwise it's just activeLayer alone.
+function tsSelectedLayers() {
+  if (multiSelectedLayerIds.size) {
+    return (activeLook.layers || []).filter(l => multiSelectedLayerIds.has(l.id));
+  }
+  return activeLayer ? [activeLayer] : [];
+}
+
+// Lines up every selected layer against the OUTER bounding box of the
+// whole selection — 'left'/'h-center'/'right' set each layer's x, 'top'/
+// 'v-center'/'bottom' set y, matching the convention every design tool
+// uses for aligning a multi-selection (align to the group, not to
+// whichever layer happens to be primary). ensurePos forces free-canvas
+// positioning first — a layer still on a layout preset has no explicit
+// box to compute or align against.
+function tsAlignSelection(kind) {
+  const layers = tsSelectedLayers();
+  if (layers.length < 2) return;
+  const boxes = layers.map(l => { const pos = ensurePos(l); return { layer: l, pos, h: tsEffectiveH(l, pos) }; });
+  const minX = Math.min(...boxes.map(b => b.pos.x));
+  const maxX = Math.max(...boxes.map(b => b.pos.x + b.pos.w));
+  const minY = Math.min(...boxes.map(b => b.pos.y));
+  const maxY = Math.max(...boxes.map(b => b.pos.y + b.h));
+  const centerX = (minX + maxX) / 2;
+  const centerY = (minY + maxY) / 2;
+  boxes.forEach(({ pos, h }) => {
+    if (kind === 'left') pos.x = Math.round(minX);
+    else if (kind === 'h-center') pos.x = Math.round(centerX - pos.w / 2);
+    else if (kind === 'right') pos.x = Math.round(maxX - pos.w);
+    else if (kind === 'top') pos.y = Math.round(minY);
+    else if (kind === 'v-center') pos.y = Math.round(centerY - h / 2);
+    else if (kind === 'bottom') pos.y = Math.round(maxY - h);
+  });
+  up();
+}
+
+// The selection's own outer bounding box (design px) — the multi-select
+// Transform panel's X/Y/W/H fields (renderProps) read and write against
+// this, same as a single layer's own X/Y/W/H reads/writes against its pos.
+function tsGroupBounds(layers) {
+  if (!layers.length) return { x: 0, y: 0, w: 0, h: 0 };
+  const boxes = layers.map(l => { const pos = ensurePos(l); return { pos, h: tsEffectiveH(l, pos) }; });
+  const minX = Math.min(...boxes.map(b => b.pos.x));
+  const minY = Math.min(...boxes.map(b => b.pos.y));
+  const maxX = Math.max(...boxes.map(b => b.pos.x + b.pos.w));
+  const maxY = Math.max(...boxes.map(b => b.pos.y + b.h));
+  return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
+}
+
+// Moves every selected layer by (dx, dy) and/or scales every layer's own
+// position AND size by (sx, sy), all relative to `bounds`'s own top-left
+// — the group's own resize handle, in effect: dragging W (or H, with the
+// chain link scaling both together) grows or shrinks every member in
+// place around the group's corner, instead of only ever being able to
+// resize one layer at a time.
+function tsTransformSelection(layers, bounds, { dx = 0, dy = 0, sx = 1, sy = 1 } = {}) {
+  layers.forEach(l => {
+    const p = ensurePos(l);
+    const relX = p.x - bounds.x;
+    const relY = p.y - bounds.y;
+    p.x = Math.round(bounds.x + relX * sx + dx);
+    p.y = Math.round(bounds.y + relY * sy + dy);
+    if (sx !== 1) p.w = Math.max(4, Math.round(p.w * sx));
+    if (sy !== 1 && p.h > 0) p.h = Math.max(4, Math.round(p.h * sy));
+  });
+}
+
+// Detects two mousedowns on the SAME layer within 500ms — module-level
+// state (not a per-div closure) on purpose: a re-render between the two
+// clicks (renderPreview rebuilds every layer's DOM node from scratch)
+// would otherwise throw away a closure-local timer along with the div it
+// lived on, exactly the bug that made this not work at all before
+// tsBeginDrag was changed to stop re-rendering an already-selected layer.
+// Kept as its own mousedown listener rather than a native 'dblclick' or
+// the 'click'-based wireDoubleClickSend helper — see the call site in
+// renderPreview for why.
+let tsLastLayerClickId = null;
+let tsLastLayerClickAt = 0;
+function tsHandleLayerDblClick(e, div, layer) {
+  if (e.button !== 0 || e.shiftKey || e.metaKey || e.ctrlKey) return;
+  const now = Date.now();
+  const isDouble = tsLastLayerClickId === layer.id && (now - tsLastLayerClickAt) < 500;
+  tsLastLayerClickId = isDouble ? null : layer.id;
+  tsLastLayerClickAt = isDouble ? 0 : now;
+  if (isDouble) {
+    // tsDecorateLayerEl's own mousedown listener (registered before this
+    // one, same element/event) already ran tsBeginDrag for this exact
+    // click, unconditionally — cancel that drag session before it can run
+    // tsDragEnd's own re-render out from under the field this is about to
+    // create and focus.
+    tsCancelDrag();
+    beginInlineTextEdit(div, layer);
+  }
+}
+
+function tsCancelDrag() {
+  document.removeEventListener('mousemove', tsDragMove);
+  document.removeEventListener('mouseup', tsDragEnd);
+  tsDrag = null;
+}
+
+// In-place text editing for a 'custom'-binding text layer — see the
+// tsHandleLayerDblClick call site in renderPreview. Turns the on-canvas div
+// itself into the input, instead of the separate "Text" field in the props
+// panel — that field still exists and stays in sync (renderProps() below),
+// it's just no longer the ONLY way to change the words.
+function beginInlineTextEdit(div, layer) {
+  // A 'verse' layer in item mode is that specific slide's real lyric/text
+  // line (backed by commitSlideText — see the wireDoubleClickSend call
+  // site above), not a customText string on the layer itself. Everything
+  // else (single-line customText, revert-on-Escape) only applies to the
+  // plain 'custom' case.
+  const isVerseSlide = layer.binding === 'verse' && tsMode === 'item' && !!tsItemCtx;
+  const original = isVerseSlide
+    ? ((window.KairoService?.slidesFor?.(tsItemCtx.item) || [])[tsItemCtx.slideIndex]?.text || '')
+    : (layer.customText || '');
+  div.contentEditable = 'true';
+  div.spellcheck = false;
+  div.classList.add('ts-el-editing');
+  // Plain text only — an uncontrolled contentEditable can pick up rich
+  // HTML from a paste; both customText and a slide's own text are always
+  // plain strings everywhere else they're read/written.
+  const onPaste = (e) => {
+    e.preventDefault();
+    const text = (e.clipboardData || window.clipboardData).getData('text/plain');
+    document.execCommand('insertText', false, text);
+  };
+  div.addEventListener('paste', onPaste);
+  div.focus();
+  // Caret at the end, not a select-all — highlighting the whole line on
+  // entry looked wrong (a jagged per-wrapped-line block, not a clean box)
+  // and meant a single stray keystroke could wipe the entire line. Click
+  // or arrow to reposition, the same as opening any other text field.
+  const range = document.createRange();
+  range.selectNodeContents(div);
+  range.collapse(false);
+  const sel = window.getSelection();
+  sel.removeAllRanges();
+  sel.addRange(range);
+
+  let settled = false;
+  const commit = () => {
+    if (settled) return;
+    settled = true;
+    tsActiveEdit = null;
+    div.removeEventListener('paste', onPaste);
+    div.contentEditable = 'false';
+    div.classList.remove('ts-el-editing');
+    if (isVerseSlide) {
+      // A slide's own text is legitimately multi-line (2+ lines per slide
+      // is normal — see the "Lines per slide" delimiter), so line breaks
+      // are kept, not collapsed. Writes back through the exact same
+      // commitSlideText the Flow view's own editable field already uses —
+      // a second SURFACE for that one mechanism, not a parallel one.
+      const slides = window.KairoService?.slidesFor?.(tsItemCtx.item) || [];
+      const slide = slides[tsItemCtx.slideIndex];
+      if (slide) window.KairoService?.commitSlideText?.(tsItemCtx.item, tsItemCtx.slideIndex, slide, div.innerText);
+      window.KairoService?.refreshThumbnails?.();
+      renderPreview();
+    } else {
+      // customText is single-line everywhere else it's edited (the props
+      // panel uses a plain <input>) — collapse any line break a stray
+      // Enter or paste introduced instead of silently going multi-line
+      // here only.
+      layer.customText = div.innerText.replace(/\r?\n/g, ' ').trim();
+      up();
+    }
+    renderProps();
+  };
+  const cancel = () => {
+    if (settled) return;
+    settled = true;
+    tsActiveEdit = null;
+    div.removeEventListener('paste', onPaste);
+    div.contentEditable = 'false';
+    div.classList.remove('ts-el-editing');
+    if (!isVerseSlide) layer.customText = original;
+    renderPreview();
+  };
+  // Registered so every OTHER entry point that starts a new selection/drag
+  // (tsDecorateLayerEl, tsBeginDrag) can force this to commit first — see
+  // tsCommitActiveEdit and the comment on tsActiveEdit's declaration for
+  // why the blur event below can't be relied on alone.
+  tsActiveEdit = { layerId: layer.id, commit };
+  div.addEventListener('blur', commit, { once: true });
+  div.addEventListener('keydown', (e) => {
+    // Escape/Enter here must never reach the DOCUMENT-level handlers that
+    // also listen for them (Escape closes the whole Theme Studio/Full-
+    // scale edit modal — see the keydown listener near closeThemeStudio/
+    // closeItemStyleEditor). Without stopping it, exiting an edit with
+    // Escape correctly committed/cancelled the text AND, in the same
+    // keystroke, closed the entire editor out from under it — which reads
+    // exactly like "the edit didn't save", since the panel vanishes before
+    // there's any chance to see it did.
+    if (isVerseSlide) {
+      // Matches the Flow view's own contentEditable convention exactly
+      // (renderFlowView/commitSlideText): plain Enter is a new line on
+      // THIS slide, not a commit — there's no single-line assumption for
+      // real lyric text. Escape commits and exits; there's no "revert" for
+      // multi-line text here either, same as the Flow view.
+      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); div.blur(); }
+      return;
+    }
+    if (e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); div.blur(); }
+    else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); div.removeEventListener('blur', commit); cancel(); }
+  });
+}
+
 // ── Render properties panel ───────────────────────────────────────────────
 // Which of the 3 props tabs a layer type actually has content for — a
 // background/image layer has nothing under Effects (no shadow/outline/
 // scroll), so that tab is hidden rather than shown-but-empty for them.
 const PROPS_TABS_BY_LAYER_TYPE = {
-  background: ['layout', 'style'],
-  image:      ['layout', 'style'],
-  text:       ['layout', 'style', 'effects'],
+  background:  ['layout', 'style'],
+  image:       ['layout', 'style'],
+  'image-cycle': ['layout', 'style'],
+  text:        ['layout', 'style', 'effects'],
 };
 // Persists across layer switches within one Edit/Theme Studio session
 // (picking a different layer doesn't jump you back to Layout every time) —
 // reset only when it lands on a tab the newly-selected layer doesn't have.
 let activePropsTab = 'layout';
+
+// Which layer renderProps last drew the panel for — lets it tell "a new
+// layer just got selected" apart from "the same layer's props panel is
+// re-rendering for some other reason" (an edit, a tab switch), so the
+// text-layer tab jump below fires exactly once per selection, not on
+// every render.
+let lastPropsLayerId = null;
 
 function renderProps() {
   const empty = document.getElementById('ts-props-empty');
@@ -4234,8 +5672,113 @@ function renderProps() {
     panel.style.display = 'none';
     panel.innerHTML = '';
     tabs?.classList.add('hidden');
+    lastPropsLayerId = null;
+    // Text Animation lives under the Style tab now (see below) — with
+    // nothing selected there's no tab bar to gate it, so it should just
+    // show, same as it always did before it moved in here.
+    document.getElementById('ts-text-anim-section')?.classList.remove('ts-tab-hidden');
     return;
   }
+
+  // Multiple layers selected (Shift/Cmd/Ctrl+click — multiSelectedLayerIds) —
+  // show the Align toolbar instead of one layer's own props. Per-layer
+  // editing (font, color, exact position) still only makes sense one at a
+  // time; lining several layers up against each other is the one thing
+  // that's actually about the GROUP, so it gets its own panel state rather
+  // than being squeezed into the single-layer one.
+  if (multiSelectedLayerIds.size) {
+    empty.style.display = 'none';
+    panel.style.display = 'block';
+    panel.innerHTML = '';
+    tabs?.classList.add('hidden');
+    lastPropsLayerId = null;
+    const count = tsSelectedLayers().length;
+    const header = document.createElement('div');
+    header.className = 'ts-props-section-label';
+    header.textContent = `${count} layers selected`;
+    panel.appendChild(header);
+    // Same icon set and behavior as a single layer's own "align to canvas"
+    // row (renderLayoutProps/TS_ALIGN_ICONS) — this used to be a separate
+    // plain-text-chip control, which read as a different feature instead
+    // of the same alignment tool just given more than one layer to work on.
+    const alignWrap = document.createElement('div');
+    alignWrap.className = 'ts-align-group';
+    ['left', 'h-center', 'right', 'top', 'v-center', 'bottom'].forEach(kind => {
+      alignWrap.appendChild(tsAlignIconBtn(kind, () => tsAlignSelection(kind)));
+    });
+    panel.appendChild(section(null, 'Align', alignWrap));
+
+    // Transform — the group's own bounding box as one X/Y/W/H, same fields
+    // a single layer gets. X/Y moves every selected layer by the same
+    // delta (same as dragging one of them). W/H, with the chain link
+    // locked (default), SCALES every layer's position and size together
+    // relative to the group's own top-left, instead of only ever being
+    // able to resize members one at a time.
+    const bounds = tsGroupBounds(tsSelectedLayers());
+    const groupLinked = layerAspectLock.get('__group__') ?? true;
+    const numField = (label, val, min, max, onChange) => {
+      const inp = document.createElement('input');
+      inp.type = 'number'; inp.className = 'ts-prop-number';
+      inp.value = Math.round(val); inp.min = min; inp.max = max;
+      inp.addEventListener('input', () => onChange(parseFloat(inp.value) || 0));
+      const lbl = document.createElement('span'); lbl.className = 'ts-prop-label'; lbl.textContent = label;
+      const g = document.createElement('span'); g.className = 'ts-field-group';
+      g.appendChild(lbl); g.appendChild(inp);
+      return g;
+    };
+    const xyRow = document.createElement('div');
+    xyRow.className = 'ts-prop-row'; xyRow.style.gap = '8px';
+    xyRow.appendChild(numField('X', bounds.x, -TS_DESIGN_W, TS_DESIGN_W, (v) => {
+      const b = tsGroupBounds(tsSelectedLayers());
+      tsTransformSelection(tsSelectedLayers(), b, { dx: v - b.x });
+      up();
+    }));
+    xyRow.appendChild(numField('Y', bounds.y, -TS_DESIGN_H, TS_DESIGN_H, (v) => {
+      const b = tsGroupBounds(tsSelectedLayers());
+      tsTransformSelection(tsSelectedLayers(), b, { dy: v - b.y });
+      up();
+    }));
+    const whRow = document.createElement('div');
+    whRow.className = 'ts-prop-row'; whRow.style.gap = '8px';
+    whRow.appendChild(numField('W', bounds.w, 4, TS_DESIGN_W, (v) => {
+      const b = tsGroupBounds(tsSelectedLayers());
+      const sx = v / Math.max(1, b.w);
+      const linked = layerAspectLock.get('__group__') ?? true;
+      tsTransformSelection(tsSelectedLayers(), b, { sx, sy: linked ? sx : 1 });
+      up(); renderProps();
+    }));
+    const linkBtn = document.createElement('button');
+    linkBtn.type = 'button';
+    linkBtn.className = 'ts-aspect-link' + (groupLinked ? ' active' : '');
+    linkBtn.title = groupLinked ? 'Width/Height are linked — click to unlink' : 'Width/Height are unlinked — click to link';
+    linkBtn.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 15l6-6"/><path d="M11 6l1.5-1.5a3.54 3.54 0 0 1 5 5L16 11"/><path d="M13 18l-1.5 1.5a3.54 3.54 0 0 1-5-5L8 13"/></svg>';
+    linkBtn.addEventListener('click', () => {
+      const now = !(layerAspectLock.get('__group__') ?? true);
+      layerAspectLock.set('__group__', now);
+      linkBtn.classList.toggle('active', now);
+      linkBtn.title = now ? 'Width/Height are linked — click to unlink' : 'Width/Height are unlinked — click to link';
+    });
+    whRow.appendChild(linkBtn);
+    whRow.appendChild(numField('H', bounds.h, 4, TS_DESIGN_H, (v) => {
+      const b = tsGroupBounds(tsSelectedLayers());
+      const sy = v / Math.max(1, b.h);
+      const linked = layerAspectLock.get('__group__') ?? true;
+      tsTransformSelection(tsSelectedLayers(), b, { sy, sx: linked ? sy : 1 });
+      up(); renderProps();
+    }));
+    panel.appendChild(section(null, 'Transform', xyRow, whRow));
+
+    document.getElementById('ts-text-anim-section')?.classList.add('ts-tab-hidden');
+    return;
+  }
+
+  // Text is what an operator almost always opens Full-scale edit/Theme
+  // Studio to actually change (a font, a color, a size) — landing on
+  // Layout for a freshly-selected text layer meant an extra click to get
+  // anywhere useful nearly every time. Only fires on an actual NEW
+  // selection, not every re-render of the panel for the layer already open.
+  if (activeLayer.id !== lastPropsLayerId && activeLayer.type === 'text') activePropsTab = 'style';
+  lastPropsLayerId = activeLayer.id;
 
   empty.style.display = 'none';
   panel.style.display = 'block';
@@ -4245,6 +5788,8 @@ function renderProps() {
     renderBgProps(panel, activeLayer);
   } else if (activeLayer.type === 'image') {
     renderImageProps(panel, activeLayer);
+  } else if (activeLayer.type === 'image-cycle') {
+    renderImageCycleProps(panel, activeLayer);
   } else {
     renderTextProps(panel, activeLayer);
   }
@@ -4262,9 +5807,14 @@ function renderProps() {
   // A class, not a direct style write — see the .ts-tab-hidden comment in
   // styles.css for why this has to compose with, not clobber, each
   // section's own enabled/disabled inline display (Shadow/Outline/Scroll).
+  // #ts-text-anim-section lives outside `panel` (a static, always-in-DOM
+  // theme-level control, not one of the per-layer sections panel.innerHTML
+  // rebuilds every render) but still opts into the exact same tab gating —
+  // included explicitly since panel.querySelectorAll can't reach it.
   panel.querySelectorAll('[data-tab]').forEach(el => {
     el.classList.toggle('ts-tab-hidden', el.dataset.tab !== activePropsTab);
   });
+  document.getElementById('ts-text-anim-section')?.classList.toggle('ts-tab-hidden', activePropsTab !== 'style');
 }
 
 document.querySelectorAll('#ts-props-tabs .ts-tab-btn').forEach(btn => {
@@ -4344,7 +5894,21 @@ function makeSlider(val, min, max, onChange) {
   const lbl = document.createElement('span');
   lbl.className = 'ts-prop-val';
   lbl.textContent = val;
-  sl.addEventListener('input', () => { lbl.textContent = sl.value; onChange(parseFloat(sl.value)); });
+  // The label updates on every 'input' event (cheap, instant feedback) —
+  // but onChange always ends in up(), a full canvas teardown/rebuild.
+  // Dragging a slider fires dozens of 'input' events a second; calling
+  // onChange synchronously for every single one rebuilt the whole canvas
+  // that often, which is exactly what read as "Opacity flickers while
+  // dragging" (or any other slider). Coalesced to at most once per
+  // animation frame instead — same fix as the position-drag throttle.
+  let queued = false, pendingValue = null;
+  sl.addEventListener('input', () => {
+    lbl.textContent = sl.value;
+    pendingValue = parseFloat(sl.value);
+    if (queued) return;
+    queued = true;
+    requestAnimationFrame(() => { queued = false; onChange(pendingValue); });
+  });
   wrap.appendChild(sl); wrap.appendChild(lbl);
   return wrap;
 }
@@ -4390,7 +5954,7 @@ function makeAlignBtns(current, onChange) {
 
 function makeWeightSelect(current, onChange) {
   const sel = document.createElement('select');
-  sel.className = 'ts-font-select';
+  sel.className = 'ts-select';
   FONT_WEIGHTS.forEach(w => {
     const opt = document.createElement('option');
     opt.value = w.value;
@@ -4402,23 +5966,121 @@ function makeWeightSelect(current, onChange) {
   return sel;
 }
 
+// A native <select>'s dropdown popup is OS-rendered in WebKit — per-option
+// font-family CSS (which was already being set, correctly) is largely
+// ignored once the list is actually open, so every row read in the same
+// generic UI font regardless. That's "fonts don't render as what they
+// look like": the intent was there, native select just can't deliver it.
+// A plain HTML dropdown (real DOM rows, not an OS popup) respects it fully
+// — and gets a search field for free, which matters once hundreds of real
+// system fonts (loadSystemFonts, above) are merged into a list a native
+// <select> would otherwise force scrolling through blind.
 function makeFontSelect(current, onChange) {
-  const sel = document.createElement('select');
-  sel.className = 'ts-font-select';
-  FONTS.forEach(f => {
-    const opt = document.createElement('option');
-    opt.value = f.value;
-    opt.textContent = f.label;
-    opt.style.fontFamily = f.value;
-    if (f.value === current) opt.selected = true;
-    sel.appendChild(opt);
-  });
-  sel.addEventListener('change', () => {
-    const fam = sel.value;
-    if (fam !== 'system-ui') loadGoogleFont(fam);
-    onChange(fam);
-  });
-  return sel;
+  const wrap = document.createElement('div');
+  wrap.className = 'ts-font-picker';
+
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'ts-font-picker-btn';
+  const setBtnLabel = (value) => {
+    btn.style.fontFamily = value || '';
+    btn.textContent = (FONTS.find(f => f.value === value)?.label) || value || 'Choose a font…';
+  };
+  setBtnLabel(current);
+  wrap.appendChild(btn);
+
+  let panel = null;
+  function closePanel() {
+    panel?.remove();
+    panel = null;
+    document.removeEventListener('mousedown', onOutside, true);
+  }
+  function onOutside(e) {
+    if (panel && !panel.contains(e.target) && e.target !== btn) closePanel();
+  }
+  function openPanel() {
+    if (panel) { closePanel(); return; }
+    panel = document.createElement('div');
+    panel.className = 'ts-font-picker-panel';
+    const rect = btn.getBoundingClientRect();
+    panel.style.left = rect.left + 'px';
+    panel.style.top = (rect.bottom + 4) + 'px';
+    panel.style.width = Math.max(240, rect.width) + 'px';
+
+    const search = document.createElement('input');
+    search.type = 'text';
+    search.placeholder = 'Search fonts…';
+    search.className = 'ts-font-picker-search';
+    panel.appendChild(search);
+
+    const list = document.createElement('div');
+    list.className = 'ts-font-picker-list';
+    panel.appendChild(list);
+
+    function renderRows(filter) {
+      list.innerHTML = '';
+      const q = filter.trim().toLowerCase();
+      const matches = FONTS.filter(f => !q || f.label.toLowerCase().includes(q));
+      // A saved theme's font isn't necessarily in FONTS (loadSystemFonts
+      // loads async and may not have resolved yet, or the font could since
+      // have been uninstalled) — show the real stored value as its own row
+      // rather than silently hiding what's actually set.
+      if (current && !FONTS.some(f => f.value === current) && (!q || current.toLowerCase().includes(q))) {
+        matches.unshift({ label: current, value: current, google: false });
+      }
+      matches.slice(0, 300).forEach(f => {
+        const row = document.createElement('button');
+        row.type = 'button';
+        row.className = 'ts-font-picker-row' + (f.value === current ? ' active' : '');
+        // A decorative/display/script font (most of what a real "fonts I have
+        // way more than these" system list turns up — dafont.com-style
+        // installs) can render its OWN NAME completely illegibly at 14px, and
+        // a symbol/dingbat/braille font (Apple Braille, Wingdings-alikes)
+        // doesn't draw its name as recognizable Latin text at all — neither
+        // is a bug, that's genuinely how the font looks, but a picker that
+        // ONLY shows the styled specimen makes such a row impossible to
+        // identify. Always keep the plain, always-legible label alongside it
+        // (Google Fonts'/Figma's own font pickers do the same) rather than
+        // relying on the specimen alone to say what this row even is.
+        const label = document.createElement('span');
+        label.className = 'ts-font-picker-row-label';
+        label.textContent = f.label;
+        const sample = document.createElement('span');
+        sample.className = 'ts-font-picker-row-sample';
+        sample.style.fontFamily = f.value;
+        sample.textContent = f.label;
+        row.appendChild(label);
+        row.appendChild(sample);
+        // Fetched on hover, not for the whole list up front — only ever for
+        // entries FONTS marked as a Google font; loadSystemFonts' entries
+        // are already on the machine and need no network fetch at all.
+        row.addEventListener('mouseenter', () => { if (f.google) loadGoogleFont(f.value); }, { once: true });
+        row.addEventListener('click', () => {
+          current = f.value;
+          setBtnLabel(f.value);
+          if (f.google) loadGoogleFont(f.value);
+          onChange(f.value);
+          closePanel();
+        });
+        list.appendChild(row);
+      });
+      if (!matches.length) {
+        const empty = document.createElement('div');
+        empty.className = 'ts-font-picker-empty';
+        empty.textContent = 'No fonts match';
+        list.appendChild(empty);
+      }
+    }
+    renderRows('');
+    search.addEventListener('input', () => renderRows(search.value));
+    document.body.appendChild(panel);
+    search.focus();
+    // Deferred one tick — the SAME click that opened this would otherwise
+    // immediately bubble into this listener and close it right back.
+    setTimeout(() => document.addEventListener('mousedown', onOutside, true), 0);
+  }
+  btn.addEventListener('click', openPanel);
+  return wrap;
 }
 
 function makeChips(options, current, onChange) {
@@ -4436,6 +6098,25 @@ function makeChips(options, current, onChange) {
     wrap.appendChild(btn);
   });
   return wrap;
+}
+
+// A real <select> for a small fixed set of choices — same shape as
+// makeWeightSelect/makeFontSelect, generalized. Chips read fine for a
+// handful of options with room to spare (Fit Mode, alignment), but for
+// something like text Case, a dropdown reads as the more standard control
+// (matches Canva/ProPresenter's own text panels) and takes less width.
+function makeSelect(options, current, onChange) {
+  const sel = document.createElement('select');
+  sel.className = 'ts-select';
+  options.forEach(({ label, value }) => {
+    const opt = document.createElement('option');
+    opt.value = value;
+    opt.textContent = label;
+    if (value === current) opt.selected = true;
+    sel.appendChild(opt);
+  });
+  sel.addEventListener('change', () => onChange(sel.value));
+  return sel;
 }
 
 // Autosave, debounced — edits already mutate activeLook in place (it's a
@@ -4513,6 +6194,10 @@ function diffLayerOverride(baseLayer, curLayer) {
   if (shadowDiff) ov.shadow = shadowDiff;
   const outlineDiff = diffSubObject(baseLayer?.outline, curLayer.outline, ['enabled', 'color', 'width']);
   if (outlineDiff) ov.outline = outlineDiff;
+  // fit/radius — image and image-cycle layers only (undefined on a text
+  // layer either side, so this stays a no-op for those).
+  if (curLayer.fit !== undefined && curLayer.fit !== baseLayer?.fit) ov.fit = curLayer.fit;
+  if (curLayer.radius !== undefined && curLayer.radius !== baseLayer?.radius) ov.radius = curLayer.radius;
   if (curLayer.visible === false) ov.visible = false; // only the hidden case is ever stored; visible is the assumed default
   return ov;
 }
@@ -4528,12 +6213,48 @@ function diffLayerOverride(baseLayer, curLayer) {
 function writeItemSlideStyleFromSynthetic() {
   if (!tsItemCtx || !activeLook) return;
   const { item, slideIndex, baseLook } = tsItemCtx;
+  // Scenes save whole, not diffed — see buildSyntheticLook's matching
+  // branch for why (no base theme to diff against at all). Persisting
+  // itself is service.js's saveTimerScenes, same as every other scene
+  // mutation (add/delete/reorder/duration) already goes through.
+  if (item.type === 'timer' && item.scenes && item.scenes.length) {
+    if (item.scenes[slideIndex]) item.scenes[slideIndex].layers = deepClone(activeLook.layers || []);
+    // resend:false — scheduleItemStyleAutosave's caller already re-pushes the
+    // live segment right after this returns (resendLiveForSlideStyleEdit);
+    // saveTimerScenes's own resend would otherwise double-fire the broadcast.
+    window.KairoService?.saveTimerScenes?.(item, { resend: false });
+    return;
+  }
   const overrides = {};
+  // Media Bin background (bgMedia) — buildSyntheticLook prepends a synthetic
+  // '__bg-media' layer for it via applyBgMediaOverride, purely for this
+  // canvas to render; it's not a real theme/custom layer and was never part
+  // of activeLook before that injection, so the diff pass below must skip
+  // it entirely (never store it as a "custom layer", never let its id throw
+  // off the z-order comparison) and this carries the actual field forward
+  // untouched instead, so an unrelated edit here doesn't silently clear it.
+  // isItemCustomLayer treats it as deletable like any operator-added layer
+  // (nothing in baseLook.layers shares its id) — the operator's own "remove
+  // it" affordance is deleting it from the Layers panel, so its absence
+  // from activeLook.layers here is read as exactly that, not preserved.
+  const stillPresent = (activeLook.layers || []).some(l => l.id === '__bg-media');
+  const existingBgMedia = item.slideStyles?.[slideIndex]?.bgMedia;
+  if (existingBgMedia && stillPresent) overrides.bgMedia = existingBgMedia;
   const customLayers = [];
   (activeLook.layers || []).forEach(layer => {
+    if (layer.id === '__bg-media') return;
     const baseLayer = (baseLook.layers || []).find(l => l.id === layer.id);
     if (!baseLayer) { customLayers.push(deepClone(layer)); return; }
-    if (layer.type !== 'text') return;
+    // Used to only diff text layers — a base theme's own image/image-cycle/
+    // background layer could never have its position/fit/etc. overridden
+    // per-slide at all, only per-slide text. That's the "the background
+    // isn't editable" gap: dragging/resizing an Image Cycle layer (now
+    // allowed in item mode, see tsDecorateLayerEl's call site) had nowhere
+    // to actually persist to. diffLayerOverride already computes pos/
+    // opacity/fit/radius/visible generically (only font/shadow/outline are
+    // text-specific, and those diff to nothing when a layer has none of
+    // those fields), so the type check here was the only thing narrowing
+    // it to text.
     const ov = diffLayerOverride(baseLayer, layer);
     if (Object.keys(ov).length) overrides[layer.id] = ov;
   });
@@ -4544,7 +6265,7 @@ function writeItemSlideStyleFromSynthetic() {
   // layers in the order they were added), so a slide nobody reordered
   // carries no override at all.
   const naturalOrder = [...(baseLook.layers || []).map(l => l.id), ...customLayers.map(l => l.id)];
-  const currentOrder = (activeLook.layers || []).map(l => l.id);
+  const currentOrder = (activeLook.layers || []).filter(l => l.id !== '__bg-media').map(l => l.id);
   if (currentOrder.join('|') !== naturalOrder.join('|')) overrides.__layerOrder = currentOrder;
   if (Object.keys(overrides).length) {
     item.slideStyles = item.slideStyles || {};
@@ -4570,6 +6291,11 @@ function scheduleItemStyleAutosave() {
     try {
       if (tsItemCtx) window.KairoService?.resendLiveForSlideStyleEdit?.(tsItemCtx.item.id, tsItemCtx.slideIndex);
     } catch {}
+    // The Stack/Timer views underneath this modal don't rebuild on their
+    // own until next opened — without this, a Full-scale edit looked saved
+    // but its thumbnail stayed stale until the operator switched views
+    // away and back.
+    window.KairoService?.refreshThumbnails?.();
   }, 500);
 }
 function resetItemHistory() {
@@ -4589,7 +6315,7 @@ function itemUndo() {
   tsItemCtx.item.slideStyles = snapshot;
   window.KairoService?.saveService?.();
   activeLook = buildSyntheticLook(tsItemCtx.item, tsItemCtx.slideIndex);
-  activeLayer = null;
+  activeLayer = null; multiSelectedLayerIds.clear();
   renderLayersList(); renderPreview(); renderProps();
 }
 function itemRedo() {
@@ -4599,7 +6325,7 @@ function itemRedo() {
   tsItemCtx.item.slideStyles = snapshot;
   window.KairoService?.saveService?.();
   activeLook = buildSyntheticLook(tsItemCtx.item, tsItemCtx.slideIndex);
-  activeLayer = null;
+  activeLayer = null; multiSelectedLayerIds.clear();
   renderLayersList(); renderPreview(); renderProps();
 }
 
@@ -4634,7 +6360,7 @@ function restoreLookSnapshot(snapshot) {
   Object.keys(activeLook).forEach(k => delete activeLook[k]);
   Object.assign(activeLook, deepClone(snapshot));
   if (idx >= 0) looks[idx] = activeLook;
-  activeLayer = null;
+  activeLayer = null; multiSelectedLayerIds.clear();
   lastThemeSnapshot = deepClone(activeLook); // the just-restored state is the new baseline
   saveLooks();
   renderLooksList(); renderLayersList(); syncMetaRow(); renderPreview(); renderProps();
@@ -4694,12 +6420,29 @@ document.addEventListener('keydown', (e) => {
 });
 
 // ── Layout (free-canvas) props — Alignment / Position / Dimension ─────────
+// Chain-link state for the W/H fields (renderLayoutProps) — whether typing
+// one dimension scales the other proportionally, same idea as corner-drag
+// already locking aspect ratio for an image (tsDragMove), just extended to
+// the numeric fields. Transient UI preference, not theme data, so it's
+// tracked here by layer id rather than adding a field to the layer object
+// itself (which would bloat every saved/exported theme with UI state).
+// Defaults locked — unlinking is the deliberate opt-out for "scale just
+// this one dimension".
+const layerAspectLock = new Map();
+
 function renderLayoutProps(panel, layer) {
   const cur = measurePos(layer);
 
-  const posNum = (key, min, max) => {
+  const posNum = (key, min, max, { aspect = false } = {}) => {
     const inp = makeNumber(cur[key], min, max, 1, v => {
-      ensurePos(layer)[key] = Math.round(v);
+      const p = ensurePos(layer);
+      const before = { w: p.w, h: p.h };
+      p[key] = Math.round(v);
+      if (aspect && (layerAspectLock.get(layer.id) ?? true) && before.w > 0 && before.h > 0) {
+        if (key === 'w') p.h = Math.max(1, Math.round(before.h * (p.w / before.w)));
+        else p.w = Math.max(1, Math.round(before.w * (p.h / before.h)));
+        tsSyncPosInputs(layer);
+      }
       renderPreview();
       // Pre-existing gap in theme mode: these inputs never called
       // scheduleThemeAutosave() either — out of scope to fix here. Item
@@ -4715,41 +6458,67 @@ function renderLayoutProps(panel, layer) {
   const alignWrap = document.createElement('div');
   alignWrap.className = 'ts-align-group';
   [
-    ['Left',   '<line x1="4" y1="4" x2="4" y2="20"/><rect x="8" y="9" width="12" height="6"/>',  p => { p.x = 0; }],
-    ['Center', '<line x1="12" y1="4" x2="12" y2="20"/><rect x="5" y="9" width="14" height="6"/>', p => { p.x = Math.round((TS_DESIGN_W - p.w) / 2); }],
-    ['Right',  '<line x1="20" y1="4" x2="20" y2="20"/><rect x="4" y="9" width="12" height="6"/>', p => { p.x = TS_DESIGN_W - p.w; }],
-    ['Top',    '<line x1="4" y1="4" x2="20" y2="4"/><rect x="9" y="8" width="6" height="12"/>',  p => { p.y = 0; }],
-    ['Middle', '<line x1="4" y1="12" x2="20" y2="12"/><rect x="9" y="5" width="6" height="14"/>', p => { p.y = Math.round((TS_DESIGN_H - tsEffectiveH(layer, p)) / 2); }],
-    ['Bottom', '<line x1="4" y1="20" x2="20" y2="20"/><rect x="9" y="4" width="6" height="12"/>', p => { p.y = TS_DESIGN_H - tsEffectiveH(layer, p); }],
-  ].forEach(([name, icon, act]) => {
-    const btn = document.createElement('button');
-    btn.className = 'ts-align-btn';
-    btn.title = name;
-    btn.innerHTML = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round">${icon}</svg>`;
-    btn.addEventListener('click', () => {
+    ['left',     p => { p.x = 0; }],
+    ['h-center', p => { p.x = Math.round((TS_DESIGN_W - p.w) / 2); }],
+    ['right',    p => { p.x = TS_DESIGN_W - p.w; }],
+    ['top',      p => { p.y = 0; }],
+    ['v-center', p => { p.y = Math.round((TS_DESIGN_H - tsEffectiveH(layer, p)) / 2); }],
+    ['bottom',   p => { p.y = TS_DESIGN_H - tsEffectiveH(layer, p); }],
+  ].forEach(([kind, act]) => {
+    alignWrap.appendChild(tsAlignIconBtn(kind, () => {
       const p = ensurePos(layer);
       act(p);
       renderPreview();
       tsSyncPosInputs(layer);
       if (tsMode === 'item') tsSave(); // same pre-existing-gap note as posNum above
-    });
-    alignWrap.appendChild(btn);
+    }));
   });
+
+  // Groups a label with its input so .ts-prop-row's own flex-wrap (needed
+  // so a crowded row doesn't clip against the panel edge) can only ever
+  // break BETWEEN whole pairs, never in the middle of one — that's exactly
+  // what was leaving the H field stranded on its own line with no visible
+  // "H" next to it: five separate flex children (W label, W input, the
+  // link button, H label, H input) in one row meant the row could wrap
+  // right between the H label and the H input, same as it could between
+  // any other two of those five.
+  const fieldGroup = (...children) => {
+    const g = document.createElement('span');
+    g.className = 'ts-field-group';
+    children.forEach(c => g.appendChild(c));
+    return g;
+  };
 
   const xyRow = document.createElement('div');
   xyRow.className = 'ts-prop-row'; xyRow.style.gap = '8px';
   const xl = document.createElement('span'); xl.className = 'ts-prop-label'; xl.textContent = 'X';
   const yl = document.createElement('span'); yl.className = 'ts-prop-label'; yl.textContent = 'Y';
-  xyRow.appendChild(xl); xyRow.appendChild(posNum('x', -TS_DESIGN_W, TS_DESIGN_W));
-  xyRow.appendChild(yl); xyRow.appendChild(posNum('y', -TS_DESIGN_H, TS_DESIGN_H));
+  xyRow.appendChild(fieldGroup(xl, posNum('x', -TS_DESIGN_W, TS_DESIGN_W)));
+  xyRow.appendChild(fieldGroup(yl, posNum('y', -TS_DESIGN_H, TS_DESIGN_H)));
 
   const whRow = document.createElement('div');
   whRow.className = 'ts-prop-row'; whRow.style.gap = '8px';
   const wl = document.createElement('span'); wl.className = 'ts-prop-label'; wl.textContent = 'W';
   const hl = document.createElement('span'); hl.className = 'ts-prop-label';
   hl.textContent = layer.type === 'text' ? 'H (0 = auto)' : 'H';
-  whRow.appendChild(wl); whRow.appendChild(posNum('w', 40, TS_DESIGN_W));
-  whRow.appendChild(hl); whRow.appendChild(posNum('h', 0, TS_DESIGN_H));
+  // Chain link — locked (default) means typing W or H scales the other
+  // dimension to keep the box's current proportions; unlinked scales just
+  // that one field. Per-layer, not persisted (see layerAspectLock's own
+  // comment above).
+  const linked = layerAspectLock.get(layer.id) ?? true;
+  const linkBtn = document.createElement('button');
+  linkBtn.type = 'button';
+  linkBtn.className = 'ts-aspect-link' + (linked ? ' active' : '');
+  linkBtn.title = linked ? 'Width/Height are linked — click to unlink' : 'Width/Height are unlinked — click to link';
+  linkBtn.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 15l6-6"/><path d="M11 6l1.5-1.5a3.54 3.54 0 0 1 5 5L16 11"/><path d="M13 18l-1.5 1.5a3.54 3.54 0 0 1-5-5L8 13"/></svg>';
+  linkBtn.addEventListener('click', () => {
+    const now = !(layerAspectLock.get(layer.id) ?? true);
+    layerAspectLock.set(layer.id, now);
+    linkBtn.classList.toggle('active', now);
+    linkBtn.title = now ? 'Width/Height are linked — click to unlink' : 'Width/Height are unlinked — click to link';
+  });
+  whRow.appendChild(fieldGroup(wl, posNum('w', 40, TS_DESIGN_W, { aspect: true }), linkBtn));
+  whRow.appendChild(fieldGroup(hl, posNum('h', 0, TS_DESIGN_H, { aspect: true })));
 
   const kids = [prop('Align', alignWrap), xyRow, whRow];
 
@@ -4773,6 +6542,28 @@ function renderLayoutProps(panel, layer) {
 // Background layer properties
 function renderBgProps(panel, layer) {
   renderLayoutProps(panel, layer);
+
+  // Shape — "Add Shape" only ever made a plain rectangle; layer.shape picks
+  // from the same set applyShapeGeometry renders (this file, service.js's
+  // thumbnails, and display.html's real output all read it the same way).
+  // Corner Radius only means anything for 'rect' (the other shapes ignore
+  // layer.radius entirely — pill/ellipse/triangle/diamond are already fully
+  // rounded or already have their own hard edges), so it's hidden otherwise
+  // rather than left sitting there doing nothing.
+  panel.appendChild(section('style', 'Shape',
+    makeChips([
+      { label: 'Rectangle', value: 'rect' },
+      { label: 'Ellipse',   value: 'ellipse' },
+      { label: 'Pill',      value: 'pill' },
+      { label: 'Triangle',  value: 'triangle' },
+      { label: 'Diamond',   value: 'diamond' },
+    ], layer.shape || 'rect', v => { layer.shape = v; radiusRow.style.display = v === 'rect' ? '' : 'none'; up(); })
+  ));
+  const radiusRow = section('style', 'Corner Radius',
+    prop('Radius', makeSlider(layer.radius || 0, 0, 200, v => { layer.radius = v; up(); }))
+  );
+  if ((layer.shape || 'rect') !== 'rect') radiusRow.style.display = 'none';
+  panel.appendChild(radiusRow);
 
   // Fill type
   panel.appendChild(section('style', 'Fill',
@@ -4813,7 +6604,15 @@ function renderImageProps(panel, layer) {
       { label: 'Stretch', value: 'fill' },
     ], layer.fit || 'contain', v => { layer.fit = v; up(); })),
     prop('Opacity', makeSlider(layer.opacity ?? 100, 0, 100, v => { layer.opacity = v; up(); })),
-    prop('Radius', makeSlider(layer.radius || 0, 0, 200, v => { layer.radius = v; up(); }))
+    prop('Radius', makeSlider(layer.radius || 0, 0, 200, v => { layer.radius = v; up(); })),
+    // A slow continuous zoom/pan while this image sits on screen — same
+    // option Image Cycle has, and the same reason it's a plain CSS
+    // animation rather than anything frame-rendered (see display.html's
+    // matching branch): a single still background still benefits from
+    // feeling alive, not just a slideshow of several.
+    prop('Motion', makeSelect([
+      { label: 'None', value: 'none' }, { label: 'Ken Burns (slow zoom)', value: 'kenburns' },
+    ], layer.motion || 'none', v => { layer.motion = v; up(); }))
   ));
 
   // The color-key "Remove background" cutout used to live here — pulled per
@@ -4822,6 +6621,191 @@ function renderImageProps(panel, layer) {
   // so it did more harm than good. removeImageBackground() itself is gone
   // too; if a real cutout tool comes back, it should be an actual
   // segmentation model, not this.
+}
+
+// Image Cycle layer properties — a slideshow of stills that advances on its
+// own as a live Timer segment's countdown runs (see triggers.js's
+// stage-timer totalMs/remainingMs and display.html's handleActionBadge),
+// evenly spacing `sources.length` images across the whole countdown so the
+// last one lands right as it hits zero. Built for the "image left / timer
+// right" pre-service layout, but positioned/sized like any other layer
+// (renderLayoutProps), so it isn't tied to one specific split. Editing here
+// (and every static preview: the canvas below, paintLookLayers,
+// buildLayerDOM's non-ticking initial paint) always shows sources[0] — the
+// live advance only happens against a real running countdown on the actual
+// output, not in any preview surface.
+function renderImageCycleProps(panel, layer) {
+  const nameInp = document.createElement('input');
+  nameInp.type = 'text'; nameInp.className = 'ts-prop-input';
+  nameInp.value = layer.name; nameInp.placeholder = 'Layer name';
+  nameInp.addEventListener('input', () => { layer.name = nameInp.value; renderLayersList(); });
+  panel.appendChild(section('layout', 'Layer', prop('Name', nameInp)));
+
+  renderLayoutProps(panel, layer);
+
+  panel.appendChild(section('style', 'Image',
+    prop('Fit', makeChips([
+      { label: 'Contain', value: 'contain' },
+      { label: 'Cover',   value: 'cover' },
+      { label: 'Stretch', value: 'fill' },
+    ], layer.fit || 'cover', v => { layer.fit = v; up(); })),
+    prop('Opacity', makeSlider(layer.opacity ?? 100, 0, 100, v => { layer.opacity = v; up(); })),
+    prop('Radius', makeSlider(layer.radius || 0, 0, 200, v => { layer.radius = v; up(); }))
+  ));
+
+  // Timing/transition — only meaningful for a scene's own Image Cycle
+  // layer (a segment's "Scenes" list, see renderItemTimerControls); the
+  // plain single-theme case ignores intervalSec entirely and keeps
+  // spacing sources evenly across the whole countdown instead (see
+  // display.html's handleActionBadge for exactly which of the two applies
+  // and why). 0/blank = "use the whole-countdown spacing", not "instant".
+  panel.appendChild(section('style', 'Timing',
+    prop('Seconds/image', makeNumber(layer.intervalSec || '', 0, 600, 1, v => { layer.intervalSec = v > 0 ? v : undefined; up(); })),
+    prop('Change', makeSelect([
+      { label: 'Cut', value: 'cut' }, { label: 'Slide (left to right)', value: 'slide' },
+      { label: 'Crossfade', value: 'crossfade' },
+    ], layer.transition || 'cut', v => { layer.transition = v; up(); })),
+    // A continuous slow zoom/pan while the image sits there — the same
+    // idea Remotion/HyperFrames-style motion primitives are built for,
+    // reimplemented here as a plain CSS animation (see display.html's
+    // startCycleMotion) so it keeps running live against a countdown that
+    // can be re-timed at any moment, instead of a pre-rendered timeline.
+    prop('Motion', makeSelect([
+      { label: 'None', value: 'none' }, { label: 'Ken Burns (slow zoom)', value: 'kenburns' },
+    ], layer.motion || 'none', v => { layer.motion = v; up(); }))
+  ));
+
+  const listWrap = document.createElement('div');
+  listWrap.className = 'ts-cycle-list';
+  const addBtns = document.createElement('div');
+  addBtns.className = 'ts-cycle-add-row';
+  const uploadBtn = document.createElement('button');
+  uploadBtn.className = 'modal-btn'; uploadBtn.textContent = 'Upload…';
+  const libBtn = document.createElement('button');
+  libBtn.className = 'modal-btn'; libBtn.textContent = 'From Library…';
+  const fileInp = document.createElement('input');
+  fileInp.type = 'file'; fileInp.accept = 'image/*'; fileInp.multiple = true; fileInp.style.display = 'none';
+  uploadBtn.addEventListener('click', () => fileInp.click());
+  fileInp.addEventListener('change', async () => {
+    for (const file of Array.from(fileInp.files || [])) {
+      try {
+        const { src } = await loadImageFile(file);
+        layer.sources = layer.sources || [];
+        layer.sources.push(src);
+      } catch { toast('Could not load that image', 'error'); }
+    }
+    fileInp.value = '';
+    up();
+    renderProps();
+  });
+  libBtn.addEventListener('click', () => openCycleImagePicker(layer));
+  addBtns.appendChild(uploadBtn); addBtns.appendChild(libBtn); addBtns.appendChild(fileInp);
+  // Only offered while empty — once there are real images, loading the
+  // sample set on top would just be clutter, not a preview aid anymore.
+  if (!(layer.sources || []).length) {
+    const sampleBtn = document.createElement('button');
+    sampleBtn.className = 'modal-btn secondary';
+    sampleBtn.textContent = 'Load sample images';
+    sampleBtn.title = 'Placeholder frames so you can see the cycle in action before adding your own';
+    sampleBtn.addEventListener('click', () => {
+      layer.sources = [...SAMPLE_CYCLE_IMAGES];
+      up();
+      renderProps();
+    });
+    addBtns.appendChild(sampleBtn);
+  }
+  listWrap.appendChild(addBtns);
+
+  const grid = document.createElement('div');
+  grid.className = 'ts-cycle-grid';
+  (layer.sources || []).forEach((src, i) => {
+    const card = document.createElement('div');
+    card.className = 'ts-cycle-thumb';
+    const img = document.createElement('img');
+    img.src = src;
+    card.appendChild(img);
+    const badge = document.createElement('span');
+    badge.className = 'ts-cycle-thumb-index';
+    badge.textContent = String(i + 1);
+    card.appendChild(badge);
+    const rm = document.createElement('button');
+    rm.className = 'ts-cycle-thumb-remove';
+    rm.title = 'Remove';
+    rm.innerHTML = '<svg width="10" height="10" viewBox="0 0 16 16"><path d="M3 3l10 10M13 3L3 13" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>';
+    rm.addEventListener('click', () => { layer.sources.splice(i, 1); up(); renderProps(); });
+    card.appendChild(rm);
+    grid.appendChild(card);
+  });
+  if (!(layer.sources || []).length) {
+    const empty = document.createElement('div');
+    empty.className = 'svc-empty';
+    empty.textContent = 'No images yet — add at least 2 to cycle through.';
+    grid.appendChild(empty);
+  }
+  listWrap.appendChild(grid);
+  panel.appendChild(section('style', `Images (${(layer.sources || []).length})`, listWrap));
+}
+
+// Reuses fetchAllMediaItems (Theme Studio's own Media Library browser) but
+// appends into layer.sources instead of setting a single image layer's src
+// — a separate small overlay rather than generalizing openMediaLibraryPicker,
+// since "pick one, replace src, close" and "pick any number, keep the
+// picker open, append each" are different enough interactions.
+let cycleImagePickerEl = null;
+function closeCycleImagePicker() { cycleImagePickerEl?.remove(); cycleImagePickerEl = null; }
+async function openCycleImagePicker(layer) {
+  closeCycleImagePicker();
+  const overlay = document.createElement('div');
+  overlay.className = 'ts-media-picker-overlay';
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) closeCycleImagePicker(); });
+  const panel = document.createElement('div');
+  panel.className = 'ts-media-picker-panel';
+  const header = document.createElement('div');
+  header.className = 'ts-media-picker-header';
+  header.innerHTML = '<span>Add from Media Library</span>';
+  const closeBtn = document.createElement('button');
+  closeBtn.className = 'modal-close-btn';
+  closeBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 16 16"><path d="M3 3l10 10M13 3L3 13" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg><span>Close</span>';
+  closeBtn.addEventListener('click', closeCycleImagePicker);
+  header.appendChild(closeBtn);
+  panel.appendChild(header);
+  const grid = document.createElement('div');
+  grid.className = 'ts-media-picker-grid';
+  grid.textContent = 'Loading…';
+  panel.appendChild(grid);
+  overlay.appendChild(panel);
+  document.body.appendChild(overlay);
+  cycleImagePickerEl = overlay;
+
+  const items = (await fetchAllMediaItems()).filter(it => it.kind === 'image');
+  grid.innerHTML = '';
+  if (!items.length) {
+    grid.innerHTML = '<div class="svc-empty">No images in your Media Library yet.</div>';
+    return;
+  }
+  items.forEach(item => {
+    const card = document.createElement('button');
+    card.className = 'media-card';
+    const img = document.createElement('img');
+    img.src = item.url;
+    card.appendChild(img);
+    const label = document.createElement('div');
+    label.className = 'media-card-label';
+    label.textContent = item.name;
+    card.appendChild(label);
+    // Stays open — appending one image at a time is the whole point of
+    // this picker being separate from the single-image one.
+    card.addEventListener('click', async () => {
+      try {
+        const { src } = await loadImageFromUrl(item.url);
+        layer.sources = layer.sources || [];
+        layer.sources.push(src);
+        up();
+        renderProps();
+      } catch { toast('Could not load that image', 'error'); }
+    });
+    grid.appendChild(card);
+  });
 }
 
 // Text layer properties
@@ -4838,6 +6822,15 @@ function renderTextProps(panel, layer) {
       { label: 'Verse', value: 'verse' },
       { label: 'Ref', value: 'reference' },
       { label: 'Timer', value: 'timer' },
+      // Hour/Minute/Second — the individual zero-padded pieces (see
+      // display.html's timeParts) instead of one fixed "H:MM:SS" string,
+      // so the countdown can be laid out as separately positioned/sized/
+      // styled elements — e.g. the hour stacked directly above the
+      // minute — rather than only ever one text box with no layout
+      // control over its own pieces.
+      { label: 'Hour', value: 'timer-h' },
+      { label: 'Minute', value: 'timer-m' },
+      { label: 'Second', value: 'timer-s' },
       { label: 'Custom', value: 'custom' },
     ], layer.binding, v => { layer.binding = v; customRow.style.display = v === 'custom' ? '' : 'none'; up(); }))
   ));
@@ -4873,19 +6866,33 @@ function renderTextProps(panel, layer) {
       const itLabel = document.createElement('span'); itLabel.className = 'ts-prop-label'; itLabel.textContent = 'Italic';
       const itToggle = makeToggle(layer.font.italic, v => { layer.font.italic = v; up(); });
       const trLabel = document.createElement('span'); trLabel.className = 'ts-prop-label'; trLabel.style.marginLeft = '8px'; trLabel.textContent = 'Case';
-      const trChips = makeChips([
-        {label:'None',value:'none'},{label:'Upper',value:'uppercase'},{label:'Lower',value:'lowercase'}
+      const trSelect = makeSelect([
+        { label: 'None', value: 'none' }, { label: 'UPPERCASE', value: 'uppercase' }, { label: 'lowercase', value: 'lowercase' },
       ], layer.font.transform, v => { layer.font.transform = v; up(); });
       row.appendChild(itLabel); row.appendChild(itToggle);
-      row.appendChild(trLabel); row.appendChild(trChips);
+      row.appendChild(trLabel); row.appendChild(trSelect);
       return row;
     })()
   ));
 
-  // Spacing
+  // Spacing — both as plain number entries, same row (mirrors the
+  // Size+Weight row above), not sliders. An exact value like 1.15 line
+  // height or -0.5 letter spacing is what people actually reach for; a
+  // slider makes hitting one precisely more fiddly, not less, and two
+  // separate rows for two related, similarly-sized numbers was just
+  // taking up more vertical space than the content needed.
   panel.appendChild(section('style', 'Spacing',
-    prop('Line H', makeSlider(layer.font.lineHeight, 0.8, 3, v => { layer.font.lineHeight = parseFloat(v.toFixed(2)); up(); })),
-    prop('Letter', makeSlider(layer.font.letterSpacing, -5, 30, v => { layer.font.letterSpacing = parseFloat(v.toFixed(1)); up(); }))
+    (() => {
+      const row = document.createElement('div');
+      row.className = 'ts-prop-row'; row.style.gap = '8px';
+      const lhLabel = document.createElement('span'); lhLabel.className = 'ts-prop-label'; lhLabel.textContent = 'Line H';
+      const lhInp = makeNumber(layer.font.lineHeight, 0.5, 4, 0.05, v => { layer.font.lineHeight = parseFloat(v.toFixed(2)); up(); });
+      const ltLabel = document.createElement('span'); ltLabel.className = 'ts-prop-label'; ltLabel.textContent = 'Letter';
+      const ltInp = makeNumber(layer.font.letterSpacing, -5, 30, 0.5, v => { layer.font.letterSpacing = parseFloat(v.toFixed(1)); up(); });
+      row.appendChild(lhLabel); row.appendChild(lhInp);
+      row.appendChild(ltLabel); row.appendChild(ltInp);
+      return row;
+    })()
   ));
 
   // Color
@@ -4895,8 +6902,30 @@ function renderTextProps(panel, layer) {
     prop('Align', makeAlignBtns(layer.align, v => { layer.align = v; up(); }))
   ));
 
+  // Effects (Shadow/Outline/Scroll) — each one used to be TWO separate
+  // .ts-props-section blocks (a header-only section, then a second section
+  // for its detail rows), which meant two full padding+border-bottom
+  // boxes per effect: an unwanted divider splitting a toggle from the
+  // very controls it toggles, and double the visual weight for one
+  // logical group. Building an on/off effect's row now merges both into
+  // one real section, with just an inner wrapper (not a section of its
+  // own) collapsing for the detail rows.
+  function effectSection(name, enabled, onToggle, detailChildren) {
+    const header = document.createElement('div');
+    header.className = 'ts-prop-row ts-effect-header';
+    const label = document.createElement('span');
+    label.className = 'ts-props-section-label'; label.style.margin = '0'; label.textContent = name;
+    const toggle = makeToggle(enabled, v => { onToggle(v); details.style.display = v ? '' : 'none'; up(); });
+    header.appendChild(label); header.appendChild(toggle);
+    const details = document.createElement('div');
+    details.className = 'ts-effect-details';
+    details.style.display = enabled ? '' : 'none';
+    detailChildren.forEach(c => details.appendChild(c));
+    return section('effects', null, header, details);
+  }
+
   // Shadow
-  const shadowDetails = section('effects', null,
+  panel.appendChild(effectSection('Shadow', layer.shadow.enabled, v => { layer.shadow.enabled = v; }, [
     prop('Color', makeColor(layer.shadow.color, v => { layer.shadow.color = v; up(); })),
     prop('Opacity', makeSlider(layer.shadow.opacity, 0, 100, v => { layer.shadow.opacity = v; up(); })),
     prop('Blur', makeSlider(layer.shadow.blur, 0, 60, v => { layer.shadow.blur = v; up(); })),
@@ -4908,51 +6937,36 @@ function renderTextProps(panel, layer) {
       const yi = makeNumber(layer.shadow.y, -50, 50, 1, v => { layer.shadow.y = v; up(); });
       row.appendChild(xl); row.appendChild(xi); row.appendChild(yl); row.appendChild(yi);
       return row;
-    })()
-  );
-  shadowDetails.style.display = layer.shadow.enabled ? '' : 'none';
-
-  const shadowHeader = document.createElement('div');
-  shadowHeader.className = 'ts-prop-row';
-  const shLabel = document.createElement('span'); shLabel.className = 'ts-prop-label'; shLabel.textContent = 'Shadow';
-  const shToggle = makeToggle(layer.shadow.enabled, v => { layer.shadow.enabled = v; shadowDetails.style.display = v ? '' : 'none'; up(); });
-  shadowHeader.appendChild(shLabel); shadowHeader.appendChild(shToggle);
-  const shadowSection = section('effects', 'Shadow', shadowHeader);
-  panel.appendChild(shadowSection);
-  panel.appendChild(shadowDetails);
+    })(),
+  ]));
 
   // Outline
-  const outlineDetails = section('effects', null,
+  panel.appendChild(effectSection('Outline', layer.outline.enabled, v => { layer.outline.enabled = v; }, [
     prop('Color', makeColor(layer.outline.color, v => { layer.outline.color = v; up(); })),
-    prop('Width', makeSlider(layer.outline.width, 1, 10, v => { layer.outline.width = v; up(); }))
-  );
-  outlineDetails.style.display = layer.outline.enabled ? '' : 'none';
-
-  const outlineHeader = document.createElement('div');
-  outlineHeader.className = 'ts-prop-row';
-  const olLabel = document.createElement('span'); olLabel.className = 'ts-prop-label'; olLabel.textContent = 'Outline';
-  const olToggle = makeToggle(layer.outline.enabled, v => { layer.outline.enabled = v; outlineDetails.style.display = v ? '' : 'none'; up(); });
-  outlineHeader.appendChild(olLabel); outlineHeader.appendChild(olToggle);
-  panel.appendChild(section('effects', 'Outline', outlineHeader));
-  panel.appendChild(outlineDetails);
+    prop('Width', makeSlider(layer.outline.width, 1, 10, v => { layer.outline.width = v; up(); })),
+  ]));
 
   // Scroll — continuous horizontal marquee (news-ticker / large-scroll
   // layers, see the Ticker and Scroll — Fill Screen presets). Independent of
   // layout: works on the Ticker preset's bottom strip or a free-canvas box
   // just as well. Speed is seconds per full loop — lower is faster.
   if (!layer.scroll) layer.scroll = { enabled: false, speed: 15 };
-  const scrollDetails = section('effects', null,
-    prop('Speed', makeSlider(layer.scroll.speed, 3, 60, v => { layer.scroll.speed = v; up(); }))
-  );
-  scrollDetails.style.display = layer.scroll.enabled ? '' : 'none';
+  panel.appendChild(effectSection('Scroll', layer.scroll.enabled, v => { layer.scroll.enabled = v; }, [
+    prop('Speed', makeSlider(layer.scroll.speed, 3, 60, v => { layer.scroll.speed = v; up(); })),
+  ]));
 
-  const scrollHeader = document.createElement('div');
-  scrollHeader.className = 'ts-prop-row';
-  const scLabel = document.createElement('span'); scLabel.className = 'ts-prop-label'; scLabel.textContent = 'Scroll';
-  const scToggle = makeToggle(layer.scroll.enabled, v => { layer.scroll.enabled = v; scrollDetails.style.display = v ? '' : 'none'; up(); });
-  scrollHeader.appendChild(scLabel); scrollHeader.appendChild(scToggle);
-  panel.appendChild(section('effects', 'Scroll', scrollHeader));
-  panel.appendChild(scrollDetails);
+  // Entrance — a one-time fade + rise the moment this slide/scene first
+  // shows, not a continuous effect like Ken Burns (Image/Image Cycle's own
+  // Motion option). Plays in every render context (real output, editor
+  // canvas, operator preview) the same simple way: a CSS animation added
+  // when the element is first created, since "the slide just appeared" IS
+  // "this element was just created" in all three.
+  panel.appendChild(effectSection('Entrance', (layer.entrance || 'none') !== 'none',
+    v => { layer.entrance = v ? 'fade-up' : 'none'; }, [
+      prop('Style', makeSelect([
+        { label: 'Fade + Rise', value: 'fade-up' },
+      ], layer.entrance === 'fade-up' ? 'fade-up' : 'fade-up', v => { layer.entrance = v; up(); })),
+    ]));
 }
 
 // ── Wire modal open/close ─────────────────────────────────────────────────
@@ -4996,6 +7010,7 @@ function openThemeStudio() {
 }
 
 function closeThemeStudio() {
+  tsCommitActiveEdit(null);
   looksModal?.classList.add('hidden');
   looksBtn?.classList.remove('active');
   document.querySelector('.main-layout')?.classList.remove('hidden-el');
@@ -5014,10 +7029,16 @@ function toggleItemModeChrome(isItem) {
   document.querySelector('#ts-pane-themes .ts-col-header')?.classList.toggle('hidden', isItem);
   document.getElementById('ts-item-mode-header')?.classList.toggle('hidden', !isItem);
   document.getElementById('ts-item-theme-header')?.classList.toggle('hidden', !isItem);
-  document.querySelector('.ts-meta-row')?.classList.toggle('hidden', isItem);
-  // Canvas size is a whole-theme concern (like Layout/Transition/Canvas,
-  // which the line above already hides) — floats over the preview instead
-  // of living in that row, so it needs its own toggle here.
+  // .ts-meta-row doesn't exist anywhere in the DOM (a stale selector from
+  // before these became individual .ts-props-section blocks — this was a
+  // silent no-op, so Layout/Transition/Text Animation/Canvas/Translate-to
+  // never actually hid in item mode at all). .ts-theme-meta is the real,
+  // current marker shared by all of them (Transition now lives next to the
+  // canvas instead of in this column, but it's still theme-level and still
+  // tagged the same way).
+  document.querySelectorAll('.ts-theme-meta').forEach(el => el.classList.toggle('hidden', isItem));
+  // Canvas size is a whole-theme concern too — floats over the preview
+  // instead of living among the others, so it needs its own toggle here.
   document.querySelector('.ts-canvas-size-group')?.classList.toggle('hidden', isItem);
   const hint = document.querySelector('.ts-layers-hint');
   if (hint) hint.style.visibility = isItem ? 'hidden' : '';
@@ -5035,6 +7056,11 @@ function updateItemThemeLabel() {
   const resolved = window.KairoService.themeForItem(tsItemCtx.item);
   label.textContent = tsItemCtx.item.themeId ? (resolved?.name || 'Theme') : 'Output default';
 }
+
+// resolveFlexibleTime — "Ends at" used to require strict 24-hour HH:MM;
+// see src/layer_geometry.js for the shared, relaxed parser (loaded via
+// index.html before this script) — was a byte-identical copy-paste shared
+// with service.js's openSegmentTimePopover.
 
 // The countdown's actual target — this is the thing that makes a timer
 // segment a timer, and it used to live ONLY behind the separate Quick-edit
@@ -5089,17 +7115,23 @@ function renderItemTimerControls() {
     // control (Tauri's real webview on macOS) can show a complete-looking
     // value while .value still reads back empty until every sub-segment is
     // explicitly confirmed, which silently defeated this exact field. Same
-    // fix as the Quick-edit popover in service.js.
+    // fix as the Quick-edit popover in service.js — which now also accepts
+    // 12-hour input (see resolveFlexibleTime there for the full reasoning);
+    // duplicated here rather than imported, per this codebase's usual
+    // per-file convention.
     const timeInp = document.createElement('input');
-    timeInp.type = 'text'; timeInp.inputMode = 'numeric'; timeInp.placeholder = 'HH:MM'; timeInp.maxLength = 5;
+    timeInp.type = 'text'; timeInp.inputMode = 'numeric'; timeInp.placeholder = 'HH:MM or H:MM AM/PM'; timeInp.maxLength = 8;
     timeInp.className = 'ts-prop-input';
     timeInp.value = params.endAtTime || '';
     timeInp.addEventListener('input', () => {
-      const digits = timeInp.value.replace(/\D/g, '').slice(0, 4);
-      timeInp.value = digits.length > 2 ? `${digits.slice(0, 2)}:${digits.slice(2)}` : digits;
+      if (/^[0-9:]*$/.test(timeInp.value)) {
+        const digits = timeInp.value.replace(/\D/g, '').slice(0, 4);
+        timeInp.value = digits.length > 2 ? `${digits.slice(0, 2)}:${digits.slice(2)}` : digits;
+      }
     });
     timeInp.addEventListener('change', () => {
-      if (/^([01]\d|2[0-3]):[0-5]\d$/.test(timeInp.value)) save({ mode: 'endAt', endAtTime: timeInp.value });
+      const resolved = resolveFlexibleTime(timeInp.value);
+      if (resolved) save({ mode: 'endAt', endAtTime: resolved });
     });
     fieldRow.appendChild(timeInp);
   }
@@ -5114,15 +7146,29 @@ function renderItemTimerControls() {
   const warnLbl = document.createElement('span');
   warnLbl.className = 'ts-prop-label'; warnLbl.textContent = 'Warning';
   colorRow.appendChild(warnLbl);
-  colorRow.appendChild(makeColor(params.warnColor || timerLayer?.warnColor || '#ffcf4d',
+  colorRow.appendChild(makeColor(params.warnColor || timerLayer?.warnColor || '#e8a64a',
     (v) => save({ warnColor: v })));
   const otLbl = document.createElement('span');
   otLbl.className = 'ts-prop-label'; otLbl.textContent = 'Overtime';
   otLbl.style.marginLeft = '10px';
   colorRow.appendChild(otLbl);
-  colorRow.appendChild(makeColor(params.overtimeColor || timerLayer?.overtimeColor || '#ff5c5c',
+  colorRow.appendChild(makeColor(params.overtimeColor || timerLayer?.overtimeColor || '#e8404a',
     (v) => save({ overtimeColor: v })));
   host.appendChild(colorRow);
+
+  // Scenes (segment.scenes — a storyboard, see segments.js) are managed
+  // as real SLIDES in the Slides panel to the left now (renderItemSlidesList/
+  // addTimerSlide) — one thumbnail per scene, click to edit its layers,
+  // "+ Add Slide" to add another, a duration field right on each slide's
+  // own row for "the player controls speed" — rather than a separate list
+  // tucked away in here. This section used to hold that whole list.
+  if (item.scenes && item.scenes.length) {
+    const scenesNote = document.createElement('p');
+    scenesNote.className = 'setting-hint';
+    scenesNote.style.margin = '4px 0 0';
+    scenesNote.textContent = `Playing ${item.scenes.length} slide${item.scenes.length === 1 ? '' : 's'} in sequence — manage them in the Slides panel to the left.`;
+    host.appendChild(scenesNote);
+  }
 
   // Local echo so the field reflects the change immediately even before
   // the PUT round-trips — item.trigger is the same live segmentList
@@ -5167,15 +7213,49 @@ function resolveItemBaseLook(item) {
 // actual theme id, with this specific slide's stored overrides (if any)
 // merged field-by-field onto each text layer — a partial override (say, just
 // font.size) must not blow away the rest of the base theme's settings.
+// Media Bin support (index.html/service.js) — "set as background" doesn't
+// touch the theme itself, it stores {src,kind} in the SAME per-slide
+// override bag slideStyles already is (bgMedia is just one more field
+// alongside __customLayers), then this prepends a real layer for it at
+// render time and drops the theme's own flat background so the media
+// actually shows instead of being covered by an opaque canvas fill drawn
+// after it. Reuses the video-aware image-layer rendering already built for
+// theme "image" layers (isVideoLayerSrc) — a background picked from the
+// bin can be a video just as validly as a static image.
+function applyBgMediaOverride(layers, bgMedia) {
+  if (!bgMedia?.src) return layers;
+  const synthetic = {
+    id: '__bg-media', type: 'image', name: 'Background (Media Bin)', visible: true,
+    src: bgMedia.src, fit: 'cover', opacity: 100, radius: 0,
+    pos: { x: 0, y: 0, w: TS_DESIGN_W, h: TS_DESIGN_H },
+  };
+  return [synthetic, ...layers.filter(l => l.type !== 'background')];
+}
+
 function buildSyntheticLook(item, slideIndex) {
+  // A timer item's scenes (segment.scenes — its slide storyboard) have no
+  // shared base theme to diff against at all: each one IS a whole,
+  // standalone layer set, same as a real theme is. So this is a straight
+  // clone of that scene's own layers, not the base-theme-plus-per-slide-
+  // override merge below — writeItemSlideStyleFromSynthetic's own scenes
+  // branch is the reciprocal save path.
+  if (item.type === 'timer' && item.scenes && item.scenes.length) {
+    const scene = item.scenes[slideIndex] || item.scenes[0];
+    return { id: `scene:${item.id}:${slideIndex}`, layers: deepClone(scene?.layers || []) };
+  }
   const base = resolveItemBaseLook(item);
   const clone = deepClone(base) || { layers: [] };
   clone.id = `item-edit:${item.id}:${slideIndex}`;
   const overrides = item.slideStyles?.[slideIndex] || {};
+  clone.layers = applyBgMediaOverride(clone.layers || [], overrides.bgMedia);
   (clone.layers || []).forEach(layer => {
-    if (layer.type !== 'text') return;
     const ov = overrides[layer.id];
     if (!ov) return;
+    // Was gated to text-only, same reason/fix as writeItemSlideStyleFromSynthetic's
+    // matching guard above it (see that comment) — pos/opacity/fit/radius/
+    // visible now apply to any layer type; font/shadow/outline/align/color
+    // stay meaningful only for text since that's the only override shape
+    // that ever gets computed for a non-text layer to begin with.
     if (ov.pos) layer.pos = { ...ov.pos };
     if (ov.font) layer.font = { ...layer.font, ...ov.font };
     if (ov.align) layer.align = ov.align;
@@ -5183,6 +7263,8 @@ function buildSyntheticLook(item, slideIndex) {
     if (ov.opacity !== undefined) layer.opacity = ov.opacity;
     if (ov.shadow) layer.shadow = { ...layer.shadow, ...ov.shadow };
     if (ov.outline) layer.outline = { ...layer.outline, ...ov.outline };
+    if (ov.fit) layer.fit = ov.fit;
+    if (ov.radius !== undefined) layer.radius = ov.radius;
     if (ov.visible === false) layer.visible = false;
   });
   // Item/slide-specific layers the operator added in Full-scale edit — not
@@ -5205,6 +7287,7 @@ function renderItemSlidesList() {
   el.innerHTML = '';
   const { item, slideIndex, baseLook } = tsItemCtx;
   const slides = window.KairoService.slidesFor(item);
+  const isScenes = item.type === 'timer' && item.scenes && item.scenes.length;
   slides.forEach((s, i) => {
     const row = document.createElement('div');
     row.className = 'ts-item-slide-row'
@@ -5226,8 +7309,45 @@ function renderItemSlidesList() {
       // attached below, instead of forcing a per-thumb synchronous reflow.
       thumb.__pendingPaint = { s, i };
     }
-
     row.appendChild(thumb);
+
+    // A scene slide's "player" setting — how long the live countdown shows
+    // it before advancing to the next one — lives right on its own row,
+    // the same place PowerPoint keeps a slide's advance timing next to the
+    // slide itself rather than in a separate list somewhere else.
+    if (s.isScene) {
+      const durRow = document.createElement('div');
+      durRow.className = 'ts-item-slide-duration';
+      const durInp = document.createElement('input');
+      durInp.type = 'number'; durInp.min = '1';
+      durInp.value = s.durationSec || '';
+      durInp.title = 'Seconds this slide stays on screen';
+      durInp.addEventListener('click', (e) => e.stopPropagation());
+      durInp.addEventListener('change', () => {
+        const n = parseFloat(durInp.value);
+        if (n > 0) { item.scenes[s.sceneIndex].durationSec = Math.round(n); window.KairoService.saveTimerScenes(item); }
+      });
+      durRow.appendChild(durInp);
+      const durLbl = document.createElement('span');
+      durLbl.textContent = 's';
+      durRow.appendChild(durLbl);
+      row.appendChild(durRow);
+
+      const delBtn = document.createElement('button');
+      delBtn.className = 'ts-item-slide-delete';
+      delBtn.title = 'Delete slide';
+      delBtn.innerHTML = '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
+      delBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (item.scenes.length <= 1) return; // a timer slide with scenes always keeps at least one
+        item.scenes.splice(s.sceneIndex, 1);
+        window.KairoService.saveTimerScenes(item);
+        if (slideIndex >= item.scenes.length) tsItemCtx.slideIndex = item.scenes.length - 1;
+        selectItemSlide(tsItemCtx.slideIndex);
+      });
+      row.appendChild(delBtn);
+    }
+
     // Cmd/Ctrl+Click toggle / Shift+Click range-select — same gesture as
     // Quick Edit and the Stack/Grid view, via the shared selection state
     // service.js owns. A plain click clears the selection and picks this
@@ -5244,21 +7364,47 @@ function renderItemSlidesList() {
       e.preventDefault();
       const sections = [];
       const editGroup = [];
-      if (window.KairoService.canDuplicateSlide(item, s)) {
+      if (s.isScene) {
+        editGroup.push({ label: 'Duplicate', onClick: () => duplicateTimerScene(item, s.sceneIndex) });
+      } else if (window.KairoService.canDuplicateSlide(item, s)) {
         editGroup.push({ label: 'Duplicate', onClick: () => window.KairoService.duplicateSlide(item, i) });
       }
       const selection = window.KairoService.selectedSlideIndices.size
         ? window.KairoService.selectedSlideIndices : new Set([i]);
-      if (window.KairoService.anySlidesDuplicable(item, selection)) {
+      if (!s.isScene && window.KairoService.anySlidesDuplicable(item, selection)) {
         editGroup.push({
           label: selection.size > 1 ? `Copy ${selection.size} slides` : 'Copy',
           onClick: () => window.KairoService.copySlides(item, selection),
         });
       }
-      if (window.KairoService.slideClipboard && item.type === 'slides') {
+      if (!s.isScene && window.KairoService.slideClipboard && item.type === 'slides') {
         editGroup.push({ label: 'Paste', onClick: () => window.KairoService.pasteSlides(item, i) });
       }
       if (editGroup.length) sections.push(editGroup);
+      // Delete was missing entirely from this menu — the Stack/Grid view's
+      // own slide right-click (slideCard, service.js) already has it as
+      // its own danger-styled section; this thumbnail list had nothing
+      // beyond the scene case's small standalone X button, so a regular
+      // (non-timer) slide couldn't be deleted from Full-scale edit's own
+      // Slides panel at all without leaving to the Stack view first.
+      if (s.isScene) {
+        sections.push([{
+          label: 'Delete', danger: true, disabled: item.scenes.length <= 1,
+          onClick: () => {
+            if (item.scenes.length <= 1) return; // always keep at least one
+            item.scenes.splice(s.sceneIndex, 1);
+            window.KairoService.saveTimerScenes(item);
+            if (slideIndex >= item.scenes.length) tsItemCtx.slideIndex = item.scenes.length - 1;
+            selectItemSlide(tsItemCtx.slideIndex);
+          },
+        }]);
+      } else {
+        sections.push([{
+          label: selection.size > 1 ? `Delete ${selection.size} slides` : 'Delete this slide',
+          danger: true,
+          onClick: () => window.KairoService.bulkDeleteSlides(item, selection),
+        }]);
+      }
       if (sections.length) window.KairoService.openContextMenu(e.clientX, e.clientY, sections);
     });
     el.appendChild(row);
@@ -5268,7 +7414,14 @@ function renderItemSlidesList() {
     const pending = thumb.__pendingPaint;
     if (!pending) return;
     const { s, i } = pending;
-    window.KairoService.paintLookLayers(thumb, baseLook, item.slideStyles?.[i] || {}, {
+    // A scene slide has no shared base theme to diff against — its own
+    // layers are the whole thing, same as a real theme's are (see
+    // buildSyntheticLook's own scenes branch for why editing works the
+    // same way). Every other item type keeps the base-theme + per-slide-
+    // override painting it always had.
+    const look = s.isScene ? { layers: item.scenes[s.sceneIndex]?.layers || [] } : baseLook;
+    const style = s.isScene ? {} : (item.slideStyles?.[i] || {});
+    window.KairoService.paintLookLayers(thumb, look, style, {
       verseText: s.text, referenceText: s.reference || '', translatedText: '',
     }, { hideReference: true });
   });
@@ -5283,6 +7436,82 @@ function renderItemSlidesList() {
     label.textContent = String(i + 1) + '.';
     thumb.appendChild(label);
   });
+
+  // "+ Add Slide" — a Timer segment's own affordance for building a
+  // storyboard, right where the slides it creates will actually show up.
+  // Available on every timer item, not just ones already using scenes:
+  // the first click converts today's single placeholder slide into
+  // scene 0 (carrying over whatever theme/background it already had, so
+  // nothing already configured is lost) and adds a fresh scene 1 after it.
+  if (item.type === 'timer') {
+    const addBtn = document.createElement('button');
+    addBtn.className = 'ts-item-add-slide-btn';
+    addBtn.textContent = '+ Add Slide';
+    addBtn.addEventListener('click', () => addTimerSlide(item));
+    el.appendChild(addBtn);
+  }
+}
+
+// A fresh slide starts with one full-bleed background layer and a
+// centered Countdown, matching timer-big's own defaults — a real, visible
+// starting point rather than a blank canvas with nothing to select. The
+// operator's own Image Cycle layer(s)/captions get added from inside the
+// slide editor the same way any theme's do (the "Cycle"/Text/Image
+// buttons in Theme Studio's add-content bar).
+function defaultSceneLayers() {
+  return [
+    { id: 'bg', type: 'background', name: 'Canvas', visible: true,
+      fill: 'gradient', color: '#0b0b0f', opacity: 100, color2: '#1c1c30', angle: 160 },
+    { id: 'timer', type: 'text', name: 'Countdown', visible: true, binding: 'timer', customText: '',
+      pos: { x: 160, y: 380, w: 1600, h: 320 },
+      font: { family: 'Manrope', size: 180, weight: 800, italic: false, lineHeight: 1, letterSpacing: 0, transform: 'none' },
+      color: '#ffffff', opacity: 100, align: 'center',
+      shadow: { ...TXT_SHADOW_SOFT }, outline: { ...NO_OUTLINE } },
+  ];
+}
+function addTimerSlide(item) {
+  if (!item.scenes || !item.scenes.length) {
+    // Carry over whatever the segment's single slide already had (a real
+    // theme, custom layers) as scene 0, rather than discarding it the
+    // moment scenes mode turns on.
+    const base = resolveItemBaseLook(item);
+    const first = deepClone(base?.layers || defaultSceneLayers());
+    // The item's own custom text-layer overrides (position/font/etc.,
+    // stored in slideStyles[0] up to now) apply on top, same field-by-field
+    // merge buildSyntheticLook already does for the diff-based case —
+    // otherwise anything already customized here would silently vanish
+    // the moment this becomes scene 0's own standalone layers.
+    const overrides = item.slideStyles?.[0] || {};
+    first.forEach(layer => {
+      if (layer.type !== 'text') return;
+      const ov = overrides[layer.id];
+      if (!ov) return;
+      if (ov.pos) layer.pos = { ...ov.pos };
+      if (ov.font) layer.font = { ...layer.font, ...ov.font };
+      if (ov.align) layer.align = ov.align;
+      if (ov.color) layer.color = ov.color;
+      if (ov.opacity !== undefined) layer.opacity = ov.opacity;
+      if (ov.shadow) layer.shadow = { ...layer.shadow, ...ov.shadow };
+      if (ov.outline) layer.outline = { ...layer.outline, ...ov.outline };
+      if (ov.visible === false) layer.visible = false;
+    });
+    item.scenes = [{ id: 'scene-' + Date.now(), name: item.name || 'Slide 1', durationSec: 60, layers: first }];
+  }
+  item.scenes.push({ id: 'scene-' + (Date.now() + 1), name: `Slide ${item.scenes.length + 1}`, durationSec: 60, layers: defaultSceneLayers() });
+  window.KairoService.saveTimerScenes(item);
+  renderItemSlidesList();
+  selectItemSlide(item.scenes.length - 1);
+}
+function duplicateTimerScene(item, index) {
+  const src = item.scenes[index];
+  if (!src) return;
+  const copy = deepClone(src);
+  copy.id = 'scene-' + Date.now();
+  copy.name = `${src.name || 'Slide'} copy`;
+  item.scenes.splice(index + 1, 0, copy);
+  window.KairoService.saveTimerScenes(item);
+  renderItemSlidesList();
+  selectItemSlide(index + 1);
 }
 
 // Mirrors selectLook()'s fan-out (swap the data-source, reset history, then
@@ -5290,9 +7519,10 @@ function renderItemSlidesList() {
 // the whole engine at something else."
 function selectItemSlide(index) {
   if (!tsItemCtx) return;
+  tsCommitActiveEdit(null);
   tsItemCtx.slideIndex = index;
   resetItemHistory();
-  activeLayer = null;
+  activeLayer = null; multiSelectedLayerIds.clear();
   activeLook = buildSyntheticLook(tsItemCtx.item, index);
   renderItemSlidesList(); renderLayersList(); renderPreview(); renderProps();
 }
@@ -5315,7 +7545,7 @@ function openItemStyleEditor(itemId, slideIndex = 0) {
   looksModal?.classList.remove('hidden');
   toggleItemModeChrome(true);
   resetItemHistory();
-  activeLayer = null;
+  activeLayer = null; multiSelectedLayerIds.clear();
   activeLook = buildSyntheticLook(item, slideIndex);
   renderItemSlidesList(); renderLayersList(); renderProps();
   // Render after layout settles so the stage has real dimensions — same
@@ -5335,9 +7565,10 @@ function closeItemStyleEditor() {
   tsMode = 'theme';
   tsItemCtx = null;
   activeLook = looks[0];
-  activeLayer = null;
+  activeLayer = null; multiSelectedLayerIds.clear();
   resetThemeHistory(); // otherwise item mode's undo stack would carry over onto whichever theme this lands back on
 }
+
 // Exposed so service.js's sectionCard() icon and showCenterView() (top-nav
 // tab switch) can open/close this — same pattern as window.KairoThemeStudio.
 // Called by service.js's refreshAfterSlideEdit after any slide-level
@@ -5349,7 +7580,7 @@ function refreshItemStyleEditorSlides(itemId) {
   if (tsMode !== 'item' || !tsItemCtx || tsItemCtx.item.id !== itemId) return;
   const slides = window.KairoService.slidesFor(tsItemCtx.item);
   tsItemCtx.slideIndex = Math.max(0, Math.min(tsItemCtx.slideIndex, slides.length - 1));
-  activeLayer = null;
+  activeLayer = null; multiSelectedLayerIds.clear();
   activeLook = buildSyntheticLook(tsItemCtx.item, tsItemCtx.slideIndex);
   renderItemSlidesList(); renderLayersList(); renderPreview(); renderProps();
 }
@@ -5393,7 +7624,7 @@ window.KairoThemeStudio = {
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape' || looksModal?.classList.contains('hidden')) return;
   const t = e.target;
-  if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT')) return;
+  if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return;
   if (tsMode === 'item') closeItemStyleEditor(); else closeThemeStudio();
 });
 
@@ -5437,13 +7668,18 @@ function pasteLayers() {
 document.addEventListener('keydown', (e) => {
   if (looksModal?.classList.contains('hidden') || !activeLook || tsMode === 'item') return;
   const t = e.target;
-  if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT')) return;
+  if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return;
   if (!(e.metaKey || e.ctrlKey)) return;
   const key = e.key.toLowerCase();
 
   if (key === 'a') { e.preventDefault(); selectAllLayers(); }
   else if (key === 'c') { if (multiSelectedLayerIds.size || activeLayer) { e.preventDefault(); copyLayers(); } }
   else if (key === 'v') { if (layerClipboard.length) { e.preventDefault(); pasteLayers(); } }
+  // Cmd/Ctrl+D — duplicate in place (Canva/Figma/Keynote's own shortcut for
+  // this), same result as copy-then-paste but one keystroke: copyLayers
+  // already snapshots the whole current selection, pasteLayers already
+  // clones with fresh ids and selects the new copies.
+  else if (key === 'd') { if (multiSelectedLayerIds.size || activeLayer) { e.preventDefault(); copyLayers(); pasteLayers(); } }
 });
 
 // Delete/Backspace for the selected layer(s) — same gesture as removing a
@@ -5461,11 +7697,36 @@ document.addEventListener('keydown', (e) => {
     e.preventDefault();
     const ids = [...multiSelectedLayerIds];
     multiSelectedLayerIds = new Set();
+    activeLayer = null;
     ids.forEach(id => deleteLayer(activeLook.layers.find(l => l.id === id)));
   } else if (activeLayer) {
     e.preventDefault();
     deleteLayer(activeLayer);
   }
+});
+
+// Arrow keys nudge the current selection (single or multi — tsSelectedLayers)
+// by 1 design px, Shift+Arrow by 10 — the same increments (and the same
+// gesture) as PowerPoint/Keynote/Figma/Canva, for the exact positioning a
+// drag alone can't reliably do. Works in item mode too, same as Delete —
+// nudging is just a position edit, no different from typing into X/Y.
+document.addEventListener('keydown', (e) => {
+  const arrowDelta = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] }[e.key];
+  if (!arrowDelta) return;
+  if (looksModal?.classList.contains('hidden') || !activeLook) return;
+  const t = e.target;
+  if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return;
+  const layers = tsSelectedLayers();
+  if (!layers.length) return;
+  e.preventDefault();
+  const step = e.shiftKey ? 10 : 1;
+  const [dx, dy] = arrowDelta;
+  layers.forEach(l => {
+    const p = ensurePos(l);
+    p.x += dx * step;
+    p.y += dy * step;
+  });
+  up();
 });
 
 // Deselect on a click that lands outside any layer — the grey margin around
@@ -5480,8 +7741,9 @@ document.addEventListener('keydown', (e) => {
 // exactly which element was actually hit.
 document.querySelector('.ts-preview-wrap')?.addEventListener('mousedown', (e) => {
   const stage = tsStageEl();
-  if (!activeLayer && !multiSelectedLayerIds.size) return;
+  if (!activeLayer && !multiSelectedLayerIds.size && !tsActiveEdit) return;
   if (e.target !== e.currentTarget && e.target !== stage) return;
+  tsCommitActiveEdit(null);
   activeLayer = null;
   multiSelectedLayerIds = new Set();
   renderLayersList();
@@ -5630,25 +7892,12 @@ document.getElementById('ts-alpha-toggle')?.addEventListener('click', () => {
   renderProps();
 });
 
-// Animation chips
-document.getElementById('ts-anim-picker')?.addEventListener('click', e => {
-  const btn = e.target.closest('.ts-chip');
-  if (!btn || !activeLook) return;
-  document.querySelectorAll('#ts-anim-picker .ts-chip').forEach(b => b.classList.remove('active'));
-  btn.classList.add('active');
-  activeLook.animation = btn.dataset.anim;
-  document.getElementById('ts-anim-speed')?.classList.toggle('hidden', btn.dataset.anim === 'cut');
-  scheduleThemeAutosave();
-});
-
-// Transition speed — a multiplier on display.html's base 300ms (see
-// renderStage there), not a raw duration, so "1" always means exactly the
-// original hardcoded speed regardless of what that baseline happens to be.
-document.getElementById('ts-anim-speed')?.addEventListener('input', e => {
-  if (!activeLook) return;
-  activeLook.animationSpeed = parseFloat(e.target.value);
-  scheduleThemeAutosave();
-});
+// Transition (Fade/Slide/Cut + speed) moved from a per-theme setting here
+// to a display-level one — see the Monitoring panel's own quick picker
+// (service.js) and display.html's outputAnimation. activeLook.animation/
+// animationSpeed are no longer read anywhere; left as harmless unused
+// fields on already-saved themes rather than migrating every stored look
+// just to strip them.
 
 // Text Animation dropdown — a separate setting from the Transition chips
 // above (see KairoWordSplit's file header for why these were split out of
@@ -5696,6 +7945,13 @@ tsAddLayerBtn?.addEventListener('click', () => {
     color: '#ffffff', opacity: 100, align: 'center',
     shadow: { enabled: false, color: '#000000', opacity: 70, blur: 8, x: 0, y: 2 },
     outline: { enabled: false, color: '#000000', width: 2 },
+    // Explicit free-canvas box from the moment it's created — every OTHER
+    // new layer (Add Shape, Add Image) already gets one; this was the one
+    // left to fall back to a layout-preset rule instead (full canvas
+    // width, centered, per the 'fullscreen' branch), which rendered and
+    // dragged/resized completely differently from every other layer type
+    // and from what its own selection handles implied.
+    pos: { x: 460, y: 480, w: 1000, h: 0 },
   };
   activeLook.layers.push(newLayer);
   activeLayer = newLayer;
@@ -5731,6 +7987,61 @@ document.getElementById('ts-add-shape-btn')?.addEventListener('click', () => {
 // settings-storage budget. PNG/WebP keep their alpha; everything else is
 // re-encoded as JPEG, which is far smaller for photographs.
 const IMG_MAX_W = 1920;
+
+// The native file dialog behind "Add Image" (ts-image-file) is
+// accept="image/*", but that's a hint, not an enforced filter — the
+// operator can and does pick an actual video file through "All Files".
+// Worse than the frozen-background bug this session already fixed
+// (display.html rendering a real video src as a static background-image):
+// here the file went through loadImageFile below, which decodes via
+// `new Image()` — and WebKit (Tauri's renderer on macOS) will silently
+// decode SOME video containers (.mov especially) as their first frame
+// instead of firing img.onerror like a real image-only engine would. The
+// canvas step then re-encodes just that one frame as a JPEG and the layer
+// is saved as a genuinely still image — no error anywhere, no video data
+// left to ever play. Real incident: a segment's "video" background turned
+// out to be exactly this — a JPEG snapshot of frame 1. Checking file.type
+// (the OS-reported MIME type, reliable even though accept="image/*" isn't
+// enforced) BEFORE ever touching the image-decode path avoids this
+// entirely, by routing an actual video file to loadVideoFile instead.
+function isVideoFile(file) {
+  if (file.type) return file.type.startsWith('video/');
+  return /\.(mp4|webm|mov|m4v|ogv)$/i.test(file.name || '');
+}
+
+// Stores the file's own bytes untouched (no canvas re-encode — a canvas
+// can only ever capture one still frame, which is exactly the bug this
+// exists to avoid) as a data: URI, so isVideoLayerSrc (display.html/
+// service.js/app.js's canvas) recognizes it and renders a real <video>
+// element instead of a background-image div. Dimensions come from loading
+// it into an offscreen <video> just long enough to read
+// videoWidth/videoHeight — same reason loadImageFile captures w/h, so
+// corner-drag resize has a real aspect ratio to lock onto.
+// Unlike loadImageFile (downscaled to IMG_MAX_W below), a video can't be
+// shrunk client-side without a real re-encode — so this caps raw file size
+// instead. Without a cap, the base64 data: URI lands straight in `looks`
+// and can push localStorage past quota on the next saveLooks() (see its
+// own comment), silently breaking every future theme edit for the session.
+const VIDEO_MAX_MB = 20;
+function loadVideoFile(file) {
+  return new Promise((resolve, reject) => {
+    if (file.size > VIDEO_MAX_MB * 1024 * 1024) {
+      reject(new Error(`Video too large (max ${VIDEO_MAX_MB}MB) — use a shorter clip or the Media Bin instead`));
+      return;
+    }
+    const fr = new FileReader();
+    fr.onerror = () => reject(new Error('read failed'));
+    fr.onload = () => {
+      const src = fr.result;
+      const v = document.createElement('video');
+      v.preload = 'metadata';
+      v.onerror = () => resolve({ src, w: 0, h: 0 }); // still usable without a known aspect ratio
+      v.onloadedmetadata = () => resolve({ src, w: v.videoWidth || 0, h: v.videoHeight || 0 });
+      v.src = src;
+    };
+    fr.readAsDataURL(file);
+  });
+}
 
 function loadImageFile(file) {
   return new Promise((resolve, reject) => {
@@ -5798,11 +8109,24 @@ async function addMediaToCurrentSlide(url, nameHint) {
   if (!activeLook) return false;
   try {
     const { src, w, h } = await loadImageFromUrl(url);
-    const fit = Math.min(TS_DESIGN_W * 0.5 / w, TS_DESIGN_H * 0.5 / h, 1);
+    // True original pixel size whenever it actually fits the canvas — only
+    // scale down if it wouldn't (a photo bigger than the whole 1920x1080
+    // design canvas), never just because it's bigger than some arbitrary
+    // "half the canvas" box. The ,1 cap still means never scaling UP past
+    // 100% for a small image.
+    const fit = Math.min(TS_DESIGN_W / w, TS_DESIGN_H / h, 1);
     const pw = Math.round(w * fit), ph = Math.round(h * fit);
     const layer = {
       id: 'image-' + Date.now(), type: 'image', name: (nameHint || 'Image').replace(/\.[^.]+$/, '').slice(0, 24),
       visible: true, src, fit: 'contain', opacity: 100, radius: 0,
+      // The image's real aspect ratio (w/h already downscaled together by
+      // loadImageFromUrl if huge, so the RATIO is still the true one even
+      // though absolute pixels may be capped) — nothing on the layer used
+      // to remember this after the initial box size, so a corner-drag
+      // resize had nothing to lock onto and let the box's aspect drift
+      // away from the image's own, which is what made a contain-fit image
+      // look like it was zooming while being resized (see tsDragMove).
+      naturalW: w, naturalH: h,
       pos: { x: Math.round((TS_DESIGN_W - pw) / 2), y: Math.round((TS_DESIGN_H - ph) / 2), w: pw, h: ph },
     };
     activeLook.layers.push(layer);
@@ -5905,14 +8229,21 @@ tsImageFile?.addEventListener('change', async () => {
   const file = tsImageFile.files?.[0];
   tsImageFile.value = '';
   if (!file || !activeLook) return;
+  const isVideo = isVideoFile(file);
   try {
-    const { src, w, h } = await loadImageFile(file);
-    // Place it centred, scaled to fit comfortably inside the canvas.
-    const fit = Math.min(TS_DESIGN_W * 0.5 / w, TS_DESIGN_H * 0.5 / h, 1);
-    const pw = Math.round(w * fit), ph = Math.round(h * fit);
+    const { src, w, h } = isVideo ? await loadVideoFile(file) : await loadImageFile(file);
+    // True original pixel size whenever it fits the canvas at all — same
+    // reasoning as addMediaToCurrentSlide. A video with unknown dimensions
+    // (loadVideoFile's onerror fallback) still gets a sensible default box
+    // instead of a divide-by-zero.
+    const fit = (w && h) ? Math.min(TS_DESIGN_W / w, TS_DESIGN_H / h, 1) : 1;
+    const pw = (w && h) ? Math.round(w * fit) : Math.round(TS_DESIGN_W * 0.5);
+    const ph = (w && h) ? Math.round(h * fit) : Math.round(TS_DESIGN_H * 0.5);
     const layer = {
-      id: 'image-' + Date.now(), type: 'image', name: file.name.replace(/\.[^.]+$/, '').slice(0, 24) || 'Image',
+      id: 'image-' + Date.now(), type: 'image', name: file.name.replace(/\.[^.]+$/, '').slice(0, 24) || (isVideo ? 'Video' : 'Image'),
       visible: true, src, fit: 'contain', opacity: 100, radius: 0,
+      // See the matching comment in addMediaToCurrentSlide — same reason.
+      naturalW: w, naturalH: h,
       pos: { x: Math.round((TS_DESIGN_W - pw) / 2), y: Math.round((TS_DESIGN_H - ph) / 2), w: pw, h: ph },
     };
     activeLook.layers.push(layer);
@@ -5921,8 +8252,26 @@ tsImageFile?.addEventListener('change', async () => {
     up();
     renderProps();
   } catch {
-    toast('Could not load that image', 'error');
+    toast(isVideo ? 'Could not load that video' : 'Could not load that image', 'error');
   }
+});
+
+// Starts empty — the operator adds frames afterward from the Style tab's
+// "Images" list (renderImageCycleProps) rather than picking a first file
+// upfront, since a cycle only makes sense with 2+ images anyway. Defaults
+// to the left 75% of the canvas (the requested pre-service split), sized
+// like any other layer via Layout after — not locked to that split.
+document.getElementById('ts-add-cycle-btn')?.addEventListener('click', () => {
+  if (!activeLook) return;
+  const layer = {
+    id: 'cycle-' + Date.now(), type: 'image-cycle', name: 'Image Cycle',
+    visible: true, sources: [], fit: 'cover', opacity: 100, radius: 0,
+    pos: { x: 0, y: 0, w: Math.round(TS_DESIGN_W * 0.75), h: TS_DESIGN_H },
+  };
+  activeLook.layers.push(layer);
+  activeLayer = layer;
+  up();
+  renderProps();
 });
 
 // ── Theme import / export ─────────────────────────────────────────────────
@@ -5963,7 +8312,7 @@ function addImportedLook(look, nameSuffix = ' (imported)') {
 
 function finishLookImport(look) {
   activeLook  = look;
-  activeLayer = null;
+  activeLayer = null; multiSelectedLayerIds.clear();
   resetThemeHistory(); // a freshly-imported theme has no undo history of its own to inherit
   saveLooks();
   renderLooksList(); renderLayersList(); syncMetaRow(); renderPreview(); renderProps();
@@ -6112,7 +8461,7 @@ newLookBtn?.addEventListener('click', () => {
   base.name = 'New Theme';
   looks.push(base);
   activeLook  = base;
-  activeLayer = null;
+  activeLayer = null; multiSelectedLayerIds.clear();
   resetThemeHistory();
   saveLooks();
   renderLooksList();
@@ -6226,7 +8575,16 @@ function buildScreenSelect(outputId) {
   sel.className = 'setting-input output-screen-select';
   populateScreenOptions(sel, outputId);
   sel.addEventListener('change', () => {
-    const s = cachedScreens[Number(sel.value)];
+    // Real incident: `Number('')` evaluates to 0 in JS (not NaN) — the
+    // "None — don't output here" option's own value IS '' (see
+    // populateScreenOptions' noneOpt.value = ''), so selecting it silently
+    // resolved to cachedScreens[0] (whatever monitor happens to be first
+    // in the list — typically the operator's own main screen) instead of
+    // "no screen at all". Owner: "display output is set to none, but it's
+    // showing up on my machine." Explicit empty-string check first, rather
+    // than trusting Number() to produce NaN for invalid input the way it
+    // does for every OTHER non-numeric string.
+    const s = sel.value === '' ? null : cachedScreens[Number(sel.value)];
     setOutputScreen(outputId, s ? { width: s.width, height: s.height, left: s.left, top: s.top } : null);
     if (typeof livePreviewOutputId !== 'undefined' && livePreviewOutputId === outputId) applyLivePreviewAspect();
     const label = `kairo-${outputId}`;
@@ -6745,8 +9103,45 @@ async function saveSettingsPatch(patch) {
     if (looksModal?.classList.contains('hidden')) openThemeStudio();
     document.getElementById(btnId)?.click();
   };
+
+  // File > Import's chooser — see the comment on the 'menu-import' listener
+  // below and #import-options-modal in index.html. Each row just hands off
+  // to a flow that already exists and is already tested (the Slides add-
+  // menu's quick file/clipboard import, and Theme Studio's own importer),
+  // this is only ever the front door that picks which one "Import" meant.
+  const importOptionsModal = document.getElementById('import-options-modal');
+  function openImportOptionsModal() { importOptionsModal?.classList.remove('hidden'); }
+  function closeImportOptionsModal() { importOptionsModal?.classList.add('hidden'); }
+  document.getElementById('close-import-options')?.addEventListener('click', closeImportOptionsModal);
+  importOptionsModal?.querySelector('.modal-overlay')?.addEventListener('click', closeImportOptionsModal);
+
+  const triggerQuickFile = (destination) => {
+    const input = document.getElementById('quick-import-file');
+    if (input) { input.dataset.destination = destination; input.click(); }
+  };
+  document.getElementById('import-opt-file')?.addEventListener('click', () => {
+    closeImportOptionsModal();
+    triggerQuickFile('playlist');
+  });
+  document.getElementById('import-opt-clipboard')?.addEventListener('click', () => {
+    closeImportOptionsModal();
+    window.KairoService?.quickImportClipboard?.('playlist');
+  });
+  document.getElementById('import-opt-song')?.addEventListener('click', () => {
+    closeImportOptionsModal();
+    triggerQuickFile('library');
+  });
+  document.getElementById('import-opt-theme')?.addEventListener('click', () => {
+    closeImportOptionsModal();
+    clickWhenReady('import-look-btn');
+  });
   window.__TAURI__.event.listen('menu-new-theme',     () => clickWhenReady('new-look-btn'));
-  window.__TAURI__.event.listen('menu-import',        () => clickWhenReady('import-look-btn'));
+  // File > Import used to go straight to clickWhenReady('import-look-btn')
+  // — silently jumping into Theme Studio's own theme importer, with nothing
+  // telling the operator that's what "Import" even meant. Import is almost
+  // always about CONTENT (slides/a song), not a theme file, so this now
+  // opens a small chooser instead of guessing — see #import-options-modal.
+  window.__TAURI__.event.listen('menu-import',        () => openImportOptionsModal());
   window.__TAURI__.event.listen('menu-export-theme',  () => clickWhenReady('export-look-btn'));
   // KAIRO > Settings… (Cmd+,) — same panel the toolbar gear icon opens.
   window.__TAURI__.event.listen('menu-settings',      () => { settingsModal?.classList.remove('hidden'); showFirstSettingsPane(); });

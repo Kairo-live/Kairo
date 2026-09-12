@@ -116,9 +116,8 @@
             </button>
             <div class="tb-divider"></div>
             <div class="tb-download-wrap">
-                <button id="export-btn" class="tb-studio-btn" title="Download" aria-haspopup="menu" aria-expanded="false">
+                <button id="export-btn" class="tb-studio-btn tb-icon-only" title="Export" aria-label="Export" aria-haspopup="menu" aria-expanded="false">
                     <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-                    <span>Export</span>
                 </button>
                 <div id="download-menu" class="tb-menu hidden" role="menu">
                     <div class="tb-menu-label">Live session</div>
@@ -132,9 +131,15 @@
                     </button>
                 </div>
             </div>
-            <button id="settings-btn" class="tb-studio-btn" title="Settings">
+            <!-- Always-reachable toggle, independent of the bin's own
+                 collapsed state and of which of Bible/Slides/Timer is
+                 active — the one place to bring it back once hidden. -->
+            <button id="media-bin-toggle-btn" class="tb-studio-btn" title="Media Bin">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 15l4.5-4.5a2 2 0 0 1 2.8 0L15 15"/><path d="M14 14l1.5-1.5a2 2 0 0 1 2.8 0L21 15"/><circle cx="8.5" cy="8.5" r="1.5"/></svg>
+                <span>Media Bin</span>
+            </button>
+            <button id="settings-btn" class="tb-studio-btn tb-icon-only" title="Settings" aria-label="Settings">
                 <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
-                <span>Settings</span>
             </button>
             <!-- Window controls: hidden on macOS -->
             <div class="window-controls">
@@ -358,17 +363,6 @@
                     </div>
                 </div>
                 <div class="media-folder-rail" id="media-folder-rail"></div>
-                <div class="media-transport hidden" id="media-transport">
-                    <button id="media-play-btn" class="ls-icon-btn" title="Play / Pause">
-                        <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" id="media-play-icon"><polygon points="5 3 19 12 5 21 5 3"/></svg>
-                    </button>
-                    <button id="media-mute-btn" class="ls-icon-btn" title="Mute / Unmute">
-                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" id="media-mute-icon"><polygon points="3 9 8 9 13 4 13 20 8 15 3 15 3 9" fill="currentColor" stroke="none"/><path d="M16 8a5 5 0 0 1 0 8"/><path d="M19 5a9 9 0 0 1 0 14"/></svg>
-                    </button>
-                    <input type="range" id="media-seek" class="media-seek" min="0" max="1000" value="0" title="Seek">
-                    <span class="media-time" id="media-time">0:00 / 0:00</span>
-                    <input type="range" id="media-volume" class="media-volume" min="0" max="100" value="100" title="Volume">
-                </div>
                 <div class="media-dropzone" id="media-dropzone">
                     <div class="media-grid" id="media-grid"></div>
                     <div class="media-dropzone-hint hidden" id="media-dropzone-hint">Drop to add to this folder</div>
@@ -411,6 +405,59 @@
                 <div id="current-display-card" class="cs-live-queue-body cs-live-queue-scroll">
                     <div class="cs-queue-empty">Sent verses and range queues appear here…</div>
                 </div>
+            </div>
+
+            <!-- Media transport (mute/play/seek/volume) — used to live inside
+                 #media-library-view, so setMediaTransportVisible removing
+                 .hidden from it had no visible effect at all while any OTHER
+                 view (Bible/Slides/Timer) was active, since that whole
+                 ancestor container was still display:none — exactly the gap
+                 sending a video through the Media Bin (reachable from those
+                 same views) ran into. Moved out here, a sibling of the Media
+                 Bin rather than nested under one specific view, so it's
+                 reachable the same way regardless of which one sent the
+                 video that's actually playing. -->
+            <div class="media-transport hidden" id="media-transport">
+                <button id="media-play-btn" class="ls-icon-btn" title="Play / Pause">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" id="media-play-icon"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+                </button>
+                <!-- Mute button immediately followed by the volume slider —
+                     they used to sit at opposite ends of the bar (mute here,
+                     volume all the way past seek+time), which read as two
+                     unrelated controls instead of one "volume" group paired
+                     the way every other media player pairs them. -->
+                <button id="media-mute-btn" class="ls-icon-btn" title="Mute / Unmute">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" id="media-mute-icon"><polygon points="3 9 8 9 13 4 13 20 8 15 3 15 3 9" fill="currentColor" stroke="none"/><path d="M16 8a5 5 0 0 1 0 8"/><path d="M19 5a9 9 0 0 1 0 14"/></svg>
+                </button>
+                <input type="range" id="media-volume" class="media-volume" min="0" max="100" value="100" title="Volume">
+                <input type="range" id="media-seek" class="media-seek" min="0" max="1000" value="0" title="Seek">
+                <span class="media-time" id="media-time">0:00 / 0:00</span>
+            </div>
+
+            <!-- Media Bin — ProPresenter-style always-reachable media shelf.
+                 Shown only under Bible/Slides/Timer (see showCenterView's
+                 media-bin toggle), so it's reachable without leaving those
+                 views for the Media tab — but picking an item here calls
+                 the EXACT SAME sendMediaItem the Media tab's own cards do
+                 (service.js), landing on that same independent media layer
+                 behind the slide. An earlier version tried to inject the
+                 pick as a background layer into whatever's currently live
+                 instead; that never reached fully-automatic live-detection
+                 sends at all (server-broadcast, no per-request look), so it
+                 was dropped for this simpler, already-proven mechanism.
+                 Collapsible (the eye button) and resizable (the drag
+                 handle) — see initMediaBinResize/toggleMediaBin in
+                 service.js. -->
+            <div class="media-bin hidden" id="media-bin">
+                <div class="media-bin-splitter" id="media-bin-splitter" title="Drag to resize"></div>
+                <div class="media-bin-header">
+                    <span class="cs-section-label">Media Bin</span>
+                    <span class="media-bin-hint">Click an item to send it to the display</span>
+                    <button id="media-bin-hide-btn" class="ls-icon-btn" title="Hide media bin">
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+                    </button>
+                </div>
+                <div class="media-bin-strip" id="media-bin-strip"></div>
             </div>
 
         </main>
@@ -460,6 +507,13 @@
                         <div class="live-screen-text" id="preview-verse-text">Nothing on display</div>
                         <div class="live-screen-ref" id="preview-verse-ref"></div>
                     </div>
+                    <!-- ProPresenter-style song section annotation (Verse/
+                         Chorus/Bridge/etc.) — shown only for a 'song' item's
+                         slide, which carries its own block.label separately
+                         from the song title already in preview-verse-ref.
+                         Click to override the detected type for this slide
+                         (see cycleSectionLabel in app.js). -->
+                    <button type="button" class="live-screen-section-badge hidden" id="preview-section-badge" title="Click to change section type"></button>
                     <!-- Shown instead of live-screen-inner when the sent item
                          carries its own theme (e.g. a ProPresenter import) —
                          paintLookLayers renders straight into this. -->
@@ -490,6 +544,29 @@
                         </button>
                     </div>
                 </div>
+            </div>
+
+            <!-- Output transition — display-level (not per-theme, see
+                 display.html's outputAnimation), so it lives right under the
+                 one "viewer" that actually shows the output, reachable
+                 without ever opening Theme Studio. -->
+            <div class="rs-transition-bar" id="rs-transition-bar">
+                <span class="rs-transition-label">Transition</span>
+                <!-- Icon-only, same square-button style as Theme Studio's
+                     align row (.ts-align-btn, already icon-only) rather
+                     than text chips — the tooltip (title) carries the name. -->
+                <div class="ts-align-group" id="rs-anim-picker">
+                    <button class="ts-align-btn" data-anim="fade" title="Fade">
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"><circle cx="9" cy="12" r="6"/><circle cx="15" cy="12" r="6" stroke-dasharray="2.5 2.5"/></svg>
+                    </button>
+                    <button class="ts-align-btn" data-anim="slide-up" title="Slide">
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="12" x2="15" y2="12"/><polyline points="11 7 16 12 11 17"/><line x1="20" y1="5" x2="20" y2="19"/></svg>
+                    </button>
+                    <button class="ts-align-btn" data-anim="cut" title="Cut (instant)">
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><polyline points="13 3 5 13 11 13 9 21 19 11 13 11 13 3"/></svg>
+                    </button>
+                </div>
+                <input type="range" id="rs-anim-speed" class="ts-anim-speed-slider" min="0.3" max="2.5" step="0.1" value="1" title="Transition speed">
             </div>
 
             <!-- Candidates — context (fingerprint/IDF) suggestions only.
@@ -667,6 +744,35 @@
         </div>
     </div>
 
+    <!-- File > Import — the native menu item used to jump straight into
+         Theme Studio's own theme importer (import-look-btn) with no way to
+         tell it was even about themes and not the far more common "import
+         some slides/a song" case. This is the chooser that decides which
+         import flow (Slides/Song content, or a Theme file) File > Import
+         actually means, before handing off to that flow's own existing
+         modal/dialog — see initNativeMenuBridge in app.js. -->
+    <div id="import-options-modal" class="modal hidden">
+        <div class="modal-overlay"></div>
+        <div class="modal-content" style="width:360px;">
+            <div class="modal-header">
+                <h2>Import</h2>
+                <button id="close-import-options" class="modal-close-btn">
+                    <svg width="16" height="16" viewBox="0 0 16 16"><path d="M3 3l10 10M13 3L3 13" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+                    <span>Close</span>
+                </button>
+            </div>
+            <div class="modal-body" style="display:block;padding:8px;">
+                <div class="svc-popover-list">
+                    <button type="button" class="svc-popover-item" id="import-opt-file">Slides from file…</button>
+                    <button type="button" class="svc-popover-item" id="import-opt-clipboard">Slides from clipboard…</button>
+                    <button type="button" class="svc-popover-item" id="import-opt-song">Song…</button>
+                    <div class="svc-add-menu-sep"></div>
+                    <button type="button" class="svc-popover-item" id="import-opt-theme">Theme…</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <!-- ═══ THEME STUDIO — full in-window view ═══ -->
     <div id="looks-modal" class="ts-view hidden">
         <div class="ts-view-inner">
@@ -740,6 +846,10 @@
                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>
                             <span>Library</span>
                         </button>
+                        <button id="ts-add-cycle-btn" class="ts-add-btn" title="Add an image cycle (slideshow that advances across a Timer segment's countdown)">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="6" width="14" height="12" rx="2"/><rect x="8" y="2" width="14" height="12" rx="2" opacity="0.5"/></svg>
+                            <span>Cycle</span>
+                        </button>
                         <input type="file" id="ts-image-file" accept="image/*" style="display:none">
                         <!-- Right-aligned on the same row as Add content, rather
                              than buried in the meta row below or floating loose
@@ -791,7 +901,7 @@
                          per-layer properties below so the whole panel reads
                          as one continuous inspector, not two different UIs
                          stacked together. -->
-                    <div class="ts-props-section">
+                    <div class="ts-props-section ts-theme-meta">
                         <span class="ts-props-section-label">Layout</span>
                         <div class="ts-prop-row">
                             <div class="ts-chip-group" id="ts-layout-picker">
@@ -802,20 +912,7 @@
                             </div>
                         </div>
                     </div>
-                    <div class="ts-props-section">
-                        <span class="ts-props-section-label">Transition</span>
-                        <div class="ts-prop-row">
-                            <div class="ts-chip-group" id="ts-anim-picker">
-                                <button class="ts-chip active" data-anim="fade">Fade</button>
-                                <button class="ts-chip" data-anim="slide-up">Slide</button>
-                                <button class="ts-chip" data-anim="cut">Cut</button>
-                            </div>
-                        </div>
-                        <div class="ts-prop-row">
-                            <input type="range" id="ts-anim-speed" class="ts-anim-speed-slider" min="0.3" max="2.5" step="0.1" value="1" title="Transition speed" style="width:100%;">
-                        </div>
-                    </div>
-                    <div class="ts-props-section">
+                    <div class="ts-props-section ts-theme-meta" data-tab="style" id="ts-text-anim-section">
                         <span class="ts-props-section-label">Text Animation</span>
                         <p class="setting-hint" style="margin:0 0 8px;">How the verse text itself reveals — independent of the Transition above.</p>
                         <div class="ts-prop-row">
@@ -844,7 +941,7 @@
                             <input type="range" id="ts-text-anim-intensity" class="ts-prop-slider" min="0.5" max="2" step="0.1" value="1" style="flex:1;">
                         </div>
                     </div>
-                    <div class="ts-props-section">
+                    <div class="ts-props-section ts-theme-meta">
                         <span class="ts-props-section-label">Canvas</span>
                         <div class="ts-prop-row">
                             <button id="ts-alpha-toggle" class="ts-chip" title="Transparent canvas — for chroma / alpha key setups">Transparent</button>
@@ -854,7 +951,7 @@
                          fills the right panel's preview here, and doubles as this
                          theme's default when nothing else (a playlist item, the Bible
                          tab) has already chosen one. -->
-                    <div class="ts-props-section hidden" id="ts-translate-group">
+                    <div class="ts-props-section ts-theme-meta hidden" id="ts-translate-group">
                         <span class="ts-props-section-label">Translate to</span>
                         <div class="ts-prop-row">
                             <div class="ts-chip-group" id="ts-translate-picker">
@@ -947,7 +1044,7 @@
                     <div class="setting-group" id="whisper-installer-group" style="display:none;">
                         <label class="setting-label">Offline Model</label>
                         <div id="whisper-status-line" style="font-size:12px;color:var(--text-3);margin-bottom:8px;">Checking…</div>
-                        <button id="whisper-install-btn" class="setting-input" style="cursor:pointer;display:none;">Download offline model (~182MB)</button>
+                        <button id="whisper-install-btn" class="setting-input" style="cursor:pointer;display:none;">Download offline model (~465MB)</button>
                         <div id="whisper-progress-wrap" style="display:none;margin-top:6px;">
                             <div style="background:var(--surface-2);height:6px;border-radius:3px;overflow:hidden;">
                                 <div id="whisper-progress-bar" style="background:var(--accent);height:100%;width:0%;transition:width .2s;"></div>
@@ -961,34 +1058,28 @@
                         <input type="password" id="deepgram-key" class="setting-input" placeholder="dg_...">
                     </div>
 
-                    <div class="setting-group">
-                        <label class="setting-label">Audio Input</label>
-                        <div class="toggle-group" id="audio-mode-toggle">
-                            <button class="toggle-btn active" data-mode="mic">Mic</button>
-                            <button class="toggle-btn" data-mode="line-in">Line In</button>
+                    <div class="setting-row-2col">
+                        <div class="setting-group">
+                            <label class="setting-label">Audio Input</label>
+                            <div style="display:flex;gap:6px;align-items:center;">
+                                <select id="audio-source-settings" class="setting-input" style="flex:1;min-width:0;">
+                                    <option value="">Loading devices…</option>
+                                </select>
+                                <button id="refresh-devices-settings" class="modal-btn secondary" style="white-space:nowrap;font-size:11px;" title="Refresh device list">↻</button>
+                            </div>
+                            <p class="setting-hint">The line-in or interface feed the app listens to.</p>
                         </div>
-                        <p class="setting-hint" id="audio-mode-hint">Built-in or USB microphone with noise suppression</p>
-                    </div>
 
-                    <div class="setting-group">
-                        <label class="setting-label">Audio Source</label>
-                        <div style="display:flex;gap:6px;align-items:center;">
-                            <select id="audio-source-settings" class="setting-input" style="flex:1;">
-                                <option value="">Loading devices...</option>
-                            </select>
-                            <button id="refresh-devices-settings" class="modal-btn secondary" style="white-space:nowrap;font-size:11px;" title="Refresh device list">↻ Refresh</button>
+                        <div class="setting-group">
+                            <label class="setting-label">Media Audio Output</label>
+                            <div style="display:flex;gap:6px;align-items:center;">
+                                <select id="media-output-settings" class="setting-input" style="flex:1;min-width:0;">
+                                    <option value="">System default</option>
+                                </select>
+                                <button id="refresh-output-devices-settings" class="modal-btn secondary" style="white-space:nowrap;font-size:11px;" title="Refresh device list">↻</button>
+                            </div>
+                            <p class="setting-hint">Where video sent to the Media layer plays out. Falls back to system default.</p>
                         </div>
-                    </div>
-
-                    <div class="setting-group">
-                        <label class="setting-label">Media Audio Output</label>
-                        <div style="display:flex;gap:6px;align-items:center;">
-                            <select id="media-output-settings" class="setting-input" style="flex:1;">
-                                <option value="">System default</option>
-                            </select>
-                            <button id="refresh-output-devices-settings" class="modal-btn secondary" style="white-space:nowrap;font-size:11px;" title="Refresh device list">↻ Refresh</button>
-                        </div>
-                        <p class="setting-hint">Which speaker/interface video sent to the Media layer plays through on the output. Falls back to the system default if the platform doesn't support switching output devices.</p>
                     </div>
                 </div>
 
@@ -1020,6 +1111,28 @@
                             <input type="checkbox" id="show-confidence-settings" checked>
                             Show confidence scores
                         </label>
+                    </div>
+                </div>
+
+                <!-- ── MEANING-BASED CANDIDATES (semantic layer) ──────
+                     A quoted/paraphrased verse with no "book chapter verse"
+                     ever said out loud only ever gets caught by comparing
+                     MEANING, not shared words — this installs the model
+                     that powers it. Not bundled with the app (adds ~300MB
+                     to every install for a suggestions-only layer the
+                     lexical detectors above don't need at all) — downloads
+                     once, here, same pattern as the Whisper/translation
+                     model installs elsewhere in Settings. -->
+                <div class="settings-section">
+                    <div class="settings-section-label">Meaning-Based Candidates</div>
+                    <p class="setting-hint" style="font-size:11px;color:var(--text-3);margin-bottom:10px;">
+                        Catches a quoted or paraphrased verse even when no reference is ever spoken — e.g. "God made the heavens and the earth in the beginning" surfacing Genesis 1:1. Suggestions only; never auto-sends. One-time download, ~300MB, runs fully offline afterward.
+                    </p>
+                    <div id="semantic-status-panel" class="osp osp-loading">
+                        <div class="osp-row">
+                            <span class="osp-dot"></span>
+                            <span class="osp-title">Checking…</span>
+                        </div>
                     </div>
                 </div>
 
@@ -1306,7 +1419,15 @@
                 <h2>Welcome to KAIRO</h2>
                 <button id="close-first-run" class="modal-close-btn" aria-label="Dismiss"><span>✕</span><span>Close</span></button>
             </div>
-            <div class="modal-body">
+            <!-- .modal-body defaults to a 2-column grid (260px / 1fr — built
+                 for Settings-style label+value rows); every other plain
+                 content modal in this file opts out with an inline
+                 display:block (see the "Downloads"/etc. modals above), which
+                 this one was missing. Without it, its 4 flat children
+                 (p/label/input/a) auto-flowed into a 2x2 grid instead of one
+                 stacked column — p top-left, label top-right, input
+                 bottom-left, link bottom-right. -->
+            <div class="modal-body" style="display:block;padding:20px;">
                 <p style="margin:0 0 16px;line-height:1.5;color:var(--text-dim,#aaa);font-size:13px;">
                     KAIRO listens to spoken scripture and detects verses in real time. To transcribe
                     live audio it needs a Deepgram API key. Paste yours below, or skip for now and add
@@ -1446,7 +1567,21 @@
                         await existing.show();
                         await existing.setFocus();
                         // Push the new URL so layout / opacity changes apply.
+                        // A navigate() is a real page reload of display.html — it
+                        // boots blank by design, so anything genuinely live (a
+                        // slide, a running timer segment) has to be re-pushed or
+                        // the screen just stays blank until the operator notices
+                        // and manually re-sends. Reachable from an ordinary action
+                        // (reassigning the output's monitor), not just a rare
+                        // reopen, so this can't be skipped.
                         await existing.navigate(location.origin + url);
+                        // navigate() resolves once navigation is ISSUED, not once the
+                        // reloaded display.html has reopened its WebSocket — a resend
+                        // right here can race ahead of that reconnect and be dropped.
+                        // Try immediately (usually plenty) and once more after the
+                        // window's own reconnect backoff would have caught up.
+                        try { window.KairoService?.resendLiveForThemeEdit?.(null); } catch {}
+                        setTimeout(() => { try { window.KairoService?.resendLiveForThemeEdit?.(null); } catch {} }, 1500);
                         return;
                     }
                     const win = new WebviewWindow(label, {
@@ -1789,9 +1924,12 @@
     <script src="design_space.js"></script>
     <script src="word_split.js"></script>
     <script src="color_utils.js"></script>
+    <script src="layer_geometry.js"></script>
     <script src="content_browser.js"></script>
     <script src="hymns.js"></script>
     <script src="lyrics_follow.js"></script>
+    <script src="sermon_follow.js"></script>
+    <script src="content_lookup.js"></script>
     <script src="service.js"></script>
     <script src="app.js"></script>
 </body>

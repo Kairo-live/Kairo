@@ -305,7 +305,17 @@
           // Explicit "no playlists yet" — the operator hasn't created one.
           activePlaylistId = null; service = null;
         }
-        if (ensureDefaultPlaylist()) saveAll();
+        // The old plain sermonFollow boolean became a followMode string
+        // ('sermon'/'script'/unset) so a 'slides' item can pick which
+        // tracking engine, not just on/off — carry an operator's existing
+        // choice forward rather than silently turning their auto-advance
+        // off. Idempotent: once followMode is set, this never runs again
+        // for that item.
+        let followModeMigrated = false;
+        playlists.forEach(p => (p.items || []).forEach(it => {
+          if (it.sermonFollow && !it.followMode) { it.followMode = 'sermon'; followModeMigrated = true; }
+        }));
+        if (ensureDefaultPlaylist() || followModeMigrated) saveAll();
         return;
       }
     } catch {}
@@ -336,6 +346,7 @@
   // wouldn't actually persist anything for one — this is the one place
   // that needs to know the difference and redirect to the server instead.
   function saveService() {
+    markLookupCandidatesDirty();
     saveAll();
     if (window.KairoItemStyleEditor?.isOpen?.()) {
       const item = window.KairoItemStyleEditor.getItem();
@@ -489,10 +500,21 @@
         return [{ label: item.ref, lines: [item.text || item.ref], text: item.text || '', reference: item.ref,
                   book: item.book || null, chapter: item.chapter || null, verse: item.verse || null }];
       // A segment (server/segments.js) is a real item for editing purposes
-      // ("a slide with a timer component") but only ever has the one slide
-      // — no text of its own, just a static placeholder for the 'timer'-
-      // bound layer to preview against (layerTextContent, app.js).
+      // ("a slide with a timer component"). Scenes (segment.scenes — a
+      // storyboard, played in order across the live countdown, each with
+      // its own explicit duration and complete layer set) show up here as
+      // real slides, exactly like a Song/Slides deck's own multiple
+      // slides — same thumbnail panel, same click-to-select, same
+      // Duplicate/Copy/Paste right-click menu, rather than a separate
+      // bespoke list. A plain segment with no scenes still gets the one
+      // placeholder slide it always had.
       case 'timer':
+        if (item.scenes && item.scenes.length) {
+          return item.scenes.map((sc, i) => ({
+            label: sc.name || `Slide ${i + 1}`, text: '', reference: '', timerText: '',
+            isScene: true, sceneIndex: i, durationSec: sc.durationSec,
+          }));
+        }
         return [{ label: item.name || item.title || 'Timer', text: '', reference: '', timerText: '' }];
       default:
         return [];
@@ -622,15 +644,42 @@
     return '';
   }
 
-  // ── Lyric follower ("karaoke" auto-advance) ───────────────────────────
-  // Engine: src/lyrics_follow.js. Active only for a live SONG item with
-  // auto-follow on. Fed every {type:'transcript'} the WS delivers (app.js
-  // → onTranscript). onAdvance sends the first slide of the target block
-  // through the normal sendSlide path; a manual send resyncs its cursor so
-  // the operator always wins. Degrades by freezing — a wrong flip mid-song
-  // is glaring, a missed one is one click.
+  // ── Speech-driven auto-advance ("Auto-follow") ─────────────────────────
+  // THREE engines, splitting "what should be live" from "where in it are
+  // we":
+  //  • src/content_lookup.js — listens even with NOTHING live, and brings
+  //    a song or slide deck up the moment its OPENING is clearly heard
+  //    (same idea as scripture auto-detect, scoped to the playlist + the
+  //    full Song Bank).
+  //  • src/lyrics_follow.js — once a SONG is live, chases an exact token
+  //    position (sung verbatim from a known script).
+  //  • src/sermon_follow.js — once a 'slides' deck with its own Auto-
+  //    Advance turned on is live, tracks position by distinctive
+  //    vocabulary (a sermon is paraphrased, not recited).
+  // Only one position-tracking engine is ever live at once; the lookup
+  // engine runs alongside it independently, so it can still catch the
+  // NEXT song starting while the current one is still being tracked. Fed
+  // every {type:'transcript'} the WS delivers (app.js → onTranscript).
+  // All three degrade by freezing/staying silent — a wrong flip (or a
+  // wrong autonomous send) mid-service is glaring, a missed one is one
+  // click.
+  //
+  // Driven directly by Start Listening (app.js's handleConnectionState
+  // calls setAutoFollow(true)/(false) on connect/disconnect) — owner:
+  // "Start Listening [should be] the universal control... it automatically
+  // advances based on what it hears in real time." This used to be its own
+  // separate toggle an operator had to remember to also turn on, which is
+  // exactly the silently-off failure mode the rest of this product fights
+  // ("a wrong send is worse than a missed one" cuts both ways — a MISSED
+  // auto-advance because a second switch was forgotten is a real failure
+  // too). setAutoFollow is still exported and the HUD's own click handler
+  // still calls it directly — an operator can pause auto-advance mid-
+  // service (e.g. wants manual control through one song) without stopping
+  // audio capture altogether; it's just no longer a REQUIRED separate
+  // startup step.
   let follower = null;
   let followItemId = null;
+  let contentLookup = null;
   let autoFollow = false;
   let followerAdvancing = false; // guard: our own sendSlide must not resync
   try { autoFollow = localStorage.getItem('kairo-auto-follow') === '1'; } catch {}
@@ -642,20 +691,133 @@
     const i = slidesFor(item).findIndex(s => s.blockIndex === blockIdx);
     return i < 0 ? null : i;
   }
-  function startFollower(item, fromBlockIdx) {
-    const LF = window.KairoLyricsFollow;
-    if (!LF || !item || item.type !== 'song') return;
-    follower = new LF.LyricsFollower(songShapeForFollow(item), {
-      onAdvance: (e) => {
-        const idx = firstSlideOfBlock(item, e.toBlockIdx);
-        if (idx == null || `${item.id}:${idx}` === liveSlideKey) return;
-        followerAdvancing = true;
-        Promise.resolve(sendSlide(item, idx)).finally(() => { followerAdvancing = false; });
-      },
-      onPosition: (s) => renderFollowHud(s),
-    });
-    followItemId = item.id;
-    if (fromBlockIdx != null) follower.resync(fromBlockIdx);
+  // Flat deck shape sermon_follow.js expects — a 'slides' item's blocks are
+  // already one slide each (unlike a song's verse/chorus blocks, which
+  // expand into several slides apiece via the "Lines per slide" delimiter),
+  // so this is just the plain text list, no block/slide translation needed.
+  function sermonShapeForFollow(item) {
+    return { title: item.title || 'Sermon', slides: (item.blocks || []).map(b => b.text || '') };
+  }
+  // A slide's own label doubles as its auto-advance trigger phrase for an
+  // image block that has no spoken text of its own to match against —
+  // owner: "if they name the image a custom name, or even the image file
+  // name is called, it goes up." Custom name wins when it's real (not the
+  // generic "Slide N" fallback every block gets by default); otherwise
+  // falls back to the file's own name, captured at upload time
+  // (b.imageFileName — see uploadMediaFiles/the image-replace handler),
+  // cleaned into plain words. Genuinely nothing to key off (no custom name,
+  // no captured filename — e.g. an image inserted before this existed)
+  // returns '' — flattenSong tokenizes that to zero words, so the block
+  // simply has no head keys and can never independently trigger a catch-up
+  // or a jump, which is the correct, safe behavior for "nothing to match".
+  function imageTriggerPhrase(b) {
+    if (b.label && !/^slide\s+\d+$/i.test(b.label)) return b.label;
+    if (b.imageFileName) return b.imageFileName.replace(/\.[^.]+$/, '').replace(/[-_]+/g, ' ');
+    return '';
+  }
+  // Exact-script shape for an announcement/prepared-slide deck — reuses
+  // lyrics_follow.js's own engine (it's just token alignment against a
+  // known text, the exact same problem a hymn's verse/chorus is), treating
+  // each slide as its own one-slide "block". Owner: "the moment the person
+  // matches the first few words, it should send and immediately prepare
+  // for the next one." A text slide's own lines are the script; an image
+  // slide's "script" is its trigger phrase (see imageTriggerPhrase).
+  function announcementShapeForFollow(item) {
+    return {
+      title: item.title || 'Slides',
+      blocks: (item.blocks || []).map((b, i) => ({
+        label: b.label || `Slide ${i + 1}`,
+        lines: b.image ? [imageTriggerPhrase(b)] : (b.lines || (b.text || '').split('\n')),
+      })),
+    };
+  }
+  // A 'slides' item picks ONE of two tracking engines, since they make
+  // genuinely different tradeoffs (see openItemContextMenu's submenu):
+  //  'sermon' — src/sermon_follow.js, paraphrase-tolerant, tracks by
+  //             distinctive vocabulary (a sermon outline is talked AROUND,
+  //             not read verbatim).
+  //  'script' — src/lyrics_follow.js, exact alignment against the slide's
+  //             own text (an announcement is read close to verbatim off
+  //             the slide, or matched by an image's own name), with a wide
+  //             maxBlockSkip so a presenter jumping straight to a later
+  //             item in the deck is still caught, not just sequential +1.
+  // Owner: "work on the automatic movement" — an UNSET item now defaults to
+  // 'script' (exact-wording) rather than neither, matching how a 'song'
+  // already auto-follows with no per-item toggle needed. This is safe by
+  // construction, not just by policy: a genuine photo set or wording-free
+  // deck has no label/filename/text for LyricsFollower to align against
+  // (see imageTriggerPhrase — empty block = no keys = never independently
+  // advances), so it simply stays inert either way. An operator who wants a
+  // SPECIFIC deck to never react to ambient speech regardless can still
+  // explicitly turn it Off — a real, distinct value from "never touched",
+  // not just item.followMode being falsy the way it used to be.
+  function followModeOf(item) {
+    if (!item || item.type !== 'slides') return null;
+    if (item.followMode === 'off') return null;
+    if (item.followMode === 'sermon') return 'sermon';
+    return 'script';
+  }
+  // Kept as a thin alias — several call sites below only care "is SOME
+  // slides-follow engine eligible", not which one.
+  function sermonFollowEligible(item) {
+    return !!followModeOf(item);
+  }
+  // fromIndex is always a SLIDE index (matching what sendSlide/slidesFor
+  // use everywhere else) regardless of which engine starts — translated to
+  // a block index internally for the lyrics follower, which tracks blocks.
+  function startFollower(item, fromIndex) {
+    if (!item) return;
+    if (item.type === 'song') {
+      const LF = window.KairoLyricsFollow;
+      if (!LF) return;
+      follower = new LF.LyricsFollower(songShapeForFollow(item), {
+        onAdvance: (e) => {
+          const idx = firstSlideOfBlock(item, e.toBlockIdx);
+          if (idx == null || `${item.id}:${idx}` === liveSlideKey) return;
+          followerAdvancing = true;
+          Promise.resolve(sendSlide(item, idx)).finally(() => { followerAdvancing = false; });
+        },
+        onPosition: (s) => renderFollowHud(s),
+      });
+      followItemId = item.id;
+      const blockIdx = fromIndex != null ? (slidesFor(item)[fromIndex]?.blockIndex ?? 0) : null;
+      if (blockIdx != null) follower.resync(blockIdx);
+    } else if (followModeOf(item) === 'script') {
+      const LF = window.KairoLyricsFollow;
+      if (!LF) return;
+      const blocks = (item.blocks || []).length;
+      follower = new LF.LyricsFollower(announcementShapeForFollow(item), {
+        // Search the whole rest of the deck, not just +1/+2 — a presenter
+        // jumping straight to a later item is the expected case here, not
+        // a rare exception the way a dropped verse is for a song.
+        config: { maxBlockSkip: Math.max(1, blocks - 1) },
+        onAdvance: (e) => {
+          const idx = firstSlideOfBlock(item, e.toBlockIdx);
+          if (idx == null || `${item.id}:${idx}` === liveSlideKey) return;
+          followerAdvancing = true;
+          Promise.resolve(sendSlide(item, idx)).finally(() => { followerAdvancing = false; });
+        },
+        onPosition: (s) => renderFollowHud(s),
+      });
+      followItemId = item.id;
+      const blockIdx = fromIndex != null ? (slidesFor(item)[fromIndex]?.blockIndex ?? 0) : null;
+      if (blockIdx != null) follower.resync(blockIdx);
+    } else if (followModeOf(item) === 'sermon') {
+      const SF = window.KairoSermonFollow;
+      if (!SF) return;
+      follower = new SF.SermonFollower(sermonShapeForFollow(item), {
+        onAdvance: (e) => {
+          if (e.toIndex == null || `${item.id}:${e.toIndex}` === liveSlideKey) return;
+          followerAdvancing = true;
+          Promise.resolve(sendSlide(item, e.toIndex)).finally(() => { followerAdvancing = false; });
+        },
+        onPosition: (s) => renderFollowHud(s),
+      });
+      followItemId = item.id;
+      if (fromIndex != null) follower.resync(fromIndex);
+    } else {
+      return;
+    }
     renderFollowHud(follower.snapshot());
   }
   function stopFollower() { follower = null; followItemId = null; renderFollowHud(null); }
@@ -691,15 +853,131 @@
     return false;
   }
   // Per-slide style (Full-Edit item mode) changed for a specific item+slide.
+  // Full-scale edit's autosave (scheduleItemStyleAutosave, app.js) used to
+  // only persist + re-push if live — nothing ever told the Stack view's
+  // slide thumbnails or the Timer grid's segment cards to actually repaint,
+  // so an edit (a new background image, a moved text layer, whatever) sat
+  // saved and correct but invisible in either thumbnail until the operator
+  // happened to leave and come back to that view, which rebuilds it fresh
+  // regardless. Cheap enough to just refresh both unconditionally rather
+  // than track which one the edited item actually belongs to.
+  function refreshThumbnails() {
+    renderStack();
+    renderTimerGrid();
+  }
+
   function resendLiveForSlideStyleEdit(itemId, slideIndex) {
+    // Timer segments aren't playlist items (they live in segmentList, not
+    // service.items — see getTimerItem) — a live segment being edited in
+    // Full-scale edit (e.g. adding a video background) needs the SAME
+    // "re-push what's already live" treatment a regular slide gets below,
+    // otherwise the change just sits saved until the operator manually
+    // stops/starts the segment to see it. Segments only ever have one
+    // slide (index 0), unlike a real item's multiple slides.
+    const liveSeg = segmentList.find(s => s.id === itemId && s.status === 'live');
+    if (liveSeg) { sendTimerSegment(liveSeg); return true; }
     if (!liveSlideKey || liveSlideKey !== `${itemId}:${slideIndex}`) return false;
     const item = service && service.items.find(i => i.id === itemId);
     if (!item) return false;
     sendSlide(item, slideIndex);
     return true;
   }
+  // Builds a real playlist 'song' item from a Song Bank record — the exact
+  // same shape buildHymnRow's own "Add" click constructs (renderHymnList),
+  // just pushed straight into service.items instead of opening the Add-to-
+  // playlist confirm modal: there's no operator standing at that modal
+  // mid-service to click Confirm, so an autonomous match has to land
+  // directly, the same way a detected scripture reference sends without
+  // anyone confirming it first.
+  function addHymnToPlaylist(h) {
+    const item = {
+      id: uid('song'), type: 'song', songBank: true,
+      title: h.title, author: h.author, year: h.year,
+      linesPerSlide: DEFAULT_LINES_PER_SLIDE,
+      blocks: (h.blocks || []).map(b => ({ label: b.label, lines: [...(b.lines || [])] })),
+    };
+    // Mirrors openAddConfirm's own default (the manual "Add" modal) — a bank
+    // hymn with no stored themeId falls back to the lyrics theme, not
+    // whatever the operator's general output theme happens to be. This path
+    // has no operator confirm step to catch a wrong theme before it's live.
+    if (h.themeId) item.themeId = h.themeId;
+    else {
+      const lyrics = (typeof looks !== 'undefined' && Array.isArray(looks)) ? looks.find(l => l.id === 'lyrics-block') : null;
+      if (lyrics) item.themeId = lyrics.id;
+    }
+    service.items.push(item);
+    saveService();
+    renderSidebar();
+    renderStack();
+    return item;
+  }
+
+  // Rebuild content_lookup.js's candidate pool — every song/'slides' item
+  // already in the CURRENT PLAYLIST (except whatever's already live), PLUS
+  // every song in the Song Bank/Library that ISN'T already sitting in the
+  // playlist under the same title. "It's in my song bank" was explicit —
+  // a song doesn't need to have been staged for this service ahead of
+  // time, the same way scripture detection doesn't need a verse queued up
+  // first. Bank entries are tagged _bank so onMatch below knows to add them
+  // to the playlist (addHymnToPlaylist) before sending, instead of trying
+  // to sendSlide something that was never a real item. Cheap either way —
+  // tokenizing one opening line per candidate, a few hundred short hymns
+  // included — called fresh on every ingest rather than tracked as dirty
+  // state, so it can never go stale after an item's added or edited.
+  // onTranscript calls this on EVERY transcript delivery while auto-follow
+  // is on — per app.js's own comment, interim transcripts can arrive
+  // several times a second during continuous speech. Rebuilding from
+  // scratch each time (including re-tokenizing all ~286 bank hymns via
+  // searchHymns('')) is cheap per-call but needless repeated work for the
+  // full duration of a live service. `lookupCandidatesDirty` (set by
+  // saveService — the one place every playlist mutation funnels through)
+  // covers a content change; comparing the live id inline below covers the
+  // pool's other real input (the live item is excluded from its own
+  // candidates) without needing to hook every liveSlideKey assignment site.
+  let lookupCandidatesDirty = true;
+  let lookupCandidatesLiveId; // undefined sentinel forces the first build
+  function markLookupCandidatesDirty() { lookupCandidatesDirty = true; }
+  function refreshLookupCandidates() {
+    if (!contentLookup || !service) return;
+    const liveId = liveSlideKey ? liveSlideKey.split(':')[0] : null;
+    if (!lookupCandidatesDirty && liveId === lookupCandidatesLiveId) return;
+    lookupCandidatesDirty = false;
+    lookupCandidatesLiveId = liveId;
+    const playlistPool = service.items.filter(i => i.id !== liveId && (i.type === 'song' || i.type === 'slides'));
+    const playlistTitles = new Set(playlistPool.map(i => (i.title || '').trim().toLowerCase()).filter(Boolean));
+    const bankPool = (typeof searchHymns === 'function' ? searchHymns('') : [])
+      .filter(h => h && h.title && !playlistTitles.has(h.title.trim().toLowerCase()))
+      .map(h => ({ ...h, type: 'song', _bank: h }));
+    contentLookup.setCandidates([...playlistPool, ...bankPool]);
+  }
+
   function onTranscript(msg) {
-    if (follower && autoFollow) follower.ingest(msg && msg.text || '', { isFinal: !!(msg && msg.isFinal) });
+    const text = (msg && msg.text) || '';
+    // words: real per-word timestamps (Deepgram always sends these; see
+    // server.js's handleTranscriptSegment) — LyricsFollower uses them for
+    // actual audio-time-based rate tracking instead of estimating tempo
+    // from wall-clock arrival timing. Absent for engines that don't provide
+    // them; LyricsFollower.ingest falls back to the old estimate then.
+    const meta = { isFinal: !!(msg && msg.isFinal), words: msg && msg.words };
+    if (follower && autoFollow) follower.ingest(text, meta);
+    if (autoFollow) {
+      if (!contentLookup) {
+        const CL = window.KairoContentLookup;
+        if (CL) {
+          contentLookup = new CL.ContentLookup({
+            onMatch: ({ item, confidence }) => {
+              const target = item._bank ? addHymnToPlaylist(item._bank) : item;
+              debugLog('content-lookup-match', { itemId: target.id, itemType: target.type, fromBank: !!item._bank, confidence });
+              sendSlide(target, 0);
+            },
+          });
+        }
+      }
+      if (contentLookup) {
+        refreshLookupCandidates();
+        contentLookup.ingest(text, meta);
+      }
+    }
   }
   function setAutoFollow(on) {
     autoFollow = !!on;
@@ -708,17 +986,19 @@
     else if (liveSlideKey) {
       const [id, idx] = liveSlideKey.split(':');
       const live = service && service.items.find(i => i.id === id);
-      if (live && live.type === 'song') startFollower(live, slidesFor(live)[Number(idx)]?.blockIndex ?? 0);
+      if (live && (live.type === 'song' || sermonFollowEligible(live))) startFollower(live, Number(idx));
     }
     renderFollowHud(follower ? follower.snapshot() : null);
   }
 
-  // Compact status chip — only present while a song is live. Shows the
-  // tracked block + a confidence bar, and carries the auto-follow toggle.
+  // Compact status chip — present while a song, or a 'slides' item with its
+  // own Auto-Advance toggle on, is live. Shows the tracked position + a
+  // confidence bar, and carries the master auto-follow toggle.
   function renderFollowHud(snap) {
     let el = document.getElementById('lyric-follow-hud');
-    const liveSong = liveSlideKey && service && service.items.find(i => i.id === liveSlideKey.split(':')[0] && i.type === 'song');
-    if (!liveSong) { if (el) el.remove(); return; }
+    const liveItem = liveSlideKey && service && service.items.find(i => i.id === liveSlideKey.split(':')[0]);
+    const followable = liveItem && (liveItem.type === 'song' || sermonFollowEligible(liveItem));
+    if (!followable) { if (el) el.remove(); return; }
     if (!el) {
       el = document.createElement('div');
       el.id = 'lyric-follow-hud';
@@ -728,10 +1008,16 @@
     const on = autoFollow;
     const state = !on ? 'off' : !snap ? 'idle' : snap.frozen ? 'frozen' : snap.armed ? 'armed' : 'tracking';
     const pct = snap ? Math.round(snap.confidence * 100) : 0;
+    // The lyrics follower's snapshot names the block; the sermon follower
+    // just has a slide index — name it from the deck's own slide text so
+    // the HUD still reads as "here's where it thinks we are", not a bare number.
+    const posLabel = !snap ? 'listening…'
+      : snap.blockLabel ? snap.blockLabel
+      : (slidesFor(liveItem)[snap.index]?.text || '').split('\n')[0].slice(0, 40) || `Slide ${snap.index + 1}`;
     el.innerHTML =
       `<button class="lfh-toggle ${on ? 'on' : ''}" title="Auto-advance slides by listening">` +
         `<span class="lfh-dot ${state}"></span>Auto-follow</button>` +
-      (on ? `<span class="lfh-info">${snap ? (snap.blockLabel || '—') : 'listening…'}` +
+      (on ? `<span class="lfh-info">${posLabel}` +
         `<span class="lfh-bar"><i style="width:${pct}%"></i></span></span>` : '');
     el.querySelector('.lfh-toggle').onclick = () => setAutoFollow(!autoFollow);
   }
@@ -743,10 +1029,13 @@
     // Keep the follower in step with what's actually on screen.
     if (item.type === 'song') {
       const blockIdx = slide.blockIndex ?? 0;
-      if (autoFollow && (!follower || followItemId !== item.id)) startFollower(item, blockIdx);
+      if (autoFollow && (!follower || followItemId !== item.id)) startFollower(item, index);
       else if (follower && followItemId === item.id && !followerAdvancing) follower.resync(blockIdx);
+    } else if (sermonFollowEligible(item)) {
+      if (autoFollow && (!follower || followItemId !== item.id)) startFollower(item, index);
+      else if (follower && followItemId === item.id && !followerAdvancing) follower.resync(index);
     } else if (follower) {
-      stopFollower(); // a non-song went live — follower has nothing to track
+      stopFollower(); // this item has nothing for either follower to track
     }
     renderFollowHud(follower ? follower.snapshot() : null);
     renderStack();
@@ -777,6 +1066,13 @@
           look,
           verse: {
             reference: slide.reference || '',
+            // ProPresenter-style section annotation (Verse/Chorus/Bridge/
+            // etc.) — only ever meaningful for a 'song' item (slidesFor's
+            // other cases already fold their own label into `reference`
+            // or leave it blank); the operator preview's section badge
+            // (app.js renderPreviewScreen) reads this separately from
+            // `reference`, which still carries the song's own title.
+            label: item.type === 'song' ? (slide.label || '') : '',
             text: slide.text || '',
             nlt_text: slide.text || '',
             translatedText,
@@ -801,6 +1097,74 @@
       debugLog('send-slide-error', { itemId: item.id, message: err.message });
       if (typeof toast === 'function') toast('Send failed: ' + err.message, 'error');
     }
+  }
+
+  // Cycle the CURRENTLY LIVE song slide's section label through the
+  // standard ProPresenter-style set — a one-click fix for a wrong or
+  // missing auto-detected type (see slide_import.js's own SECTION_LABEL_RE,
+  // applied at import time), right where the operator is already looking,
+  // rather than a trip back into the song editor. Entry point for app.js's
+  // live-preview section badge (window.KairoService.cycleSectionLabel,
+  // exposed below) — the badge click itself lives in app.js since that's
+  // where the preview DOM is, but playlists/liveSlideKey/slidesFor/
+  // sendSlide are all private to this file's own closure.
+  //
+  // Session-only: updates the in-memory item and re-sends so the live
+  // output picks it up immediately; does NOT write back to the Song
+  // Library — a real per-song edit still belongs in the editor, this is
+  // for "the import guessed wrong, fix it now" during a live service.
+  const SECTION_CYCLE = ['Verse', 'Chorus', 'Refrain', 'Solo', 'Pre-Chorus', 'Bridge', 'Tag', 'Intro', 'Outro'];
+  // Mirrors app.js's own SECTION_TYPE_RE/sectionTypeClass exactly (same
+  // class names, so the CSS palette is shared) — duplicated rather than
+  // shared across the app.js/service.js boundary since app.js is a
+  // separate top-level script with no access into this IIFE's scope, and
+  // window.KairoService is a one-way bridge (service.js exposes TO app.js,
+  // not the reverse).
+  const SECTION_TYPE_RE = /^(verse|chorus|refrain|solo|pre-?chorus|bridge|tag|intro|outro|ending)/i;
+  function sectionTypeClass(label) {
+    const m = SECTION_TYPE_RE.exec(String(label || '').trim());
+    if (!m) return null;
+    const t = m[1].toLowerCase().replace(/-/g, '');
+    if (t === 'prechorus') return 'sec-prechorus';
+    if (t === 'ending') return 'sec-outro';
+    return `sec-${t}`;
+  }
+  function cycleSectionLabel() {
+    if (!liveSlideKey) return;
+    const [itemId, idxStr] = liveSlideKey.split(':');
+    const item = playlists.flatMap(p => p.items || []).find(it => it.id === itemId);
+    if (!item || item.type !== 'song') return;
+    const idx = Number(idxStr);
+    const slide = slidesFor(item)[idx];
+    if (!slide || slide.blockIndex == null) return;
+    const block = item.blocks[slide.blockIndex];
+    if (!block) return;
+    const currentBase = String(block.label || '').trim().toLowerCase().replace(/[^a-z]/g, '');
+    let nextIdx = 0;
+    if (currentBase) {
+      const i = SECTION_CYCLE.findIndex(s => currentBase.startsWith(s.toLowerCase().replace(/[^a-z]/g, '')));
+      nextIdx = i >= 0 ? (i + 1) % SECTION_CYCLE.length : 0;
+    }
+    block.label = SECTION_CYCLE[nextIdx];
+    renderStack();
+    sendSlide(item, idx);
+  }
+
+  // The operator's Clear Slide/Clear All action (app.js's clearOutputLayer)
+  // wipes the real output and the top preview panel, but until this existed
+  // never told the PLAYLIST what happened — the slide's row/thumbnail in the
+  // Stack/Sidebar kept showing itself as "live" indefinitely after Clear,
+  // and refreshLookupCandidates kept wrongly excluding that item from
+  // auto-lookup's candidate pool since it still thought it was live. Also
+  // stops a follower tracking the now-cleared item, same as removeItem —
+  // nothing is live for it to sync position against anymore.
+  function clearLive() {
+    if (!liveSlideKey) return;
+    liveSlideKey = null;
+    if (follower) stopFollower(); // already calls renderFollowHud(null) internally
+    else renderFollowHud(null);
+    renderStack();
+    renderSidebar();
   }
 
   async function awaitTranslatedText(item, slide) {
@@ -1177,7 +1541,13 @@
     service.items = service.items.filter(i => i.id !== id);
     expanded.delete(id);
     if (activeItemId === id) activeItemId = null;
-    if (liveSlideKey && liveSlideKey.startsWith(id + ':')) liveSlideKey = null;
+    if (liveSlideKey && liveSlideKey.startsWith(id + ':')) {
+      liveSlideKey = null;
+      // A follower tracking the just-deleted item would otherwise keep
+      // ingesting transcripts and can still fire sendSlide on a stale item,
+      // resurrecting a deleted item back onto the live output unattended.
+      if (followItemId === id) stopFollower();
+    }
     saveService(); renderSidebar(); renderStack();
   }
 
@@ -1227,6 +1597,7 @@
     songs:      'songs-library-view',
     media:      'media-library-view',
   };
+  let currentCenterView = 'bible';
   function showCenterView(view) {
     // The top nav is the one master controller for the whole body — Theme
     // Studio included. Switching to any of these views has to close it out
@@ -1234,6 +1605,7 @@
     // showing underneath.
     window.KairoThemeStudio?.close?.();
     window.KairoItemStyleEditor?.close?.();
+    currentCenterView = view;
     Object.entries(CENTER_VIEWS).forEach(([key, id]) => {
       document.getElementById(id)?.classList.toggle('hidden', key !== view);
     });
@@ -1248,7 +1620,226 @@
     // playlist's stack (there's no separate library view to land on).
     const btnId = { bible: 'bible-btn', songs: 'songs-btn', media: 'media-btn', timer: 'timer-btn', stack: 'slides-btn', fullscreen: 'slides-btn' }[view];
     if (btnId) document.getElementById(btnId)?.classList.add('active');
+    updateMediaBinVisibility();
   }
+
+  // ── Media Bin — ProPresenter-style always-reachable background shelf ───
+  // Only meaningful under Bible/Slides/Timer (per the operator's own
+  // scoping: "an option in bible, slides, timer") — Songs/Media browsing
+  // has no "currently live" thing to set a background on. Independent of
+  // the Media *tab*'s own bin/folders browsing (that sends to the separate
+  // media output layer); this sets item.slideStyles[i].bgMedia /
+  // segment.slideStyles[0].bgMedia / the Bible theme override instead —
+  // see applyBgMediaOverride in app.js/service.js/display.html.
+  const MEDIA_BIN_VIEWS = new Set(['bible', 'stack', 'fullscreen', 'timer']);
+  let mediaBinUserHidden = false;
+  try { mediaBinUserHidden = localStorage.getItem('kairo-media-bin-hidden') === '1'; } catch {}
+  let mediaBinLoaded = false;
+
+  function updateMediaBinVisibility() {
+    const bin = document.getElementById('media-bin');
+    if (!bin) return;
+    const shouldShow = MEDIA_BIN_VIEWS.has(currentCenterView) && !mediaBinUserHidden;
+    bin.classList.toggle('hidden', !shouldShow);
+    // Same .active treatment the nav tabs above it already use (red pill) —
+    // the toggle button otherwise looked identical whether the bin was
+    // actually showing or not, on top of/instead of just Bible/Slides/
+    // Timer/Songs/Media each having their own separate .active state.
+    document.getElementById('media-bin-toggle-btn')?.classList.toggle('active', shouldShow);
+    // Re-fetch every time it's revealed (not just the first time) — the bin
+    // is a live shortcut of the Media tab, so a folder added or a watched
+    // folder's contents changing while the bin was hidden must show up the
+    // moment it's shown again. It's a few small HTTP calls, cheap enough.
+    if (shouldShow) { mediaBinLoaded = true; renderMediaBinStrip(); }
+  }
+
+  // The Media Bin mirrors the Media tab — so anything that changes the Media
+  // tab's contents (a smart folder added/removed, a watched folder's files
+  // changing on disk, an upload) must refresh the bin too if it's visible.
+  function refreshMediaBinIfVisible() {
+    const bin = document.getElementById('media-bin');
+    if (bin && !bin.classList.contains('hidden')) renderMediaBinStrip();
+  }
+
+  function toggleMediaBin() {
+    mediaBinUserHidden = !mediaBinUserHidden;
+    try { localStorage.setItem('kairo-media-bin-hidden', mediaBinUserHidden ? '1' : '0'); } catch {}
+    updateMediaBinVisibility();
+    // Owner: hiding the bin should take its transport bar with it, even if
+    // a video happens to still be playing out live — the bar sits right
+    // above the bin (see index.html's own comment on why it's a sibling,
+    // not nested), so leaving it behind reads as an orphaned control once
+    // its bin is gone. If a video really is still playing, the next real
+    // onMediaStatus update (timeupdate fires continuously during playback)
+    // brings it straight back once the bin — and the bar with it — is shown
+    // again, so this only ever hides it, never needs to restore it here.
+    if (mediaBinUserHidden) setMediaTransportVisible(false);
+  }
+
+  // All bin + smart-folder media in one flat list — same shape app.js's own
+  // fetchAllMediaItems uses for its Theme Studio "Library" picker, kept as
+  // a separate copy per this file's own fetch helpers/no cross-file import.
+  async function fetchAllMediaItemsForBin() {
+    const items = [];
+    const binP = fetchWithTimeout(`${SERVER}/api/media/bin`).then(r => r.json())
+      .then(bin => (bin.items || []).forEach(it => items.push(it)))
+      .catch(() => {});
+    // Smart folders are fetched in parallel, not one round-trip per folder
+    // in sequence — the Media Bin's first paint used to wait on N serial
+    // requests for N watched folders.
+    const foldersP = fetchWithTimeout(`${SERVER}/api/media/folders`).then(r => r.json())
+      .then(foldersRes => Promise.all((foldersRes.folders || []).map(folder =>
+        fetchWithTimeout(`${SERVER}/api/media/folders/${folder.id}/items`).then(r => r.json())
+          .then(res => (res.items || []).forEach(it => items.push(it)))
+          .catch(() => {})
+      )))
+      .catch(() => {});
+    await Promise.all([binP, foldersP]);
+    return items;
+  }
+
+  // Drag-and-drop mime for a Media Bin card → a slide grid drop. Custom
+  // type (not a bare string on 'text/plain') so a drop target can tell
+  // "this is a Kairo media pick" apart from an ordinary text/file drag
+  // without guessing from content.
+  const MEDIA_DRAG_MIME = 'application/x-kairo-media';
+
+  function buildMediaBinCard(item) {
+    const card = document.createElement('button');
+    card.className = 'media-card';
+    // Owner: "add a dropzone highlight for where the user wants to drag
+    // from media bin directly to slides grid." The Media Bin strip is the
+    // one place Media content is ever visible AT THE SAME TIME as another
+    // view (Bible/Slides/Timer) — see this function's own header comment
+    // and renderMediaBinStrip's — unlike the full Media tab, which closes
+    // whatever editor was open (buildMediaCard's own comment), so this is
+    // the only surface a real cross-panel drag is even physically possible
+    // from. Video isn't draggable here — a 'slides' block's own shape only
+    // ever holds a static image (see slidesFor's 'slides' case), so a
+    // dropped video would have nowhere valid to land.
+    //
+    // draggable is only switched on for the actual duration of a mouse
+    // press, never left permanently true — same fix already applied to the
+    // sidebar row/stack card's own reorder-drag (see their comments): a
+    // permanently-draggable element that's ALSO an ordinary click target
+    // (this card sends the item on click) let a hair of mouse/trackpad
+    // drift silently start a real native drag session, which a confirmed
+    // WebKit/macOS bug turned into the unrelated top bar going stale — even
+    // when the drag was never actually completed.
+    if (item.kind === 'image') {
+      card.draggable = false;
+      card.addEventListener('mousedown', () => { card.draggable = true; });
+      card.addEventListener('mouseup', () => { card.draggable = false; });
+      card.addEventListener('dragstart', (e) => {
+        e.dataTransfer.setData(MEDIA_DRAG_MIME, JSON.stringify({ url: item.url, name: item.name }));
+        e.dataTransfer.effectAllowed = 'copy';
+      });
+      // Belt-and-suspenders: mouseup won't fire if the drag ends outside
+      // the window/over a drop target that swallows it — dragend always
+      // fires exactly once a drag session concludes, however it ends.
+      card.addEventListener('dragend', () => { card.draggable = false; });
+    }
+    // Same shared thumbnail builder the Media tab's own grid uses
+    // (buildMediaThumb, defined further down with buildMediaCard) — was
+    // its own separate copy that never autoplayed a video thumbnail at
+    // all, which is exactly "frozen, like an image" for a video the same
+    // way the Timer layer's own bug was.
+    card.appendChild(buildMediaThumb(item));
+    if (item.kind === 'video') {
+      const badge = document.createElement('span');
+      badge.className = 'media-card-badge';
+      badge.textContent = 'VIDEO';
+      card.appendChild(badge);
+    }
+    const label = document.createElement('div');
+    label.className = 'media-card-label';
+    label.textContent = item.name;
+    card.appendChild(label);
+    card.title = `Send "${item.name}" to the media layer`;
+    // Same call the Media tab's own grid uses (buildMediaCard, above) — the
+    // Media Bin is just a second, always-reachable place to trigger it from
+    // Bible/Slides/Timer, not a different mechanism. An earlier version of
+    // this tried to inject the pick as a background layer into the current
+    // item/segment/theme instead; that path had real bugs and, more
+    // fundamentally, never reached Kairo's fully-automatic live-detection
+    // sends at all (they broadcast straight from the server with no look
+    // attached) — sendMediaItem's independent media layer has neither
+    // problem, since it's a separate compositing layer the slide paints
+    // over, not something threaded through the slide/theme's own data.
+    card.addEventListener('click', () => sendMediaItem(item));
+    // Same Fit Mode menu as the Media tab's own grid (buildMediaCard,
+    // above) — was missing here entirely, so there was no way to pick
+    // Cover/Stretch from the bin at all, only from the Media tab itself.
+    card.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      const currentFit = mediaFitPrefs.get(item.url) || 'contain';
+      const sections = [[{
+        label: 'Fit Mode',
+        submenu: [['contain', 'Contain'], ['cover', 'Cover'], ['fill', 'Stretch']].map(([v, label]) => ({
+          label, selected: currentFit === v, onClick: () => sendMediaItem(item, v),
+        })),
+      }]];
+      openContextMenu(e.clientX, e.clientY, sections);
+    });
+    return card;
+  }
+
+  async function renderMediaBinStrip() {
+    const strip = document.getElementById('media-bin-strip');
+    if (!strip) return;
+    strip.innerHTML = '<div class="svc-empty">Loading…</div>';
+    const items = await fetchAllMediaItemsForBin();
+    strip.innerHTML = '';
+    if (!items.length) {
+      strip.innerHTML = '<div class="svc-empty">No media yet — add some from the Media tab.</div>';
+      return;
+    }
+    items.forEach(item => strip.appendChild(buildMediaBinCard(item)));
+  }
+
+  document.getElementById('media-bin-toggle-btn')?.addEventListener('click', toggleMediaBin);
+  document.getElementById('media-bin-hide-btn')?.addEventListener('click', toggleMediaBin);
+
+  // Drag-to-resize — deliberately NOT reusing app.js's initVerticalSplitter:
+  // that helper resizes a pane that sits ABOVE its splitter (dragging down
+  // grows it). Here the splitter is the bin's own top edge and the bin
+  // itself sits at the bottom of .center-stage, so it's the opposite
+  // relationship — dragging UP (mouse Y decreasing) has to grow it, and the
+  // element being resized (.media-bin) IS the splitter's own parent, not a
+  // separate sibling pane.
+  const MEDIA_BIN_H_KEY = 'kairo-media-bin-h';
+  function initMediaBinResize() {
+    const bin = document.getElementById('media-bin');
+    const splitter = document.getElementById('media-bin-splitter');
+    if (!bin || !splitter) return;
+    const saved = parseInt(localStorage.getItem(MEDIA_BIN_H_KEY) || '', 10);
+    if (saved > 0) bin.style.height = saved + 'px';
+
+    let startY = 0, startH = 0;
+    const MIN_H = 90, MAX_H = 400; // matches .media-bin's own min-/max-height in styles.css
+    const onMove = (e) => {
+      const h = Math.max(MIN_H, Math.min(MAX_H, startH + (startY - e.clientY)));
+      bin.style.height = h + 'px';
+    };
+    const onUp = () => {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      splitter.classList.remove('dragging');
+      document.body.style.userSelect = '';
+      try { localStorage.setItem(MEDIA_BIN_H_KEY, String(bin.offsetHeight)); } catch {}
+    };
+    splitter.addEventListener('mousedown', (e) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      startY = e.clientY;
+      startH = bin.offsetHeight;
+      splitter.classList.add('dragging');
+      document.body.style.userSelect = 'none';
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+    });
+  }
+  initMediaBinResize();
 
   function openStack() {
     showCenterView('stack');
@@ -1432,10 +2023,17 @@
       const slides = slidesFor(item);
       if (!slides.length) {
         body.innerHTML = '<div class="svc-empty-sm">No slides yet — Edit to add content.</div>';
+        // Still a valid drop target — an empty announcement deck is the
+        // MOST likely case someone's about to build by dragging images in.
+        // Wired on the actual .svc-empty-sm child, not `body` itself —
+        // that's what the .svc-media-drop-target highlight (styles.css)
+        // targets.
+        if (item.type === 'slides') wireMediaBinDropTarget(body.firstElementChild, item);
       } else {
         const grid = document.createElement('div');
         grid.className = 'svc-slides-grid';
         slides.forEach((s, i) => grid.appendChild(slideCard(item, s, i)));
+        if (item.type === 'slides') wireMediaBinDropTarget(grid, item);
         body.appendChild(grid);
       }
       card.appendChild(body);
@@ -1575,7 +2173,25 @@
     // once for Full-scale edit's own slide list).
     const label = document.createElement('div');
     label.className = 'svc-slide-label';
-    label.textContent = `${i + 1}.`;
+    // Show the real section label (Verse/Chorus/Bridge/etc — from import
+    // detection or the operator's own click-to-cycle edit) when this slide
+    // has one, instead of always just the bare index. Real gap: this grid
+    // is where an operator actually browses a song's slides (matching
+    // ProPresenter's own slide-library convention of labeling each slide),
+    // but the label was previously only ever surfaced on the LIVE preview
+    // badge for whichever slide happens to be on air — nowhere in the
+    // browsing view itself. `b.label` falls back to a generic `Slide N`
+    // string (see slidesFor) when nothing real was ever set, so exclude
+    // that shape and fall back to the plain numeral exactly as before.
+    const realLabel = item.type === 'song' && s.label && !/^slide\s+\d+$/i.test(s.label) ? s.label : null;
+    label.textContent = realLabel || `${i + 1}.`;
+    // Owner: "it needs a color shading with a frame around it to make the
+    // user see it in first glance" — a plain-text label was easy to miss
+    // among the thumbnails. Same color palette as the live-screen operator
+    // badge, so Verse/Chorus/Bridge/etc read as a real category, not just
+    // more dim text.
+    const secCls = realLabel ? sectionTypeClass(realLabel) : null;
+    if (secCls) label.classList.add('sec-labeled', secCls);
     preview.appendChild(label);
     if (preview.__pendingPaint) preview.__pendingPaint.label = label;
 
@@ -1604,7 +2220,25 @@
     card.addEventListener('contextmenu', (e) => {
       e.preventDefault();
       const sections = [];
+      // Edit/Change Theme were only ever reachable for the WHOLE item
+      // (openItemContextMenu, the sidebar/stack-head menu) — a slide's own
+      // right-click had Duplicate/Copy/Paste/Delete but no way to actually
+      // style it or re-theme it without leaving to find that other menu.
+      // Edit jumps straight to THIS slide (index i), not always slide 0.
+      sections.push([
+        { label: 'Edit', onClick: () => window.KairoItemStyleEditor?.open?.(item.id, i) },
+        { label: 'Change Theme', onClick: () => openThemePopover(card, item) },
+      ]);
       if (s.image) sections.push([{ label: 'Fit Mode', submenu: fitModeMenuItems(item) }]);
+      // Real gap: a song's section label (Verse/Chorus/Bridge/etc) was only
+      // ever settable via the operator's own live-preview badge — cycling
+      // through SECTION_CYCLE one click at a time, and only once THIS exact
+      // slide happened to be live. An operator browsing/prepping the song
+      // ahead of time (this grid, not yet on air) had no way to set it at
+      // all. Direct pick here, same underlying block.label write-through.
+      if (item.type === 'song' && s.blockIndex != null) {
+        sections.push([{ label: 'Section', submenu: sectionMenuItems(item, s, i) }]);
+      }
       const editGroup = [];
       if (canDuplicateSlide(item, s)) {
         editGroup.push({ label: 'Duplicate', onClick: () => duplicateSlide(item, i) });
@@ -1779,6 +2413,15 @@
         { label: 'Change Theme', onClick: () => openThemePopover(anchorEl, item) },
         { label: 'Edit', onClick: () => window.KairoItemStyleEditor?.open?.(item.id, 0) },
         { label: 'Quick edit', onClick: () => openFullEdit(item.id) },
+        // Auto-advance mode (src/lyrics_follow.js or src/sermon_follow.js)
+        // — opt-in per item, unlike a song (which always auto-follows once
+        // Start Listening is on): a 'slides' deck is just as often
+        // announcements or a photo set that should never react to ambient
+        // speech, so this is the explicit "yes, listen for THIS one" — and
+        // WHICH way to listen for it, since a prepared announcement (read
+        // close to verbatim off the slide) and a sermon outline (talked
+        // AROUND, not read) need genuinely different tracking engines.
+        ...(item.type === 'slides' ? [{ label: 'Auto-Advance', submenu: followModeMenuItems(item) }] : []),
         // Omitted rather than shown-but-empty when there's nowhere else to
         // move to (e.g. only one playlist exists) — same convention as
         // every Copy/Duplicate/Paste item elsewhere in this menu (see the
@@ -1815,6 +2458,65 @@
       label, selected: current === v,
       onClick: () => { item.fit = v; saveService(); renderStack(); if (activeItemId === item.id) renderFullEdit(); },
     }));
+  }
+
+  // Direct pick, mirroring cycleSectionLabel's own normalize-and-compare
+  // logic (so a manually-imported "Chorus:" label and a menu-picked
+  // "Chorus" are recognized as the same value, not treated as distinct).
+  function sectionMenuItems(item, s, i) {
+    const block = item.blocks[s.blockIndex];
+    if (!block) return [];
+    const current = String(block.label || '').trim().toLowerCase().replace(/[^a-z]/g, '');
+    const items = SECTION_CYCLE.map(lbl => ({
+      label: lbl,
+      selected: current === lbl.toLowerCase().replace(/[^a-z]/g, ''),
+      onClick: () => {
+        block.label = lbl;
+        saveService();
+        renderStack();
+        // Refresh the on-air badge too if this exact slide is currently live
+        // — otherwise the operator's live output would show a stale label
+        // until the next send.
+        if (liveSlideKey === `${item.id}:${i}`) sendSlide(item, i);
+      },
+    }));
+    items.push({
+      label: 'None', selected: !current,
+      onClick: () => { block.label = ''; saveService(); renderStack(); },
+    });
+    return items;
+  }
+
+  function followModeMenuItems(item) {
+    const setMode = (mode) => {
+      // 'off' is a real, explicit value now — distinct from unset, which
+      // defaults to 'script' automatically (see followModeOf). Storing null
+      // here would just mean "never touched" again and silently re-enable
+      // the default the operator just tried to turn off.
+      item.followMode = mode;
+      saveService();
+      // Live right now with Start Listening already on: start/stop
+      // immediately instead of waiting for the next send to notice.
+      if (liveSlideKey && liveSlideKey.split(':')[0] === item.id && autoFollow) {
+        const idx = Number(liveSlideKey.split(':')[1]);
+        if (mode === 'off') stopFollower(); else startFollower(item, idx);
+      }
+    };
+    const current = followModeOf(item);
+    return [
+      {
+        label: 'Off', selected: !current,
+        onClick: () => setMode('off'),
+      },
+      {
+        label: 'Announcement (exact wording)', selected: current === 'script',
+        onClick: () => setMode('script'),
+      },
+      {
+        label: 'Sermon outline (paraphrase-tolerant)', selected: current === 'sermon',
+        onClick: () => setMode('sermon'),
+      },
+    ];
   }
 
   function openLinesPopover(anchor, item) {
@@ -2190,6 +2892,14 @@
   // `opts.onCommit`/`opts.onSplit` wire the verse-text layer up for in-place
   // editing (full-edit canvas only) — omit both to get a read-only render,
   // which is what thumbnails and previews want.
+  // isVideoLayerSrc, applyShapeGeometry, applyLayerOrder — see
+  // src/layer_geometry.js for the shared implementation (loaded via
+  // index.html before this script; resolved here via normal scope lookup
+  // out of this file's enclosing IIFE, same as hexToRgb/hexA already are).
+  // Was a byte-identical copy-paste across this file, app.js, and
+  // display.html — already silently drifted (this copy of
+  // applyShapeGeometry had dropped app.js's .toFixed(1) rounding).
+
   function paintLookLayers(host, look, style, content, opts = {}) {
     host.classList.remove('is-alpha');
     host.innerHTML = '';
@@ -2199,7 +2909,20 @@
     // src/app.js's writeItemSlideStyleFromSynthetic) ride along inside the
     // same per-slide style object rather than a parallel field — appended
     // last so they paint on top, same as every other "new layer" convention.
-    const layers = [...(look?.layers || []), ...((style || {}).__customLayers || [])];
+    let layers = [...(look?.layers || []), ...((style || {}).__customLayers || [])];
+    if ((style || {}).__layerOrder) layers = applyLayerOrder(layers, style.__layerOrder);
+    // Media Bin "set as background" (see app.js's matching
+    // applyBgMediaOverride) — same field, same synthetic-layer shape, so
+    // this preview mirror agrees with the real output and the editor
+    // canvas instead of just showing the theme's own flat fill.
+    if (style?.bgMedia?.src) {
+      layers = [
+        { id: '__bg-media', type: 'image', name: 'Background (Media Bin)', visible: true,
+          src: style.bgMedia.src, fit: 'cover', opacity: 100, radius: 0,
+          pos: { x: 0, y: 0, w: DESIGN_W, h: DESIGN_H } },
+        ...layers.filter(l => l.type !== 'background'),
+      ];
+    }
     // Only themes that actually pair a reference/translation caption with a
     // verse layer get the "no caption without a verse line" guard below — a
     // theme deliberately built with ONLY a reference/citation layer (no verse
@@ -2226,20 +2949,42 @@
         } else {
           d.style.background = hexA(layer.color, layer.opacity);
         }
-        if (layer.radius) d.style.borderRadius = (layer.radius * scale) + 'px';
+        applyShapeGeometry(d, layer, scale);
         host.appendChild(d);
         return;
       }
       if (layer.type === 'image') {
-        const d = document.createElement('div');
         const p = layer.pos || { x: 0, y: 0, w: DESIGN_W, h: DESIGN_H };
+        const fit = layer.fit === 'fill' ? 'fill' : (layer.fit || 'contain');
+        // An "image" layer whose src is actually a video (Theme Studio's
+        // file picker doesn't hard-block it, drag-and-drop never respected
+        // accept="image/*") can't play at all through background-image —
+        // same fix as display.html's buildLayerDOM, so the monitoring
+        // preview agrees with what the real output now does instead of
+        // showing a permanently frozen frame.
+        if (layer.src && isVideoLayerSrc(layer.src)) {
+          const v = document.createElement('video');
+          v.autoplay = true; v.loop = true; v.muted = true; v.playsInline = true;
+          v.style.cssText = 'position:absolute;background:transparent;';
+          v.style.objectFit = fit;
+          v.style.left = (p.x / DESIGN_W * 100) + '%';
+          v.style.top = (p.y / DESIGN_H * 100) + '%';
+          v.style.width = (p.w / DESIGN_W * 100) + '%';
+          v.style.height = (p.h / DESIGN_H * 100) + '%';
+          if (layer.rotation) v.style.transform = `rotate(${layer.rotation}deg)`;
+          v.src = layer.src;
+          host.appendChild(v);
+          v.play().catch(() => {});
+          return;
+        }
+        const d = document.createElement('div');
         d.style.cssText = 'position:absolute;background-position:center;background-repeat:no-repeat;';
         // Theme Studio's layer.fit is already fully wired everywhere else
         // (app.js's canvas render, display.html's real output) — this was
         // the one renderer left hardcoded to 'contain', so a Cover/Stretch
         // layer looked right on the real output but wrong in every sidebar/
         // stack live-look preview that goes through paintLookLayers.
-        d.style.backgroundSize = layer.fit === 'fill' ? '100% 100%' : (layer.fit || 'contain');
+        d.style.backgroundSize = fit === 'fill' ? '100% 100%' : fit;
         d.style.left = (p.x / DESIGN_W * 100) + '%';
         d.style.top = (p.y / DESIGN_H * 100) + '%';
         d.style.width = (p.w / DESIGN_W * 100) + '%';
@@ -2248,7 +2993,40 @@
         // this renderer (thumbnails, Live Preview) was the one place a
         // rotated image layer never rotated at all.
         if (layer.rotation) d.style.transform = `rotate(${layer.rotation}deg)`;
+        // Ken Burns (layer.motion) is a continuous 1.0x→1.12x drift on the
+        // real output — this thumbnail is a static snapshot with no per-
+        // tick refresh, so it can't replay that, but pinning it to the
+        // animation's exact starting frame (scale 1, its LEAST zoomed
+        // point) meant the live output almost always looked more zoomed in
+        // than the thumbnail promised, since most of the time it's
+        // somewhere past that starting point. A fixed mid-drift scale
+        // approximates what a glance at the real output usually looks like
+        // instead of its one least-zoomed instant.
+        if (layer.motion === 'kenburns') {
+          d.style.transform = (layer.rotation ? `rotate(${layer.rotation}deg) ` : '') + 'scale(1.06)';
+          d.style.transformOrigin = 'center';
+        }
         if (layer.src) d.style.backgroundImage = `url('${layer.src}')`;
+        host.appendChild(d);
+        return;
+      }
+      if (layer.type === 'image-cycle') {
+        // Same "always frame 0" rule as app.js's canvas — this preview
+        // mirror doesn't get a live per-second countdown tick at all, only
+        // the real output (display.html's handleActionBadge) does.
+        const sources = layer.sources || [];
+        if (!sources.length) return;
+        const p = layer.pos || { x: 0, y: 0, w: DESIGN_W, h: DESIGN_H };
+        const fit = layer.fit === 'fill' ? 'fill' : (layer.fit || 'cover');
+        const d = document.createElement('div');
+        d.style.cssText = 'position:absolute;background-position:center;background-repeat:no-repeat;';
+        d.style.backgroundSize = fit === 'fill' ? '100% 100%' : fit;
+        d.style.left = (p.x / DESIGN_W * 100) + '%';
+        d.style.top = (p.y / DESIGN_H * 100) + '%';
+        d.style.width = (p.w / DESIGN_W * 100) + '%';
+        d.style.height = (p.h / DESIGN_H * 100) + '%';
+        if (layer.rotation) d.style.transform = `rotate(${layer.rotation}deg)`;
+        d.style.backgroundImage = `url('${sources[0]}')`;
         host.appendChild(d);
         return;
       }
@@ -2258,6 +3036,10 @@
       const isTranslated = layer.binding === 'verse_translated';
       const isReference = layer.binding === 'reference';
       const isTimer = layer.binding === 'timer';
+      // Individual hour/minute/second parts (see display.html's timeParts)
+      // — a static "00" placeholder here same as isTimer's own content
+      // pick below; this preview mirror never ticks live either way.
+      const isTimerPart = layer.binding === 'timer-h' || layer.binding === 'timer-m' || layer.binding === 'timer-s';
       // A reference/translation caption with no verse line to caption reads
       // as orphaned floating text (e.g. just a song title on an otherwise
       // empty canvas) rather than theme-controlled output — withhold it
@@ -2293,7 +3075,18 @@
       d.style.left = (box.x / DESIGN_W * 100) + '%';
       d.style.top = (box.y / DESIGN_H * 100) + '%';
       d.style.width = (box.w / DESIGN_W * 100) + '%';
+      // Entrance (layer.entrance, renderTextProps' Effects tab) — this
+      // painter always positions via plain left/top (no layout-preset
+      // centering transform to conflict with, unlike app.js's canvas), so
+      // it's safe to apply unconditionally.
+      if (layer.entrance === 'fade-up') d.style.animation = 'kairo-text-in 700ms ease-out both';
       if (box.h > 0) d.style.height = (box.h / DESIGN_H * 100) + '%';
+      // A thumbnail/card preview has no handles or editing affordance to
+      // show "this text doesn't fit its box" the way the real canvas can —
+      // it should just always stay a clean, contained thumbnail regardless
+      // of what the underlying layer's own sizing is doing, unconditionally,
+      // not only once some overflow heuristic trips.
+      d.style.overflow = 'hidden';
 
       const size = ov.font?.size ?? layer.font.size;
       d.style.fontFamily = `'${ov.font?.family || layer.font.family}', system-ui, sans-serif`;
@@ -2307,21 +3100,23 @@
       const color = ov.color || layer.color;
       const opacity = ov.opacity ?? layer.opacity;
       d.style.color = hexA(color, opacity);
-      if (isTimer) {
+      if (isTimer || isTimerPart) {
         // Timer state colours (see display.html buildLayerDOM) — onTimerAction
         // recolours the element as the countdown enters warning / overtime.
         d.dataset.baseColor = hexA(color, opacity);
-        d.dataset.warnColor = ov.warnColor || layer.warnColor || '#ffcf4d';
-        d.dataset.overtimeColor = ov.overtimeColor || layer.overtimeColor || '#ff5c5c';
+        d.dataset.warnColor = ov.warnColor || layer.warnColor || '#e8a64a';
+        d.dataset.overtimeColor = ov.overtimeColor || layer.overtimeColor || '#e8404a';
       }
+      // Outline folded into this SAME text-shadow (a ring of sharp offset
+      // shadows via outlineShadows — see layer_geometry.js) rather than
+      // -webkit-text-stroke, which this WebKit build corrupts on bold/
+      // large text — see that helper's own comment.
       const shadow = ov.shadow || layer.shadow;
-      if (shadow?.enabled) {
-        d.style.textShadow = `${shadow.x * scale}px ${shadow.y * scale}px ${shadow.blur * scale}px ${hexA(shadow.color, shadow.opacity)}`;
-      }
       const outline = ov.outline || layer.outline;
-      if (outline?.enabled) {
-        d.style.webkitTextStroke = `${outline.width * scale}px ${outline.color}`;
-      }
+      const shadowParts = [];
+      if (outline?.enabled) shadowParts.push(...outlineShadows(outline.width * scale, outline.color));
+      if (shadow?.enabled) shadowParts.push(`${shadow.x * scale}px ${shadow.y * scale}px ${shadow.blur * scale}px ${hexA(shadow.color, shadow.opacity)}`);
+      if (shadowParts.length) d.style.textShadow = shadowParts.join(', ');
       // Lyrics — Motion's per-word/per-character reveal only applies to the
       // verse text, and only when this painter isn't also being used as a
       // live contentEditable field (Full-scale edit's in-place editing) —
@@ -2332,11 +3127,15 @@
       if (isVerse && !editable && window.KairoWordSplit?.applyMotionText(d, look?.textAnimation, content.verseText, look?.textAnimationSpeed || 1, { color: look?.textHighlightColor, intensity: look?.textAnimationIntensity })) {
         // handled
       } else {
+        const hasTimerTemplate = layer.binding === 'custom' && typeof layer.customText === 'string' && layer.customText.includes('{timer}');
         d.textContent = isVerse ? content.verseText
           : isTranslated ? (content.translatedText || '')
           : isReference ? (content.referenceText || '')
           : isTimer ? (content.timerText || '')
+          : isTimerPart ? '00'
+          : hasTimerTemplate ? layer.customText.replace('{timer}', content.timerText || '0:00')
           : (layer.customText || '');
+        if (hasTimerTemplate) d.dataset.timerTemplate = layer.customText;
       }
 
       if (isVerse && opts.onCommit) {
@@ -2486,6 +3285,17 @@
         saveService(); renderFullEdit(); renderSidebar();
       });
       host.appendChild(add);
+      // Image slides only make sense for a plain 'slides' deck (a song's
+      // blocks are lyric text, chunked into slides by line count — an
+      // image doesn't fit that shape). See openSlideMediaLibraryPicker.
+      if (item.type === 'slides') {
+        const addMedia = document.createElement('button');
+        addMedia.className = 'svc-add-line';
+        addMedia.style.margin = '4px auto';
+        addMedia.textContent = '+ image from library';
+        addMedia.addEventListener('click', () => openSlideMediaLibraryPicker(item));
+        host.appendChild(addMedia);
+      }
     }
 
     const hint = document.createElement('div');
@@ -2961,10 +3771,19 @@
             : { label: b.label, text: (b.lines || []).join('\n') });
           delete item.linesPerSlide;
         } else {
-          // Re-flow the imported text as lyrics, n lines per slide.
+          // Re-flow ALL the imported text as ONE continuous stream of
+          // lines, ignoring the original paragraph breaks — that's the
+          // whole point of Custom-lines mode (see its own hint text just
+          // above: "ignoring the original paragraph breaks"). Chunking
+          // each imported block (paragraph) separately, the previous
+          // behavior, meant this delimiter silently did nothing whenever
+          // a pasted stanza already had <= n lines — which looks exactly
+          // like Paragraph mode, with nothing to explain why "Custom
+          // lines: 2" didn't actually re-split anything.
           item.type = 'song';
           item.linesPerSlide = n;
-          item.blocks = rawBlocks.map(b => ({ label: b.label, lines: [...(b.lines || [])] }));
+          const allLines = rawBlocks.filter(b => !b.image).flatMap(b => b.lines || []);
+          item.blocks = [{ label: item.title || 'Imported', lines: allLines }];
         }
       } else {
         item.linesPerSlide = n;
@@ -3031,8 +3850,10 @@
               blocks: extra.blocks.map(b => b.image
                 ? { label: b.label, image: b.image }
                 : { label: b.label, text: (b.lines || []).join('\n') }) }
+          // Same flatten-across-blocks reflow as the primary item above —
+          // Custom-lines mode ignores the original paragraph breaks.
           : { id: uid('song'), type: 'song', title: extra.name || 'Imported slides', themeId: item.themeId, linesPerSlide: n,
-              blocks: extra.blocks.map(b => ({ label: b.label, lines: [...(b.lines || [])] })) };
+              blocks: [{ label: extra.name || 'Imported', lines: extra.blocks.filter(b => !b.image).flatMap(b => b.lines || []) }] };
         archiveImportToDefault(extraItem, target);
         target.items.push(extraItem);
       }
@@ -3058,6 +3879,161 @@
         img.src = fr.result;
       };
       fr.readAsDataURL(file);
+    });
+  }
+
+  // Same fetch+canvas re-encode readImage() does for a File, just sourced
+  // from an existing Media Bin/smart-folder URL instead — for pulling an
+  // already-organized announcement image straight into a slide deck
+  // (openSlideMediaLibraryPicker below) without a redundant re-upload
+  // through the OS file picker.
+  function readImageFromUrl(url) {
+    return fetch(url).then(r => {
+      if (!r.ok) throw new Error('fetch failed');
+      return r.blob();
+    }).then(blob => new Promise((resolve, reject) => {
+      const objectUrl = URL.createObjectURL(blob);
+      const img = new Image();
+      img.onerror = () => { URL.revokeObjectURL(objectUrl); reject(new Error('decode failed')); };
+      img.onload = () => {
+        URL.revokeObjectURL(objectUrl);
+        const scale = Math.min(1, 1920 / img.naturalWidth);
+        const c = document.createElement('canvas');
+        c.width = Math.round(img.naturalWidth * scale);
+        c.height = Math.round(img.naturalHeight * scale);
+        c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+        resolve(c.toDataURL(/png|webp/i.test(blob.type) ? 'image/png' : 'image/jpeg', 0.86));
+      };
+      img.src = objectUrl;
+    }));
+  }
+
+  // Local mirror of app.js's own fetchAllMediaItems (Theme Studio's Library
+  // picker) — same cross-file duplication convention used elsewhere in this
+  // pair of files (see SECTION_CYCLE/sectionTypeClass) rather than reaching
+  // into app.js's closure, which service.js's own IIFE has no access to.
+  async function fetchAllMediaItemsForPicker() {
+    const items = [];
+    try {
+      const bin = await fetch(`${SERVER}/api/media/bin`).then(r => r.json());
+      (bin.items || []).forEach(it => items.push(it));
+    } catch {}
+    try {
+      const foldersRes = await fetch(`${SERVER}/api/media/folders`).then(r => r.json());
+      for (const folder of (foldersRes.folders || [])) {
+        try {
+          const res = await fetch(`${SERVER}/api/media/folders/${folder.id}/items`).then(r => r.json());
+          (res.items || []).forEach(it => items.push(it));
+        } catch {}
+      }
+    } catch {}
+    return items;
+  }
+
+  // Real drag-and-drop from the Media Bin strip (buildMediaBinCard) onto a
+  // 'slides' item's own slide grid (or its empty-state placeholder) in the
+  // Stack view — the ONE place Media content is visible at the same time
+  // as another view (see buildMediaBinCard's own comment for why the full
+  // Media tab can't support this). `el` is either the .svc-slides-grid or
+  // the empty-deck placeholder div, both wired identically. Highlighted
+  // via .svc-media-drop-target (styles.css) — checked with
+  // el.contains(e.relatedTarget) on dragleave so hovering over a CHILD
+  // slide card doesn't flicker the highlight off and back on.
+  function wireMediaBinDropTarget(el, item) {
+    el.addEventListener('dragover', (e) => {
+      if (!e.dataTransfer.types.includes(MEDIA_DRAG_MIME)) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'copy';
+      el.classList.add('svc-media-drop-target');
+    });
+    el.addEventListener('dragleave', (e) => {
+      if (el.contains(e.relatedTarget)) return;
+      el.classList.remove('svc-media-drop-target');
+    });
+    el.addEventListener('drop', async (e) => {
+      const raw = e.dataTransfer.getData(MEDIA_DRAG_MIME);
+      if (!raw) return;
+      e.preventDefault();
+      el.classList.remove('svc-media-drop-target');
+      let mi;
+      try { mi = JSON.parse(raw); } catch { return; }
+      try {
+        const src = await readImageFromUrl(mi.url);
+        item.blocks.push({ label: `Slide ${item.blocks.length + 1}`, image: src, imageFileName: mi.name });
+        saveService(); renderStack();
+        if (activeItemId === item.id) renderFullEdit();
+      } catch {
+        if (typeof toast === 'function') toast('Could not load that image', 'error');
+      }
+    });
+  }
+
+  // "Add from Media Library" for an actual SLIDE (not a Theme Studio decor
+  // layer — see app.js's openMediaLibraryPicker/addMediaToCurrentSlide,
+  // which pushes into activeLook.layers, a different thing entirely).
+  // Appends a real new block to a 'slides' item, filename captured so the
+  // announcement follower (announcementShapeForFollow/imageTriggerPhrase)
+  // has something to match on even before the operator names it. The
+  // click-based bridge (dragging works too now — wireMediaBinDropTarget
+  // above — but only from the Media Bin strip, which is the one place
+  // Media content is visible alongside another view; this stays as the
+  // reachable path from the Media tab itself, where dragging isn't
+  // physically possible).
+  let slideMediaPickerEl = null;
+  function closeSlideMediaLibraryPicker() { slideMediaPickerEl?.remove(); slideMediaPickerEl = null; }
+  async function openSlideMediaLibraryPicker(item) {
+    closeSlideMediaLibraryPicker();
+    const overlay = document.createElement('div');
+    overlay.className = 'ts-media-picker-overlay';
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) closeSlideMediaLibraryPicker(); });
+    const panel = document.createElement('div');
+    panel.className = 'ts-media-picker-panel';
+    const header = document.createElement('div');
+    header.className = 'ts-media-picker-header';
+    header.innerHTML = '<span>Add from Media Library</span>';
+    const closeBtn = document.createElement('button');
+    closeBtn.className = 'modal-close-btn';
+    closeBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 16 16"><path d="M3 3l10 10M13 3L3 13" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg><span>Close</span>';
+    closeBtn.addEventListener('click', closeSlideMediaLibraryPicker);
+    header.appendChild(closeBtn);
+    panel.appendChild(header);
+    const grid = document.createElement('div');
+    grid.className = 'ts-media-picker-grid';
+    grid.textContent = 'Loading…';
+    panel.appendChild(grid);
+    overlay.appendChild(panel);
+    document.body.appendChild(overlay);
+    slideMediaPickerEl = overlay;
+
+    const items = (await fetchAllMediaItemsForPicker()).filter(it => it.kind === 'image');
+    grid.innerHTML = '';
+    if (!items.length) {
+      grid.innerHTML = '<div class="svc-empty">No images in your Media Library yet.</div>';
+      return;
+    }
+    items.forEach(mi => {
+      const card = document.createElement('button');
+      card.className = 'media-card';
+      const img = document.createElement('img');
+      img.src = mi.url;
+      card.appendChild(img);
+      const label = document.createElement('div');
+      label.className = 'media-card-label';
+      label.textContent = mi.name;
+      card.appendChild(label);
+      card.addEventListener('click', async () => {
+        card.disabled = true;
+        try {
+          const src = await readImageFromUrl(mi.url);
+          item.blocks.push({ label: `Slide ${item.blocks.length + 1}`, image: src, imageFileName: mi.name });
+          saveService(); renderFullEdit(); renderStack();
+          closeSlideMediaLibraryPicker();
+        } catch {
+          if (typeof toast === 'function') toast('Could not load that image', 'error');
+          card.disabled = false;
+        }
+      });
+      grid.appendChild(card);
     });
   }
 
@@ -3212,7 +4188,18 @@
     if (!host || typeof searchHymns !== 'function') return;
     let results = searchHymns(query);
     if (activeSongCategory != null) {
-      results = results.filter(h => isLibrarySong(h.id) && librarySongs.find(s => s.id === h.id)?.category === activeSongCategory);
+      results = results.filter(h => {
+        // The bundled 286-hymn bank has no per-song category (it's a
+        // read-only import, not the operator's own tagged library) — but
+        // every one of those songs genuinely IS a hymn by origin, so the
+        // "Hymn" chip specifically must include all of them, not just
+        // library songs someone happened to tag category:'hymn'. Real
+        // incident this fixes: selecting "Hymn" showed nothing from the
+        // actual hymn bank at all — only the operator's own manually-
+        // tagged library entries, which for most operators is empty.
+        if (activeSongCategory === 'hymn' && !isLibrarySong(h.id)) return true;
+        return isLibrarySong(h.id) && librarySongs.find(s => s.id === h.id)?.category === activeSongCategory;
+      });
     }
     host.innerHTML = '';
 
@@ -3267,6 +4254,7 @@
     }
     renderMediaFolderRail();
     renderMediaGrid();
+    refreshMediaBinIfVisible();   // folder linked/unlinked → bin mirrors it
   }
 
   function renderMediaFolderRail() {
@@ -3412,7 +4400,13 @@
   // Only load a thumbnail's bytes once the card is near the viewport — a
   // linked folder can hold hundreds of images (esp. an existing Google
   // Drive / Photos folder), and loading them all at once, some of them
-  // large or cloud-backed, is what locked the app up.
+  // large or cloud-backed, is what locked the app up. A video thumbnail
+  // deliberately stays PAUSED on its first frame once loaded, same as an
+  // image — playing every visible video thumbnail at once (a grid can show
+  // a dozen+ cards) is real, ongoing decode work for media nobody picked
+  // yet, purely for a shelf/grid preview. It plays for real once actually
+  // selected — sendMediaItem's target (the independent media layer /
+  // display.html) is a real autoplaying <video>.
   const lazyMediaObserver = (typeof IntersectionObserver === 'function')
     ? new IntersectionObserver((entries, obs) => {
         for (const e of entries) {
@@ -3424,29 +4418,49 @@
       }, { rootMargin: '300px' })
     : { observe(el) { if (el.dataset.src) { el.src = el.dataset.src; delete el.dataset.src; } }, unobserve() {} };
 
+  // The one shared thumbnail builder for every "media item as a card" grid
+  // in the app (Media tab's own grid via buildMediaCard, the Media Bin via
+  // buildMediaBinCard below) — was two near-identical copies that could
+  // silently drift.
+  function buildMediaThumb(item) {
+    if (item.kind === 'video') {
+      const v = document.createElement('video');
+      // preload:'metadata' (not 'none') + lazy src, and deliberately never
+      // played — see lazyMediaObserver's own comment on why a shelf/grid
+      // full of thumbnails stays paused until something is actually
+      // selected. 'metadata' only fetches enough to know duration/
+      // dimensions — nowhere near the cost of decoding the whole file — but
+      // whether that alone also paints a first frame is browser/codec-
+      // dependent, which is why some cards showed a real frame and others
+      // sat solid black with just the VIDEO badge. The explicit seek below
+      // is the standard cross-browser fix: forcing currentTime to a hair
+      // past 0 makes every browser decode and paint that one frame, same
+      // lightweight cost either way.
+      v.muted = true; v.preload = 'metadata';
+      v.addEventListener('loadedmetadata', () => {
+        try { v.currentTime = Math.min(0.1, (v.duration || 1) / 2); } catch {}
+      }, { once: true });
+      v.dataset.src = item.url;
+      lazyMediaObserver.observe(v);
+      return v;
+    }
+    const img = document.createElement('img');
+    img.loading = 'lazy';
+    img.decoding = 'async';
+    img.dataset.src = item.url;
+    lazyMediaObserver.observe(img);
+    return img;
+  }
+
   function buildMediaCard(item, { isRecent } = {}) {
     const card = document.createElement('button');
     card.className = 'media-card';
+    card.appendChild(buildMediaThumb(item));
     if (item.kind === 'video') {
-      const v = document.createElement('video');
-      // preload:none + lazy src — a linked folder with dozens of videos must
-      // not fan out into dozens of range requests the instant the grid paints
-      // (that plus large cloud files is what froze the app).
-      v.muted = true; v.preload = 'none';
-      v.dataset.src = item.url;
-      lazyMediaObserver.observe(v);
-      card.appendChild(v);
       const badge = document.createElement('span');
       badge.className = 'media-card-badge';
       badge.textContent = 'VIDEO';
       card.appendChild(badge);
-    } else {
-      const img = document.createElement('img');
-      img.loading = 'lazy';
-      img.decoding = 'async';
-      img.dataset.src = item.url;
-      lazyMediaObserver.observe(img);
-      card.appendChild(img);
     }
     // A "Recently Used" entry is a denormalized snapshot, not a live
     // listing — if the underlying file's been moved/deleted since, the
@@ -3600,6 +4614,7 @@
     // The bin has no watcher pushing change events (only smart folders do,
     // since only those are real external directories) — refresh directly.
     if (!activeMediaFolderId) renderMediaGrid();
+    refreshMediaBinIfVisible();
   }
 
   // ── Transport bar (mute/play/volume/seek) — remote-controls whatever the
@@ -3623,8 +4638,15 @@
   }
 
   // Called from app.js's WS switch (see window.KairoService.onMediaStatus)
-  // whenever the display reports a timeupdate/play/pause/loadedmetadata.
-  function onMediaStatus({ currentTime, duration, paused }) {
+  // whenever the display reports a timeupdate/play/pause/loadedmetadata —
+  // or, now, whenever the media layer's content changes at all (see
+  // display.html's renderMediaStage). `kind` says what's actually there:
+  // once it's anything but 'video' (cleared, or overwritten by a scene's
+  // own image — see renderTimerScene, which shares this same layer), the
+  // transport bar has nothing left to control and must hide instead of
+  // sitting there with a seek bar frozen at 0:00/0:00 looking broken.
+  function onMediaStatus({ currentTime, duration, paused, kind }) {
+    if (kind && kind !== 'video') { setMediaTransportVisible(false); return; }
     setMediaTransportVisible(true);
     const seek = document.getElementById('media-seek');
     const time = document.getElementById('media-time');
@@ -3639,11 +4661,13 @@
       : '<rect x="5" y="4" width="5" height="16"/><rect x="14" y="4" width="5" height="16"/>';
   }
 
-  // Folder contents changed on disk (fs.watch) — refresh only if it's the
-  // folder currently open, matching "the folder stays dynamic" without
-  // re-fetching views the operator isn't even looking at.
+  // Folder contents changed on disk (fs.watch) — refresh the Media tab grid
+  // if it's the folder currently open, and the Media Bin unconditionally
+  // (it aggregates every folder, so any folder's change is relevant to it)
+  // whenever it's visible.
   function onMediaFolderChanged(folderId) {
     if (activeMediaFolderId === folderId) renderMediaGrid();
+    refreshMediaBinIfVisible();
   }
 
   // ── Timer ──────────────────────────────────────────────────────────────
@@ -3702,6 +4726,25 @@
     });
   }
 
+  // Persists a timer item's scenes (its slide storyboard — see
+  // segments.js) — called from app.js whenever a slide's layers, duration,
+  // name, order, or count changes. Also refreshes the Timer grid's
+  // thumbnail and pushes a live update if this segment happens to be the
+  // one currently running, same "don't make the operator stop/restart to
+  // see it" rule everything else in Full-scale edit follows.
+  // `resend: false` — writeItemSlideStyleFromSynthetic's scene branch (app.js)
+  // saves via this same function but is itself immediately followed by
+  // scheduleItemStyleAutosave's own resendLiveForSlideStyleEdit call; without
+  // this flag a live-scene layer edit fired sendTimerSegment twice (150ms
+  // apart), visibly flashing the output back to scene 0 an extra time.
+  function saveTimerScenes(item, opts) {
+    fetchWithTimeout(`${SERVER}/api/segments/${item.id}`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ scenes: item.scenes }),
+    }).catch(() => {});
+    renderTimerGrid();
+    if (!opts || opts.resend !== false) setTimeout(() => resendLiveTimer(), 150);
+  }
+
   // Adapts a fetched segment into the shape openItemStyleEditor/slidesFor/
   // themeForItem expect of a real item ({id, type, themeId, slideStyles,
   // title}) — a LIVE reference into segmentList, not a copy, so Full-scale
@@ -3741,7 +4784,7 @@
     const short = msg.length > 22 ? msg.slice(0, 21) + '…' : msg;
     readoutEl.textContent = short;
     readoutEl.title = msg;
-    readoutEl.style.color = '#ff5c5c';
+    readoutEl.style.color = '#e8404a';
     setTimeout(() => {
       if (readoutEl.textContent === short) { readoutEl.textContent = prev; readoutEl.removeAttribute('title'); readoutEl.style.color = ''; }
     }, 2500);
@@ -3802,22 +4845,39 @@
   // broadcast (display.html's handleActionBadge writes into
   // [data-binding="timer"], which lives in that layer).
   async function sendTimerSegment(seg) {
-    const base = themeForItem(seg);
-    if (!base) return;
-    // Fold this segment's warning / overtime colour choices onto the timer
-    // layer so the output recolours through them as the countdown runs down.
-    const look = JSON.parse(JSON.stringify(base));
-    const tl = (look.layers || []).find(l => l.binding === 'timer');
     const p = seg.trigger?.params || {};
-    if (tl) {
-      if (p.warnColor) tl.warnColor = p.warnColor;
-      if (p.overtimeColor) tl.overtimeColor = p.overtimeColor;
+    // Fold this segment's warning/overtime colour choices onto every
+    // Countdown-bound text layer so the output recolours through them as
+    // the countdown runs down — every scene's own timer layer, not just
+    // the single-theme case's one.
+    const foldWarnColors = (layers) => {
+      const tl = (layers || []).find(l => l.binding === 'timer');
+      if (tl) {
+        if (p.warnColor) tl.warnColor = p.warnColor;
+        if (p.overtimeColor) tl.overtimeColor = p.overtimeColor;
+      }
+    };
+    // Scenes (a storyboard — see segments.js) take over entirely when
+    // present; themeId/slideStyles stay exactly as they always were for
+    // the plain single-theme case, which is still how most segments work.
+    const scenes = (seg.scenes && seg.scenes.length)
+      ? JSON.parse(JSON.stringify(seg.scenes))
+      : null;
+    let look = null;
+    if (scenes) {
+      scenes.forEach(sc => foldWarnColors(sc.layers));
+    } else {
+      const base = themeForItem(seg);
+      if (!base) return;
+      look = JSON.parse(JSON.stringify(base));
+      foldWarnColors(look.layers);
     }
     try {
       await fetchWithTimeout(`${SERVER}/api/service/send-timer`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           look,
+          scenes,
           style: seg.slideStyles?.[0] || {},
           label: seg.name || 'Timer',
           timerText: '0:00',
@@ -3827,6 +4887,12 @@
       if (typeof toast === 'function') toast('Could not send timer to output: ' + err.message, 'error');
     }
   }
+
+  // resolveFlexibleTime — "Ends at" used to require strict 24-hour HH:MM;
+  // see src/layer_geometry.js for the shared, relaxed parser (loaded via
+  // index.html before this script; resolved via normal scope lookup out
+  // of this file's enclosing IIFE). Was a byte-identical copy-paste shared
+  // with app.js's own Quick-edit popover.
 
   // Set (or change) a segment's end time — the only control that used to
   // live directly on the card face and now lives behind right-click /
@@ -3903,17 +4969,24 @@
             return { mode: 'duration', durationSec: n * 60 };
           };
         } else {
-          inp.placeholder = 'HH:MM';
-          inp.maxLength = 5;
+          inp.placeholder = 'HH:MM or H:MM AM/PM';
+          inp.maxLength = 8;
           inp.value = params.endAtTime || '';
           inp.addEventListener('input', () => {
-            const d = inp.value.replace(/\D/g, '').slice(0, 4);
-            inp.value = d.length > 2 ? `${d.slice(0, 2)}:${d.slice(2)}` : d;
+            // Only auto-format (digits-only, auto-insert the colon) while
+            // it's STILL plain digits — the moment a space or an am/pm
+            // letter shows up, leave the rest of what's typed alone rather
+            // than fight a digit-only formatter that has no idea what to
+            // do with letters.
+            if (/^[0-9:]*$/.test(inp.value)) {
+              const d = inp.value.replace(/\D/g, '').slice(0, 4);
+              inp.value = d.length > 2 ? `${d.slice(0, 2)}:${d.slice(2)}` : d;
+            }
           });
           readParams = () => {
-            const v = inp.value.trim();
-            if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(v)) { showErr('Enter a valid time as HH:MM (24-hour), e.g. 19:30'); return null; }
-            return { mode: 'endAt', endAtTime: v };
+            const resolved = resolveFlexibleTime(inp.value);
+            if (!resolved) { showErr('Enter a valid time, e.g. 19:30 or 7:30 PM'); return null; }
+            return { mode: 'endAt', endAtTime: resolved };
           };
         }
         fieldWrap.appendChild(inp);
@@ -3989,6 +5062,20 @@
     preview.className = 'timer-card-preview' + (seg.status !== 'live' ? ' is-pending' : '');
     preview.id = `timer-preview-${seg.id}`;
     preview.title = (seg.status === 'live' ? 'Double-click to stop' : 'Double-click to start') + ' · right-click for more';
+
+    // The card used to be a plain black box regardless of what theme/
+    // background media the segment actually carries — same idea as
+    // Slides' own slide thumbnails (paintLookLayers), just painted behind
+    // the status/readout/label overlays below instead of standing alone.
+    const bg = document.createElement('div');
+    bg.className = 'timer-card-bg';
+    preview.appendChild(bg);
+    // Scenes (a storyboard, see segments.js) replace the single-theme case
+    // entirely — the thumbnail shows scene 0's own frame instead of
+    // whatever themeForItem would otherwise fall back to (there's no real
+    // themeId to resolve once a segment has scenes).
+    const theme = (seg.scenes && seg.scenes.length) ? { layers: seg.scenes[0].layers || [] } : themeForItem(seg);
+    if (theme) paintLookLayers(bg, theme, seg.slideStyles?.[0] || {}, { timerText: '' });
 
     const status = document.createElement('span');
     status.className = 'timer-card-status' + (seg.status === 'live' ? ' is-live' : '');
@@ -4136,7 +5223,7 @@
   // just the live card's readout in place rather than re-fetching and
   // re-rendering the whole grid every second.
   function onTimerAction(msg) {
-    const { remainingMs, cleared } = msg.payload || {};
+    const { remainingMs, cleared, totalMs } = msg.payload || {};
 
     // Tick the Monitoring panel's timer layer regardless of which view the
     // operator is on — segmentList is only loaded when the Timer view has
@@ -4149,9 +5236,51 @@
         el.classList.toggle('is-overtime', ot);
         el.classList.toggle('is-warning', wn);
         const base = el.dataset.baseColor;
-        if (base) el.style.color = ot ? (el.dataset.overtimeColor || '#ff5c5c')
-          : wn ? (el.dataset.warnColor || '#ffcf4d') : base;
+        if (base) el.style.color = ot ? (el.dataset.overtimeColor || '#e8404a')
+          : wn ? (el.dataset.warnColor || '#e8a64a') : base;
       });
+      // Individual hour/minute/second parts — same idea as display.html's
+      // timeParts, mirrored here so this preview keeps pace with the real
+      // output instead of sitting frozen on its initial "00" placeholder.
+      const absSec = Math.max(0, Math.ceil(Math.abs(remainingMs) / 1000));
+      const parts = {
+        h: String(Math.floor(absSec / 3600)).padStart(2, '0'),
+        m: String(Math.floor((absSec % 3600) / 60)).padStart(2, '0'),
+        s: String(absSec % 60).padStart(2, '0'),
+      };
+      ['h', 'm', 's'].forEach(k => {
+        document.querySelectorAll(`#slide-preview-timer [data-binding="timer-${k}"]`).forEach(el => {
+          el.textContent = parts[k];
+          el.classList.toggle('is-overtime', ot);
+          el.classList.toggle('is-warning', wn);
+          const base = el.dataset.baseColor;
+          if (base) el.style.color = ot ? (el.dataset.overtimeColor || '#e8404a')
+            : wn ? (el.dataset.warnColor || '#e8a64a') : base;
+        });
+      });
+      // "{timer}" inline-copy substitution — same idea as display.html's
+      // own [data-timer-template] tick loop, so the operator's own preview
+      // shows the live sentence too, not just the real output.
+      document.querySelectorAll('#slide-preview-timer [data-timer-template]').forEach(el => {
+        el.textContent = el.dataset.timerTemplate.replace('{timer}', f);
+      });
+      // Scene switch — see previewTimerScenes' own comment above. Runs
+      // even past zero (no !overtime guard, unlike the real output's own
+      // whole-countdown Image Cycle spacing) since a segment stays live
+      // and counting up in overtime rather than ending outright, and the
+      // last scene should still be the one showing throughout that.
+      if (previewTimerScenes && previewTimerScenes.length && typeof totalMs === 'number' && totalMs > 0) {
+        const elapsed = Math.max(0, totalMs - remainingMs);
+        const { index } = previewActiveSceneForElapsed(elapsed);
+        if (index !== previewActiveSceneIndex) {
+          previewActiveSceneIndex = index;
+          const host = document.getElementById('slide-preview-timer');
+          const scene = previewTimerScenes[index];
+          if (host && scene) {
+            paintLookLayers(host, { layers: scene.layers || [] }, {}, { timerText: f });
+          }
+        }
+      }
     } else {
       onTimerSlide({ clear: true });
     }
@@ -4187,6 +5316,28 @@
     if (readoutEl) readoutEl.textContent = (overtime ? '+' : '') + formatTime(Math.abs(remainingMs) / 1000);
   }
 
+  // Scenes (segment.scenes — a storyboard, see segments.js) live-switch in
+  // this preview too, not just the real output (display.html) — a scene
+  // change is a completely different slide, not a minor background
+  // variation, so the operator needs to actually see the show progress in
+  // their own monitor to know it's working, not just trust that it's
+  // happening somewhere else. Mirrors display.html's timerScenes/
+  // activeSceneIndex/activeSceneForElapsed exactly.
+  let previewTimerScenes = null;
+  let previewActiveSceneIndex = -1;
+  function previewActiveSceneForElapsed(elapsedMs) {
+    if (!previewTimerScenes || !previewTimerScenes.length) return { index: 0, sceneElapsedMs: elapsedMs };
+    let cum = 0;
+    for (let i = 0; i < previewTimerScenes.length; i++) {
+      const durMs = Math.max(0, Number(previewTimerScenes[i].durationSec) || 0) * 1000;
+      if (i === previewTimerScenes.length - 1 || elapsedMs < cum + durMs) {
+        return { index: i, sceneElapsedMs: Math.max(0, elapsedMs - cum) };
+      }
+      cum += durMs;
+    }
+    return { index: previewTimerScenes.length - 1, sceneElapsedMs: 0 };
+  }
+
   // A segment went live (or was cleared) — render its full theme into the
   // Monitoring panel's timer layer, exactly as the real output does.
   function onTimerSlide(msg) {
@@ -4195,7 +5346,12 @@
     const plain = document.querySelector('#slide-preview .live-screen-inner');
     const themed = document.getElementById('slide-preview-themed');
     const media = document.getElementById('slide-preview-media');
-    if (msg.clear || !msg.look) {
+    previewTimerScenes = msg.scenes && msg.scenes.length ? msg.scenes : null;
+    previewActiveSceneIndex = 0;
+    const look = msg.look || (msg.scenes && msg.scenes[0] ? { layers: msg.scenes[0].layers || [] } : null);
+    if (msg.clear || !look) {
+      previewTimerScenes = null;
+      previewActiveSceneIndex = -1;
       host.innerHTML = '';
       host.classList.add('hidden');
       // Bring back whatever the slide layer was showing under the timer.
@@ -4209,7 +5365,7 @@
     // A themed timer with a solid background reads as "on screen" — don't
     // let the "Nothing on display" placeholder show through beneath it.
     plain?.classList.add('hidden');
-    paintLookLayers(host, msg.look, msg.style || {}, {
+    paintLookLayers(host, look, msg.style || {}, {
       verseText: '', referenceText: '', translatedText: '', timerText: msg.timerText || '0:00',
     });
   }
@@ -4308,11 +5464,23 @@
     }
   }
 
+  // Reads the OS clipboard directly — window.__TAURI__.clipboardManager
+  // (tauri-plugin-clipboard-manager, see its own Cargo.toml/lib.rs comment)
+  // when running as the real app, since a Tauri webview never grants the
+  // plain web Clipboard API used below without it; navigator.clipboard is
+  // kept only as a fallback for the rare case this runs outside Tauri.
+  async function readClipboardText() {
+    if (window.__TAURI__?.clipboardManager?.readText) {
+      return await window.__TAURI__.clipboardManager.readText();
+    }
+    if (navigator.clipboard?.readText) return await navigator.clipboard.readText();
+    throw new Error('clipboard unavailable');
+  }
+
   async function quickImportClipboard(destination = 'playlist') {
     try {
-      if (!navigator.clipboard?.readText) throw new Error('clipboard unavailable');
-      const text = await navigator.clipboard.readText();
-      if (!text.trim()) throw new Error('Clipboard is empty');
+      const text = await readClipboardText();
+      if (!text || !text.trim()) throw new Error('Clipboard is empty');
       const d = await importTextViaServer(text);
       // Routed through the same beginImportResult every other import path
       // uses (not a direct openAddConfirm call) — keeps ProPresenter-style
@@ -4452,12 +5620,80 @@
 
   // ── Wiring ──────────────────────────────────────────────────────────────
   let inited = false;
+  // Output transition (Fade/Slide/Cut + speed) — display-level, not per-
+  // theme (see display.html's outputAnimation and its own comment there),
+  // so this quick picker lives right under the Monitoring preview instead
+  // of requiring a trip into Theme Studio to change how the WHOLE output
+  // transitions. Persisted through the existing /api/settings store; the
+  // POST there broadcasts live to display.html, so a change here takes
+  // effect on the real output immediately, no reload.
+  function initOutputTransitionPicker() {
+    const picker = document.getElementById('rs-anim-picker');
+    const speedInput = document.getElementById('rs-anim-speed');
+    if (!picker || !speedInput) return;
+
+    function setActive(anim) {
+      picker.querySelectorAll('.ts-align-btn').forEach(b => b.classList.toggle('active', b.dataset.anim === anim));
+      speedInput.classList.toggle('hidden', anim === 'cut');
+    }
+
+    // If the operator touches the picker before this initial fetch
+    // resolves, its own POST already applied the real change — the fetch
+    // landing after that would otherwise visually revert the UI back to
+    // the stale value it fetched at load, even though the persisted
+    // setting itself is still correct.
+    let userTouched = false;
+    fetchWithTimeout(`${SERVER}/api/settings`).then(r => r.json()).then(s => {
+      if (userTouched) return;
+      setActive(s.outputAnimation || 'fade');
+      if (typeof s.outputAnimationSpeed === 'number' && s.outputAnimationSpeed > 0) speedInput.value = s.outputAnimationSpeed;
+    }).catch(() => { if (!userTouched) setActive('fade'); });
+
+    picker.addEventListener('click', (e) => {
+      const btn = e.target.closest('.ts-align-btn');
+      if (!btn) return;
+      userTouched = true;
+      setActive(btn.dataset.anim);
+      fetchWithTimeout(`${SERVER}/api/settings`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ outputAnimation: btn.dataset.anim }),
+      }).catch(() => {});
+    });
+
+    // Debounced — 'input' fires continuously while dragging, and each
+    // change here is a real settings-file write plus a broadcast, not
+    // just a local style update.
+    let speedTimer = null;
+    speedInput.addEventListener('input', () => {
+      userTouched = true;
+      clearTimeout(speedTimer);
+      const value = parseFloat(speedInput.value);
+      speedTimer = setTimeout(() => {
+        fetchWithTimeout(`${SERVER}/api/settings`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ outputAnimationSpeed: value }),
+        }).catch(() => {});
+      }, 200);
+    });
+  }
+
   function init() {
     if (inited) return;
     inited = true;
+    initOutputTransitionPicker();
 
     loadAll();
     loadInstalledMtLangs(); // fire-and-forget — warms effectiveTranslateTo's single-language fallback
+
+    // Bible is the default landing view and nothing ever calls
+    // showCenterView('bible') to arrive there (it's just already showing in
+    // the static HTML) — so without this, updateMediaBinVisibility never
+    // runs until the operator happens to switch tabs at least once, and the
+    // Media Bin toggle button's very first click flips mediaBinUserHidden
+    // from its already-correct default straight into "hidden", with no
+    // visible change (it started hidden in the HTML either way) to explain
+    // why nothing happened. Sync the real DOM state up front instead.
+    updateMediaBinVisibility();
 
     document.getElementById('playlist-switcher')?.addEventListener('click', (e) => openPlaylistSwitcherPopover(e.currentTarget));
     // Cross-playlist drag: dragging a sidebar/stack item onto the switcher
@@ -4609,7 +5845,9 @@
           target.item.src = src; saveService(); renderFullEdit(); renderStack();
         } else if (target && target.blockIndex != null) {
           const block = target.item.blocks[target.blockIndex];
-          if (block) { block.image = src; saveService(); renderFullEdit(); renderStack(); }
+          // imageFileName: the announcement-follower's fallback trigger
+          // phrase when no custom label is set — see imageTriggerPhrase.
+          if (block) { block.image = src; block.imageFileName = f.name; saveService(); renderFullEdit(); renderStack(); }
         } else {
           openAddConfirm({ id: uid('img'), type: 'image', title: f.name.replace(/\.[^.]+$/, ''), src }, {});
           break; // multi-select: confirm the first, add the rest after
@@ -4785,13 +6023,18 @@
   // with the same theme a sent slide actually carries, instead of plain text.
   window.KairoService = {
     get service() { return service; },
-    slidesFor, sendSlide, focusInStack, openFullEdit, closeStack, closeFullEdit,
+    slidesFor, sendSlide, cycleSectionLabel, focusInStack, openFullEdit, closeStack, closeFullEdit,
     effectiveTranslateTo, awaitTranslatedText,
     paintLookLayers, renderLookThumbnail, saveService, openContextMenu, openThemePopover, themeForItem,
-    showMediaLibrary, onMediaStatus, onMediaFolderChanged,
-    showTimerLibrary, onTimerAction, onClockAction, getTimerItem, updateSegmentParams,
+    showMediaLibrary, onMediaStatus, onMediaFolderChanged, setMediaTransportVisible,
+    showTimerLibrary, onTimerAction, onClockAction, getTimerItem, updateSegmentParams, saveTimerScenes,
     onTranscript, setAutoFollow, get autoFollow() { return autoFollow; },
-    resendLiveForThemeEdit, resendLiveForSlideStyleEdit, onTimerSlide,
+    resendLiveForThemeEdit, resendLiveForSlideStyleEdit, onTimerSlide, refreshThumbnails, clearLive,
+    // Lets Full-scale edit's canvas (app.js's beginInlineTextEdit) double-
+    // click-edit a verse-bound layer's actual words — a song lyric or a
+    // plain slide's own text — the same write-back the Flow view's
+    // contentEditable already uses, not a second, separate mechanism.
+    commitSlideText,
     // Slide multi-select/duplicate/copy-paste — shared state lives here,
     // Full-scale edit's renderItemSlidesList (app.js) reaches in through
     // these instead of touching selectedSlideIndices directly cross-file.
@@ -4800,5 +6043,9 @@
     selectAllSlidesFor, bulkDeleteSlides,
     get slideClipboard() { return slideClipboard; },
     get selectedSlideIndices() { return selectedSlideIndices; },
+    // File > Import's chooser (initNativeMenuBridge, app.js) reaches into
+    // this same "Paste from clipboard" flow the Slides/Songs add-menus
+    // already use, rather than a second implementation of clipboard import.
+    quickImportClipboard,
   };
 })();
