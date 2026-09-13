@@ -844,6 +844,19 @@ function showInViewer(verses, method, topScore, correctedFrom = null, look = nul
   // playlist". The live preview above still updates either way.
   if (method === 'service') return;
 
+  // A real scripture detection just painted over whatever was on screen —
+  // including a live song/slide item, if content_lookup.js's own auto-swap
+  // had one up. service.js's liveSlideKey never learns about this on its
+  // own (this whole path is scripture-only, service.js has no listener for
+  // 'detection' messages at all), so it kept believing that item was still
+  // live: the Stack/Sidebar showed a stale "live" badge on it, AND
+  // content_lookup's own candidate pool kept excluding it from future
+  // matches — a preacher returning to the SAME song after a scripture
+  // interlude could never get it auto-detected again. Release it the same
+  // way the manual "Clear Slide" button already does (clearLive is a no-op
+  // if nothing was live, safe to call unconditionally here).
+  window.KairoService?.clearLive?.();
+
   // Auto-correction: strip the mis-cited row so it doesn't linger above the fix.
   if (correctedFrom) {
     const stale = currentDisplayCard?.querySelector(`[data-ref="${CSS.escape(correctedFrom)}"]`);
