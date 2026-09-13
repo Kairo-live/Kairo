@@ -21,13 +21,40 @@
   --text-3:      #6e6e6e;
   --text-4:      #333333;
 
+  /* Danger/destructive/error ONLY — delete buttons, "frozen"/overtime
+     status, error toasts. Deliberately kept a genuine red and NOT moved to
+     the new brand color below — the two used to be forced together just
+     because they happened to share a hex value, which meant there was no
+     way for "this failed" to look different from "this is the live brand
+     color", and no room for the brand to ever move without also recoloring
+     every error state in the app. */
   --red:         #e8404a;
   --red-dim:     rgba(232,64,74,0.15);
-  --green:       #e8404a;
-  --green-dim:   rgba(232,64,74,0.14);
-  /* Accent — warm tawny gold to harmonize with the red brand
-     instead of the bright cool blue that clashed in the Settings modal.
-     Variable names kept as --blue* for cross-file compat. */
+  /* Success/confirmed/connected — .test-result.success, .bs-dot.connected,
+     broadcasting indicators, "direct citation confirmed" tags, a toggle's
+     "on" state. This used to be hardcoded to the EXACT SAME hex as --red
+     above (copy-paste leftover, never actually given a green value) — every
+     one of those ~28 "this succeeded" usages was silently rendering in
+     alarm-red, visually identical to real error states. */
+  --green:       #22c55e;
+  --green-dim:   rgba(34,197,94,0.15);
+  /* Brand / primary accent — wordmark, active toolbar/tab state, Start
+     Listening, live/broadcasting indicators, on-air pills. Split out from
+     --red (see its own comment) specifically so the brand identity can be
+     a color with more "punch" (warm orange-to-red) without also having to
+     mean "something is wrong" every time it appears. --brand-gradient is
+     for surfaces that can render an actual two-stop gradient (buttons,
+     badges, the wordmark's own background) — --brand alone is the solid
+     fallback for borders/text/icons where a gradient fill doesn't apply. */
+  --brand:          #F5301A;
+  --brand-dim:      rgba(245,48,26,0.15);
+  --brand-gradient: linear-gradient(135deg, #FF9130, #F5301A);
+  /* Secondary accent — primary CTA buttons (.modal-btn.primary), input
+     focus rings, "sent/confirmed" pulse. Kept as-is: teal sits
+     near-complementary to the new orange-leaning brand color on the color
+     wheel, which is exactly why it already reads well as a second accent
+     rather than clashing with it. Variable names kept as --blue* for
+     cross-file compat, even though the actual hex is teal, not blue. */
   --blue:        #4db6ac;
   --blue-dim:    rgba(77,182,172,0.15);
   --blue-slide:  #3a9a8f;
@@ -115,7 +142,7 @@
   color: var(--text);
   line-height: 1;
 }
-.bootstrap-wordmark span { color: var(--red); }
+.bootstrap-wordmark span { color: var(--brand); }
 .bootstrap-tagline {
   font-size: 10px;
   letter-spacing: 0.36em;
@@ -135,7 +162,7 @@
   height: 100%;
   width: 30%;
   border-radius: 3px;
-  background: var(--red);
+  background: var(--brand);
   transition: width 400ms ease;
 }
 /* Indeterminate sweep when width is 0 (unknown progress). */
@@ -314,7 +341,7 @@ html, body {
   font-family: var(--font-head);
   font-size: 15px;
   font-weight: 800;
-  color: var(--red);
+  color: var(--brand);
   letter-spacing: 0.1em;
   text-transform: uppercase;
 }
@@ -394,7 +421,7 @@ html, body {
 }
 .tb-group .tb-studio-btn { background: transparent; border-color: transparent; }
 .tb-group .tb-studio-btn:hover  { background: var(--bg-hover); }
-.tb-group .tb-studio-btn.active { background: var(--red-dim); border-color: var(--red-dim); }
+.tb-group .tb-studio-btn.active { background: var(--brand-dim); border-color: var(--brand-dim); }
 
 .tb-divider {
   width: 1px;
@@ -431,7 +458,7 @@ html, body {
 }
 
 .tb-icon-btn:hover { background: var(--bg-hover); color: var(--text); }
-.tb-icon-btn.active { color: var(--red); background: var(--red-dim); }
+.tb-icon-btn.active { color: var(--brand); background: var(--brand-dim); }
 
 /* Theme Studio button — icon + label pill like Pewbeam's Content Studio */
 .tb-studio-btn {
@@ -452,7 +479,7 @@ html, body {
   white-space: nowrap;
 }
 .tb-studio-btn:hover  { background: var(--bg-card); color: var(--text); border-color: rgba(255,255,255,0.18); }
-.tb-studio-btn.active { color: var(--red); border-color: var(--red-dim); background: var(--red-dim); }
+.tb-studio-btn.active { color: var(--brand); border-color: var(--brand-dim); background: var(--brand-dim); }
 /* Icon-only variant — Settings/Export used to always carry a text label
    alongside Bible/Slides/Timer/Songs/Media/Theme Studio/Export/Media Bin,
    which read as too many labeled buttons crammed into one bar; the name is
@@ -490,7 +517,7 @@ html, body {
   background: transparent;
   border: 1px solid rgba(232,64,74,0.55);
   border-radius: 999px;
-  color: var(--red);
+  color: var(--brand);
   font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.06em;
@@ -502,15 +529,15 @@ html, body {
 }
 
 .tb-listen-btn:hover  {
-  background: var(--red-dim);
-  border-color: var(--red);
-  color: var(--red);
+  background: var(--brand-dim);
+  border-color: var(--brand);
+  color: var(--brand);
 }
 .tb-listen-btn:active { transform: scale(0.97); }
 
 .tb-listen-btn.active {
-  background: var(--red);
-  border-color: var(--red);
+  background: var(--brand);
+  border-color: var(--brand);
   color: white;
   box-shadow: 0 1px 2px rgba(0,0,0,0.25), inset 0 1px 0 rgba(255,255,255,0.10);
   animation: pulse-red 2s ease-in-out infinite;
@@ -616,7 +643,7 @@ html, body {
 }
 
 .transcript-entry.live {
-  border-left: 2px solid var(--red);
+  border-left: 2px solid var(--brand);
   padding-left: 8px;
   margin-left: -2px;
 }
@@ -638,7 +665,7 @@ html, body {
   user-select: text;
 }
 
-.transcript-entry.live .transcript-time { color: var(--red); }
+.transcript-entry.live .transcript-time { color: var(--brand); }
 .transcript-entry.live .transcript-text { color: var(--text); }
 
 /* ── Detections body ── */
@@ -1121,7 +1148,7 @@ html, body {
   letter-spacing: 0.15em;
   text-transform: uppercase;
   color: white;
-  background: var(--red);
+  background: var(--brand);
   padding: 3px 8px;
   border-radius: 20px;
   z-index: 2;
@@ -1453,7 +1480,7 @@ html, body {
 }
 .settings-nav-item svg { width: 16px; height: 16px; flex: none; }
 .settings-nav-item:hover { background: var(--bg-hover); color: var(--text); }
-.settings-nav-item.active { background: var(--red-dim); color: var(--red); }
+.settings-nav-item.active { background: var(--brand-dim); color: var(--brand); }
 
 .settings-panes {
   overflow-y: auto;
@@ -1738,7 +1765,7 @@ html, body {
 }
 .lfh-dot.tracking { background: #35c46a; animation: lfh-pulse 1.6s ease-out infinite; color: #35c46a; }
 .lfh-dot.armed    { background: #e8a64a; color: #e8a64a; }
-.lfh-dot.frozen   { background: #e8404a; color: #e8404a; }
+.lfh-dot.frozen   { background: var(--red); color: var(--red); }
 .lfh-dot.idle     { background: var(--text-3); }
 @keyframes lfh-pulse { 0% { box-shadow: 0 0 0 0 currentColor; } 70% { box-shadow: 0 0 0 5px rgba(53,196,106,0); } 100% { box-shadow: 0 0 0 0 rgba(53,196,106,0); } }
 .lfh-info { display: flex; align-items: center; gap: 6px; color: var(--text-2, #aaa); }
@@ -1858,7 +1885,7 @@ html, body {
   transition: var(--trans);
 }
 .svc-slide:hover { border-color: var(--blue); }
-.svc-slide.live { border-color: var(--red); box-shadow: 0 0 0 1px var(--red); }
+.svc-slide.live { border-color: var(--brand); box-shadow: 0 0 0 1px var(--brand); }
 .svc-slide.selected { outline: 2px solid var(--selected-border); outline-offset: -2px; }
 
 /* Bare "N." fallback (no real section set) — a compact bottom-left pill,
@@ -1963,7 +1990,7 @@ html, body {
 .svc-live-tag {
   position: absolute;
   top: 6px; right: 6px;
-  background: var(--red);
+  background: var(--brand);
   color: #fff;
   font-size: 9px; font-weight: 800;
   letter-spacing: 0.1em;
@@ -2200,7 +2227,7 @@ html, body {
   border-radius: var(--radius-sm);
   background: var(--bg-card);
 }
-.svc-flow-row.live { border-color: var(--red); }
+.svc-flow-row.live { border-color: var(--brand); }
 .svc-flow-row.selected { outline: 2px solid var(--selected-border); outline-offset: -2px; }
 .svc-flow-grip { color: var(--text-3); flex: none; cursor: grab; padding-top: 6px; }
 .svc-flow-grip.is-disabled { cursor: default; opacity: 0.35; }
@@ -2558,7 +2585,7 @@ select {
   font-weight: 800;
   letter-spacing: 1.2px;
   text-transform: uppercase;
-  color: var(--red);
+  color: var(--brand);
   padding-bottom: 8px;
   border-bottom: 1px solid var(--border);
   margin-bottom: 4px;
@@ -3413,7 +3440,7 @@ select {
   align-items: center;
   gap: 5px;
   padding: 3px 9px;
-  background: var(--red-dim);
+  background: var(--brand-dim);
   border: 1px solid rgba(232,64,74,0.3);
   border-radius: 20px;
   font-family: var(--font-head);
@@ -3421,13 +3448,13 @@ select {
   font-weight: 800;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  color: var(--red);
+  color: var(--brand);
 }
 
 .cs-on-air-dot {
   width: 5px; height: 5px;
   border-radius: 50%;
-  background: var(--red);
+  background: var(--brand);
   animation: dot-pulse 1.8s ease-in-out infinite;
 }
 
@@ -3865,9 +3892,9 @@ select {
    tint (blue) — never an intentional app color; pinned to --red so a
    dragged slider matches the rest of the "active" language instead of
    looking like a stray unstyled system control. */
-.media-transport #media-mute-btn.active { color: var(--red); background: var(--red-dim); border-color: var(--red); }
-.media-seek { flex: 1; accent-color: var(--red); }
-.media-volume { width: 80px; flex: none; accent-color: var(--red); }
+.media-transport #media-mute-btn.active { color: var(--brand); background: var(--brand-dim); border-color: var(--brand); }
+.media-seek { flex: 1; accent-color: var(--brand); }
+.media-volume { width: 80px; flex: none; accent-color: var(--brand); }
 .media-time {
   font-size: 10px;
   font-family: var(--mono);
@@ -3970,8 +3997,8 @@ select {
 .timer-card-preview.is-pending .timer-card-readout { color: rgba(255, 255, 255, 0.25); font-size: 13px; font-weight: 600; }
 /* Overtime/warning — matches display.html's #timer-badge treatment, so the
    operator's own card agrees with what's on the real output. */
-.timer-card-preview.is-overtime .timer-card-readout { color: #e8404a; }
-.timer-card-preview.is-overtime .timer-card-status { color: #e8404a; }
+.timer-card-preview.is-overtime .timer-card-readout { color: var(--red); }
+.timer-card-preview.is-overtime .timer-card-status { color: var(--red); }
 .timer-card-preview.is-warning .timer-card-readout { color: #e8a64a; }
 .timer-card-preview.is-warning .timer-card-status { color: #e8a64a; }
 .timer-card-label {
@@ -4199,7 +4226,7 @@ select {
   border-radius: 50%;
   cursor: pointer;
 }
-.ts-cycle-thumb-remove:hover { background: #e8404a; }
+.ts-cycle-thumb-remove:hover { background: var(--red); }
 .ts-cycle-list .svc-empty { grid-column: 1 / -1; font-size: 11.5px; padding: 10px 0; }
 
 /* Theme Studio / Full-scale edit's "Library" button — a thumbnail picker
@@ -5172,7 +5199,7 @@ select {
   transition: opacity var(--trans);
 }
 .ts-item-slide-row:hover .ts-item-slide-delete { opacity: 1; }
-.ts-item-slide-delete:hover { background: #e8404a; }
+.ts-item-slide-delete:hover { background: var(--red); }
 .ts-item-add-slide-btn {
   width: 100%;
   margin-top: 4px;
