@@ -50,15 +50,22 @@
          the operator the app. Removed once ready.
     ═══════════════════════════════════════════════════════ -->
     <div id="bootstrap-overlay">
-        <svg class="bootstrap-mark" width="72" height="72" viewBox="0 0 24 24">
+        <!-- Full brand lockup (mark + "KAIRO" serif wordmark), owner-traced in
+             Illustrator from the reference logo image. Source kept at
+             src-tauri/icons/kairo-wordmark-source.svg — that raw trace also
+             includes a white card-background layer with the letterforms cut
+             out as holes (an Image Trace artifact, slightly misaligned with
+             the actual ink paths below it, which "ghosts" the O if rendered);
+             this only uses the clean ink paths, not that background layer. -->
+        <svg class="bootstrap-mark" width="340" height="71.6" viewBox="68.65 139.42 403.38 84.89">
             <defs>
                 <linearGradient id="kairoBootMarkGrad" x1="0%" y1="0%" x2="100%" y2="100%">
                     <stop offset="0%" stop-color="#FF9130"/>
                     <stop offset="100%" stop-color="#F5301A"/>
                 </linearGradient>
             </defs>
-            <rect width="24" height="24" rx="4.22" ry="4.22" fill="url(#kairoBootMarkGrad)"/>
-            <g fill="#ffffff" transform="translate(12,11.28) scale(0.209499) translate(-119.410,-174.950)">
+            <!-- Book/rays icon -->
+            <g fill="url(#kairoBootMarkGrad)">
                 <path d="M146.63,166.72c-12.18,2.44-21.27,10.16-26.37,20.98-1.79-11.05,2.74-21.11,10.68-28.07,4.11-3.37,8.47-5.84,13.91-7.69,1.69,4.76,2.15,9.38,1.78,14.78Z"/>
                 <path d="M128.61,155.11c-9.5,7.8-14.2,18.25-13.89,30.52-10.31-12.38-5.79-31.33,5.27-42.2,3.46,3.77,6.06,7.27,8.61,11.68Z"/>
                 <path d="M155.76,185.17c-11.36-3.52-22.73-1.13-31.28,7.41,1.45-7.24,6.15-12.66,11.94-16.5,7.78-4.65,16.6-6.39,25.89-4.67-.99,4.96-3.24,9.28-6.56,13.76Z"/>
@@ -67,8 +74,20 @@
                 <path d="M116.87,206.44c-10.17-8.27-20-7.27-32.12-4.84l-12.08.07,5.62-9.96c6,.09,11.82-.19,17.75.24,9.05.65,17.45,5.88,20.83,14.5Z"/>
                 <path d="M96.73,186.2l-12.43.12c-4.01-4.95-6.87-10.06-7.81-16.65,4.05-.83,7.96-1,11.92-.73.95,6.74,3.64,11.66,8.32,17.26Z"/>
             </g>
+            <!-- Full "KAIRO" wordmark, one solid color (white) — deliberately
+                 NOT split-colored per letter. An earlier version colored "RO"
+                 with the brand gradient like the app's old plain-text
+                 wordmark did, but on this serif lockup it read as two
+                 separate words instead of one name. The icon alone carries
+                 the brand color; the word itself stays one consistent ink. -->
+            <g fill="#ffffff">
+                <rect x="183.58" y="145.38" width="9.49" height="73.86"/>
+                <path d="M268.63,152.68l-22.17,57.63c9.66-10.25,22.7-14.48,35.76-8.65-17-1.07-29.83,2.42-37.46,17.58h-14.96s-24.17-31.48-24.17-31.48c-3.05-2.37-6.35-1.88-10.44-1.35l35.95-40.91,4.19.06-30.1,34.25c2.39-.43,5.11,0,6.76,2.14l27.82,36.35,28.09-72.94h7.71s28.4,73.81,28.4,73.81l-9.72.04-25.64-66.54Z"/>
+                <rect x="309.94" y="145.38" width="9.49" height="73.86"/>
+                <path d="M348.3,197.05l13.1-3.34c12.95-3.31,19.1-20.38,12.69-33.6-3.06-6.3-9.05-11.45-16.18-11.51l-16.27-.14v70.72s-9.46,0-9.46,0v-73.87s25.21.06,25.21.06c6.11.01,12.01,1.69,17.15,4.82,8.92,5.43,13.07,15.34,11.4,25.64-1.55,9.58-8.89,17.36-18.8,20.14,10.46,3.57,17.55,11.96,17.71,23.06l-9.46.15c-.12-8.06-4.07-15.38-10.99-19.38-2.93-1.69-6.16-2.03-9.49-2.27l-6.61-.49Z"/>
+                <path d="M466.8,180.71c1.89,5.09.91,9.7-.91,14.66-5.28,14.44-18.97,24.45-34.54,24.92-16.49.5-31.09-9.94-36.5-24.65-5.88-15.98-.82-33.34,12.64-43.67,10.03-7.69,22.78-9.77,35.45-5.49,10.18,3.44,19.49,12.3,23.21,23.67l1.85,7.6c.14.58-.79,2.23-1.21,2.96ZM461.49,195.28c4.65-22.54-15.98-45.39-39.14-44.76-13.4.37-23.4,10.46-23.86,23.87-.65,19.1,15.66,37.32,34.78,39.61,13.45,1.61,25.52-5.65,28.22-18.72Z"/>
+            </g>
         </svg>
-        <div class="bootstrap-wordmark">KAI<span>RO</span></div>
         <div class="bootstrap-tagline">Live Scripture Detection</div>
         <div class="bootstrap-bar"><div class="bootstrap-bar-fill" id="bootstrap-bar-fill"></div></div>
         <div class="bootstrap-status" id="bootstrap-status">Starting&hellip;</div>

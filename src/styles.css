@@ -49,15 +49,26 @@
   --brand:          #F5301A;
   --brand-dim:      rgba(245,48,26,0.15);
   --brand-gradient: linear-gradient(135deg, #FF9130, #F5301A);
-  /* Secondary accent — primary CTA buttons (.modal-btn.primary), input
-     focus rings, "sent/confirmed" pulse. Kept as-is: teal sits
-     near-complementary to the new orange-leaning brand color on the color
-     wheel, which is exactly why it already reads well as a second accent
-     rather than clashing with it. Variable names kept as --blue* for
-     cross-file compat, even though the actual hex is teal, not blue. */
-  --blue:        #4db6ac;
-  --blue-dim:    rgba(77,182,172,0.15);
-  --blue-slide:  #3a9a8f;
+  /* Secondary/interactive accent — input focus rings, hover borders, toggle
+     tracks, drag-drop indicators, primary CTA buttons (.modal-btn.primary),
+     accent-color on checkboxes. Was teal, kept "near-complementary to
+     orange" as an intentional design call earlier this session — owner
+     feedback on the running app was that it (and the app's separate mint/
+     green accents, #5fd6a8, folded into this at the same time) still read
+     as competing colors "everywhere," not as a considered second accent.
+     Went neutral instead, per the owner's own framing: orange stays the
+     ONLY color in the app, reserved for the brand mark and live/on-air
+     state; everything else interactive goes monochrome gray/white.
+     --blue is the light role (text/border/accent-color/small indicator
+     dots — things sitting directly on a dark panel, no paired light text).
+     --blue-solid (new, reuses --selected-solid below) is for the small
+     subset that fills a SOLID button/toggle-track background behind white
+     text or a white toggle knob — a light value there would wash out.
+     Variable names kept as --blue* for cross-file compat, same reasoning
+     as before, even though the hex is now neutral gray, not teal. */
+  --blue:        #d0d0d6;
+  --blue-dim:    rgba(255,255,255,0.08);
+  --blue-slide:  #57575f;
   --orange:      #f59e0b;
   --purple:      #8b5cf6;
 
@@ -134,16 +145,10 @@
   transition: opacity 450ms ease;
 }
 #bootstrap-overlay.done { opacity: 0; pointer-events: none; }
-.bootstrap-mark { margin-bottom: calc(var(--space-3) * -1); }
-.bootstrap-wordmark {
-  font-family: var(--font-head);
-  font-size: 46px;
-  font-weight: 800;
-  letter-spacing: 0.16em;
-  color: var(--text);
-  line-height: 1;
-}
-.bootstrap-wordmark span { color: var(--brand); }
+/* The full brand lockup (icon + "KAIRO" wordmark) rendered as one SVG —
+   see its own comment in index.html. Replaced the old separate icon-pill
+   + CSS-text-wordmark pairing (.bootstrap-wordmark, removed). */
+.bootstrap-mark { display: block; }
 .bootstrap-tagline {
   font-size: 10px;
   letter-spacing: 0.36em;
@@ -223,10 +228,10 @@ html, body {
    search boxes) — exactly where input.select() highlights everything on
    entering rename mode. Left unstyled, the platform's default selection
    background (light, meant for light-background pages) sat behind this
-   app's near-white text with almost no contrast. Reusing the same teal-bg/
-   dark-text pairing already used for active badges elsewhere. */
+   app's near-white text with almost no contrast. */
 ::selection {
-  /* --blue is teal/green (#4db6ac) despite the name — read as "green".
+  /* --blue was teal (#4db6ac) when this was written, since made neutral
+     gray (see its own comment) — either way it was never used here.
      --red isn't right either — it's the app's "danger/active/live" accent
      everywhere else, alarming for plain text selection. The app's own
      neutral --selected-solid (a dark gray) turned out just as wrong for a
@@ -842,13 +847,13 @@ html, body {
 .scripture-actions      { display: flex; align-items: center; gap: 5px; }
 .scripture-action-btn   { width: 26px; height: 26px; display: flex; align-items: center; justify-content: center; background: transparent; border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text-3); cursor: pointer; transition: all var(--trans); }
 .scripture-action-btn:hover { background: var(--bg-hover); color: var(--text); border-color: var(--border-md); }
-.scripture-note-btn     { margin-left: auto; padding: 4px 10px; background: var(--blue-dim); border: 1px solid rgba(77,182,172,0.25); border-radius: var(--radius-sm); color: var(--blue); font-size: 11px; font-weight: 600; cursor: pointer; transition: all var(--trans); }
-.scripture-note-btn:hover { background: var(--blue); color: white; }
+.scripture-note-btn     { margin-left: auto; padding: 4px 10px; background: var(--blue-dim); border: 1px solid rgba(255,255,255,0.25); border-radius: var(--radius-sm); color: var(--blue); font-size: 11px; font-weight: 600; cursor: pointer; transition: all var(--trans); }
+.scripture-note-btn:hover { background: var(--selected-solid); color: white; }
 
 /* Confidence badge — colour tiers for quick at-a-glance quality */
 .conf-badge      { display: inline-block; font-size: 10px; font-weight: 800; border-radius: 4px; padding: 1px 5px; margin-left: 4px; line-height: 1.4; letter-spacing: 0.04em; }
 .conf-high       { background: #3d080a; color: #fca5a5; }  /* ≥ 90% — red    */
-.conf-good       { background: #1f3632; color: #a9ddd7; }  /* 80–89% — tawny */
+.conf-good       { background: #2a2a2e; color: var(--blue); }  /* 80–89% */
 .conf-mid        { background: #3b2f08; color: #fde68a; }  /* 60–79% — amber */
 .conf-low        { background: #3b0f0f; color: #fca5a5; }  /* < 60%  — red   */
 
@@ -888,7 +893,7 @@ html, body {
 
 /* Suggestion card — blue hover accent */
 .suggestion-card { border-left: 2px solid var(--border); }
-.suggestion-card:hover { border-left-color: var(--blue); border-color: rgba(77,182,172,0.25); }
+.suggestion-card:hover { border-left-color: var(--blue); border-color: rgba(255,255,255,0.25); }
 
 /* Inner layout */
 .lvc-ref {
@@ -949,7 +954,7 @@ html, body {
 .locked-verse-card .lvc-send-btn:hover { background: var(--bg-hover); color: var(--text); }
 
 .suggestion-card .lvc-send-btn {
-  background: var(--blue);
+  background: var(--selected-solid);
   color: #fff;
 }
 .suggestion-card .lvc-send-btn:hover { opacity: 0.88; }
@@ -984,7 +989,7 @@ html, body {
   line-height: 1.4;
 }
 .conf-high  { background: rgba(61,8,10,0.8);   color: #fca5a5; border: 1px solid rgba(232,64,74,0.25); }
-.conf-good  { background: rgba(31,54,50,0.8);  color: #a9ddd7; border: 1px solid rgba(77,182,172,0.28); }
+.conf-good  { background: rgba(42,42,46,0.8);  color: var(--blue); border: 1px solid rgba(255,255,255,0.28); }
 .conf-mid   { background: rgba(59,47,8,0.8);   color: #fde68a; border: 1px solid rgba(253,230,138,0.2);  }
 .conf-low   { background: rgba(59,15,15,0.8);  color: #fca5a5; border: 1px solid rgba(252,165,165,0.2);  }
 /* Pulse — same verse re-detected, card already at top */
@@ -996,8 +1001,8 @@ html, body {
   flex-shrink: 0;
   margin-top: 8px;
   padding: 10px 12px;
-  background: rgba(77,182,172,0.04);
-  border: 1px solid rgba(77,182,172,0.12);
+  background: rgba(255,255,255,0.04);
+  border: 1px solid rgba(255,255,255,0.12);
   border-radius: var(--radius);
 }
 
@@ -1025,7 +1030,7 @@ html, body {
   text-transform: uppercase;
   color: var(--blue);
   background: var(--blue-dim);
-  border: 1px solid rgba(77,182,172,0.2);
+  border: 1px solid rgba(255,255,255,0.2);
   border-radius: 6px;
   padding: 3px 8px;
   animation: fade-up 200ms ease-out;
@@ -1035,7 +1040,7 @@ html, body {
 .range-banner { display: flex; align-items: center; gap: 8px; background: var(--bg-card); border: 1px solid var(--blue); border-radius: var(--radius); padding: 8px 12px; margin-bottom: 8px; }
 .range-label { font-size: 10px; font-weight: 700; color: var(--blue); text-transform: uppercase; letter-spacing: 0.5px; white-space: nowrap; }
 .range-next { font-size: 11px; color: var(--text-muted); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.range-next-btn { font-size: 11px; font-weight: 700; background: var(--blue); color: white; border: none; border-radius: 4px; padding: 4px 10px; cursor: pointer; white-space: nowrap; }
+.range-next-btn { font-size: 11px; font-weight: 700; background: var(--selected-solid); color: white; border: none; border-radius: 4px; padding: 4px 10px; cursor: pointer; white-space: nowrap; }
 .range-next-btn:hover { opacity: 0.85; }
 .range-clear-btn { font-size: 11px; color: var(--text-muted); background: none; border: none; cursor: pointer; padding: 2px 4px; }
 .range-clear-btn:hover { color: var(--text); }
@@ -2356,7 +2361,7 @@ html, body {
 .hymn-add {
   font-size: var(--fs-xs); font-weight: 700;
   color: var(--blue);
-  border: 1px solid rgba(77,182,172,0.35);
+  border: 1px solid rgba(255,255,255,0.35);
   border-radius: 999px;
   padding: 3px 10px;
 }
@@ -2428,7 +2433,7 @@ html, body {
 }
 .setting-input:focus {
   border-color: var(--blue);
-  box-shadow: 0 0 0 3px rgba(77,182,172,0.12);
+  box-shadow: 0 0 0 3px rgba(255,255,255,0.12);
 }
 
 /* Custom arrow for <select> */
@@ -2565,7 +2570,7 @@ select {
   cursor: pointer; transition: all var(--trans);
 }
 
-.modal-btn.primary { background: var(--blue); color: white; padding: 8px 24px; }
+.modal-btn.primary { background: var(--selected-solid); color: white; padding: 8px 24px; }
 .modal-btn.primary:hover { background: var(--blue-slide); }
 .modal-btn.secondary { background: transparent; color: var(--text-2); border: 1px solid var(--border-md); }
 .modal-btn.secondary:hover { background: var(--bg-hover); color: var(--text); }
@@ -2613,7 +2618,7 @@ select {
   transition: border-color var(--trans);
 }
 .output-card:has(input:checked) {
-  border-color: rgba(77,182,172,0.3);
+  border-color: rgba(255,255,255,0.3);
 }
 
 .output-card-header {
@@ -2743,8 +2748,8 @@ select {
 }
 
 .output-toggle input:checked + .output-toggle-track {
-  background: var(--blue);
-  border-color: var(--blue);
+  background: var(--selected-solid);
+  border-color: var(--selected-solid);
 }
 
 .output-toggle input:checked + .output-toggle-track::after {
@@ -3374,7 +3379,7 @@ select {
   width: auto; height: 34px;
   display: flex; align-items: center; justify-content: center; gap: 6px;
   padding: 0 14px;
-  background: var(--blue);
+  background: var(--selected-solid);
   border: none; border-radius: var(--radius);
   color: white; cursor: pointer; flex-shrink: 0;
   font-size: 12px; font-weight: 600; font-family: var(--font);
@@ -3388,6 +3393,10 @@ select {
 .cs-theme-btn {
   height: 34px;
   padding: 0 12px;
+  /* Row-mates (.cs-search-input, .cs-select) both use --radius (8px);
+     inherited --radius-sm (5px) from .ls-icon-btn read as a mismatched
+     corner in the same toolbar row. */
+  border-radius: var(--radius);
 }
 
 .cs-select {
@@ -3568,8 +3577,8 @@ select {
   letter-spacing: 0.04em;
   text-transform: uppercase;
   color: var(--amber, #e8a64a);
-  background: rgba(77,182,172,0.12);
-  border: 1px solid rgba(77,182,172,0.28);
+  background: rgba(255,255,255,0.12);
+  border: 1px solid rgba(255,255,255,0.28);
   white-space: nowrap;
 }
 .locked-verse-card.corrected { border-left-color: var(--amber, #e8a64a); }
@@ -3701,7 +3710,7 @@ select {
   min-width: 0;
 }
 .history-grid .locked-verse-card:hover {
-  border-color: rgba(77,182,172,0.3);
+  border-color: rgba(255,255,255,0.3);
   background: var(--bg-hover);
   transform: none;
 }
@@ -3754,7 +3763,7 @@ select {
   color: var(--text-2);
   border: 1px solid var(--border-md);
 }
-.history-grid .locked-verse-card .lvc-send-btn:hover { background: var(--blue); color: #fff; border-color: var(--blue); }
+.history-grid .locked-verse-card .lvc-send-btn:hover { background: var(--selected-solid); color: #fff; border-color: var(--selected-solid); }
 
 /* Book abbreviation badge inside history card */
 .history-book-badge {
@@ -3918,7 +3927,7 @@ select {
   justify-content: center;
   border: 2px dashed var(--blue);
   border-radius: var(--radius-lg);
-  background: rgba(59, 130, 246, 0.08);
+  background: var(--blue-dim);
   color: var(--blue);
   font-size: 13px;
   font-weight: 600;
@@ -3956,7 +3965,7 @@ select {
   gap: 8px;
   transition: border-color var(--trans);
 }
-.timer-card.is-live { border-color: var(--blue); box-shadow: 0 0 0 1px var(--blue); }
+.timer-card.is-live { border-color: var(--brand); box-shadow: 0 0 0 1px var(--brand); }
 .timer-card.is-done { opacity: 0.55; }
 
 .timer-card-preview {
@@ -4025,11 +4034,13 @@ select {
   background: rgba(0, 0, 0, 0.5); color: var(--text-3);
   display: flex; align-items: center;
 }
-.timer-card-status.is-live { color: #5fd6a8; }
+/* "Live" is the one state that keeps the brand color — orange is reserved
+   for the brand mark and on-air indicators, everything else went neutral. */
+.timer-card-status.is-live { color: var(--brand); }
 .timer-card-status.is-live::before {
   content: '';
   display: inline-block; width: 5px; height: 5px; border-radius: 999px;
-  background: #5fd6a8; margin-right: 4px;
+  background: var(--brand); margin-right: 4px;
   animation: pulse-osp 1.4s ease-in-out infinite;
 }
 
@@ -4346,7 +4357,7 @@ select {
   font-weight: 700;
   background: var(--blue-dim);
   color: var(--blue);
-  border: 1px solid rgba(77,182,172,0.2);
+  border: 1px solid rgba(255,255,255,0.2);
   border-radius: 10px;
   padding: 1px 7px;
   min-width: 20px;
@@ -4420,8 +4431,8 @@ select {
   align-items: center;
   justify-content: space-between;
   padding: 8px 14px;
-  background: rgba(77,182,172,0.08);
-  border-top: 1px solid rgba(77,182,172,0.2);
+  background: rgba(255,255,255,0.08);
+  border-top: 1px solid rgba(255,255,255,0.2);
   gap: 10px;
   flex-shrink: 0;
 }
@@ -4445,7 +4456,7 @@ select {
   font-weight: 700;
   letter-spacing: 0.1em;
   text-transform: uppercase;
-  color: #a9ddd7;
+  color: var(--blue);
   flex-shrink: 0;
 }
 
@@ -4482,9 +4493,9 @@ select {
 }
 
 .range-nav-next {
-  background: var(--blue);
+  background: var(--selected-solid);
   color: #fff;
-  border-color: var(--blue);
+  border-color: var(--selected-solid);
 }
 .range-nav-next:hover { background: var(--blue-slide); border-color: var(--blue-slide); }
 
@@ -4507,10 +4518,10 @@ select {
 /* Active verse in range — bright left accent + subtle glow */
 .range-verse-card.range-active {
   border-left: 3px solid var(--blue);
-  background: rgba(77,182,172,0.08);
+  background: rgba(255,255,255,0.08);
   opacity: 1;
 }
-.range-verse-card.range-active .lvc-ref { color: #a9ddd7; }
+.range-verse-card.range-active .lvc-ref { color: var(--blue); }
 
 /* Queued (not yet spoken) — dimmed */
 .range-verse-card.range-queued {
@@ -4521,9 +4532,9 @@ select {
 
 /* Range book badge — subtle blue tint to distinguish from normal history */
 .range-book-badge {
-  background: rgba(77,182,172,0.15) !important;
-  color: #a9ddd7 !important;
-  border-color: rgba(77,182,172,0.3) !important;
+  background: rgba(255,255,255,0.15) !important;
+  color: var(--blue) !important;
+  border-color: rgba(255,255,255,0.3) !important;
 }
 
 /* ── Purpose-built candidate card (no inheritance conflicts) ────────────── */
@@ -4539,7 +4550,7 @@ select {
   user-select: none;
   transition: border-color 0.12s;
 }
-.cand-card:hover { border-color: rgba(77,182,172,0.35); }
+.cand-card:hover { border-color: rgba(255,255,255,0.35); }
 /* Phrase/keyword search hit — the engine found the closest match(es) but
    isn't confident enough to call it a direct reference, so it's a pick-one
    suggestion rather than something already live. Amber to read as distinct
@@ -4601,7 +4612,7 @@ select {
   letter-spacing: 0.06em;
   text-transform: uppercase;
   padding: 3px 0;
-  background: var(--blue);
+  background: var(--selected-solid);
   color: #fff;
   border: none;
   border-radius: var(--radius);
@@ -5563,7 +5574,7 @@ select {
 /* Select-all's footprint (Cmd/Ctrl+A) — distinct from .active (the single
    layer whose properties show in the panel) since a whole-theme select-all
    spans many rows at once, none of which is "the" edited layer. */
-.ts-layer-row.multi-selected:not(.active) { border-color: rgba(77,182,172,0.4); background: rgba(77,182,172,0.08); }
+.ts-layer-row.multi-selected:not(.active) { border-color: rgba(255,255,255,0.4); background: rgba(255,255,255,0.08); }
 
 .ts-layer-vis {
   background: none; border: none; cursor: pointer;
@@ -5822,7 +5833,7 @@ select {
   width: 10px; height: 10px; border-radius: 50%;
   background: var(--text-3); transition: transform var(--trans), background var(--trans);
 }
-.ts-toggle input:checked + .ts-toggle-track { background: var(--blue); border-color: var(--blue); }
+.ts-toggle input:checked + .ts-toggle-track { background: var(--selected-solid); border-color: var(--selected-solid); }
 .ts-toggle input:checked + .ts-toggle-track::after { transform: translateX(12px); background: #fff; }
 
 /* Fill type chips */
@@ -6039,9 +6050,9 @@ select {
   align-items: center;
   gap: 10px;
   padding: 10px 16px;
-  background: rgba(77,182,172,0.10);
-  border-bottom: 1px solid rgba(77,182,172,0.25);
-  color: #a9ddd7;
+  background: rgba(255,255,255,0.10);
+  border-bottom: 1px solid rgba(255,255,255,0.25);
+  color: var(--blue);
   font-size: 13px;
   font-weight: 500;
   position: relative;
@@ -6049,11 +6060,11 @@ select {
 }
 #update-banner svg { flex-shrink: 0; opacity: 0.9; }
 #update-banner span { flex: 1; }
-#update-banner strong { color: #b8e5df; }
+#update-banner strong { color: var(--text); }
 .upd-btn {
-  background: rgba(77,182,172,0.18);
-  border: 1px solid rgba(77,182,172,0.4);
-  color: #a9ddd7;
+  background: rgba(255,255,255,0.18);
+  border: 1px solid rgba(255,255,255,0.4);
+  color: var(--blue);
   padding: 4px 12px;
   border-radius: 999px;
   font-size: 12px;
@@ -6061,17 +6072,17 @@ select {
   cursor: pointer;
   white-space: nowrap;
 }
-.upd-btn:hover:not(:disabled) { background: rgba(77,182,172,0.28); }
+.upd-btn:hover:not(:disabled) { background: rgba(255,255,255,0.28); }
 .upd-btn:disabled { opacity: 0.5; cursor: default; }
 .upd-snooze {
   background: none;
   border: none;
-  color: rgba(169,221,215,0.6);
+  color: rgba(255,255,255,0.5);
   font-size: 12px;
   cursor: pointer;
   padding: 2px 6px;
 }
-.upd-snooze:hover { color: #a9ddd7; }
+.upd-snooze:hover { color: var(--blue); }
 
 /* Shared section-header label — used by Slides/Songs/Media/Timer's own
    headers (see .cs-section-header usages in index.html), not just wherever
@@ -6162,7 +6173,7 @@ select {
   transition: all var(--trans);
 }
 .osp-btn-primary {
-  background: var(--blue);
+  background: var(--selected-solid);
   color: white;
 }
 .osp-btn-primary:hover { background: var(--blue-slide); }
@@ -6174,14 +6185,17 @@ select {
 .osp-btn-ghost:hover { background: var(--bg-hover); color: var(--text); }
 
 /* State variants */
-.osp-ok       { border-color: rgba(95, 214, 168, 0.35); }
-.osp-ok       .osp-dot { background: #5fd6a8; box-shadow: 0 0 8px rgba(95,214,168,0.55); }
+/* Was a one-off hardcoded mint (#5fd6a8) never actually tied to the app's
+   real --green success token — same class of drift --green itself was
+   fixed for earlier. "Connected/ok" IS a success state; use the real one. */
+.osp-ok       { border-color: rgba(34,197,94,0.35); }
+.osp-ok       .osp-dot { background: var(--green); box-shadow: 0 0 8px rgba(34,197,94,0.55); }
 .osp-warn     { border-color: rgba(245, 158, 11, 0.35); }
 .osp-warn     .osp-dot { background: var(--orange); box-shadow: 0 0 8px rgba(245,158,11,0.5); }
 .osp-err      { border-color: rgba(232, 64, 74, 0.35); }
 .osp-err      .osp-dot { background: var(--red); box-shadow: 0 0 8px rgba(232,64,74,0.5); }
-.osp-progress { border-color: rgba(77, 182, 172, 0.4); background: rgba(77,182,172,0.04); }
-.osp-progress .osp-dot { background: var(--blue); box-shadow: 0 0 8px rgba(77,182,172,0.5); }
+.osp-progress { border-color: rgba(255,255,255,0.4); background: rgba(255,255,255,0.04); }
+.osp-progress .osp-dot { background: var(--blue); box-shadow: 0 0 8px rgba(255,255,255,0.5); }
 .osp-loading  .osp-dot { background: var(--text-3); }
 
 /* Progress bar */
@@ -6203,7 +6217,7 @@ select {
 }
 .osp-progress-fill {
   height: 100%;
-  background: linear-gradient(90deg, var(--blue) 0%, #5fd6a8 100%);
+  background: linear-gradient(90deg, var(--blue) 0%, #ffffff 100%);
   border-radius: 999px;
   transition: width 200ms ease-out;
 }

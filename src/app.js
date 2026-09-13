@@ -9328,6 +9328,15 @@ async function bootstrapStartup() {
   };
   // Hard safety valve — never keep the overlay up longer than 90s.
   const safety = setTimeout(finish, 90000);
+  // Minimum time the brand lockup stays on screen. Without this the overlay
+  // could disappear well under a second after launch (mic permission already
+  // granted, deepgram engine needs no offline-model download) — too fast to
+  // actually register the new brand mark/wordmark that's the whole point of
+  // this screen. Real startup work above still happens at its own pace;
+  // this only holds the "Ready" state on screen a little longer, never
+  // makes it wait longer than it already would.
+  const MIN_DISPLAY_MS = 3500;
+  const startedAt = Date.now();
 
   try {
     // 1) Microphone permission
@@ -9365,6 +9374,8 @@ async function bootstrapStartup() {
 
     setBar(90);
     setStatus('Ready');
+    const elapsed = Date.now() - startedAt;
+    if (elapsed < MIN_DISPLAY_MS) await new Promise(r => setTimeout(r, MIN_DISPLAY_MS - elapsed));
   } finally {
     clearTimeout(safety);
     finish();
