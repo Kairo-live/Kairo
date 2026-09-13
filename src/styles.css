@@ -275,9 +275,14 @@ input[type="range"] {
 input[type="range"]::-webkit-slider-runnable-track {
   height: 4px;
   border-radius: 999px;
+  /* --bg-input (#121214) is darker than the panels this sits on — the
+     "unfilled" half read as an empty gap past the thumb rather than a
+     continuous track (owner feedback, live: "the disconnect"). A light
+     translucent fill instead, so it reads as track against the dark
+     panel regardless of exactly which dark surface it's sitting on. */
   background: linear-gradient(to right,
     var(--brand) 0%, var(--brand) var(--progress, 50%),
-    var(--bg-input) var(--progress, 50%), var(--bg-input) 100%);
+    rgba(255,255,255,0.18) var(--progress, 50%), rgba(255,255,255,0.18) 100%);
 }
 input[type="range"]::-webkit-slider-thumb {
   -webkit-appearance: none;
