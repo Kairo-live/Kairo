@@ -5465,7 +5465,18 @@
       const d = await importArrayBufferAsFile(file);
       beginImportResult(d, file.name.replace(/\.[^.]+$/, ''), { destination });
     } catch (err) {
-      if (typeof toast === 'function') toast(err.message, 'error');
+      // toast() is a deliberate no-op in this app (see its own comment in
+      // app.js) — this used to call it anyway, so a failed quick-import
+      // (a real incident: a .proplaylist that failed to parse) produced
+      // literally no feedback at all, not even a console trace a user
+      // would think to check. Reuse the SAME inline-error surface the
+      // dialog-based import path already has (#import-status inside
+      // #import-modal) rather than inventing a new one — open that dialog
+      // straight into its error state so the failure is visible exactly
+      // where every other import failure already shows up.
+      openImport({ destination });
+      const st = document.getElementById('import-status');
+      if (st) st.textContent = err.message;
     }
   }
 
@@ -5555,14 +5566,18 @@
 
   async function confirmImport() {
     const ta = document.getElementById('import-text');
+    const st = document.getElementById('import-status');
     let d = importPending;
     if (!d && ta && ta.value.trim()) {
       try { d = await importTextViaServer(ta.value); }
-      catch (err) { if (typeof toast === 'function') toast(err.message, 'error'); return; }
+      // Same dead-toast bug as quickImportFile's own comment — the dialog
+      // is already open right here, #import-status is right there. No
+      // reason this path alone should still funnel through a no-op.
+      catch (err) { if (st) st.textContent = err.message; return; }
     }
     const hasContent = d && ((d.items && d.items.length) || (d.blocks && d.blocks.length));
     if (!hasContent) {
-      if (typeof toast === 'function') toast('Nothing to import', 'error');
+      if (st) st.textContent = 'Nothing to import';
       return;
     }
     closeImport();
