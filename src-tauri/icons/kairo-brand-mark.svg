@@ -1,13 +1,13 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
   <defs>
-    <linearGradient id="g" x1="0%" y1="0%" x2="100%" y2="100%">
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
       <stop offset="0%" stop-color="#FF9130"/>
       <stop offset="100%" stop-color="#F5301A"/>
     </linearGradient>
   </defs>
-  <rect width="1024" height="1024" rx="180" ry="180" fill="#161618"/>
-  <g fill="url(#g)" transform="translate(512,481.28) scale(6.353445) translate(-119.410,-174.950)">
+  <rect width="1024" height="1024" rx="180" ry="180" fill="url(#bgGrad)"/>
+  <g fill="#ffffff" transform="translate(512,481.28) scale(7.448866) translate(-119.410,-174.950)">
     <path d="M146.63,166.72c-12.18,2.44-21.27,10.16-26.37,20.98-1.79-11.05,2.74-21.11,10.68-28.07,4.11-3.37,8.47-5.84,13.91-7.69,1.69,4.76,2.15,9.38,1.78,14.78Z"/>
     <path d="M128.61,155.11c-9.5,7.8-14.2,18.25-13.89,30.52-10.31-12.38-5.79-31.33,5.27-42.2,3.46,3.77,6.06,7.27,8.61,11.68Z"/>
     <path d="M155.76,185.17c-11.36-3.52-22.73-1.13-31.28,7.41,1.45-7.24,6.15-12.66,11.94-16.5,7.78-4.65,16.6-6.39,25.89-4.67-.99,4.96-3.24,9.28-6.56,13.76Z"/>
