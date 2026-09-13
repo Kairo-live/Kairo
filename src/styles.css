@@ -134,6 +134,7 @@
   transition: opacity 450ms ease;
 }
 #bootstrap-overlay.done { opacity: 0; pointer-events: none; }
+.bootstrap-mark { margin-bottom: calc(var(--space-3) * -1); }
 .bootstrap-wordmark {
   font-family: var(--font-head);
   font-size: 46px;
