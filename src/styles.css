@@ -2565,7 +2565,7 @@ select {
 }
 
 .modal-btn.primary { background: var(--blue); color: white; padding: 8px 24px; }
-.modal-btn.primary:hover { background: #3a9a8f; }
+.modal-btn.primary:hover { background: var(--blue-slide); }
 .modal-btn.secondary { background: transparent; color: var(--text-2); border: 1px solid var(--border-md); }
 .modal-btn.secondary:hover { background: var(--bg-hover); color: var(--text); }
 
@@ -4485,7 +4485,7 @@ select {
   color: #fff;
   border-color: var(--blue);
 }
-.range-nav-next:hover { background: #3a9a8f; border-color: #3a9a8f; }
+.range-nav-next:hover { background: var(--blue-slide); border-color: var(--blue-slide); }
 
 .range-nav-clear {
   background: transparent;
@@ -6180,7 +6180,7 @@ select {
 .osp-err      { border-color: rgba(232, 64, 74, 0.35); }
 .osp-err      .osp-dot { background: var(--red); box-shadow: 0 0 8px rgba(232,64,74,0.5); }
 .osp-progress { border-color: rgba(77, 182, 172, 0.4); background: rgba(77,182,172,0.04); }
-.osp-progress .osp-dot { background: #4db6ac; box-shadow: 0 0 8px rgba(77,182,172,0.5); }
+.osp-progress .osp-dot { background: var(--blue); box-shadow: 0 0 8px rgba(77,182,172,0.5); }
 .osp-loading  .osp-dot { background: var(--text-3); }
 
 /* Progress bar */
@@ -6202,7 +6202,7 @@ select {
 }
 .osp-progress-fill {
   height: 100%;
-  background: linear-gradient(90deg, #4db6ac 0%, #5fd6a8 100%);
+  background: linear-gradient(90deg, var(--blue) 0%, #5fd6a8 100%);
   border-radius: 999px;
   transition: width 200ms ease-out;
 }
