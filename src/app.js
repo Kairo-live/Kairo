@@ -8699,19 +8699,28 @@ function outputThemeMap() {
 }
 
 // ── Language ──────────────────────────────────────────────────────────────
-// Spoken language drives transcription; scripture language selects which verse
-// corpus detection runs against. Packs are downloaded once and cached locally,
-// same pattern as the offline speech model.
+// Spoken language drives transcription; scripture language selects which
+// text a detected/displayed verse shows in (server.js's applyScriptureLanguage,
+// a real lookup against databases/bibles/packs/*.json — sourced 2026-09-13
+// from public-domain/CC-BY-SA editions, real text, not placeholders).
+//
+// Important scope note, same honesty precedent as the old "Coming soon"
+// this replaced: LIVE AUDIO DETECTION still only runs against the English
+// KJV corpus — these packs change what a resolved reference DISPLAYS as,
+// not what language the app listens for. A second language's own
+// detection index (anchor trie, IDF map, embeddings) is real infrastructure
+// that doesn't exist yet. `hasPack: true` means real bundled verse text;
+// it does not mean "detects speech in this language."
 const LANG_PACKS = [
   { code: 'en', name: 'English',    translations: 'KJV · NIV · NLT · ESV · NASB · NKJV', bundled: true },
-  { code: 'es', name: 'Spanish',    translations: 'Reina-Valera 1960' },
-  { code: 'pt', name: 'Portuguese', translations: 'Almeida' },
-  { code: 'fr', name: 'French',     translations: 'Louis Segond' },
-  { code: 'de', name: 'German',     translations: 'Luther' },
-  { code: 'yo', name: 'Yoruba',     translations: 'Bíbélì Mímọ́' },
-  { code: 'ig', name: 'Igbo',       translations: 'Baịbụl Nsọ' },
-  { code: 'ha', name: 'Hausa',      translations: 'Littafi Mai Tsarki' },
-  { code: 'sw', name: 'Swahili',    translations: 'Biblia Habari Njema' },
+  { code: 'es', name: 'Spanish',    translations: 'Reina-Valera 1909 (public domain)', hasPack: true },
+  { code: 'pt', name: 'Portuguese', translations: 'Almeida Atualizada 1911 (GPL)', hasPack: true },
+  { code: 'fr', name: 'French',     translations: 'Louis Segond 1910 (public domain)', hasPack: true },
+  { code: 'de', name: 'German',     translations: 'Luther 1545 (public domain)', hasPack: true },
+  { code: 'yo', name: 'Yoruba',     translations: 'Bíbélì Mímọ́ (Biblica, CC BY-SA 4.0)', hasPack: true },
+  { code: 'ig', name: 'Igbo',       translations: 'Baịbụl Nsọ (Biblica, CC BY-SA 4.0)', hasPack: true },
+  { code: 'ha', name: 'Hausa',      translations: 'Littafi Mai Tsarki (Biblica, CC BY-SA 4.0)', hasPack: true },
+  { code: 'sw', name: 'Swahili',    translations: 'New Testament only (public domain)', hasPack: true },
 ];
 
 function installedLangs() {
@@ -8749,17 +8758,27 @@ function renderLangPacks() {
         saveSettingsPatch({ installedLangs: settings.installedLangs, bibleLanguage: settings.bibleLanguage });
         renderLangPacks();
       });
+    } else if (p.hasPack) {
+      // Real verse text now, bundled in the app (databases/bibles/packs/,
+      // sourced 2026-09-13 — see LANG_PACKS' own comment for exactly what
+      // this does and doesn't cover) rather than a remote download, so
+      // there's no real fetch to wait on — "installing" just switches it
+      // on locally. Still true, and still worth saying out loud: live
+      // audio DETECTION stays English-only; this only changes what a
+      // resolved verse displays as.
+      btn.textContent = 'Install';
+      btn.title = 'Adds real verse text for this language. Live audio detection still only listens for English.';
+      btn.addEventListener('click', () => {
+        settings.installedLangs = [...new Set([...installed, p.code])];
+        saveSettingsPatch({ installedLangs: settings.installedLangs });
+        renderLangPacks();
+      });
     } else {
-      // /api/lang/install has never had a real source wired up (it 503s
-      // without KAIRO_LANG_PACK_BASE_URL, which nothing ever sets) — and
-      // even a successful install wouldn't do anything yet, since the
-      // detection worker never reads settings.bibleLanguage to switch which
-      // verse corpus it indexes against. Showing "Install" as if this
-      // already worked was misleading; be honest that it's not built yet
-      // rather than leaving a button that always fails.
+      // No real source found/verified for this language yet — be honest
+      // rather than showing a button that would just fail or fake it.
       btn.textContent = 'Coming soon';
       btn.disabled = true;
-      btn.title = 'Live detection in this language isn’t available yet.';
+      btn.title = 'No verified scripture-text source found for this language yet.';
     }
 
     row.appendChild(meta); row.appendChild(btn);

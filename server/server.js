@@ -1051,6 +1051,59 @@ function primaryOutputTranslateLang() {
   return lang;
 }
 
+// ── Scripture-language packs ─────────────────────────────────────────────
+// Real bundled verse text for the "Scripture Language" setting — separate
+// from attachBibleTranslations() below, which is the DIFFERENT "Translate
+// to" feature (live MT of whatever's detected, for the Multi-Language
+// split theme's right-hand panel). This is a straight lookup of an
+// ALREADY-TRANSLATED verse from a real published edition, keyed by the
+// same book/chapter/verse reference detection already resolves.
+//
+// Detection itself still only runs against the English KJV corpus
+// (map.json) — a second language's own detection index (anchor trie, IDF
+// map, embeddings) is real, substantial infra that doesn't exist yet, not
+// something to fake here. This only changes what TEXT shows once a
+// reference is already known, same principle as the honest "Coming soon"
+// this replaced (see LANG_PACKS in src/app.js): real for what it actually
+// does, not implying more.
+//
+// Sourced 2026-09-13 from public-domain/CC-BY-SA-licensed editions —
+// databases/bibles/packs/*.json, each file's own `license`/`source` field
+// has the exact citation. Swahili is New Testament only (no source data
+// for a public-domain Swahili Old Testament was found); Yoruba/Igbo/Hausa
+// are Biblica's modern editions, CC BY-SA 4.0 (attribution required).
+const scripturePacks = new Map(); // lang code -> Map(reference -> text), or null if load failed
+
+function loadScripturePack(lang) {
+  if (scripturePacks.has(lang)) return scripturePacks.get(lang);
+  let map = null;
+  try {
+    const raw = JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'packs', `${lang}.json`), 'utf8'));
+    map = new Map(raw.verses.map(v => [v.reference, v.text]));
+    console.log(`[ScripturePack] Loaded ${lang}: ${map.size} verses (${raw.translation}, ${raw.license})`);
+  } catch (err) {
+    console.warn(`[ScripturePack] No pack for "${lang}":`, err.message);
+  }
+  scripturePacks.set(lang, map);
+  return map;
+}
+
+// Mutates verses in place, same pattern as attachBibleTranslations below.
+// No-ops for English (the default/bundled language) or a verse the pack
+// doesn't have (rare versification gaps) — falls back to the original
+// (English) text rather than showing nothing.
+function applyScriptureLanguage(verses) {
+  const lang = settings.bibleLanguage || 'en';
+  if (lang === 'en') return verses;
+  const pack = loadScripturePack(lang);
+  if (!pack) return verses;
+  for (const v of verses) {
+    const text = v.reference && pack.get(v.reference);
+    if (text) v.text = text;
+  }
+  return verses;
+}
+
 // Real verse text in the target language, looked up from the bundled
 // public-domain translations (no API key needed) — mutates verses in place
 // so every path sharing these object references picks it up once, whichever
@@ -1137,6 +1190,7 @@ function getFirstMeaningfulWords(text, n = 3) {
 }
 
 async function setRangeQueue(verses) {
+  applyScriptureLanguage(verses);
   await attachBibleTranslations(verses);
   rangeAllVerses      = verses.slice();
   rangeCurrentVerse   = verses[0] || null;
@@ -3676,6 +3730,7 @@ async function processForReferences(transcript, isFinal) {
         // translated side stayed blank until the final transcript's own,
         // properly-translated broadcast landed moments later — a real,
         // visible lag between the two panels.
+        applyScriptureLanguage(verses);
         await attachBibleTranslations(verses);
         broadcast({
           type: 'detection',
@@ -4606,7 +4661,10 @@ async function broadcastDetection(verses, method, topScore, target) {
     }
   }
 
-  if (target === 'viewer') await attachBibleTranslations(verses);
+  if (target === 'viewer') {
+    applyScriptureLanguage(verses);
+    await attachBibleTranslations(verses);
+  }
   broadcast({ type: 'detection', verses, method, topScore, target, timestamp: now });
 
   // Do NOT clear candidates on viewer send — candidates is now a permanent session log.

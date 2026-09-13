@@ -2415,28 +2415,33 @@ input[type="range"]:disabled { opacity: 0.4; cursor: default; }
 
 /* ── Language packs ── */
 .lang-pack-list {
-  display: flex;
-  flex-direction: column;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  overflow: hidden;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-2);
 }
 .lang-pack-row {
   display: flex;
   align-items: center;
   gap: var(--space-3);
   padding: 9px 12px;
-  border-bottom: 1px solid var(--border);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  min-width: 0;
 }
-.lang-pack-row:last-child { border-bottom: none; }
 .lang-pack-meta { flex: 1; min-width: 0; }
-.lang-pack-name { font-size: var(--fs-md); font-weight: 600; color: var(--text); }
+.lang-pack-name {
+  font-size: var(--fs-md); font-weight: 600; color: var(--text);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
 .lang-pack-sub {
   font-size: var(--fs-xs);
   color: var(--text-3);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-.lang-pack-row .modal-btn { padding: 5px 12px; font-size: var(--fs-xs); }
+/* Two columns means roughly half the width a full-width row had — the
+   button needs a fixed floor so it can't get squeezed/overlapped by a
+   longer language name (found live: "Portuguese" ran into "Install"). */
+.lang-pack-row .modal-btn { padding: 5px 10px; font-size: var(--fs-xs); flex-shrink: 0; white-space: nowrap; }
 .lang-pack-remove { color: var(--red) !important; border-color: rgba(232,64,74,0.3) !important; }
 .settings-pane { display: none; }
 .settings-pane.active {
