@@ -253,6 +253,42 @@ html, body {
 ::-webkit-scrollbar-thumb   { background: rgba(255,255,255,0.08); border-radius: 4px; }
 ::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.16); }
 
+/* Range sliders (svc-scale, media-seek/volume, Theme Studio's transition
+   speed/intensity) — `accent-color` alone only paints the FILLED portion +
+   thumb; the UNFILLED remainder stays the browser's own light-gray default
+   no matter what, which read as unstyled against this app's fully dark UI
+   (owner feedback, live). Fully custom track instead: a two-tone gradient
+   split at --progress (a 0-100% custom property kept in sync with the
+   input's actual value by wireRangeSliders() in app.js, since there's no
+   pure-CSS way to know a range input's value) — brand orange up to the
+   thumb, a dark neutral past it, plain white thumb on top. Per-slider CSS
+   still controls layout (width/flex) — this covers only the shared
+   track/thumb look. -webkit- prefix covers both Tauri targets (WKWebView
+   on macOS, WebView2/Chromium on Windows both use it for form controls). */
+input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 16px;
+  background: transparent;
+  cursor: pointer;
+}
+input[type="range"]::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 999px;
+  background: linear-gradient(to right,
+    var(--brand) 0%, var(--brand) var(--progress, 50%),
+    var(--bg-input) var(--progress, 50%), var(--bg-input) 100%);
+}
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 13px; height: 13px;
+  margin-top: -4.5px; /* centers the 13px thumb on the 4px track */
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.5);
+}
+input[type="range"]:disabled { opacity: 0.4; cursor: default; }
+
 /* ══════════════════════════════════════
    TOP BAR
 ══════════════════════════════════════ */
@@ -1843,7 +1879,7 @@ html, body {
   gap: var(--space-2);
   margin-left: auto;
 }
-.svc-scale { width: 84px; accent-color: var(--brand); }
+.svc-scale { width: 84px; }
 .svc-edit-btn { padding: 5px 14px; font-size: var(--fs-xs); }
 
 /* Slide grid — card width is driven by the scale slider. */
@@ -3895,16 +3931,13 @@ select {
   padding: 8px 16px;
   flex-shrink: 0;
 }
-/* Active/muted state uses the app's one real "active" accent (--red — see
-   .tb-icon-btn.active, .pill-red, .settings-nav-item.active) rather than
-   the neutral list-selection white. The two range inputs below had no
-   accent-color at all, so they fell back to WebKit's own default control
-   tint (blue) — never an intentional app color; pinned to --red so a
-   dragged slider matches the rest of the "active" language instead of
-   looking like a stray unstyled system control. */
+/* Active/muted state uses the brand accent (see .tb-icon-btn.active,
+   .settings-nav-item.active) rather than the neutral list-selection white.
+   The two range inputs below get their brand-orange fill + dark track from
+   the generic input[type="range"] rules near the top of this file. */
 .media-transport #media-mute-btn.active { color: var(--brand); background: var(--brand-dim); border-color: var(--brand); }
-.media-seek { flex: 1; accent-color: var(--brand); }
-.media-volume { width: 80px; flex: none; accent-color: var(--brand); }
+.media-seek { flex: 1; }
+.media-volume { width: 80px; flex: none; }
 .media-time {
   font-size: 10px;
   font-family: var(--mono);
@@ -5763,18 +5796,12 @@ select {
 
 .ts-prop-slider {
   flex: 1;
-  height: 3px;
-  accent-color: var(--brand);
-  cursor: pointer;
 }
 
 /* Transition speed — sits right next to the Fade/Slide/Cut chips, hidden
    for Cut (an instant swap has no duration to tune). */
 .ts-anim-speed-slider {
   width: 60px;
-  height: 3px;
-  accent-color: var(--brand);
-  cursor: pointer;
 }
 .ts-anim-speed-slider.hidden { display: none; }
 

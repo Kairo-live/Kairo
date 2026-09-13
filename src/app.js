@@ -1616,6 +1616,30 @@ async function restartAudioCapture(reason, allowDeviceFallback = true) {
   }
 }
 
+// ── Range slider fill ─────────────────────────────────────────────────────
+// Native `accent-color` alone only paints the FILLED portion + thumb of a
+// <input type="range"> — the unfilled remainder stays the OS/browser's own
+// light-gray default regardless, which read as unstyled/default against
+// this app's fully dark UI (owner feedback, live). The CSS track gradient
+// (::-webkit-slider-runnable-track in styles.css) needs a --progress custom
+// property to know where the fill/unfilled split falls; this keeps it in
+// sync on load and on every drag. Covers every <input type="range"> in the
+// document (svc-scale, media-seek/volume, Theme Studio's transition speed/
+// intensity sliders) — one wiring point rather than one per slider.
+function wireRangeSliders() {
+  const setProgress = (el) => {
+    const min = parseFloat(el.min) || 0;
+    const max = parseFloat(el.max) || 100;
+    const val = parseFloat(el.value) || 0;
+    const pct = max > min ? ((val - min) / (max - min)) * 100 : 0;
+    el.style.setProperty('--progress', Math.max(0, Math.min(100, pct)) + '%');
+  };
+  document.querySelectorAll('input[type="range"]').forEach((el) => {
+    setProgress(el);
+    el.addEventListener('input', () => setProgress(el));
+  });
+}
+
 // ── Custom Select Dropdowns ───────────────────────────────────────────────
 // Replaces native <select> elements with a fully styled custom component.
 // Usage: call initCustomSelects() after DOM is ready.
@@ -9392,6 +9416,7 @@ async function bootstrapStartup() {
 // IPC round-trip finished, and if the token never arrived at all, every
 // later action — including "Start Listening" — kept failing all session).
 renderLooksList();
+wireRangeSliders();
 (async () => {
   await loadAuthToken();
   connectWS();
