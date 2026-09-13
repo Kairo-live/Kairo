@@ -1843,7 +1843,7 @@ html, body {
   gap: var(--space-2);
   margin-left: auto;
 }
-.svc-scale { width: 84px; accent-color: var(--blue); }
+.svc-scale { width: 84px; accent-color: var(--brand); }
 .svc-edit-btn { padding: 5px 14px; font-size: var(--fs-xs); }
 
 /* Slide grid — card width is driven by the scale slider. */
@@ -2748,8 +2748,8 @@ select {
 }
 
 .output-toggle input:checked + .output-toggle-track {
-  background: var(--selected-solid);
-  border-color: var(--selected-solid);
+  background: var(--brand);
+  border-color: var(--brand);
 }
 
 .output-toggle input:checked + .output-toggle-track::after {
@@ -5764,7 +5764,7 @@ select {
 .ts-prop-slider {
   flex: 1;
   height: 3px;
-  accent-color: var(--blue);
+  accent-color: var(--brand);
   cursor: pointer;
 }
 
@@ -5773,7 +5773,7 @@ select {
 .ts-anim-speed-slider {
   width: 60px;
   height: 3px;
-  accent-color: var(--blue);
+  accent-color: var(--brand);
   cursor: pointer;
 }
 .ts-anim-speed-slider.hidden { display: none; }
@@ -5833,7 +5833,7 @@ select {
   width: 10px; height: 10px; border-radius: 50%;
   background: var(--text-3); transition: transform var(--trans), background var(--trans);
 }
-.ts-toggle input:checked + .ts-toggle-track { background: var(--selected-solid); border-color: var(--selected-solid); }
+.ts-toggle input:checked + .ts-toggle-track { background: var(--brand); border-color: var(--brand); }
 .ts-toggle input:checked + .ts-toggle-track::after { transform: translateX(12px); background: #fff; }
 
 /* Fill type chips */
