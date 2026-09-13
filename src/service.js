@@ -937,18 +937,23 @@
   let lookupCandidatesDirty = true;
   let lookupCandidatesLiveId; // undefined sentinel forces the first build
   function markLookupCandidatesDirty() { lookupCandidatesDirty = true; }
+  // Owner: songs scrapped from auto-detect ("not viable") — the whole
+  // premise leaned on what's actually being SUNG matching a song's opening,
+  // and STT reliably transcribing singing is the same architectural dead
+  // end this project killed for scripture-during-singing detection earlier.
+  // Plain slide decks/announcements have no such dependency (they're
+  // matched against ordinary spoken words), so they're untouched — only
+  // the song half of the candidate pool (playlist songs + the whole hymn
+  // bank) is dropped. content_lookup.js/lyrics_follow.js/the hymn bank
+  // itself are left in place, just not fed songs anymore.
   function refreshLookupCandidates() {
     if (!contentLookup || !service) return;
     const liveId = liveSlideKey ? liveSlideKey.split(':')[0] : null;
     if (!lookupCandidatesDirty && liveId === lookupCandidatesLiveId) return;
     lookupCandidatesDirty = false;
     lookupCandidatesLiveId = liveId;
-    const playlistPool = service.items.filter(i => i.id !== liveId && (i.type === 'song' || i.type === 'slides'));
-    const playlistTitles = new Set(playlistPool.map(i => (i.title || '').trim().toLowerCase()).filter(Boolean));
-    const bankPool = (typeof searchHymns === 'function' ? searchHymns('') : [])
-      .filter(h => h && h.title && !playlistTitles.has(h.title.trim().toLowerCase()))
-      .map(h => ({ ...h, type: 'song', _bank: h }));
-    contentLookup.setCandidates([...playlistPool, ...bankPool]);
+    const playlistPool = service.items.filter(i => i.id !== liveId && i.type === 'slides');
+    contentLookup.setCandidates(playlistPool);
   }
 
   function onTranscript(msg) {
