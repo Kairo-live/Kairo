@@ -2946,8 +2946,11 @@ function loadWhisperMod() {
   // behind) to sherpa-onnx streaming zipformer (transducer, genuinely
   // frame-by-frame like Deepgram). sherpa_engine.js exports a `WhisperEngine`
   // alias + the same defaultModelPath/defaultModelDir names, so nothing else
-  // in this file changes. whisper_engine.js is kept in the tree as the old
-  // path if this ever needs reverting.
+  // in this file changes. whisper_engine.js/whisper_installer.js (and the
+  // smart-whisper dependency they used) were removed outright once it was
+  // confirmed nothing ever required them anymore — this "whisper*" naming
+  // below is legacy from that era, kept only because renaming every var/
+  // route wasn't worth the churn; the engine underneath is sherpa-onnx.
   whisperMod = require('./sherpa_engine');
   return whisperMod;
 }

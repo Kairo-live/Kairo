@@ -4,17 +4,28 @@
 // directory in as a resource — see the "resources" key — so anything left in
 // node_modules ships in the installer verbatim).
 //
-// Two passes:
-//   1. A package-specific trim for smart-whisper: whisper.cpp compiles from
-//      source via node-gyp, and that leaves ~20MB of submodule source,
-//      intermediate .o build objects, and header-only build deps that are
-//      never touched again once build/Release/smart-whisper.node exists.
-//      Confirmed empirically that `require('smart-whisper')` still resolves
-//      correctly after this trim (see whisper_installer.js commit notes).
+// Three passes:
+//   1. Whole-package removal for dependencies that are pulled in
+//      transitively (so `npm uninstall` isn't an option — they'd just come
+//      back on the next install) but are provably never require()'d by the
+//      code path this app actually runs. Currently: onnxruntime-web (109MB)
+//      — @huggingface/transformers lists it as a hard dependency because its
+//      published bundle covers both a browser/WASM build and a Node build,
+//      but confirmed directly against the compiled Node entry point
+//      (transformers.node.cjs) that the string "onnxruntime-web" only ever
+//      appears in a source-map-style comment and a browser-only WASM CDN
+//      URL template — zero real `require("onnxruntime-web")` calls. The
+//      actual Node runtime path loads `onnxruntime-node` only.
 //   2. A generic sweep across all installed packages for content that's
 //      real weight but never read at runtime: markdown docs, changelogs,
 //      source maps, test suites, CI config, and editor/VCS cruft that
 //      occasionally ships inside a published tarball.
+//
+// (smart-whisper used to get a dedicated build-artifact trim here too, but
+// as of the whisper.cpp → sherpa-onnx engine swap it's no longer a
+// dependency at all — see server/server.js's loadWhisperMod() comment —
+// so there's nothing left under node_modules for a smart-whisper pass to
+// find.)
 //
 // Safe to run repeatedly — everything it deletes is regenerable by a clean
 // `npm ci`, so this should run AFTER install and BEFORE `tauri build` reads
@@ -48,26 +59,12 @@ function duBytes(p) {
 
 function fmtMB(bytes) { return (bytes / 1_000_000).toFixed(1) + 'MB'; }
 
-// ── Pass 1: smart-whisper-specific trim ──────────────────────────────────
-function pruneSmartWhisper() {
-  const dir = path.join(NODE_MODULES, 'smart-whisper');
-  if (!fs.existsSync(dir)) return 0;
+// ── Pass 1: whole-package removal (confirmed dead at runtime) ───────────
+const DEAD_PACKAGES = ['onnxruntime-web'];
+
+function pruneDeadPackages() {
   let saved = 0;
-  // Full source/build-tool directories not touched at runtime.
-  for (const sub of ['whisper.cpp', 'src', 'node-addon-api', 'scripts']) {
-    saved += rm(path.join(dir, sub));
-  }
-  saved += rm(path.join(dir, 'binding.gyp'));
-  // build/Release/smart-whisper.node is the ONLY thing under build/ that
-  // dist/index.js actually requires at runtime — everything else there is
-  // node-gyp's own bookkeeping (object files, Makefiles, dep-tracking).
-  const release = path.join(dir, 'build', 'Release');
-  saved += rm(path.join(release, 'obj.target'));
-  saved += rm(path.join(release, '.deps'));
-  saved += rm(path.join(release, 'nothing.a'));
-  for (const f of ['Makefile', 'binding.Makefile', 'config.gypi', 'gyp-mac-tool', 'smart-whisper.target.mk']) {
-    saved += rm(path.join(dir, 'build', f));
-  }
+  for (const name of DEAD_PACKAGES) saved += rm(path.join(NODE_MODULES, name));
   return saved;
 }
 
@@ -108,11 +105,11 @@ function main() {
     return;
   }
   const before = duBytes(NODE_MODULES);
-  const whisperSaved = pruneSmartWhisper();
+  const deadPackageSaved = pruneDeadPackages();
   const sweepSaved = sweep(NODE_MODULES);
   const after = duBytes(NODE_MODULES);
 
-  console.log(`[prune] smart-whisper trim: ${fmtMB(whisperSaved)}`);
+  console.log(`[prune] dead packages:      ${fmtMB(deadPackageSaved)}`);
   console.log(`[prune] generic sweep:      ${fmtMB(sweepSaved)}`);
   console.log(`[prune] node_modules: ${fmtMB(before)} → ${fmtMB(after)} (saved ${fmtMB(before - after)})`);
 }

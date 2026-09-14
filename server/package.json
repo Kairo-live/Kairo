@@ -17,7 +17,6 @@
     "obs-websocket-js": "^5.0.8",
     "sherpa-onnx": "^1.13.7",
     "sherpa-onnx-node": "^1.13.7",
-    "smart-whisper": "^0.8.1",
     "ws": "^8.14.2"
   }
 }
