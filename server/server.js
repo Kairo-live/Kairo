@@ -13,16 +13,19 @@
 
 // Every native-async operation in this process (fs, sharp's image decoding
 // for media thumbnails, and — the one that actually matters here — every
-// single whisper.cpp transcribe call, see whisper_engine.js/smart-whisper's
-// own AsyncProgressQueueWorker) shares Node's ONE libuv threadpool, which
-// defaults to just 4 threads. Whisper's transcribe calls fire roughly every
-// PARTIAL_INTERVAL_MS (850ms) during continuous speech — if anything else
-// briefly saturates that small shared pool, a transcribe call queues up
-// behind unrelated work instead of running immediately, which is a real,
-// observed contributor to Whisper feeling far slower than a purely local
-// engine should be (owner, live: "something running locally shouldn't have
-// that much delay"). Must be set before ANY module that touches the
-// threadpool is required — libuv reads this lazily on first use, not at
+// offline-engine transcribe call into sherpa-onnx-node's native binding)
+// shares Node's ONE libuv threadpool, which defaults to just 4 threads.
+// This was originally raised while the offline engine was still whisper.cpp
+// (via smart-whisper's AsyncProgressQueueWorker), whose transcribe calls
+// fired roughly every PARTIAL_INTERVAL_MS (850ms) during continuous speech —
+// if anything else briefly saturated that small shared pool, a transcribe
+// call queued up behind unrelated work instead of running immediately, a
+// real, observed contributor to the offline engine feeling far slower than a
+// purely local engine should be (owner, live: "something running locally
+// shouldn't have that much delay"). The same shared-threadpool risk applies
+// to sherpa-onnx-node's own native calls, so this stays raised. Must be set
+// before ANY module that touches the threadpool is required — libuv reads
+// this lazily on first use, not at
 // process boot, so setting it here (before express/sharp/etc. below) still
 // works even when this file is run directly (`node server/server.js`, the
 // path used for standalone testing) rather than only via the npm script.
@@ -517,7 +520,7 @@ wss.on('connection', (ws) => {
 
   // Forward binary audio frames to whichever engine is active.
   // - Deepgram: streamed straight to the WS connection (Deepgram does endpointing)
-  // - Whisper:  fed to the local recognizer; partial()/final() drive detection
+  // - Offline:  fed to the local recognizer; partial()/final() drive detection
   // Either way we keep a short audio ring buffer for the REST fallback path.
   ws.on('message', (data, isBinary) => {
     if (!isBinary) {
@@ -584,8 +587,8 @@ wss.on('connection', (ws) => {
           console.warn(`[Deepgram] Skipped sending — underlying socket not OPEN (readyState=${conn ? conn.readyState : 'no conn'}). Chunk preserved in ring buffer for REST fallback.`);
         }
       }
-    } else if (whisperActive) {
-      feedWhisperAudio(chunk);
+    } else if (offlineActive) {
+      feedOfflineAudio(chunk);
     }
     audioRingBuffer.push({ data: chunk, time: Date.now() });
     audioRingBytes += chunk.length;
@@ -2452,30 +2455,30 @@ app.post('/api/test-transcript', async (req, res) => {
   res.json({ ok: true });
 });
 
-// Unified start endpoint — body.engine selects 'deepgram' (cloud) or the local
-// whisper.cpp engine, reached via 'whisper', 'offline', or the legacy aliases
-// 'vosk'/'browser' left over from the Vosk-based engine this replaced (so an
-// operator's previously-saved setting keeps working after the upgrade).
-// Default is deepgram for backward compatibility.
+// Unified start endpoint — body.engine selects 'deepgram' (cloud) or the
+// local sherpa-onnx engine, reached via 'offline' (current) or the legacy
+// aliases 'whisper'/'vosk'/'browser' left over from engines this one
+// replaced (so an operator's previously-saved setting keeps working across
+// upgrades). Default is deepgram for backward compatibility.
 app.post('/api/start-listening', async (req, res) => {
   const engine = String(req.body?.engine || 'deepgram').toLowerCase();
   if (['whisper', 'offline', 'vosk', 'browser'].includes(engine)) {
-    return res.json(await startWhisper());
+    return res.json(await startOffline());
   }
   return res.json(await startDeepgram(req.body || {}));
 });
 
 app.post('/api/stop-listening', async (_, res) => {
   // Stop whichever engine is active. Both calls are idempotent / no-op if inactive.
-  if (whisperActive) await stopWhisper();
+  if (offlineActive) await stopOffline();
   if (deepgramConnection) await stopDeepgram();
   res.json({ ok: true });
 });
 
 // ── Shared NDJSON progress-stream helper ─────────────────────────────────
-// Used by the Whisper installer, translate-model installer, and Ollama pull
-// routes below — all three stream install/download progress to the client
-// as newline-delimited JSON.
+// Used by the offline-model installer, translate-model installer, and
+// Ollama pull routes below — all three stream install/download progress to
+// the client as newline-delimited JSON.
 function startNdjsonStream(res) {
   res.setHeader('Content-Type', 'application/x-ndjson');
   res.setHeader('Cache-Control', 'no-cache');
@@ -2484,52 +2487,49 @@ function startNdjsonStream(res) {
   return (obj) => { try { res.write(JSON.stringify(obj) + '\n'); } catch {} };
 }
 
-// ── Whisper offline model installer ──────────────────────────────────────
-// GUI-driven counterpart to `npm run whisper:install`. The settings panel
-// POSTs here when the operator hits "Download offline model" and renders the
-// streamed NDJSON progress events as a progress bar.
-// One install at a time — second call returns 409 instead of double-downloading.
-// Offline engine swapped to sherpa-onnx (see loadWhisperMod) — its installer
-// exports the same interface under the same `installWhisperModel` name, so
-// the /api/whisper/* endpoints below are unchanged.
-const whisperInstaller = require('./sherpa_installer');
-let whisperInstallInProgress = false;
+// ── Offline (sherpa-onnx) model installer ─────────────────────────────────
+// GUI-driven — the settings panel POSTs here when the operator hits
+// "Download offline model" and renders the streamed NDJSON progress events
+// as a progress bar. One install at a time — second call returns 409
+// instead of double-downloading.
+const offlineInstaller = require('./sherpa_installer');
+let offlineInstallInProgress = false;
 
-app.get('/api/whisper/status', (_req, res) => {
+app.get('/api/offline/status', (_req, res) => {
   res.json({
-    installed: whisperInstaller.isModelPresent(),
+    installed: offlineInstaller.isModelPresent(),
     // True when a model IS installed but it's not the current MODEL_VERSION
     // (see sherpa_installer.js's own comment on how a real update reaches an
     // existing install) — the Settings UI shows a distinct "update
     // available" state for this rather than either "not installed" or a
     // plain checkmark.
-    needsUpdate: whisperInstaller.needsUpdate(),
-    modelPath: whisperInstaller.modelPath(),
-    installing: whisperInstallInProgress,
+    needsUpdate: offlineInstaller.needsUpdate(),
+    modelPath: offlineInstaller.modelPath(),
+    installing: offlineInstallInProgress,
   });
 });
 
-app.post('/api/whisper/install', async (_req, res) => {
-  if (whisperInstallInProgress) {
+app.post('/api/offline/install', async (_req, res) => {
+  if (offlineInstallInProgress) {
     return res.status(409).json({ error: 'install already in progress' });
   }
-  whisperInstallInProgress = true;
+  offlineInstallInProgress = true;
 
   const send = startNdjsonStream(res);
 
   try {
-    await whisperInstaller.installWhisperModel({ onProgress: send });
+    await offlineInstaller.installSherpaModel({ onProgress: send });
     send({ phase: 'complete', ok: true });
   } catch (err) {
     send({ phase: 'complete', ok: false, error: err.message || String(err) });
   } finally {
-    whisperInstallInProgress = false;
+    offlineInstallInProgress = false;
     res.end();
   }
 });
 
 // ── Local translation-model installer ────────────────────────────────────
-// Same NDJSON progress-bar shape as the Whisper installer above — this is
+// Same NDJSON progress-bar shape as the offline-model installer above — this is
 // the bundled Opus-MT model translate.js's translateWithLocalLLM() runs via
 // mt_engine.js (ONNX/@huggingface/transformers), downloaded once on first
 // need rather than baked into the app installer (see mt_installer.js).
@@ -2691,10 +2691,11 @@ async function handleTranscriptSegment(transcript, isFinal, confidence, speechFi
     // the offline engine's been live, forcing every detection to wait for
     // a full utterance endpoint instead of reacting mid-sentence like
     // Deepgram already does. Removed. If a genuinely batch-style engine
-    // (re-transcribes-from-scratch, like the old whisper_engine.js, still
-    // kept in the tree) is ever reinstated as an offline option, THAT
-    // engine needs its own stability flag here — not a blanket
-    // "offline == unstable" assumption, which is what this was.
+    // (re-transcribes-from-scratch, the way whisper.cpp did — no longer
+    // in the tree, removed once nothing required it) is ever added as
+    // another offline option, THAT engine needs its own stability flag
+    // here — not a blanket "offline == unstable" assumption, which is
+    // what this was.
     streamNewWords(transcript, false);
     maybeHandleNextVerseTrigger(transcript).catch(() => {});
     maybeAdvanceRangeOnLastWords(transcript);
@@ -2962,91 +2963,82 @@ async function handleTranscriptSegment(transcript, isFinal, confidence, speechFi
   }
 }
 
-// ── Whisper (offline STT, whisper.cpp) ─────────────────────────────────────
+// ── Offline STT (sherpa-onnx) ───────────────────────────────────────────────
 // Local, no-internet engine. Audio streams from the client over the same
 // WebSocket the Deepgram path uses. Results are routed through the shared
 // `handleTranscriptSegment` so detection / broadcast / viewer behaviour is
 // identical to Deepgram.
-let whisperMod    = null;   // require('./whisper_engine'), loaded once
-let whisperEngine = null;   // WhisperEngine instance
-let whisperActive = false;
-let whisperLastPartial = '';
+let offlineMod    = null;   // require('./sherpa_engine'), loaded once
+let offlineEngine = null;   // OfflineEngine instance
+let offlineActive = false;
+let offlineLastPartial = '';
 
-function loadWhisperMod() {
-  if (whisperMod) return whisperMod;
-  // Offline engine swapped from whisper.cpp (batch, emulated streaming, always
-  // behind) to sherpa-onnx streaming zipformer (transducer, genuinely
-  // frame-by-frame like Deepgram). sherpa_engine.js exports a `WhisperEngine`
-  // alias + the same defaultModelPath/defaultModelDir names, so nothing else
-  // in this file changes. whisper_engine.js/whisper_installer.js (and the
-  // smart-whisper dependency they used) were removed outright once it was
-  // confirmed nothing ever required them anymore — this "whisper*" naming
-  // below is legacy from that era, kept only because renaming every var/
-  // route wasn't worth the churn; the engine underneath is sherpa-onnx.
-  whisperMod = require('./sherpa_engine');
-  return whisperMod;
+function loadOfflineMod() {
+  if (offlineMod) return offlineMod;
+  offlineMod = require('./sherpa_engine');
+  return offlineMod;
 }
 
-async function startWhisper() {
+async function startOffline() {
   if (connectionState === 'connected' || connectionState === 'connecting') {
     return { error: 'Already listening' };
   }
   try {
     connectionState = 'connecting';
-    broadcast({ type: 'connection-state', state: 'connecting', engine: 'whisper' });
+    broadcast({ type: 'connection-state', state: 'connecting', engine: 'offline' });
 
-    const { WhisperEngine, defaultModelPath } = loadWhisperMod();
-    whisperLastPartial = '';
-    whisperEngine = new WhisperEngine({
-      modelPath: process.env.KAIRO_WHISPER_MODEL || defaultModelPath(),
+    const { OfflineEngine, defaultModelPath } = loadOfflineMod();
+    offlineLastPartial = '';
+    offlineEngine = new OfflineEngine({
+      modelPath: process.env.KAIRO_OFFLINE_MODEL || defaultModelPath(),
       gpu: true,
       language: 'en',
       onPartial: (text) => {
         const t = (text || '').trim();
-        if (!t || t === whisperLastPartial) return;
-        whisperLastPartial = t;
+        if (!t || t === offlineLastPartial) return;
+        offlineLastPartial = t;
         handleTranscriptSegment(t, false, 0.85, false).catch(() => {});
       },
       onFinal: (text) => {
         const t = (text || '').trim();
-        whisperLastPartial = '';
+        offlineLastPartial = '';
         if (t) handleTranscriptSegment(t, true, 0.9, true).catch(() => {});
       },
-      onError: (err) => console.warn('[Whisper]', err.message),
+      onError: (err) => console.warn('[Offline]', err.message),
     });
 
-    await whisperEngine.start();
-    whisperActive = true;
+    await offlineEngine.start();
+    offlineActive = true;
     streamWatermark = 0;
     connectionState = 'connected';
-    broadcast({ type: 'connection-state', state: 'connected', engine: 'whisper' });
-    return { ok: true, engine: 'whisper' };
+    broadcast({ type: 'connection-state', state: 'connected', engine: 'offline' });
+    return { ok: true, engine: 'offline' };
   } catch (err) {
-    whisperActive = false;
-    whisperEngine = null;
+    offlineActive = false;
+    offlineEngine = null;
     connectionState = 'error';
-    const friendly = err.code === 'WHISPER_MODEL_MISSING'
+    const friendly = err.code === 'OFFLINE_MODEL_MISSING'
       ? 'Offline model missing. Open Settings → Speech Engine → Offline and hit "Download offline model", or wait for the startup download to finish.'
-      : err.code === 'WHISPER_BINDING_MISSING'
+      : err.code === 'OFFLINE_BINDING_MISSING'
       ? 'Offline engine not installed. Run "npm install" in the server folder.'
-      : `Whisper failed to start: ${err.message}`;
-    broadcast({ type: 'connection-state', state: 'error', error: friendly, errorKind: err.code === 'WHISPER_MODEL_MISSING' ? 'model-missing' : 'unknown' });
+      : `Offline engine failed to start: ${err.message}`;
+    broadcast({ type: 'connection-state', state: 'error', error: friendly, errorKind: err.code === 'OFFLINE_MODEL_MISSING' ? 'model-missing' : 'unknown' });
     return { error: friendly };
   }
 }
 
-function feedWhisperAudio(buffer) {
-  if (!whisperActive || !whisperEngine) return;
-  try { whisperEngine.feed(buffer); }
-  catch (err) { console.warn('[Whisper] feed error:', err.message); }
+function feedOfflineAudio(buffer) {
+  if (!offlineActive || !offlineEngine) return;
+  try { offlineEngine.feed(buffer); }
+  catch (err) { console.warn('[Offline] feed error:', err.message); }
 }
 
-async function stopWhisper() {
-  whisperActive = false;
-  whisperLastPartial = '';
-  if (whisperEngine) {
-    try { await whisperEngine.stop(); } catch {}
-    whisperEngine = null;
+async function stopOffline() {
+  offlineActive = false;
+  offlineLastPartial = '';
+  if (offlineEngine) {
+    try { await offlineEngine.stop(); } catch {}
+    offlineEngine = null;
   }
   connectionState = 'disconnected';
   broadcast({ type: 'connection-state', state: 'disconnected' });

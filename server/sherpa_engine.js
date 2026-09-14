@@ -21,9 +21,9 @@
 // crucially emits natural casing + punctuation, which the detection pipeline
 // downstream leans on for sentence segmentation.
 //
-// This module keeps the SAME public interface WhisperEngine had, so
-// server.js's startWhisper()/feedWhisperAudio()/stopWhisper() and everything
-// downstream of handleTranscriptSegment is untouched:
+// This module keeps the SAME public interface the old whisper.cpp engine
+// had, so server.js's startOffline()/feedOfflineAudio()/stopOffline() and
+// everything downstream of handleTranscriptSegment is untouched:
 //   new SherpaEngine({ modelDir, language, onPartial, onFinal, onError })
 //   .start()   async, throws a coded error the server maps to a friendly msg
 //   .feed(buffer)   PCM s16le, 16 kHz, mono, Node Buffer
@@ -77,7 +77,7 @@ function defaultModelDir() {
 
 // A model dir is "present" when all four required files exist and the encoder
 // (the big one) is a plausible size — guards a half-finished extraction the
-// way whisper_installer's size check did.
+// same way sherpa_installer.js's own isModelPresent() check does.
 function isModelPresent(dir = defaultModelDir()) {
   try {
     for (const f of Object.values(MODEL_FILES)) {
@@ -97,8 +97,8 @@ class SherpaEngine {
   //   onFinal(text)    — once per utterance, at the endpoint
   //   onError(err)
   constructor(opts = {}) {
-    // `modelPath` accepted as an alias so server.js's existing
-    // `new WhisperEngine({ modelPath, ... })` call needs no change.
+    // `modelPath` accepted as an alias so server.js's
+    // `new OfflineEngine({ modelPath, ... })` call needs no further change.
     this.modelDir = opts.modelDir || opts.modelPath || defaultModelDir();
     this.language = opts.language || 'en';
     this.onPartial = opts.onPartial || (() => {});
@@ -115,7 +115,7 @@ class SherpaEngine {
   async start() {
     if (!isModelPresent(this.modelDir)) {
       const e = new Error(`Offline model not found at ${this.modelDir}`);
-      e.code = 'WHISPER_MODEL_MISSING'; // reuse the code server.js already maps
+      e.code = 'OFFLINE_MODEL_MISSING'; // reuse the code server.js already maps
       throw e;
     }
     let OnlineRecognizer;
@@ -123,7 +123,7 @@ class SherpaEngine {
       ({ OnlineRecognizer } = require('sherpa-onnx-node'));
     } catch (err) {
       const e = new Error('sherpa-onnx-node is not installed. Run: npm i sherpa-onnx-node');
-      e.code = 'WHISPER_BINDING_MISSING';
+      e.code = 'OFFLINE_BINDING_MISSING';
       throw e;
     }
 
@@ -208,14 +208,11 @@ class SherpaEngine {
   }
 }
 
-// Kept as aliases so server.js's `const { WhisperEngine, defaultModelPath } =
-// loadWhisperMod()` destructure keeps working during the swap with a
-// one-line change at the require site.
 function defaultModelPath() { return defaultModelDir(); }
 
 module.exports = {
   SherpaEngine,
-  WhisperEngine: SherpaEngine,   // drop-in alias
+  OfflineEngine: SherpaEngine,   // name server.js's loadOfflineMod() destructures
   defaultModelPath,
   defaultModelDir,
   isModelPresent,

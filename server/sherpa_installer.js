@@ -265,9 +265,6 @@ async function installSherpaModel({ modelsDir: base, onProgress } = {}) {
 }
 
 module.exports = {
-  // Named to match whisper_installer.js's exports so server.js's endpoint
-  // code doesn't have to branch on which engine is active.
-  installWhisperModel: installSherpaModel,
   installSherpaModel,
   isModelPresent,
   needsUpdate,

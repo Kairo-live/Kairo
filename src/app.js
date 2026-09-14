@@ -1402,7 +1402,7 @@ async function startListening() {
       // fix (go set it up in Settings), unlike a genuine runtime error (a
       // rejected/invalid key, a real network failure) which a redirect
       // wouldn't actually resolve — so only these two specific, well-known
-      // error strings (from startDeepgram/startWhisper in server.js) trigger
+      // error strings (from startDeepgram/startOffline in server.js) trigger
       // the jump; anything else just logs, matching the previous behavior's
       // (silent) fallback rather than guessing at what an unknown error needs.
       const missingKey   = serverEngine === 'deepgram' && /no deepgram api key/i.test(d.error);
@@ -2412,7 +2412,7 @@ populateAudioOutputDevices();
 
 // ── Offline (sherpa-onnx) model installer UI ──────────────────────────────
 // Shown only when the Speech Engine toggle is set to "Offline". Streams
-// NDJSON progress events from POST /api/whisper/install into a progress bar
+// NDJSON progress events from POST /api/offline/install into a progress bar
 // so the operator doesn't have to drop to a terminal to run npm scripts.
 // Normally the startup bootstrap (bootstrapStartup()) already fetched this
 // model before the operator ever opens Settings — this panel is the manual
@@ -2440,7 +2440,7 @@ function wireOfflineModelInstaller(ids) {
 
   async function refreshStatus() {
     try {
-      const r = await fetch(`${SERVER}/api/whisper/status`);
+      const r = await fetch(`${SERVER}/api/offline/status`);
       const s = await r.json();
       if (s.installing) {
         statusLine.textContent = 'Install in progress…';
@@ -2495,7 +2495,7 @@ function wireOfflineModelInstaller(ids) {
 
     let res;
     try {
-      res = await fetch(`${SERVER}/api/whisper/install`, { method: 'POST' });
+      res = await fetch(`${SERVER}/api/offline/install`, { method: 'POST' });
     } catch (err) {
       progressText.textContent = `Failed: ${err.message}`;
       installBtn.style.display = '';
@@ -2558,7 +2558,7 @@ wireOfflineModelInstaller({
 });
 
 // ── Local translation-model installer UI ─────────────────────────────────
-// Same NDJSON-progress pattern as the Whisper installer above, for the
+// Same NDJSON-progress pattern as the offline-model installer above, for the
 // bundled Opus-MT/NLLB models translate.js uses for non-scripture slide text
 // (see mt_engine.js/mt_installer.js). French/Spanish/Portuguese are three
 // independent downloads — a French-only operator never pays for Portuguese
@@ -9549,12 +9549,12 @@ async function bootstrapStartup() {
 
     if (engine === 'offline' || engine === 'browser') {
       try {
-        const st = await (await fetch(`${SERVER}/api/whisper/status`)).json();
+        const st = await (await fetch(`${SERVER}/api/offline/status`)).json();
         if (!st.installed) {
-          fetch(`${SERVER}/api/whisper/install`, { method: 'POST' }).catch(() => {});
+          fetch(`${SERVER}/api/offline/install`, { method: 'POST' }).catch(() => {});
           for (let i = 0; i < 600; i++) {          // up to ~10 min — the offline (sherpa-onnx) model is a sizable download
             await new Promise(r => setTimeout(r, 1000));
-            const s2 = await (await fetch(`${SERVER}/api/whisper/status`)).json().catch(() => ({}));
+            const s2 = await (await fetch(`${SERVER}/api/offline/status`)).json().catch(() => ({}));
             if (s2.installed) break;
           }
         }
