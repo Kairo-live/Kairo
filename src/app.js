@@ -1761,6 +1761,8 @@ async function loadSettings() {
   try {
     const r = await fetch(`${SERVER}/api/settings`);
     settings = await r.json();
+    const versionEl = document.getElementById('settings-nav-version');
+    if (versionEl) versionEl.textContent = settings.appVersion ? `KAIRO v${settings.appVersion}` : '';
     // Populate UI
     // The server sends deepgramApiKey MASKED ("abcd1234…") for display, never
     // the real key. It used to go straight into the input's editable .value —

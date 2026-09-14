@@ -30,6 +30,11 @@ if (!process.env.UV_THREADPOOL_SIZE) process.env.UV_THREADPOOL_SIZE = '8';
 
 const path       = require('path');
 const fs         = require('fs');
+// Read once at startup rather than on every /api/settings request — the
+// version doesn't change while the process is running.
+const APP_VERSION = (() => {
+  try { return require('../package.json').version; } catch { return null; }
+})();
 const http       = require('http');
 const express    = require('express');
 const cors       = require('cors');
@@ -1104,6 +1109,26 @@ function applyScriptureLanguage(verses) {
   return verses;
 }
 
+// The "Translation" dropdown (KJV/NIV/NLT/ESV/NASB/NKJV) has never actually
+// swapped displayed text — verse.text was hardcoded to kjv_text everywhere;
+// settings.translation only ever affected the label appended for
+// ProPresenter (see sendToProPresenter/sendToOBS's own `const t =
+// settings.translation || 'KJV'`). Real, distinct text only exists for two
+// of those six (map.json's own fusionType: "KJV + NLT" — the other four
+// were always just a different label on the same KJV text; the dropdown
+// itself is being cut back to just these two real options, same change).
+// This is the missing other half: actually apply the pick. English-only —
+// applyScriptureLanguage (below/above) already owns non-English display and
+// unconditionally overwrites v.text when active, so call order doesn't
+// matter, but this runs first for clarity (translation, then language).
+function applyTranslation(verses) {
+  if ((settings.translation || 'KJV').toUpperCase() !== 'NLT') return verses;
+  for (const v of verses) {
+    if (v.nlt_text) v.text = v.nlt_text;
+  }
+  return verses;
+}
+
 // Real verse text in the target language, looked up from the bundled
 // public-domain translations (no API key needed) — mutates verses in place
 // so every path sharing these object references picks it up once, whichever
@@ -1190,6 +1215,7 @@ function getFirstMeaningfulWords(text, n = 3) {
 }
 
 async function setRangeQueue(verses) {
+  applyTranslation(verses);
   applyScriptureLanguage(verses);
   await attachBibleTranslations(verses);
   rangeAllVerses      = verses.slice();
@@ -1701,6 +1727,9 @@ app.get('/health', (_, res) => res.json({
 app.get('/api/settings', (_, res) => {
   const safe = { ...settings };
   if (safe.deepgramApiKey) safe.deepgramApiKey = safe.deepgramApiKey.slice(0, 8) + '…';
+  // Not a persisted setting — just riding along on a request the client
+  // already makes on load, rather than a separate /api/version round trip.
+  safe.appVersion = APP_VERSION;
   res.json(safe);
 });
 
@@ -3730,6 +3759,7 @@ async function processForReferences(transcript, isFinal) {
         // translated side stayed blank until the final transcript's own,
         // properly-translated broadcast landed moments later — a real,
         // visible lag between the two panels.
+        applyTranslation(verses);
         applyScriptureLanguage(verses);
         await attachBibleTranslations(verses);
         broadcast({
@@ -4662,6 +4692,7 @@ async function broadcastDetection(verses, method, topScore, target) {
   }
 
   if (target === 'viewer') {
+    applyTranslation(verses);
     applyScriptureLanguage(verses);
     await attachBibleTranslations(verses);
   }

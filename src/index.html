@@ -318,13 +318,19 @@
                         <svg width="10" height="10" viewBox="0 0 12 12" fill="none"><path d="M1 1l10 10M11 1L1 11" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
                     </button>
                 </div>
+                <!-- Only KJV and NLT are real, distinct text (map.json's own
+                     fusionType: "KJV + NLT") — NIV/ESV/NASB/NKJV used to sit
+                     here too, but picking any of them silently showed KJV
+                     text under a different label; nothing backing them
+                     actually existed. Removed rather than left to imply
+                     content that isn't there — see the Language settings
+                     pane / scripture-pack work for the real path to more
+                     translations (public-domain ones bundled directly;
+                     copyrighted ones would need a licensed API, not a
+                     bundled download). -->
                 <select id="translation-select" class="cs-select cs-translation-select">
                     <option value="KJV" selected>KJV</option>
-                    <option value="NIV">NIV</option>
                     <option value="NLT">NLT</option>
-                    <option value="ESV">ESV</option>
-                    <option value="NASB">NASB</option>
-                    <option value="NKJV">NKJV</option>
                 </select>
                 <button id="bible-theme-btn" class="ls-icon-btn ls-icon-btn-labeled svc-card-theme-btn cs-theme-btn" title="Theme for auto-detected &amp; searched scripture">
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
@@ -1095,6 +1101,10 @@
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M6 8h.01M10 8h.01M14 8h.01M18 8h.01M6 12h.01M10 12h.01M14 12h.01M18 12h.01M8 16h8"/></svg>
                     <span>Shortcuts</span>
                 </button>
+                <!-- appVersion rides along on the same GET /api/settings the
+                     rest of this panel already loads from (loadSettings() in
+                     app.js) — not its own request. -->
+                <div class="settings-nav-version" id="settings-nav-version"></div>
             </nav>
 
             <!-- Right: the selected category -->
@@ -1170,12 +1180,9 @@
                         <label class="setting-label">Translation</label>
                         <select id="translation-select-settings" class="setting-input">
                             <option value="KJV" selected>KJV</option>
-                            <option value="NIV">NIV</option>
                             <option value="NLT">NLT</option>
-                            <option value="ESV">ESV</option>
-                            <option value="NASB">NASB</option>
-                            <option value="NKJV">NKJV</option>
                         </select>
+                        <p class="setting-hint">The only two with real, distinct text bundled today — others showed KJV text under a different label with nothing actually behind them.</p>
                     </div>
 
                     <div class="setting-group">

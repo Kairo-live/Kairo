@@ -1549,6 +1549,13 @@ input[type="range"]:disabled { opacity: 0.4; cursor: default; }
   background: var(--bg-input);
   overflow-y: auto;
 }
+.settings-nav-version {
+  margin-top: auto;
+  padding: var(--space-3) var(--space-2) var(--space-1);
+  font-size: 10px;
+  color: var(--text-4);
+  text-align: center;
+}
 
 .settings-nav-item {
   display: flex;
