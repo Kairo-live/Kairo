@@ -66,7 +66,14 @@
      text or a white toggle knob — a light value there would wash out.
      Variable names kept as --blue* for cross-file compat, same reasoning
      as before, even though the hex is now neutral gray, not teal. */
-  --blue:        #d0d0d6;
+  /* #d0d0d6 (near --text's own #f0f0f0 brightness) made focus rings/borders
+     pop almost as bright as primary text — a "secondary" accent shouldn't
+     out-shout the page's actual content (owner feedback, live: a search
+     input's focus ring read as glaringly disconnected from everything
+     around it). Dimmed to a clear step below --text-2 (#8e8e8e) instead —
+     still reads as a deliberate light accent against dark panels, not
+     competing with what the panel is actually showing. */
+  --blue:        #8f8f97;
   --blue-dim:    rgba(255,255,255,0.08);
   --blue-slide:  #57575f;
   --orange:      #f59e0b;
