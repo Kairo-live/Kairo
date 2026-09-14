@@ -314,6 +314,15 @@ function fromPro6(buf) {
 // before touching `.raw`, so the extra varint/fixed32/fixed64 entries this
 // now includes are simply skipped by code that never asked for them.
 function pbFields(buf) {
+  // The doc comment above promises "never throws" — real incident: a
+  // .proplaylist manifest passed undefined here (a caller's own missing
+  // .wire check, since fixed) and `buf.length` below threw instead of
+  // failing closed like every other malformed-input case in this
+  // function. Buffer.isBuffer, not just a truthiness check — an empty
+  // buffer is a legitimate zero-field message (falls through to the
+  // while loop never executing, returns []), not the same case as "not a
+  // buffer at all".
+  if (!Buffer.isBuffer(buf)) return null;
   const fields = [];
   let pos = 0;
   while (pos < buf.length) {
@@ -592,7 +601,17 @@ function walkPlaylistManifest(fields, out, depth = 0) {
     if (!sub) continue;
     const nameField = pbFirst(sub, 2);
     const fileRefField = pbFirst(sub, 4);
-    if (nameField && nameField.wire === 2 && fileRefField) {
+    // Real crash, reported live: fileRefField can exist but NOT be a wire-2
+    // (length-delimited) submessage — e.g. a playlist item whose own [4]
+    // field is a varint/fixed-width value for some other item shape this
+    // reverse-engineered walk hasn't seen before. Every other field access
+    // in this file guards its own .wire before touching .raw; this call
+    // site was the one that didn't, and pbFields(undefined) doesn't return
+    // null the way its own doc comment promises — it throws instead
+    // (buf.length on undefined). Falls through to the same "not a
+    // presentation reference, walk it as a folder/header instead" path
+    // below rather than crashing the whole playlist import.
+    if (nameField && nameField.wire === 2 && fileRefField && fileRefField.wire === 2) {
       const relPath = pro7FileRefRelPath(fileRefField.raw);
       if (relPath) { out.push({ name: nameField.raw.toString('utf8'), relPath }); continue; }
     }

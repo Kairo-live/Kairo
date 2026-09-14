@@ -850,11 +850,24 @@
                     <span>Close</span>
                 </button>
             </div>
+            <!-- Owner: "the imports here should be consistent" — these three
+                 labels now match the Add-to-playlist popover's own wording
+                 exactly (buildImportRows in service.js) for the same two
+                 actions, rather than a separately-worded "Slides from
+                 file…/clipboard…" pair that happened to drift since this
+                 modal hands off to those exact same functions
+                 (triggerQuickFile/quickImportClipboard, see app.js). "Import
+                 song file…" (not just "Song…", the Add-to-playlist menu's
+                 own label) — here it means importing a FILE straight into
+                 the Song Library, a different action from Add-to-playlist's
+                 "Song…", which browses the library instead; keeping the
+                 same bare label for two different actions was its own
+                 source of confusion. -->
             <div class="modal-body" style="display:block;padding:8px;">
                 <div class="svc-popover-list">
-                    <button type="button" class="svc-popover-item" id="import-opt-file">Slides from file…</button>
-                    <button type="button" class="svc-popover-item" id="import-opt-clipboard">Slides from clipboard…</button>
-                    <button type="button" class="svc-popover-item" id="import-opt-song">Song…</button>
+                    <button type="button" class="svc-popover-item" id="import-opt-file">Import file…</button>
+                    <button type="button" class="svc-popover-item" id="import-opt-clipboard">Paste from clipboard</button>
+                    <button type="button" class="svc-popover-item" id="import-opt-song">Import song file…</button>
                     <div class="svc-add-menu-sep"></div>
                     <button type="button" class="svc-popover-item" id="import-opt-theme">Theme…</button>
                 </div>
