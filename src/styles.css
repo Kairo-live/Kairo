@@ -1908,7 +1908,10 @@ input[type="range"]:disabled { opacity: 0.4; cursor: default; }
    has higher specificity than .svc-edit-btn's compact toolbar padding —
    would've quietly overridden it and made these buttons noticeably bulkier
    than their row-mates. Keep the toolbar sizing, just the primary color. */
-.svc-edit-btn.primary { padding: 5px 14px; font-size: var(--fs-xs); }
+/* 3 classes, not 2 — needs to outrank .modal-btn.primary (same 2-class
+   specificity, defined later in this file, so would otherwise win on
+   source order and silently undo this override). */
+.modal-btn.svc-edit-btn.primary { padding: 5px 14px; font-size: var(--fs-xs); }
 .svc-edit-btn { padding: 5px 14px; font-size: var(--fs-xs); }
 
 /* Slide grid — card width is driven by the scale slider. */
