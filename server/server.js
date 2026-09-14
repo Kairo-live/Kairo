@@ -3097,13 +3097,29 @@ async function startDeepgram(config = {}) {
     // if it's not the current one — a stale connection's late-firing
     // events can now never mutate global state or trigger a duplicate
     // reconnect again.
-    const myConnection = deepgramConnection = dg.listen.live({
+    const dgConfig = {
       // Spoken language comes from Settings → Language. 'multi' asks Deepgram
       // to auto-detect, for services that code-switch mid-sentence.
       model: 'nova-3', language: (settings.sttLanguage || 'en-US'), smart_format: true, punctuate: true,
       interim_results: true, utterance_end_ms: 1200, endpointing: 300,
       encoding: 'linear16', sample_rate: 16000, channels: 1,
       no_delay: true, filler_words: false, diarize: false,
+    };
+    // Real gap found while wiring the scripture-language packs: this list
+    // used to be sent unconditionally regardless of settings.sttLanguage —
+    // harmless for a French/Spanish/etc. service (Deepgram just never
+    // matches these against audio that doesn't contain the literal English
+    // words), but it also means non-English services get NONE of the real
+    // accuracy boost this gives English ones on words a general ASR model
+    // tends to mangle ("Habakkuk", "Nehemiah", "Zephaniah"). Scoped to
+    // English (+ 'multi', since a code-switching service may include
+    // English) rather than guessing translations for the other 15+
+    // languages in the Spoken Language dropdown — a wrong translated term
+    // would be worse than no boost at all. Real localized lists for the
+    // languages that already have verified scripture-pack data (es/fr/pt/de)
+    // are a legitimate follow-up, sourced from real data, not guessed.
+    const sttLang = settings.sttLanguage || 'en-US';
+    if (sttLang.startsWith('en') || sttLang === 'multi') {
       // 'keywords' (KEYWORD:INTENSIFIER) only works on Nova-2/1/Enhanced/Base —
       // Nova-3 replaced it with 'keyterm' (Keyterm Prompting): plain terms,
       // no weight syntax. Deepgram does NOT reject a leftover ":N" suffix on
@@ -3111,7 +3127,7 @@ async function startDeepgram(config = {}) {
       // literal term to boost, which would never match real speech. Weights
       // dropped outright rather than translated to anything, since keyterm
       // has no equivalent concept.
-      keyterm: [
+      dgConfig.keyterm = [
         'Genesis','Exodus','Leviticus','Numbers','Deuteronomy',
         'Joshua','Judges','Ruth','Samuel','Kings','Chronicles',
         'Ezra','Nehemiah','Esther','Job','Psalms','Psalm','Proverbs',
@@ -3124,8 +3140,9 @@ async function startDeepgram(config = {}) {
         'Hebrews','James','Peter','Jude','Revelation',
         'Chapter','Verse','Scripture',
         'brethren','righteous','salvation','covenant',
-      ],
-    });
+      ];
+    }
+    const myConnection = deepgramConnection = dg.listen.live(dgConfig);
 
     return await new Promise((resolve) => {
       myConnection.on(LiveTranscriptionEvents.Open, () => {
