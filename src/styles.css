@@ -1368,7 +1368,39 @@ input[type="range"]:disabled { opacity: 0.4; cursor: default; }
   padding: 2px 0;
 }
 
-.bs-check-label input { accent-color: var(--blue); width: 14px; height: 14px; }
+/* Was plain accent-color on a native checkbox — at this size (14px) and
+   with the now-dimmed neutral accent (#8f8f97, deliberately toned down —
+   see --blue's own comment), the checked glyph read as barely-visible
+   against its own fill ("lol?", live). A real custom checkbox instead,
+   same brand-on-checked convention as the toggle switches, guarantees a
+   crisp white check regardless of accent color rather than depending on
+   whatever the OS/WebKit draws for a given accent-color hue. */
+.bs-check-label input {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 15px;
+  height: 15px;
+  border-radius: 4px;
+  border: 1px solid var(--border-md);
+  background: var(--bg-input);
+  cursor: pointer;
+  flex-shrink: 0;
+  position: relative;
+  transition: background var(--trans), border-color var(--trans);
+}
+.bs-check-label input:checked {
+  background: var(--brand);
+  border-color: var(--brand);
+}
+.bs-check-label input:checked::after {
+  content: '';
+  position: absolute;
+  left: 5px; top: 1px;
+  width: 4px; height: 8px;
+  border: solid #fff;
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
 
 /* (Old .bs-save-row, .bs-save-btn removed — dead code) */
 
@@ -2089,20 +2121,20 @@ input[type="range"]:disabled { opacity: 0.4; cursor: default; }
   border-radius: 3px;
 }
 
-.svc-slide-search-row {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  padding: 0 var(--space-4) var(--space-3);
-  flex-shrink: 0;
-}
-.svc-slide-search-row .cs-search-wrap { flex: 1; }
+/* In the Slides header row itself now (owner feedback: "search should be
+   contained in that bar" — was its own row below, taking extra vertical
+   space for no real reason). flex:1 so it fills whatever room is left
+   between the "Slides" label and the fixed-width control cluster
+   (svc-header-right, still shrink-to-fit + margin-left:auto) rather than
+   sizing to its placeholder text. min-width so it can still shrink below
+   that at a narrow panel width instead of forcing an overflow/scrollbar —
+   .svc-header's own flex-wrap is the fallback past that floor. */
+.svc-slide-search-wrap { flex: 1; min-width: 120px; }
 .svc-slide-search-count {
   font-size: var(--fs-xs);
   color: var(--text-3);
   white-space: nowrap;
-  min-width: 70px;
-  text-align: right;
+  flex-shrink: 0;
 }
 
 /* ── Playlist stack (the folder view) ────────────────────────────────────── */
@@ -5590,6 +5622,11 @@ select {
 
 .ts-chip.active { background: var(--selected-solid); color: var(--selected-text); }
 .ts-chip:hover:not(.active) { color: var(--text-2); background: var(--bg-hover); }
+/* Icon-only variant (Slides' Grid/List view switch) — square instead of
+   text-width padding, icon centered. Was plain text labels ("Grid"/
+   "List"); universal icon convention (grid-of-squares / list-rows)
+   instead, same as every other app's grid/list view toggle. */
+.ts-chip-icon { padding: 5px; display: flex; align-items: center; justify-content: center; }
 
 .ts-name-input {
   flex: 1;

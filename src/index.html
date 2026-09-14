@@ -342,22 +342,14 @@
             <div class="cs-live-queue-section cs-live-queue-main hidden" id="svc-stack-view">
                 <div class="cs-section-header svc-header">
                     <span class="cs-section-label">Slides</span>
-                    <div class="svc-header-right">
-                        <div class="ts-chip-group" id="svc-view-chips" title="View">
-                            <button class="ts-chip active" data-view="grid">Grid</button>
-                            <button class="ts-chip" data-view="list">List</button>
-                        </div>
-                        <input type="range" id="svc-scale" class="svc-scale" min="90" max="360" step="10" value="190" title="Slide size">
-                        <button id="svc-add-section-btn" class="modal-btn primary svc-edit-btn">+ Add content</button>
-                    </div>
-                </div>
-                <!-- Keyword search across every slide in this playlist — doesn't
-                     filter the list (a slide can matter for reasons a text search
-                     can't see, e.g. it's an image), just auto-expands whichever
-                     section(s) contain a match, highlights the matching slide(s),
-                     and scrolls the first one into view. -->
-                <div class="svc-slide-search-row">
-                    <div class="cs-search-wrap">
+                    <!-- Keyword search across every slide in this playlist — doesn't
+                         filter the list (a slide can matter for reasons a text search
+                         can't see, e.g. it's an image), just auto-expands whichever
+                         section(s) contain a match, highlights the matching slide(s),
+                         and scrolls the first one into view. In the same toolbar row
+                         as the rest of the controls rather than its own row below —
+                         one bar, not two. -->
+                    <div class="cs-search-wrap svc-slide-search-wrap">
                         <svg class="cs-search-icon" width="14" height="14" viewBox="0 0 16 16" fill="none"><circle cx="6.5" cy="6.5" r="5" stroke="currentColor" stroke-width="1.5"/><path d="M10.5 10.5L14 14" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
                         <input type="text" id="svc-slide-search" class="cs-search-input" placeholder="Find a word or phrase across all slides…">
                         <button id="svc-slide-search-clear" class="cs-search-clear" title="Clear" style="display:none;">
@@ -365,6 +357,18 @@
                         </button>
                     </div>
                     <span class="svc-slide-search-count" id="svc-slide-search-count"></span>
+                    <div class="svc-header-right">
+                        <div class="ts-chip-group" id="svc-view-chips" title="View">
+                            <button class="ts-chip ts-chip-icon active" data-view="grid" title="Grid view">
+                                <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><rect x="1" y="1" width="6" height="6" rx="1" fill="currentColor"/><rect x="9" y="1" width="6" height="6" rx="1" fill="currentColor"/><rect x="1" y="9" width="6" height="6" rx="1" fill="currentColor"/><rect x="9" y="9" width="6" height="6" rx="1" fill="currentColor"/></svg>
+                            </button>
+                            <button class="ts-chip ts-chip-icon" data-view="list" title="List view">
+                                <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><rect x="1" y="2" width="3" height="3" rx="0.5" fill="currentColor"/><rect x="6" y="2.5" width="9" height="2" rx="1" fill="currentColor"/><rect x="1" y="7" width="3" height="3" rx="0.5" fill="currentColor"/><rect x="6" y="7.5" width="9" height="2" rx="1" fill="currentColor"/><rect x="1" y="12" width="3" height="3" rx="0.5" fill="currentColor"/><rect x="6" y="12.5" width="9" height="2" rx="1" fill="currentColor"/></svg>
+                            </button>
+                        </div>
+                        <input type="range" id="svc-scale" class="svc-scale" min="90" max="360" step="10" value="190" title="Slide size">
+                        <button id="svc-add-section-btn" class="modal-btn primary svc-edit-btn">+ Add content</button>
+                    </div>
                 </div>
                 <div class="svc-stack-list" id="svc-stack-list"></div>
             </div>
