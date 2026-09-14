@@ -1911,8 +1911,16 @@ input[type="range"]:disabled { opacity: 0.4; cursor: default; }
 /* 3 classes, not 2 — needs to outrank .modal-btn.primary (same 2-class
    specificity, defined later in this file, so would otherwise win on
    source order and silently undo this override). */
-.modal-btn.svc-edit-btn.primary { padding: 5px 14px; font-size: var(--fs-xs); }
-.svc-edit-btn { padding: 5px 14px; font-size: var(--fs-xs); }
+.modal-btn.svc-edit-btn.primary { padding: 0 14px; font-size: var(--fs-xs); }
+/* height (not just padding) so it actually matches its row-mate
+   .cs-search-input's 34px — padding alone left it visibly shorter. */
+.svc-edit-btn {
+  height: 34px;
+  padding: 0 14px;
+  font-size: var(--fs-xs);
+  display: inline-flex;
+  align-items: center;
+}
 
 /* Slide grid — card width is driven by the scale slider. */
 .svc-slides-grid {
@@ -1961,6 +1969,15 @@ input[type="range"]:disabled { opacity: 0.4; cursor: default; }
 .svc-slide:hover { border-color: var(--blue); }
 .svc-slide.live { border-color: var(--brand); box-shadow: 0 0 0 1px var(--brand); }
 .svc-slide.selected { outline: 2px solid var(--selected-border); outline-offset: -2px; }
+/* Slide-search match — deliberately not brand orange (reserved for live/
+   on-air state elsewhere) or red/green (danger/success) — the neutral
+   secondary accent reads as "here's what you searched for", not a status. */
+.svc-slide.search-match { outline: 2px solid var(--blue); outline-offset: -2px; box-shadow: 0 0 0 4px rgba(143,143,151,0.2); }
+.svc-slide.search-match-flash { animation: svc-slide-search-flash 0.9s ease-out; }
+@keyframes svc-slide-search-flash {
+  0%   { box-shadow: 0 0 0 4px rgba(143,143,151,0.55); }
+  100% { box-shadow: 0 0 0 4px rgba(143,143,151,0.2); }
+}
 
 /* Bare "N." fallback (no real section set) — a compact bottom-left pill,
    matching Full-scale edit's slide-list convention (.ts-item-slide-label). */
@@ -2070,6 +2087,22 @@ input[type="range"]:disabled { opacity: 0.4; cursor: default; }
   letter-spacing: 0.1em;
   padding: 2px 6px;
   border-radius: 3px;
+}
+
+.svc-slide-search-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 0 var(--space-4) var(--space-3);
+  flex-shrink: 0;
+}
+.svc-slide-search-row .cs-search-wrap { flex: 1; }
+.svc-slide-search-count {
+  font-size: var(--fs-xs);
+  color: var(--text-3);
+  white-space: nowrap;
+  min-width: 70px;
+  text-align: right;
 }
 
 /* ── Playlist stack (the folder view) ────────────────────────────────────── */
