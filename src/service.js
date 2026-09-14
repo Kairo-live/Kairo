@@ -469,8 +469,23 @@
             const start = cursor;
             cursor += lines.length;
             if (!lines.length || lines.every(l => !String(l).trim())) return;
+            // b.label is empty for a Custom-lines import's single flattened
+            // block (see confirmAddConfirm) — that block never had a real
+            // section name, just the deck's own title, which repeated on
+            // every single chunked slide was pure noise (owner: "title in
+            // all slide is not required, slide numbers are more important" —
+            // applies here too, not just the 'slides' case above, since a
+            // song saved to the library from that same flow keeps carrying
+            // this same blank label). Also catches decks saved to the
+            // library BEFORE this fix, whose block label is still the
+            // deck's own title verbatim — same noise, just pre-existing
+            // data rather than a fresh blank string. Either way, fall back
+            // to a bare slide number instead of prefixing " · N" with
+            // something that isn't a real section name. A real song's
+            // genuine stanza label (e.g. "Verse 1") is untouched.
+            const hasRealLabel = b.label && b.label.trim().toLowerCase() !== String(item.title || '').trim().toLowerCase();
             out.push({
-              label: parts.length > 1 ? `${b.label} · ${i + 1}` : b.label,
+              label: parts.length > 1 ? (hasRealLabel ? `${b.label} · ${i + 1}` : `${i + 1}`) : (hasRealLabel ? b.label : ''),
               lines, text: lines.join('\n'), reference: item.title,
               blockIndex: bi, lineStart: start, lineEnd: start + lines.length,
             });
@@ -2197,7 +2212,14 @@
     // browsing view itself. `b.label` falls back to a generic `Slide N`
     // string (see slidesFor) when nothing real was ever set, so exclude
     // that shape and fall back to the plain numeral exactly as before.
-    const realLabel = item.type === 'song' && s.label && !/^slide\s+\d+$/i.test(s.label) ? s.label : null;
+    // songBank distinguishes a real song (with genuine Verse/Chorus/Bridge
+    // structure) from an imported deck that merely reuses the song type's
+    // linesPerSlide chunking machinery internally (see confirmAddConfirm's
+    // "Custom lines" import mode) — that import's single block is just
+    // labelled with the deck's own title, not a real song section, so it
+    // shouldn't get the colored section highlight below (same distinction
+    // typeLabel() above already draws for the sidebar's type text).
+    const realLabel = item.type === 'song' && item.songBank && s.label && !/^slide\s+\d+$/i.test(s.label) ? s.label : null;
     label.textContent = realLabel || `${i + 1}.`;
     // Owner: "it needs a color shading with a frame around it to make the
     // user see it in first glance" — a plain-text label was easy to miss
@@ -3797,7 +3819,12 @@
           item.type = 'song';
           item.linesPerSlide = n;
           const allLines = rawBlocks.filter(b => !b.image).flatMap(b => b.lines || []);
-          item.blocks = [{ label: item.title || 'Imported', lines: allLines }];
+          // No real section name for this synthetic block — it's just the
+          // deck's own title, which slidesFor() would otherwise repeat on
+          // every single chunked slide (owner: "title in all slide is not
+          // required, slide numbers are more important"). Blank it and let
+          // slidesFor's own fallback show a bare slide number instead.
+          item.blocks = [{ label: '', lines: allLines }];
         }
       } else {
         item.linesPerSlide = n;
@@ -3865,9 +3892,11 @@
                 ? { label: b.label, image: b.image }
                 : { label: b.label, text: (b.lines || []).join('\n') }) }
           // Same flatten-across-blocks reflow as the primary item above —
-          // Custom-lines mode ignores the original paragraph breaks.
+          // Custom-lines mode ignores the original paragraph breaks. Blank
+          // label, same reasoning as the primary item's own block above:
+          // no real section name here, just noise if repeated per slide.
           : { id: uid('song'), type: 'song', title: extra.name || 'Imported slides', themeId: item.themeId, linesPerSlide: n,
-              blocks: [{ label: extra.name || 'Imported', lines: extra.blocks.filter(b => !b.image).flatMap(b => b.lines || []) }] };
+              blocks: [{ label: '', lines: extra.blocks.filter(b => !b.image).flatMap(b => b.lines || []) }] };
         archiveImportToDefault(extraItem, target);
         target.items.push(extraItem);
       }
