@@ -4150,6 +4150,8 @@ function syncMetaRow() {
     b.classList.toggle('active', b.dataset.layout === activeLook.layout));
   const alphaBtn = document.getElementById('ts-alpha-toggle');
   if (alphaBtn) alphaBtn.classList.toggle('active', isAlphaCanvas());
+  const chromaBtn = document.getElementById('ts-chroma-toggle');
+  if (chromaBtn) chromaBtn.classList.toggle('active', isChromaCanvas());
   renderThemeCanvasSizeSelect();
 
   // Text Animation — how the verse text itself reveals, independent of the
@@ -4203,6 +4205,17 @@ function baseBgLayer() {
 }
 function isAlphaCanvas() {
   return baseBgLayer()?.fill === 'transparent';
+}
+// Standard chroma-green — see the Chroma Key button's own tooltip for why
+// this exists as a distinct option from Transparent: real per-pixel alpha
+// only survives through Syphon/NDI output; a plain OBS/vMix "Window
+// Capture" of the display window does NOT preserve any app's transparency,
+// so a solid, keyable color is the reliable default for that far more
+// common setup.
+const CHROMA_KEY_COLOR = '#00FF00';
+function isChromaCanvas() {
+  const bg = baseBgLayer();
+  return bg?.fill === 'solid' && (bg.color || '').toUpperCase() === CHROMA_KEY_COLOR;
 }
 
 // ── Render layers list ────────────────────────────────────────────────────
@@ -7923,6 +7936,32 @@ document.getElementById('ts-alpha-toggle')?.addEventListener('click', () => {
   } else {
     bg.fillBefore = bg.fill;
     bg.fill = 'transparent';
+  }
+  syncMetaRow();
+  up();
+  renderProps();
+});
+
+// Chroma Key — one click to a solid, reliably-keyable green, same
+// fillBefore round-trip as Transparent above. A distinct button rather
+// than a third click-state on Transparent since they're genuinely
+// different setups (see both buttons' own tooltips): this one just needs
+// a normal solid-fill background layer, no OS-level window transparency
+// involved at all, which is exactly why it works through a plain OBS/vMix
+// Window Capture where Transparent does not.
+document.getElementById('ts-chroma-toggle')?.addEventListener('click', () => {
+  const bg = baseBgLayer();
+  if (!bg) { toast('This theme has no background layer', 'error'); return; }
+  if (isChromaCanvas()) {
+    bg.fill = bg.fillBefore || 'solid';
+    bg.color = bg.colorBefore || bg.color;
+    delete bg.fillBefore;
+    delete bg.colorBefore;
+  } else {
+    bg.fillBefore = bg.fill;
+    bg.colorBefore = bg.color;
+    bg.fill = 'solid';
+    bg.color = CHROMA_KEY_COLOR;
   }
   syncMetaRow();
   up();

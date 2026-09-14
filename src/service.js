@@ -78,6 +78,7 @@
   let selectedItemIds = new Set(); // multi-select in the sidebar (Cmd/Ctrl+Click, Shift+Click, Cmd/Ctrl+A)
   let lastClickedItemId = null;    // anchor for Shift+Click range-select
   let liveSlideKey = null;
+  let slideSearchQuery = ''; // lowercased, trimmed — see the search wiring below and slideCard()'s use of it
   let dragFlowIndex = null;    // index being dragged in the flow view
   const expanded = new Set(); // section ids currently expanded in the stack
   // Single-open by design: expanding a card closes any other open one instead
@@ -2136,7 +2137,8 @@
   function slideCard(item, s, i) {
     const card = document.createElement('button');
     const isLive = liveSlideKey === `${item.id}:${i}`;
-    card.className = 'svc-slide' + (isLive ? ' live' : '') + (isSlideSelected(i) ? ' selected' : '');
+    const isMatch = !!slideSearchQuery && (s.text || '').toLowerCase().includes(slideSearchQuery);
+    card.className = 'svc-slide' + (isLive ? ' live' : '') + (isSlideSelected(i) ? ' selected' : '') + (isMatch ? ' search-match' : '');
     card.title = 'Send to all outputs';
 
     const preview = document.createElement('div');
@@ -5824,6 +5826,63 @@
     // sense once you're inside a playlist, so it lives on the stack view's
     // own toolbar rather than duplicated at the folder level.
     document.getElementById('svc-add-section-btn')?.addEventListener('click', (e) => openAddContentPopover(e.currentTarget));
+
+    // Keyword search across every slide's text in the current playlist —
+    // see slideSearchQuery's own declaration and slideCard()'s use of it
+    // for how the actual matching/highlighting works. This wiring just
+    // owns the input itself: debounced re-render, auto-expand any section
+    // with a match, scroll+flash the first one, keep the count/clear-button
+    // in sync.
+    {
+      const searchInput = document.getElementById('svc-slide-search');
+      const clearBtn    = document.getElementById('svc-slide-search-clear');
+      const countEl     = document.getElementById('svc-slide-search-count');
+      let searchDebounce = null;
+
+      const runSearch = () => {
+        slideSearchQuery = (searchInput.value || '').trim().toLowerCase();
+        clearBtn.style.display = slideSearchQuery ? '' : 'none';
+        if (!slideSearchQuery) { countEl.textContent = ''; renderStack(); return; }
+
+        // A match inside a collapsed section is invisible until expanded.
+        // Sections stay single-open by design elsewhere (expandOnly, see
+        // its own comment on the re-render cost of more than one open card
+        // at once) — auto-open only the FIRST item with a match, same as
+        // clicking its chevron, rather than forcing every matching section
+        // open at once.
+        let matchCount = 0;
+        let firstMatchItemId = null;
+        (service?.items || []).forEach(item => {
+          const n = slidesFor(item).filter(s =>
+            (s.text || '').toLowerCase().includes(slideSearchQuery)).length;
+          matchCount += n;
+          if (n && firstMatchItemId == null) firstMatchItemId = item.id;
+        });
+        if (firstMatchItemId != null) expandOnly(firstMatchItemId);
+        countEl.textContent = matchCount
+          ? `${matchCount} match${matchCount === 1 ? '' : 'es'}`
+          : 'No matches';
+
+        renderStack();
+
+        const first = document.querySelector('#svc-stack-list .svc-slide.search-match');
+        if (first) {
+          first.scrollIntoView({ block: 'center', behavior: 'smooth' });
+          first.classList.add('search-match-flash');
+          setTimeout(() => first.classList.remove('search-match-flash'), 900);
+        }
+      };
+
+      searchInput?.addEventListener('input', () => {
+        clearTimeout(searchDebounce);
+        searchDebounce = setTimeout(runSearch, 150);
+      });
+      clearBtn?.addEventListener('click', () => {
+        searchInput.value = '';
+        runSearch();
+        searchInput.focus();
+      });
+    }
 
     // Hidden input used for the quick "Import file…" path from the add-menu.
     let quickFileInput = document.getElementById('quick-import-file');
