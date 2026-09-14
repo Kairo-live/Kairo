@@ -3678,7 +3678,11 @@ select {
   gap: 5px;
   padding: 2px 8px;
   background: var(--green-dim);
-  border: 1px solid rgba(232,64,74,0.25);
+  /* Was a hardcoded rgba(232,64,74,*) — --red's literal RGB, the same
+     copy-paste-leftover class already fixed once tonight for the
+     ProPresenter "Connected" toggle — ringing an all-green badge in a
+     mismatched red/orange outline. */
+  border: 1px solid rgba(34,197,94,0.25);
   border-radius: 20px;
   font-family: var(--font-head);
   font-size: 8.5px;
@@ -3688,6 +3692,21 @@ select {
   color: var(--green);
   margin-left: auto;
 }
+/* This badge used to be static markup — always claimed "Auto-Deploy" was
+   live regardless of the real Settings > Bible > "Auto-send high
+   confidence verses" checkbox (owner: "I think this isn't connected to
+   the settings auto send" — correct, it never was). Wired to
+   settings.autoSend now (see updateAutoDeployBadge in app.js); this is
+   the honest "off" state — neutral, not pulsing, not implying something
+   is happening that isn't. Safety-relevant, not just cosmetic: an
+   operator needs to know whether verses are auto-hitting the screen or
+   sitting in Candidates waiting for a manual send. */
+.cs-auto-badge.off {
+  background: var(--bg-hover);
+  border-color: var(--border-md);
+  color: var(--text-3);
+}
+.cs-auto-badge.off .cs-auto-dot { background: var(--text-3); animation: none; }
 
 .cs-auto-dot {
   width: 5px; height: 5px;

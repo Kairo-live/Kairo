@@ -171,6 +171,22 @@ const saveSettingsBtn    = document.getElementById('save-settings');
 const testPPBtn          = document.getElementById('test-propresenter-btn');
 const autoSendCheckbox   = document.getElementById('auto-send-checkbox');
 const autoSendSettings   = document.getElementById('auto-send-settings');
+
+// The Live Queue's "Auto-Deploy" badge used to be static markup — always
+// claimed auto-send was live regardless of the real Settings > Bible >
+// "Auto-send high confidence verses" checkbox (owner: "I think this isn't
+// connected to the settings auto send" — it never was). Safety-relevant,
+// not just cosmetic: an operator needs to know whether a matching verse
+// is about to hit the screen on its own or sit in Candidates waiting for
+// a manual send. Called on load and from both autoSend change handlers.
+function updateAutoDeployBadge() {
+  const badge = document.getElementById('cs-auto-badge');
+  const label = document.getElementById('cs-auto-badge-label');
+  if (!badge) return;
+  const on = settings.autoSend !== false;
+  badge.classList.toggle('off', !on);
+  if (label) label.textContent = on ? 'Auto-Deploy' : 'Auto-Deploy Off';
+}
 const toastContainer     = document.getElementById('toast-container');
 const workerStatusEl     = document.getElementById('worker-status');
 const verseCountEl       = document.getElementById('verse-count');
@@ -1785,6 +1801,7 @@ async function loadSettings() {
     if (translationSelect && settings.translation)   translationSelect.value   = settings.translation;
     if (autoSendCheckbox)  autoSendCheckbox.checked  = settings.autoSend  !== false;
     if (autoSendSettings)  autoSendSettings.checked  = settings.autoSend  !== false;
+    updateAutoDeployBadge();
     if (showConfSettings)  showConfSettings.checked   = settings.showConfidence !== false;
     if (ppEnabledToggle)    ppEnabledToggle.checked    = settings.proPresenterEnabled !== false;
     if (obsEnabledToggle)   obsEnabledToggle.checked   = settings.obsEnabled === true;
@@ -1929,6 +1946,8 @@ async function saveCurrentSettings() {
   }
   settings = { ...settings, ...updated };
   if (translationSelect && updated.translation) translationSelect.value = updated.translation;
+  if (autoSendCheckbox) autoSendCheckbox.checked = updated.autoSend;
+  updateAutoDeployBadge();
   // Dismiss first-run banner now that a key may have been entered.
   showFirstRunBannerIfNeeded(settings);
   closeModal();
@@ -2090,6 +2109,7 @@ swapPPBtn?.addEventListener('click', async () => {
 autoSendCheckbox?.addEventListener('change', async () => {
   settings.autoSend = autoSendCheckbox.checked;
   if (autoSendSettings) autoSendSettings.checked = autoSendCheckbox.checked;
+  updateAutoDeployBadge();
   try {
     await fetch(`${SERVER}/api/settings`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ autoSend: settings.autoSend }) });
   } catch (err) { toast('Could not save setting: ' + err.message, 'error'); }
