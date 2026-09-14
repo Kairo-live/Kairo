@@ -1342,8 +1342,8 @@ listenBtn?.addEventListener('click', async () => {
 
 // Both engines use the same client-side audio capture: PCM16 over the
 // existing WebSocket. Only the body of /api/start-listening differs —
-// the server uses `engine` to choose between Deepgram (cloud) and whisper.cpp
-// (offline, on-device).
+// the server uses `engine` to choose between Deepgram (cloud) and the
+// offline (sherpa-onnx, on-device) engine.
 async function startListening() {
   if (isListening) return;
   // New session — reset accumulators so Content Studio doesn't bundle the
@@ -1356,7 +1356,7 @@ async function startListening() {
   const engine = (settings.speechEngine || 'deepgram').toLowerCase();
   // Both the current 'offline' value and the legacy 'browser' value (the
   // Settings toggle's data-engine, kept as an alias for anyone with an old
-  // saved setting) route to the server's whisper.cpp offline engine.
+  // saved setting) route to the server's sherpa-onnx offline engine.
   const serverEngine = (engine === 'offline' || engine === 'browser') ? 'offline' : 'deepgram';
   try {
     const deviceId = audioSourceSettings?.value || '';
@@ -1385,7 +1385,7 @@ async function startListening() {
     mediaStream = await navigator.mediaDevices.getUserMedia(constraints);
     if (micDisplay) micDisplay.textContent = mediaStream.getAudioTracks()[0]?.label || 'Microphone';
 
-    // Start the server-side engine (Deepgram or whisper.cpp)
+    // Start the server-side engine (Deepgram or the offline sherpa-onnx engine)
     const r = await fetch(`${SERVER}/api/start-listening`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1410,7 +1410,7 @@ async function startListening() {
       if (missingKey || missingModel) {
         settingsModal?.classList.remove('hidden');
         showSettingsPane('audio');
-        const field = document.getElementById(missingKey ? 'deepgram-key' : 'whisper-install-btn');
+        const field = document.getElementById(missingKey ? 'deepgram-key' : 'offline-install-btn');
         field?.scrollIntoView({ block: 'center' });
         field?.focus?.();
       } else {
@@ -1891,15 +1891,21 @@ async function loadSettings() {
 }
 
 // ── First-run onboarding modal ─────────────────────────────────────────────
-// Dismissible centered overlay prompting for the Deepgram key. Dismissed (Skip
-// or close) it stays hidden for the session; reappears next launch until a key
-// is saved.
+// Dismissible centered overlay prompting for a speech-engine choice —
+// Deepgram (paste a key) or fully offline (download the local model, no key
+// needed). Dismissed (Skip or close) it stays hidden for the session;
+// reappears next launch until a real choice has been made either way.
 let firstRunDismissed = false;
 function showFirstRunBannerIfNeeded(s) {
   const modal = document.getElementById('first-run-modal');
   if (!modal) return;
-  if (s && s.deepgramApiKey) {
-    // Key is set — make sure the modal is closed.
+  // "Configured" means either a Deepgram key is saved, OR the operator has
+  // deliberately chosen Offline (the toggle here, same 'browser' value
+  // Settings itself uses) — owner: "this should be deepgram and local if no
+  // model is downloaded for offline". Offline doesn't NEED a key, so
+  // requiring one here would leave a genuinely-offline setup nagged forever.
+  const configured = !!(s && (s.deepgramApiKey || s.speechEngine === 'browser' || s.speechEngine === 'offline'));
+  if (configured) {
     modal.classList.add('hidden');
     return;
   }
@@ -1907,6 +1913,7 @@ function showFirstRunBannerIfNeeded(s) {
   modal.classList.remove('hidden');
   const input = document.getElementById('first-run-deepgram-key');
   if (input) input.value = '';
+  syncToggleGroup('first-run-engine-toggle', 'engine', 'deepgram'); // always starts on the Deepgram tab
   // Defer focus so the overlay has laid out before we focus inside it.
   setTimeout(() => input?.focus(), 50);
 }
@@ -1916,7 +1923,36 @@ function closeFirstRunModal() {
   document.getElementById('first-run-modal')?.classList.add('hidden');
 }
 
-async function saveFirstRunKey() {
+async function saveFirstRunChoice() {
+  const engine = readToggleGroup('first-run-engine-toggle', 'engine') || 'deepgram';
+
+  if (engine === 'browser') {
+    // Offline chosen — no key needed. Persist the engine choice so it
+    // sticks (and so bootstrapStartup()/Settings both see it), then, if the
+    // model isn't already installed, kick off the same download this
+    // modal's own #first-run-offline-install-btn would (wireOfflineModelInstaller
+    // already fully owns its progress UI) rather than silently leaving the
+    // resilience path unfetched until the operator happens to revisit
+    // Settings. The download runs server-side regardless of whether this
+    // modal stays open, so closing it early (Skip/X) never interrupts it.
+    try {
+      await fetch(`${SERVER}/api/settings`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...settings, speechEngine: 'browser' }),
+      });
+      settings = { ...settings, speechEngine: 'browser' };
+      syncToggleGroup('speech-engine-toggle', 'engine', 'browser'); // keep Settings' own toggle in sync
+    } catch {
+      toast('Could not save — try again in Settings', 'error');
+      return;
+    }
+    const installBtn = document.getElementById('first-run-offline-install-btn');
+    if (installBtn && installBtn.style.display !== 'none') installBtn.click();
+    else closeFirstRunModal();
+    return;
+  }
+
   const input = document.getElementById('first-run-deepgram-key');
   const key   = (input?.value || '').trim();
   if (!key) { closeFirstRunModal(); return; }
@@ -1994,13 +2030,13 @@ cancelSettingsBtn?.addEventListener('click', closeModal);
 saveSettingsBtn?.addEventListener('click',  saveCurrentSettings);
 document.querySelector('.modal-overlay')?.addEventListener('click', closeModal);
 
-// First-run Deepgram modal wiring
-document.getElementById('first-run-save')?.addEventListener('click', saveFirstRunKey);
+// First-run onboarding modal wiring
+document.getElementById('first-run-save')?.addEventListener('click', saveFirstRunChoice);
 document.getElementById('first-run-skip')?.addEventListener('click', closeFirstRunModal);
 document.getElementById('close-first-run')?.addEventListener('click', closeFirstRunModal);
 document.querySelector('#first-run-modal .modal-overlay')?.addEventListener('click', closeFirstRunModal);
 document.getElementById('first-run-deepgram-key')?.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') saveFirstRunKey();
+  if (e.key === 'Enter') saveFirstRunChoice();
 });
 
 testPPBtn?.addEventListener('click', async () => {
@@ -2374,21 +2410,26 @@ populateAudioOutputDevices();
   }).catch(() => {});
 })();
 
-// ── Offline (whisper.cpp) model installer UI ─────────────────────────────
+// ── Offline (sherpa-onnx) model installer UI ──────────────────────────────
 // Shown only when the Speech Engine toggle is set to "Offline". Streams
 // NDJSON progress events from POST /api/whisper/install into a progress bar
 // so the operator doesn't have to drop to a terminal to run npm scripts.
 // Normally the startup bootstrap (bootstrapStartup()) already fetched this
 // model before the operator ever opens Settings — this panel is the manual
 // fallback for a first install that was skipped, interrupted, or run offline.
-(function wireWhisperInstaller() {
-  const group       = document.getElementById('whisper-installer-group');
-  const statusLine  = document.getElementById('whisper-status-line');
-  const installBtn  = document.getElementById('whisper-install-btn');
-  const progressWrap = document.getElementById('whisper-progress-wrap');
-  const progressBar  = document.getElementById('whisper-progress-bar');
-  const progressText = document.getElementById('whisper-progress-text');
-  const engineToggle = document.getElementById('speech-engine-toggle');
+//
+// Parametrized (not a single fixed IIFE) so the exact same install/progress
+// logic can drive a SECOND instance of this widget in the first-run modal
+// (its own engine choice, not just Settings) without duplicating any of the
+// NDJSON-streaming logic below — only the element ids differ per instance.
+function wireOfflineModelInstaller(ids) {
+  const group       = document.getElementById(ids.group);
+  const statusLine  = document.getElementById(ids.statusLine);
+  const installBtn  = document.getElementById(ids.installBtn);
+  const progressWrap = document.getElementById(ids.progressWrap);
+  const progressBar  = document.getElementById(ids.progressBar);
+  const progressText = document.getElementById(ids.progressText);
+  const engineToggle = document.getElementById(ids.engineToggle);
   if (!group || !installBtn) return;
 
   async function refreshStatus() {
@@ -2488,7 +2529,17 @@ populateAudioOutputDevices();
       }
     }
   });
-})();
+}
+wireOfflineModelInstaller({
+  group: 'offline-installer-group', statusLine: 'offline-status-line', installBtn: 'offline-install-btn',
+  progressWrap: 'offline-progress-wrap', progressBar: 'offline-progress-bar', progressText: 'offline-progress-text',
+  engineToggle: 'speech-engine-toggle',
+});
+wireOfflineModelInstaller({
+  group: 'first-run-offline-group', statusLine: 'first-run-offline-status-line', installBtn: 'first-run-offline-install-btn',
+  progressWrap: 'first-run-offline-progress-wrap', progressBar: 'first-run-offline-progress-bar', progressText: 'first-run-offline-progress-text',
+  engineToggle: 'first-run-engine-toggle',
+});
 
 // ── Local translation-model installer UI ─────────────────────────────────
 // Same NDJSON-progress pattern as the Whisper installer above, for the
@@ -9463,8 +9514,12 @@ async function bootstrapStartup() {
   // actually register the new brand mark/wordmark that's the whole point of
   // this screen. Real startup work above still happens at its own pace;
   // this only holds the "Ready" state on screen a little longer, never
-  // makes it wait longer than it already would.
-  const MIN_DISPLAY_MS = 3500;
+  // makes it wait longer than it already would. Bumped 3.5s → 8.5s (owner:
+  // "lets add a delay to leave it for another 5 seconds") now that the
+  // status text/progress bar are gone (see index.html) and this is the
+  // ONLY thing left communicating "something is happening" — worth a
+  // longer, deliberate brand beat instead of racing through.
+  const MIN_DISPLAY_MS = 8500;
   const startedAt = Date.now();
 
   try {
@@ -9492,7 +9547,7 @@ async function bootstrapStartup() {
           setStatus('Downloading offline model');
           setBar(null); // indeterminate — the install endpoint doesn't stream byte progress
           fetch(`${SERVER}/api/whisper/install`, { method: 'POST' }).catch(() => {});
-          for (let i = 0; i < 600; i++) {          // up to ~10 min — the whisper model (~182MB) is bigger than Vosk's was
+          for (let i = 0; i < 600; i++) {          // up to ~10 min — the offline (sherpa-onnx) model is a sizable download
             await new Promise(r => setTimeout(r, 1000));
             const s2 = await (await fetch(`${SERVER}/api/whisper/status`)).json().catch(() => ({}));
             if (s2.installed) break;

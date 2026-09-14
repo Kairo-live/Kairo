@@ -89,8 +89,14 @@
             </g>
         </svg>
         <div class="bootstrap-tagline">Live Scripture Detection</div>
-        <div class="bootstrap-bar"><div class="bootstrap-bar-fill" id="bootstrap-bar-fill"></div></div>
-        <div class="bootstrap-status" id="bootstrap-status">Starting&hellip;</div>
+        <!-- Owner: "the overlay when the app opens should also be gone.
+             prefer the full page app name and brand mark but lets add a
+             delay to leave it for another 5 seconds." The progress bar +
+             status text (bootstrapStartup() in app.js still sets these via
+             getElementById, which no-ops harmlessly now that the elements
+             are gone — see its own setStatus/setBar guards) are removed;
+             just the clean brand lockup shows, held on screen a bit longer
+             via MIN_DISPLAY_MS below instead of racing through status text. -->
     </div>
 
     <!-- ═══════════════════════════════════════════════════════
@@ -1150,15 +1156,15 @@
                     <!-- Offline model installer — shown only when "Offline" engine is selected.
                          The startup bootstrap normally fetches this before the operator ever
                          sees Settings; this panel is the manual fallback. -->
-                    <div class="setting-group" id="whisper-installer-group" style="display:none;">
+                    <div class="setting-group" id="offline-installer-group" style="display:none;">
                         <label class="setting-label">Offline Model</label>
-                        <div id="whisper-status-line" style="font-size:12px;color:var(--text-3);margin-bottom:8px;">Checking…</div>
-                        <button id="whisper-install-btn" class="setting-input" style="cursor:pointer;display:none;">Download offline model (~465MB)</button>
-                        <div id="whisper-progress-wrap" style="display:none;margin-top:6px;">
+                        <div id="offline-status-line" style="font-size:12px;color:var(--text-3);margin-bottom:8px;">Checking…</div>
+                        <button id="offline-install-btn" class="setting-input" style="cursor:pointer;display:none;">Download offline model (~465MB)</button>
+                        <div id="offline-progress-wrap" style="display:none;margin-top:6px;">
                             <div style="background:var(--surface-2);height:6px;border-radius:3px;overflow:hidden;">
-                                <div id="whisper-progress-bar" style="background:var(--accent);height:100%;width:0%;transition:width .2s;"></div>
+                                <div id="offline-progress-bar" style="background:var(--accent);height:100%;width:0%;transition:width .2s;"></div>
                             </div>
-                            <div id="whisper-progress-text" style="font-size:11px;color:var(--text-3);margin-top:4px;">Starting…</div>
+                            <div id="offline-progress-text" style="font-size:11px;color:var(--text-3);margin-top:4px;">Starting…</div>
                         </div>
                     </div>
 
@@ -1540,17 +1546,44 @@
                  bottom-left, link bottom-right. -->
             <div class="modal-body" style="display:block;padding:20px;">
                 <p style="margin:0 0 16px;line-height:1.5;color:var(--text-dim,#aaa);font-size:13px;">
-                    KAIRO listens to spoken scripture and detects verses in real time. To transcribe
-                    live audio it needs a Deepgram API key. Paste yours below, or skip for now and add
-                    it later under Settings.
+                    KAIRO listens to spoken scripture and detects verses in real time. Pick how it
+                    transcribes live audio — Deepgram (cloud, most accurate) or fully offline on this
+                    Mac. You can change this later under Settings.
                 </p>
-                <label for="first-run-deepgram-key" style="display:block;margin-bottom:6px;font-size:12px;font-weight:600;">Deepgram API Key</label>
-                <input id="first-run-deepgram-key" type="password" class="setting-input" autocomplete="off" spellcheck="false"
-                       placeholder="Paste your Deepgram API key" style="width:100%;" />
-                <a href="https://console.deepgram.com/signup" target="_blank" rel="noopener"
-                   style="display:inline-block;margin-top:10px;font-size:12px;color:var(--accent,#6aa6ff);text-decoration:none;">
-                    Get a free Deepgram key →
-                </a>
+
+                <div class="toggle-group" id="first-run-engine-toggle" style="margin-bottom:12px;">
+                    <button class="toggle-btn active" data-engine="deepgram">Deepgram</button>
+                    <button class="toggle-btn" data-engine="browser">Offline</button>
+                </div>
+
+                <div id="first-run-deepgram-group">
+                    <label for="first-run-deepgram-key" style="display:block;margin-bottom:6px;font-size:12px;font-weight:600;">Deepgram API Key</label>
+                    <input id="first-run-deepgram-key" type="password" class="setting-input" autocomplete="off" spellcheck="false"
+                           placeholder="Paste your Deepgram API key" style="width:100%;" />
+                    <a href="https://console.deepgram.com/signup" target="_blank" rel="noopener"
+                       style="display:inline-block;margin-top:10px;font-size:12px;color:var(--accent,#6aa6ff);text-decoration:none;">
+                        Get a free Deepgram key →
+                    </a>
+                </div>
+
+                <!-- Mirrors the Settings > Audio pane's offline installer widget
+                     (#offline-installer-group) exactly — same ids-as-a-set
+                     pattern, wired by the same reusable wireOfflineModelInstaller()
+                     in app.js, just a second instance for this modal. -->
+                <div id="first-run-offline-group" style="display:none;">
+                    <label style="display:block;margin-bottom:6px;font-size:12px;font-weight:600;">Offline Model</label>
+                    <div id="first-run-offline-status-line" style="font-size:12px;color:var(--text-3);margin-bottom:8px;">Checking…</div>
+                    <button id="first-run-offline-install-btn" class="setting-input" style="cursor:pointer;display:none;width:100%;text-align:left;">Download offline model</button>
+                    <div id="first-run-offline-progress-wrap" style="display:none;margin-top:6px;">
+                        <div style="background:var(--surface-2);height:6px;border-radius:3px;overflow:hidden;">
+                            <div id="first-run-offline-progress-bar" style="background:var(--accent);height:100%;width:0%;transition:width .2s;"></div>
+                        </div>
+                        <div id="first-run-offline-progress-text" style="font-size:11px;color:var(--text-3);margin-top:4px;">Starting…</div>
+                    </div>
+                    <p style="margin:10px 0 0;font-size:12px;line-height:1.5;color:var(--text-dim,#aaa);">
+                        Runs entirely on this Mac — no internet, no API key. Lower accuracy than Deepgram.
+                    </p>
+                </div>
             </div>
             <div class="modal-footer">
                 <button id="first-run-skip" class="modal-btn secondary">Skip for now</button>
@@ -1566,11 +1599,11 @@
     <span class="status-dot hidden-el" id="status-indicator"></span>
     <span class="hidden-el" id="status-text"></span>
     <div id="connection-badge" class="hidden-el"></div>
-    <!-- Worker / Whisper status (hidden, JS compat) -->
+    <!-- Worker / offline-engine status (hidden, JS compat) -->
     <span class="hidden-el" id="worker-status"></span>
     <span class="hidden-el" id="worker-indicator"></span>
-    <span class="hidden-el" id="whisper-status"></span>
-    <span class="hidden-el" id="whisper-indicator"></span>
+    <span class="hidden-el" id="offline-status"></span>
+    <span class="hidden-el" id="offline-indicator"></span>
 
     <!-- Toast Container -->
     <div id="toast-container" class="toast-container"></div>
@@ -1643,7 +1676,7 @@
 
         // Speech Engine — swap hint, hide/show Deepgram key field.
         // 'browser' is the UI label kept for backward compat — it actually maps
-        // to the server-side whisper.cpp offline engine (no internet, no API key).
+        // to the server-side sherpa-onnx offline engine (no internet, no API key).
         (function() {
             var group   = document.getElementById('speech-engine-toggle');
             var hint    = document.getElementById('speech-engine-hint');
@@ -1659,6 +1692,23 @@
             }
             group.addEventListener('toggle-change', function(e) { apply(e.detail.value); });
             // Initial sync — in case loadSettings has already run before this IIFE.
+            var active = group.querySelector('.toggle-btn.active');
+            if (active) apply(active.dataset.engine);
+        })();
+
+        // First-run modal's own engine toggle — same hide/show idea as the
+        // Settings pane above, just for the Deepgram key group. The offline
+        // installer group's own visibility is owned entirely by app.js's
+        // wireOfflineModelInstaller() (same as #offline-installer-group above),
+        // not duplicated here.
+        (function() {
+            var group  = document.getElementById('first-run-engine-toggle');
+            var keyGrp = document.getElementById('first-run-deepgram-group');
+            if (!group) return;
+            function apply(value) {
+                if (keyGrp) keyGrp.style.display = value === 'browser' ? 'none' : '';
+            }
+            group.addEventListener('toggle-change', function(e) { apply(e.detail.value); });
             var active = group.querySelector('.toggle-btn.active');
             if (active) apply(active.dataset.engine);
         })();
