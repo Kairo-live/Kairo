@@ -1894,7 +1894,21 @@ input[type="range"]:disabled { opacity: 0.4; cursor: default; }
   gap: var(--space-2);
   margin-left: auto;
 }
-.svc-scale { width: 84px; }
+/* Songs header only (svc-header-right is shared by Slides/Media/etc., whose
+   content should stay shrink-to-fit flush-right) — the search field should
+   span the row instead of sitting capped at a small fixed width with a lot
+   of dead space next to it. */
+.svc-header-right-grow { flex: 1; }
+.svc-header-right-grow .cs-search-input { flex: 1; }
+/* Was 84px — visibly cramped for a 90-360 range (barely more travel than a
+   toggle), and made the whole control cluster feel lopsided next to the
+   Grid/List chips and Add-content button either side of it. */
+.svc-scale { width: 140px; }
+/* .modal-btn.primary's own padding (8px 24px, sized for a modal footer CTA)
+   has higher specificity than .svc-edit-btn's compact toolbar padding —
+   would've quietly overridden it and made these buttons noticeably bulkier
+   than their row-mates. Keep the toolbar sizing, just the primary color. */
+.svc-edit-btn.primary { padding: 5px 14px; font-size: var(--fs-xs); }
 .svc-edit-btn { padding: 5px 14px; font-size: var(--fs-xs); }
 
 /* Slide grid — card width is driven by the scale slider. */
