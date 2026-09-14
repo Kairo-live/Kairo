@@ -11,22 +11,10 @@ mod fonts;
 use std::process::{Child, Command};
 use std::sync::{Arc, Mutex};
 use base64::Engine;
-use tauri::utils::config::Color;
-use tauri::{AppHandle, Emitter, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, Emitter, Manager, RunEvent};
 use tauri::menu::{AboutMetadataBuilder, MenuBuilder, MenuItemBuilder, SubmenuBuilder};
 use tauri_plugin_shell::ShellExt;
 use tauri_plugin_updater::UpdaterExt;
-
-// Embedded splash HTML — baked into the binary so it can render INSTANTLY
-// at launch, before the Node sidecar (and therefore Express) is up.
-const SPLASH_HTML: &str = include_str!("splash.html");
-
-/// Build a `data:` URL for the splash page so the splash window can load it
-/// without any filesystem or HTTP dependency.
-fn splash_data_url() -> String {
-    let encoded = base64::engine::general_purpose::STANDARD.encode(SPLASH_HTML);
-    format!("data:text/html;charset=utf-8;base64,{}", encoded)
-}
 
 // ── Native app menu ──────────────────────────────────────────────────────
 // Previously just Tauri's bare default (File > Close Window and nothing
@@ -510,21 +498,18 @@ fn list_monitors(app: AppHandle) -> Result<Vec<serde_json::Value>, String> {
 
 /// Called by the frontend once it has actually painted the real app (auth
 /// token loaded, styles applied) — this is the signal to reveal the main
-/// window and dismiss the splash. Showing the window immediately after
-/// dispatching `navigate()` (the old approach) raced the new page's own
-/// load/paint: the window could become visible while WebKit was still
-/// mid-navigation, showing its default white document background before our
-/// dark CSS applied — a visible white flash. Letting the frontend decide
-/// "ready" removes the race entirely; see the health-check thread's fallback
-/// timer in `run()` for what happens if this is never called (JS error, etc).
+/// window. Showing the window immediately after dispatching `navigate()`
+/// (the old approach) raced the new page's own load/paint: the window
+/// could become visible while WebKit was still mid-navigation, showing its
+/// default white document background before our dark CSS applied — a
+/// visible white flash. Letting the frontend decide "ready" removes the
+/// race entirely; see the health-check thread's fallback timer in `run()`
+/// for what happens if this is never called (JS error, etc).
 #[tauri::command]
 fn signal_main_ready(app: AppHandle) {
     if let Some(win) = app.get_webview_window("main") {
         let _ = win.show();
         let _ = win.set_focus();
-    }
-    if let Some(splash) = app.get_webview_window("splash") {
-        let _ = splash.close();
     }
 }
 
@@ -727,40 +712,15 @@ pub fn run() {
         .setup(|app| {
             let handle = app.handle().clone();
 
-            // ── Splash window ─────────────────────────────────────────────
-            // Show a branded loading screen IMMEDIATELY so the user gets
-            // feedback while the Node sidecar boots (~2-4s cold start).
-            // The HTML is baked into the binary as a data: URL — no
-            // filesystem, no network, renders before anything else does.
-            let splash_url = splash_data_url();
-            let splash_built = WebviewWindowBuilder::new(
-                app,
-                "splash",
-                WebviewUrl::External(splash_url.parse().expect("splash data url parses")),
-            )
-            .title("KAIRO")
-            .inner_size(440.0, 300.0)
-            .center()
-            .decorations(false)
-            // NOT always-on-top: that pins the splash above every other
-            // app's windows system-wide (macOS's floating window level
-            // ignores app boundaries), not just above Kairo's own main
-            // window — confirmed via a real reported repro where switching
-            // to another app mid-launch left the splash floating over it.
-            // A normal window level still shows immediately in front on
-            // launch (the OS focuses a just-created window), it just stops
-            // fighting to stay in front once the user looks elsewhere.
-            .resizable(false)
-            .skip_taskbar(false)
-            // Set the native window + webview background to dark BEFORE HTML
-            // paints, otherwise there's a brief white flash on launch while
-            // the webview transitions from its default white to our gradient.
-            .background_color(Color(13, 13, 13, 255))
-            .visible(true)
-            .build();
-            if let Err(e) = &splash_built {
-                eprintln!("[KAIRO] Failed to create splash window: {e}");
-            }
+            // Owner: "can we remove this splash?" — the dedicated splash
+            // window (branded loading screen shown while the Node sidecar
+            // boots, ~2-4s cold start) is gone. The main window already only
+            // reveals itself once the frontend calls signal_main_ready() —
+            // real paint confirmed, so no white-flash regression from that —
+            // it just means there's a real few-second gap on a cold launch
+            // where NOTHING is visible yet (no splash, no window) before the
+            // main window appears. Accepted tradeoff per the owner's explicit
+            // ask, not an oversight.
 
             // Start the bundled Node.js server.
             // In dev, the server is started by `beforeDevCommand` in tauri.conf.json
@@ -788,8 +748,8 @@ pub fn run() {
                 let _ = &handle; // keep handle alive for use below
             }
 
-            // Poll /health until the server responds, then close splash and
-            // show the main window. Max wait: 15 seconds (30 × 500ms).
+            // Poll /health until the server responds, then show the main
+            // window. Max wait: 20 seconds (40 × 500ms).
             let handle2 = handle.clone();
             let health_url = {
                 let cfg = handle.state::<ServerConfig>();
@@ -806,9 +766,8 @@ pub fn run() {
                     std::thread::sleep(std::time::Duration::from_millis(500));
                     // `/health` answers as soon as Express binds (~500ms), but the
                     // detection worker (map load, anchor trie, fingerprints) needs a
-                    // couple more seconds. Keep the splash up until `workerBasicReady`
-                    // flips true so the user never lands on a half-initialised app —
-                    // this is the "few extra seconds" of loading the splash should show.
+                    // couple more seconds. Wait for `workerBasicReady` to flip true
+                    // so the user never lands on a half-initialised app.
                     if let Ok(resp) = client.get(&health_url).send() {
                         let body = resp.text().unwrap_or_default();
                         if body.contains("\"workerBasicReady\":true") {
@@ -819,7 +778,7 @@ pub fn run() {
                     }
                 }
                 if !server_ready {
-                    eprintln!("[KAIRO] Server/worker not ready within 20s — showing main window anyway so the user isn't stuck on the splash.");
+                    eprintln!("[KAIRO] Server/worker not ready within 20s — showing main window anyway.");
                 }
 
                 // Navigate to the real server URL, but do NOT show the window
@@ -830,7 +789,7 @@ pub fn run() {
                 // background before our dark CSS applied. The frontend now
                 // calls `signal_main_ready` once it has actually painted, and
                 // THAT reveals the window instead. This fallback timer just
-                // guarantees we're never stuck on the splash forever if that
+                // guarantees the window isn't stuck invisible forever if that
                 // signal never arrives (JS error, non-Tauri edge case, etc).
                 if let Some(win) = handle2.get_webview_window("main") {
                     // ALWAYS (re)navigate now that the server is confirmed up.
@@ -860,9 +819,6 @@ pub fn run() {
                             eprintln!("[KAIRO] Frontend never signalled ready within 12s — showing main window anyway.");
                             let _ = win.show();
                             let _ = win.set_focus();
-                            if let Some(splash) = handle_fallback.get_webview_window("splash") {
-                                let _ = splash.close();
-                            }
                         }
                     }
                 });
