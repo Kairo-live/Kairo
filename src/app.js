@@ -9492,77 +9492,45 @@ registerActionHandler('clock-message', (msg) => window.KairoService?.onClockActi
 //      offline engine is selected and it isn't present yet, with progress.
 // Always resolves (and always removes the overlay) so a slow/failed step can
 // never trap the operator on the loading screen.
+// Owner: "the initial app splash is still there" — there were genuinely TWO
+// full-page branded loading screens back to back: the native splash.html
+// window (src-tauri/src/splash.html, up instantly at launch, closed by Rust
+// once /health + workerBasicReady) and this function's OWN full-screen
+// #bootstrap-overlay takeover in the freshly-revealed main window right
+// after — same brand lockup shown twice in a row. The native one already
+// covers "KAIRO is starting," so this no longer shows any UI of its own —
+// it just does the same real background work (mic permission, conditional
+// offline-model download) silently after the main window is already up. A
+// mic-permission prompt is the OS's own dialog, self-evidently a real
+// system interaction — it doesn't need a fake branded cover screen behind
+// it. #bootstrap-overlay itself is removed from index.html; nothing here
+// references it anymore.
 async function bootstrapStartup() {
-  const overlay = document.getElementById('bootstrap-overlay');
-  const statusEl = document.getElementById('bootstrap-status');
-  const barFill  = document.getElementById('bootstrap-bar-fill');
-  const setStatus = (t) => { if (statusEl) statusEl.textContent = t; };
-  const setBar = (pct) => {
-    if (!barFill) return;
-    if (pct == null) { barFill.classList.add('indeterminate'); }
-    else { barFill.classList.remove('indeterminate'); barFill.style.width = Math.max(0, Math.min(100, pct)) + '%'; }
-  };
-  const finish = () => {
-    setBar(100);
-    if (overlay) { overlay.classList.add('done'); setTimeout(() => overlay.remove(), 500); }
-  };
-  // Hard safety valve — never keep the overlay up longer than 90s.
-  const safety = setTimeout(finish, 90000);
-  // Minimum time the brand lockup stays on screen. Without this the overlay
-  // could disappear well under a second after launch (mic permission already
-  // granted, deepgram engine needs no offline-model download) — too fast to
-  // actually register the new brand mark/wordmark that's the whole point of
-  // this screen. Real startup work above still happens at its own pace;
-  // this only holds the "Ready" state on screen a little longer, never
-  // makes it wait longer than it already would. Bumped 3.5s → 8.5s (owner:
-  // "lets add a delay to leave it for another 5 seconds") now that the
-  // status text/progress bar are gone (see index.html) and this is the
-  // ONLY thing left communicating "something is happening" — worth a
-  // longer, deliberate brand beat instead of racing through.
-  const MIN_DISPLAY_MS = 8500;
-  const startedAt = Date.now();
-
+  // 1) Microphone permission
   try {
-    // 1) Microphone permission
-    setStatus('Requesting microphone access');
-    setBar(15);
-    try {
-      const s = await navigator.mediaDevices.getUserMedia({ audio: true });
-      s.getTracks().forEach(t => t.stop());
-    } catch { /* denied or unavailable — app still works; user can grant later */ }
-    setBar(35);
+    const s = await navigator.mediaDevices.getUserMedia({ audio: true });
+    s.getTracks().forEach(t => t.stop());
+  } catch { /* denied or unavailable — app still works; user can grant later */ }
 
-    // 2) Required resources — offline model when the offline engine is chosen
-    setStatus('Checking resources');
-    let engine = 'deepgram';
-    try {
-      const r = await fetch(`${SERVER}/api/settings`);
-      if (r.ok) { const s = await r.json(); engine = (s.speechEngine || 'deepgram').toLowerCase(); }
-    } catch {}
+  // 2) Required resources — offline model when the offline engine is chosen
+  let engine = 'deepgram';
+  try {
+    const r = await fetch(`${SERVER}/api/settings`);
+    if (r.ok) { const s = await r.json(); engine = (s.speechEngine || 'deepgram').toLowerCase(); }
+  } catch {}
 
-    if (engine === 'offline' || engine === 'browser') {
-      try {
-        const st = await (await fetch(`${SERVER}/api/whisper/status`)).json();
-        if (!st.installed) {
-          setStatus('Downloading offline model');
-          setBar(null); // indeterminate — the install endpoint doesn't stream byte progress
-          fetch(`${SERVER}/api/whisper/install`, { method: 'POST' }).catch(() => {});
-          for (let i = 0; i < 600; i++) {          // up to ~10 min — the offline (sherpa-onnx) model is a sizable download
-            await new Promise(r => setTimeout(r, 1000));
-            const s2 = await (await fetch(`${SERVER}/api/whisper/status`)).json().catch(() => ({}));
-            if (s2.installed) break;
-          }
+  if (engine === 'offline' || engine === 'browser') {
+    try {
+      const st = await (await fetch(`${SERVER}/api/whisper/status`)).json();
+      if (!st.installed) {
+        fetch(`${SERVER}/api/whisper/install`, { method: 'POST' }).catch(() => {});
+        for (let i = 0; i < 600; i++) {          // up to ~10 min — the offline (sherpa-onnx) model is a sizable download
+          await new Promise(r => setTimeout(r, 1000));
+          const s2 = await (await fetch(`${SERVER}/api/whisper/status`)).json().catch(() => ({}));
+          if (s2.installed) break;
         }
-      } catch { /* model status unavailable — proceed; Start will surface any real error */ }
-    }
-
-    setBar(90);
-    setStatus('Ready');
-    const elapsed = Date.now() - startedAt;
-    if (elapsed < MIN_DISPLAY_MS) await new Promise(r => setTimeout(r, MIN_DISPLAY_MS - elapsed));
-  } finally {
-    clearTimeout(safety);
-    finish();
+      }
+    } catch { /* model status unavailable — proceed; Start will surface any real error */ }
   }
 }
 
