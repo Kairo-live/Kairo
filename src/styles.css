@@ -1553,7 +1553,12 @@ input[type="range"]:disabled { opacity: 0.4; cursor: default; }
   margin-top: auto;
   padding: var(--space-3) var(--space-2) var(--space-1);
   font-size: 10px;
-  color: var(--text-4);
+  /* --text-4 (#333333) is nearly the same tone as the panel background
+     behind it — barely legible (owner feedback, live). --text-3 is this
+     app's own "muted but still readable" tier (see its own comment:
+     "kept the muted feel while staying legible" — same reasoning applies
+     here). */
+  color: var(--text-3);
   text-align: center;
 }
 
