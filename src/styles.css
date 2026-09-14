@@ -136,6 +136,38 @@
   --icon-lg: 20px;
 }
 
+/* ── Startup bootstrap overlay ───────────────────────────────────────────────
+   Full-screen branded loader shown until permissions are granted and required
+   resources are downloaded. Fades out and is removed once ready. Owner: "I
+   wanted to retain the full large one with the brand mark and logo" — this
+   is the app's one splash now (the separate native Tauri window is gone,
+   see src-tauri/src/lib.rs). No progress bar/status text here by design —
+   see #bootstrap-overlay's own comment in index.html — just the brand
+   lockup, held on screen via bootstrapStartup()'s MIN_DISPLAY_MS (app.js). */
+#bootstrap-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100000;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-5);
+  background: linear-gradient(180deg, #131313 0%, #0a0a0a 100%);
+  transition: opacity 450ms ease;
+}
+#bootstrap-overlay.done { opacity: 0; pointer-events: none; }
+/* The full brand lockup (icon + "KAIRO" wordmark) rendered as one SVG —
+   see its own comment in index.html. */
+.bootstrap-mark { display: block; }
+.bootstrap-tagline {
+  font-size: 10px;
+  letter-spacing: 0.36em;
+  text-transform: uppercase;
+  color: var(--text-2);
+  margin-top: calc(var(--space-3) * -1);
+}
+
 /* ── Icon normalization ─────────────────────────────────────────────────────
    The UI's inline SVGs were drawn with 5 different stroke weights (1.2–2.5) and
    mixed line joins, which read as visual noise. Rather than hand-edit every

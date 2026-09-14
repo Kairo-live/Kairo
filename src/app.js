@@ -9485,52 +9485,71 @@ registerActionHandler('stage-timer',   (msg) => window.KairoService?.onTimerActi
 registerActionHandler('clock-message', (msg) => window.KairoService?.onClockAction?.(msg));
 
 // ── Startup bootstrap ───────────────────────────────────────────────────────
-// Runs behind the branded overlay before the operator touches the app:
+// Runs behind the branded #bootstrap-overlay before the operator touches the
+// app:
 //   1. Requests microphone permission up front (so the OS prompt appears at
 //      launch, not mid-service when they hit Start).
 //   2. Downloads required resources — the offline speech model — when the
 //      offline engine is selected and it isn't present yet, with progress.
 // Always resolves (and always removes the overlay) so a slow/failed step can
 // never trap the operator on the loading screen.
-// Owner: "the initial app splash is still there" — there were genuinely TWO
-// full-page branded loading screens back to back: the native splash.html
-// window (src-tauri/src/splash.html, up instantly at launch, closed by Rust
-// once /health + workerBasicReady) and this function's OWN full-screen
-// #bootstrap-overlay takeover in the freshly-revealed main window right
-// after — same brand lockup shown twice in a row. The native one already
-// covers "KAIRO is starting," so this no longer shows any UI of its own —
-// it just does the same real background work (mic permission, conditional
-// offline-model download) silently after the main window is already up. A
-// mic-permission prompt is the OS's own dialog, self-evidently a real
-// system interaction — it doesn't need a fake branded cover screen behind
-// it. #bootstrap-overlay itself is removed from index.html; nothing here
-// references it anymore.
+//
+// This briefly went through a "remove the overlay, it's redundant with the
+// native splash.html window" pass — wrong call, corrected right after. Owner:
+// "I wanted to retain the full large one with the brand mark and logo." The
+// native window (since removed entirely, see src-tauri/src/lib.rs) was a
+// small 440x300 fixed-size window, not this large full-page treatment — they
+// were never really the same screen. This overlay is the app's one splash now.
 async function bootstrapStartup() {
-  // 1) Microphone permission
-  try {
-    const s = await navigator.mediaDevices.getUserMedia({ audio: true });
-    s.getTracks().forEach(t => t.stop());
-  } catch { /* denied or unavailable — app still works; user can grant later */ }
+  const overlay = document.getElementById('bootstrap-overlay');
+  const finish = () => {
+    if (overlay) { overlay.classList.add('done'); setTimeout(() => overlay.remove(), 500); }
+  };
+  // Hard safety valve — never keep the overlay up longer than 90s.
+  const safety = setTimeout(finish, 90000);
+  // Minimum time the brand lockup stays on screen. Without this the overlay
+  // could disappear well under a second after launch (mic permission already
+  // granted, deepgram engine needs no offline-model download) — too fast to
+  // actually register the brand mark/wordmark that's the whole point of this
+  // screen. Real startup work below still happens at its own pace; this only
+  // holds the screen on a little longer, never makes it wait longer than it
+  // already would.
+  const MIN_DISPLAY_MS = 8500;
+  const startedAt = Date.now();
 
-  // 2) Required resources — offline model when the offline engine is chosen
-  let engine = 'deepgram';
   try {
-    const r = await fetch(`${SERVER}/api/settings`);
-    if (r.ok) { const s = await r.json(); engine = (s.speechEngine || 'deepgram').toLowerCase(); }
-  } catch {}
-
-  if (engine === 'offline' || engine === 'browser') {
+    // 1) Microphone permission
     try {
-      const st = await (await fetch(`${SERVER}/api/whisper/status`)).json();
-      if (!st.installed) {
-        fetch(`${SERVER}/api/whisper/install`, { method: 'POST' }).catch(() => {});
-        for (let i = 0; i < 600; i++) {          // up to ~10 min — the offline (sherpa-onnx) model is a sizable download
-          await new Promise(r => setTimeout(r, 1000));
-          const s2 = await (await fetch(`${SERVER}/api/whisper/status`)).json().catch(() => ({}));
-          if (s2.installed) break;
+      const s = await navigator.mediaDevices.getUserMedia({ audio: true });
+      s.getTracks().forEach(t => t.stop());
+    } catch { /* denied or unavailable — app still works; user can grant later */ }
+
+    // 2) Required resources — offline model when the offline engine is chosen
+    let engine = 'deepgram';
+    try {
+      const r = await fetch(`${SERVER}/api/settings`);
+      if (r.ok) { const s = await r.json(); engine = (s.speechEngine || 'deepgram').toLowerCase(); }
+    } catch {}
+
+    if (engine === 'offline' || engine === 'browser') {
+      try {
+        const st = await (await fetch(`${SERVER}/api/whisper/status`)).json();
+        if (!st.installed) {
+          fetch(`${SERVER}/api/whisper/install`, { method: 'POST' }).catch(() => {});
+          for (let i = 0; i < 600; i++) {          // up to ~10 min — the offline (sherpa-onnx) model is a sizable download
+            await new Promise(r => setTimeout(r, 1000));
+            const s2 = await (await fetch(`${SERVER}/api/whisper/status`)).json().catch(() => ({}));
+            if (s2.installed) break;
+          }
         }
-      }
-    } catch { /* model status unavailable — proceed; Start will surface any real error */ }
+      } catch { /* model status unavailable — proceed; Start will surface any real error */ }
+    }
+
+    const elapsed = Date.now() - startedAt;
+    if (elapsed < MIN_DISPLAY_MS) await new Promise(r => setTimeout(r, MIN_DISPLAY_MS - elapsed));
+  } finally {
+    clearTimeout(safety);
+    finish();
   }
 }
 
