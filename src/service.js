@@ -235,13 +235,16 @@
     refreshAfterSlideEdit(item);
   }
 
-  // Unified re-render fan-out for the new slide operations — none of the
-  // three existing per-slide mutators (deleteFlowSlideOrSong,
-  // splitSlideAtCaretAt, splitFlowSlideAtCaretAt) call renderStack(), so
-  // editing slides from Quick Edit never used to update the Stack/Grid view
-  // underneath. Deliberately not touching those three existing call sites —
-  // only the new duplicate/copy/paste/bulk-delete operations get this wider
-  // fan-out.
+  // Unified re-render fan-out for slide operations. Originally built only
+  // for duplicate/copy/paste/bulk-delete — deleteFlowSlideOrSong/
+  // splitSlideAtCaretAt/splitFlowSlideAtCaretAt were deliberately left on
+  // their own narrower saveService()+renderFullEdit()+renderSidebar() calls,
+  // which never refreshed the Stack/Grid view. That gap turned into a real,
+  // reported bug once those same three became reachable from the grid
+  // card's own right-click menu (not just Flow view, where renderFullEdit()
+  // alone happened to be enough) — "right click a slide to delete it, it
+  // never works," because the grid never re-rendered to show the deletion.
+  // All three now use this fan-out too.
   function refreshAfterSlideEdit(item) {
     saveService();
     renderSidebar();
@@ -3275,7 +3278,11 @@
     block.breaks = block.breaks || [];
     if (abs > 0 && abs < block.lines.length && !block.breaks.includes(abs)) {
       block.breaks.push(abs);
-      saveService(); renderSidebar(); renderFullEdit();
+      // Same gap as deleteFlowSlideOrSong's own fix — never called
+      // renderStack(), so a split made via the grid view's own caret-split
+      // path never showed up in the grid until some unrelated action
+      // happened to re-render it.
+      refreshAfterSlideEdit(item);
       if (typeof toast === 'function') toast('Slide split', 'success');
     }
   }
@@ -3356,7 +3363,20 @@
       return;
     }
     deleteSlideAt(item, index, slide);
-    saveService(); renderFullEdit(); renderSidebar();
+    // Real incident, owner: "when you right click on a slide to delete the
+    // slide, it never works." This function is reached from BOTH the Flow
+    // view's own delete button AND the grid card's right-click "Delete
+    // this slide" (slideCard's own contextmenu handler) — but it only ever
+    // called renderFullEdit()/renderSidebar(), never renderStack(). Flow
+    // view (which calls renderFullEdit itself right after) never noticed;
+    // the grid view did — the slide was genuinely deleted from item.blocks,
+    // saved, everything, the GRID just never re-rendered to show it, so it
+    // looked like the delete silently did nothing. refreshAfterSlideEdit
+    // (the fan-out duplicateSlide/pasteSlides/bulkDeleteSlides already use —
+    // this exact same context menu's OTHER actions, which is why only
+    // Delete looked broken) covers both views correctly, including only
+    // calling renderFullEdit() when that view is actually the one open.
+    refreshAfterSlideEdit(item);
   }
 
   // `total` is passed in (computed once by renderFlowView) rather than
@@ -3579,7 +3599,8 @@
     if (!after.trim()) return; // nothing past the caret to break off
     block.text = before;
     item.blocks.splice(index + 1, 0, { label: `Slide ${index + 2}`, text: after });
-    saveService(); renderFullEdit(); renderSidebar();
+    // Same gap as deleteFlowSlideOrSong's own fix — never called renderStack().
+    refreshAfterSlideEdit(item);
     if (typeof toast === 'function') toast('Slide split', 'success');
   }
 
