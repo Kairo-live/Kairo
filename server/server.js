@@ -990,7 +990,9 @@ function resetReadingMode() {
 // mid-sermon. Catches the gap that would otherwise be silently lost.
 async function submitDeepgramRestFallback() {
   if (!audioRingBuffer.length) return;
-  const key = settings.deepgramApiKey;
+  // .trim() — see startDeepgram's own comment: a stray-whitespace key that
+  // slipped into settings before the save-side fix is truthy but useless.
+  const key = (settings.deepgramApiKey || '').trim();
   if (!key) return;
 
   // Only submit audio captured in the last 20s (avoid re-processing old audio)
@@ -1753,7 +1755,12 @@ app.get('/health', (_, res) => res.json({
 
 app.get('/api/settings', (_, res) => {
   const safe = { ...settings };
-  if (safe.deepgramApiKey) safe.deepgramApiKey = safe.deepgramApiKey.slice(0, 8) + '…';
+  // .trim() — see startDeepgram's comment: a stray-whitespace key is truthy
+  // but not real; without this it displayed as a broken-looking " …"
+  // placeholder ("Key saved" with nothing visible) instead of correctly
+  // reading as no key saved at all.
+  const trimmedKey = (safe.deepgramApiKey || '').trim();
+  safe.deepgramApiKey = trimmedKey ? trimmedKey.slice(0, 8) + '…' : '';
   // Not a persisted setting — just riding along on a request the client
   // already makes on load, rather than a separate /api/version round trip.
   safe.appVersion = APP_VERSION;
@@ -1772,6 +1779,25 @@ app.post('/api/settings', async (req, res) => {
   if (incoming.deepgramApiKey && settings.deepgramApiKey
       && incoming.deepgramApiKey === settings.deepgramApiKey.slice(0, 8) + '…') {
     delete incoming.deepgramApiKey;
+  }
+  // Real incident: the client's own "leave blank to keep the existing key"
+  // convention (app.js saveCurrentSettings only sends deepgramApiKey when
+  // the input has a value) means a genuinely-blank field never reaches
+  // here at all — but a STRAY SPACE (an accidental keystroke while trying
+  // to clear the field) is non-empty, so it sailed straight through and
+  // silently overwrote a real, working key with a single whitespace
+  // character. `!key` checks elsewhere (startDeepgram) don't catch that —
+  // a non-empty string is truthy — so the app then tried to actually
+  // connect to Deepgram with a blank key: no synchronous "no key"
+  // error, just a real (confusing) auth rejection stuck behind
+  // "Connecting…". Trim before it's ever persisted, and treat an
+  // all-whitespace value the SAME as "not sent" (matching the client's own
+  // existing blank-means-unchanged convention) rather than saving it as an
+  // empty key.
+  if (typeof incoming.deepgramApiKey === 'string') {
+    const trimmed = incoming.deepgramApiKey.trim();
+    if (trimmed) incoming.deepgramApiKey = trimmed;
+    else delete incoming.deepgramApiKey;
   }
   const updated = { ...settings, ...incoming };
   await saveSettings(updated).catch(err => console.warn('[Settings] Save failed:', err.message));
@@ -3064,7 +3090,12 @@ async function startDeepgram(config = {}) {
   deepgramUserStopped = false;
   deepgramLastConfig  = config;   // save for auto-reconnect
 
-  const key = settings.deepgramApiKey;
+  // .trim() — a stray-whitespace key (see the /api/settings save-side fix's
+  // own comment for the real incident) is truthy but not a real key; without
+  // this it sailed past this check straight into an actual Deepgram connect
+  // attempt, which just hangs on "Connecting…" behind a confusing auth
+  // rejection instead of the clear, actionable message right here.
+  const key = (settings.deepgramApiKey || '').trim();
   if (!key) {
     broadcast({ type: 'listening-error', error: 'No Deepgram API key configured' });
     return { error: 'No Deepgram API key' };
