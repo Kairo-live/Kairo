@@ -1615,10 +1615,17 @@
     Object.entries(CENTER_VIEWS).forEach(([key, id]) => {
       document.getElementById(id)?.classList.toggle('hidden', key !== view);
     });
-    // The scripture search bar only makes sense while on the Bible view or
-    // mid-playlist (stack/full-edit already coexist with it today) — not
-    // while browsing the Songs, Media, or Timer libraries.
-    document.querySelector('.cs-lookup')?.classList.toggle('hidden', view === 'songs' || view === 'media' || view === 'timer');
+    // The scripture search bar only makes sense on the Bible view itself.
+    // Used to also show on the Slides stack/full-edit (a leftover from
+    // before Slides had its own content search) — now that Slides has its
+    // own "find a word across all slides" search bar right below this one
+    // (a completely different thing: looking up scripture to ADD, vs.
+    // finding text already IN the deck), stacking both was confusing
+    // rather than useful (owner feedback, live). Adding to a playlist from
+    // the Bible tab is unaffected — Send/Add still works the same way it
+    // always did; this only controls whether the search INPUT itself
+    // shows on views where it was never the point.
+    document.querySelector('.cs-lookup')?.classList.toggle('hidden', view !== 'bible');
     document.querySelectorAll('#bible-btn, #slides-btn, #timer-btn, #songs-btn, #media-btn').forEach(b => b?.classList.remove('active'));
     // The stack (running order) and full-edit are both reached by drilling
     // into a playlist's slides — "Slides" is the right tab to show active
