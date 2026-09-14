@@ -1109,22 +1109,49 @@ function applyScriptureLanguage(verses) {
   return verses;
 }
 
-// The "Translation" dropdown (KJV/NIV/NLT/ESV/NASB/NKJV) has never actually
+// The "Translation" dropdown (KJV/NIV/NLT/ESV/NASB/NKJV) never actually
 // swapped displayed text — verse.text was hardcoded to kjv_text everywhere;
-// settings.translation only ever affected the label appended for
-// ProPresenter (see sendToProPresenter/sendToOBS's own `const t =
-// settings.translation || 'KJV'`). Real, distinct text only exists for two
-// of those six (map.json's own fusionType: "KJV + NLT" — the other four
-// were always just a different label on the same KJV text; the dropdown
-// itself is being cut back to just these two real options, same change).
-// This is the missing other half: actually apply the pick. English-only —
-// applyScriptureLanguage (below/above) already owns non-English display and
-// unconditionally overwrites v.text when active, so call order doesn't
-// matter, but this runs first for clarity (translation, then language).
+// settings.translation only affected the label appended for ProPresenter
+// (see sendToProPresenter/sendToOBS's own `const t = settings.translation
+// || 'KJV'`). Real distinct text for NKJV/NIV/ESV/NASB (owner had these
+// as real, complete translation files all along — found intact outside the
+// project dir; the earlier "only KJV+NLT are real" state was this data
+// never having been wired in, not the data never existing) now loads from
+// databases/bibles/translations/*.json, same lazy-load-and-cache pattern as
+// loadScripturePack. KJV (the default, already the detection corpus's own
+// text) and NLT (map.json's own nlt_text field) don't need a file load.
+const translationPacks = new Map(); // 'NKJV'|'NIV'|'ESV'|'NASB' -> Map(reference -> text), or null if load failed
+
+function loadTranslationPack(code) {
+  if (translationPacks.has(code)) return translationPacks.get(code);
+  let map = null;
+  try {
+    const raw = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'databases', 'bibles', 'translations', `${code}.json`), 'utf8'));
+    map = new Map(raw.verses.map(v => [v.reference, v.text]));
+    console.log(`[Translation] Loaded ${code}: ${map.size} verses (${raw.translation}, ${raw.license})`);
+  } catch (err) {
+    console.warn(`[Translation] No pack for "${code}":`, err.message);
+  }
+  translationPacks.set(code, map);
+  return map;
+}
+
+// English-only — applyScriptureLanguage (above) already owns non-English
+// display and unconditionally overwrites v.text when active, so call order
+// doesn't matter, but this runs first for clarity (translation, then
+// language).
 function applyTranslation(verses) {
-  if ((settings.translation || 'KJV').toUpperCase() !== 'NLT') return verses;
+  const t = (settings.translation || 'KJV').toUpperCase();
+  if (t === 'KJV') return verses; // already the corpus's own text
+  if (t === 'NLT') {
+    for (const v of verses) if (v.nlt_text) v.text = v.nlt_text;
+    return verses;
+  }
+  const pack = loadTranslationPack(t);
+  if (!pack) return verses;
   for (const v of verses) {
-    if (v.nlt_text) v.text = v.nlt_text;
+    const text = v.reference && pack.get(v.reference);
+    if (text) v.text = text;
   }
   return verses;
 }

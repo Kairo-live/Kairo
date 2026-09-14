@@ -58,7 +58,8 @@
       "../databases/bibles/model": "databases/bibles/model",
       "../databases/bibles/verse_embeddings.f32": "databases/bibles/verse_embeddings.f32",
       "../databases/bibles/verse_embeddings.json": "databases/bibles/verse_embeddings.json",
-      "../databases/bibles/packs": "databases/bibles/packs"
+      "../databases/bibles/packs": "databases/bibles/packs",
+      "../databases/bibles/translations": "databases/bibles/translations"
     },
     "externalBin": [
       "bin/node"

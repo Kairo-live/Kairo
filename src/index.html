@@ -318,19 +318,20 @@
                         <svg width="10" height="10" viewBox="0 0 12 12" fill="none"><path d="M1 1l10 10M11 1L1 11" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
                     </button>
                 </div>
-                <!-- Only KJV and NLT are real, distinct text (map.json's own
-                     fusionType: "KJV + NLT") — NIV/ESV/NASB/NKJV used to sit
-                     here too, but picking any of them silently showed KJV
-                     text under a different label; nothing backing them
-                     actually existed. Removed rather than left to imply
-                     content that isn't there — see the Language settings
-                     pane / scripture-pack work for the real path to more
-                     translations (public-domain ones bundled directly;
-                     copyrighted ones would need a licensed API, not a
-                     bundled download). -->
+                <!-- All 6 are now real, distinct text — databases/bibles/
+                     translations/*.json (NKJV/NIV/ESV/NASB) plus map.json's
+                     own kjv_text/nlt_text (KJV/NLT), applied by
+                     applyTranslation() in server.js. Briefly cut down to
+                     just KJV/NLT when the other four turned out to be
+                     unwired labels; restored once the real source files
+                     were found and connected. -->
                 <select id="translation-select" class="cs-select cs-translation-select">
                     <option value="KJV" selected>KJV</option>
+                    <option value="NKJV">NKJV</option>
                     <option value="NLT">NLT</option>
+                    <option value="NIV">NIV</option>
+                    <option value="ESV">ESV</option>
+                    <option value="NASB">NASB</option>
                 </select>
                 <button id="bible-theme-btn" class="ls-icon-btn ls-icon-btn-labeled svc-card-theme-btn cs-theme-btn" title="Theme for auto-detected &amp; searched scripture">
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
@@ -1180,9 +1181,12 @@
                         <label class="setting-label">Translation</label>
                         <select id="translation-select-settings" class="setting-input">
                             <option value="KJV" selected>KJV</option>
+                            <option value="NKJV">NKJV</option>
                             <option value="NLT">NLT</option>
+                            <option value="NIV">NIV</option>
+                            <option value="ESV">ESV</option>
+                            <option value="NASB">NASB</option>
                         </select>
-                        <p class="setting-hint">The only two with real, distinct text bundled today — others showed KJV text under a different label with nothing actually behind them.</p>
                     </div>
 
                     <div class="setting-group">
