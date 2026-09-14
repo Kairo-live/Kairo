@@ -1552,6 +1552,10 @@ input[type="range"]:disabled { opacity: 0.4; cursor: default; }
 .settings-nav-version {
   margin-top: auto;
   padding: var(--space-3) var(--space-2) var(--space-1);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
   font-size: 10px;
   /* --text-4 (#333333) is nearly the same tone as the panel background
      behind it — barely legible (owner feedback, live). --text-3 is this
@@ -1559,8 +1563,8 @@ input[type="range"]:disabled { opacity: 0.4; cursor: default; }
      "kept the muted feel while staying legible" — same reasoning applies
      here). */
   color: var(--text-3);
-  text-align: center;
 }
+.settings-nav-version-mark { flex-shrink: 0; opacity: 0.7; }
 
 .settings-nav-item {
   display: flex;
