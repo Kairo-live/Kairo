@@ -1392,7 +1392,32 @@ async function startListening() {
       body: JSON.stringify({ engine: serverEngine }),
     });
     const d = await r.json();
-    if (d.error) { toast(d.error, 'error'); stopAudioCapture(); return; }
+    if (d.error) {
+      stopAudioCapture();
+      // toast() is a permanent no-op in this app (see its own comment) — this
+      // used to be the ONLY thing that ran here, so "no Deepgram key" and "no
+      // offline model" both failed completely silently: the button just
+      // reverted with zero explanation of what was wrong or how to fix it.
+      // Both of these are pure missing-configuration cases with one correct
+      // fix (go set it up in Settings), unlike a genuine runtime error (a
+      // rejected/invalid key, a real network failure) which a redirect
+      // wouldn't actually resolve — so only these two specific, well-known
+      // error strings (from startDeepgram/startWhisper in server.js) trigger
+      // the jump; anything else just logs, matching the previous behavior's
+      // (silent) fallback rather than guessing at what an unknown error needs.
+      const missingKey   = serverEngine === 'deepgram' && /no deepgram api key/i.test(d.error);
+      const missingModel = serverEngine === 'offline'  && /model missing/i.test(d.error);
+      if (missingKey || missingModel) {
+        settingsModal?.classList.remove('hidden');
+        showSettingsPane('audio');
+        const field = document.getElementById(missingKey ? 'deepgram-key' : 'whisper-install-btn');
+        field?.scrollIntoView({ block: 'center' });
+        field?.focus?.();
+      } else {
+        console.error('[StartListening]', d.error);
+      }
+      return;
+    }
 
     // Stream PCM16 to server via WebSocket — same path for both engines.
     audioContext  = new AudioContext({ sampleRate: 16000 });
