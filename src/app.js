@@ -2432,20 +2432,36 @@ function wireOfflineModelInstaller(ids) {
   const engineToggle = document.getElementById(ids.engineToggle);
   if (!group || !installBtn) return;
 
+  // Original "Download offline model…" label, captured once — reused as-is
+  // for a fresh install; the update case below gets its own, shorter label
+  // rather than trying to keep an exact byte-size annotation in sync with
+  // whatever the update download actually is.
+  const downloadLabel = installBtn.textContent;
+
   async function refreshStatus() {
     try {
       const r = await fetch(`${SERVER}/api/whisper/status`);
       const s = await r.json();
-      if (s.installed) {
+      if (s.installing) {
+        statusLine.textContent = 'Install in progress…';
+        installBtn.style.display = 'none';
+      } else if (s.needsUpdate) {
+        // A model IS present and working (isModelPresent) — just not the
+        // MODEL_VERSION this build ships (see sherpa_installer.js's own
+        // comment). Distinct from "not installed" so it doesn't read as a
+        // fresh operator never having set this up at all.
+        statusLine.textContent = 'Update available for the offline model.';
+        statusLine.style.color = '';
+        installBtn.textContent = 'Update offline model';
+        installBtn.style.display = '';
+      } else if (s.installed) {
         statusLine.textContent = '✓ Offline model installed';
         statusLine.style.color = 'var(--accent)';
-        installBtn.style.display = 'none';
-      } else if (s.installing) {
-        statusLine.textContent = 'Install in progress…';
         installBtn.style.display = 'none';
       } else {
         statusLine.textContent = 'Offline model not installed.';
         statusLine.style.color = '';
+        installBtn.textContent = downloadLabel;
         installBtn.style.display = '';
       }
     } catch {

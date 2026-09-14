@@ -18,11 +18,45 @@ const https = require('https');
 const { execFile } = require('child_process');
 const { checkDiskSpace } = require('./disk_space');
 
+// Mirrored on our own GitHub releases rather than pointed straight at
+// upstream (k2-fsa/sherpa-onnx) — owner: "I thought we needed to host it, as
+// long as we have control over the download and it's a consistent file
+// everytime and we can update it." A third-party release asset can be
+// renamed/pruned out from under us with zero warning; this one is ours, so
+// the URL is stable and the file behind it never changes without MODEL_VERSION
+// also changing (see below). Byte-identical to the upstream source at mirror
+// time — verified via SHA-256 (78e2b79fcf7271553a74402a76b771b09ea40117a39566a79f52235b23db6358)
+// — and licensed by NVIDIA Corporation under the NVIDIA Open Model License
+// (https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-open-model-license/),
+// which explicitly permits redistribution with attribution; see the release
+// notes at https://github.com/Kairo-live/Kairo/releases/tag/offline-model-v1
+// for the full notice and source link.
 const MODEL_URL =
-  'https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-nemotron-speech-streaming-en-0.6b-560ms-int8-2026-04-25.tar.bz2';
+  'https://github.com/Kairo-live/Kairo/releases/download/offline-model-v1/sherpa-onnx-nemotron-speech-streaming-en-0.6b-560ms-int8-2026-04-25.tar.bz2';
 const ARCHIVE_TOP_DIR = 'sherpa-onnx-nemotron-speech-streaming-en-0.6b-560ms-int8-2026-04-25';
 const CANONICAL_DIR   = 'sherpa-streaming-en';
 const APPROX_MB       = 465;   // the .tar.bz2 download; extracted int8 set is ~662MB
+
+// Bump this (alongside MODEL_URL, and ARCHIVE_TOP_DIR/REQUIRED_FILES if the
+// new archive's own layout differs) whenever a new model is mirrored to our
+// releases — see "How do we update the on-device model" below. A plain
+// string, not semver — nothing parses or compares it beyond equality.
+const MODEL_VERSION = 'v1';
+// Written into the installed model directory after a successful install so
+// a later run can tell "a model is present" (isModelPresent) apart from
+// "the CURRENT model is present" (needsUpdate) — the two were conflated
+// before this, so publishing a new MODEL_URL would never actually reach
+// anyone who'd already installed the old one; the install button would just
+// keep reporting "✓ installed" forever. THIS is how an update actually
+// reaches an existing install: bump MODEL_VERSION + MODEL_URL here, publish
+// the new file to a new (or updated) GitHub release, ship that code change —
+// isModelPresent() alone stays true (the old files are still real and
+// working), but needsUpdate() now returns true, the Settings UI switches
+// from "✓ Offline model installed" to an "Update available" state, and
+// clicking it re-runs installSherpaModel(), which now genuinely re-downloads
+// (see the version check in installSherpaModel's short-circuit below) rather
+// than immediately reporting "already installed" and doing nothing.
+const VERSION_MARKER_FILE = '.kairo-model-version';
 
 // The four files sherpa_engine.js requires (must match its MODEL_FILES).
 const REQUIRED_FILES = [
@@ -62,6 +96,24 @@ function isModelPresent(base) {
   } catch {
     return false;
   }
+}
+
+// Absent for every install that predates this version-tracking change —
+// treated as "some unknown older version," which correctly reports
+// needsUpdate()=true rather than silently assuming it's current.
+function installedVersion(base) {
+  try {
+    return fs.readFileSync(path.join(modelDir(base), VERSION_MARKER_FILE), 'utf8').trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+// A model is present AND it's the current MODEL_VERSION. See MODEL_VERSION's
+// own comment above for how a real update actually reaches an existing
+// install via this check.
+function needsUpdate(base) {
+  return isModelPresent(base) && installedVersion(base) !== MODEL_VERSION;
 }
 
 const DOWNLOAD_IDLE_TIMEOUT_MS = 30_000;
@@ -148,7 +200,13 @@ function extractTarBz2(archivePath, intoDir) {
 }
 
 async function installSherpaModel({ modelsDir: base, onProgress } = {}) {
-  if (isModelPresent(base)) {
+  // Only short-circuit when the CURRENT version is already installed — a
+  // present-but-outdated model (needsUpdate()=true) falls through and
+  // re-downloads for real, which is the whole point of version-tracking
+  // this at all (see MODEL_VERSION's own comment). Explicitly re-checked
+  // here rather than just calling needsUpdate() so the "nothing to do" path
+  // still reads as one clear condition.
+  if (isModelPresent(base) && installedVersion(base) === MODEL_VERSION) {
     onProgress?.({ phase: 'done', already: true, modelPath: modelDir(base) });
     return { alreadyPresent: true, modelPath: modelDir(base) };
   }
@@ -199,6 +257,9 @@ async function installSherpaModel({ modelsDir: base, onProgress } = {}) {
   if (!isModelPresent(base)) {
     throw new Error('Model files missing after extraction — the archive layout may have changed.');
   }
+  // Record what got installed so a future run (possibly after MODEL_VERSION
+  // bumps in a later app update) can tell this is now current.
+  try { fs.writeFileSync(path.join(finalDir, VERSION_MARKER_FILE), MODEL_VERSION); } catch {}
   onProgress?.({ phase: 'done', already: false, modelPath: finalDir });
   return { alreadyPresent: false, modelPath: finalDir };
 }
@@ -209,9 +270,12 @@ module.exports = {
   installWhisperModel: installSherpaModel,
   installSherpaModel,
   isModelPresent,
+  needsUpdate,
+  installedVersion,
   modelPath,
   modelsDir,
   modelDir,
   MODEL_URL,
+  MODEL_VERSION,
   approxMB: () => APPROX_MB,
 };

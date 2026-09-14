@@ -2498,6 +2498,12 @@ let whisperInstallInProgress = false;
 app.get('/api/whisper/status', (_req, res) => {
   res.json({
     installed: whisperInstaller.isModelPresent(),
+    // True when a model IS installed but it's not the current MODEL_VERSION
+    // (see sherpa_installer.js's own comment on how a real update reaches an
+    // existing install) — the Settings UI shows a distinct "update
+    // available" state for this rather than either "not installed" or a
+    // plain checkmark.
+    needsUpdate: whisperInstaller.needsUpdate(),
     modelPath: whisperInstaller.modelPath(),
     installing: whisperInstallInProgress,
   });
