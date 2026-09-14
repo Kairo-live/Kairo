@@ -14,18 +14,14 @@
 // Every native-async operation in this process (fs, sharp's image decoding
 // for media thumbnails, and — the one that actually matters here — every
 // offline-engine transcribe call into sherpa-onnx-node's native binding)
-// shares Node's ONE libuv threadpool, which defaults to just 4 threads.
-// This was originally raised while the offline engine was still whisper.cpp
-// (via smart-whisper's AsyncProgressQueueWorker), whose transcribe calls
-// fired roughly every PARTIAL_INTERVAL_MS (850ms) during continuous speech —
-// if anything else briefly saturated that small shared pool, a transcribe
-// call queued up behind unrelated work instead of running immediately, a
-// real, observed contributor to the offline engine feeling far slower than a
+// shares Node's ONE libuv threadpool, which defaults to just 4 threads. If
+// anything else briefly saturates that small shared pool, a transcribe call
+// queues up behind unrelated work instead of running immediately — a real,
+// observed contributor to the offline engine feeling far slower than a
 // purely local engine should be (owner, live: "something running locally
-// shouldn't have that much delay"). The same shared-threadpool risk applies
-// to sherpa-onnx-node's own native calls, so this stays raised. Must be set
-// before ANY module that touches the threadpool is required — libuv reads
-// this lazily on first use, not at
+// shouldn't have that much delay"). Raised to 8. Must be set before ANY
+// module that touches the threadpool is required — libuv reads this lazily
+// on first use, not at
 // process boot, so setting it here (before express/sharp/etc. below) still
 // works even when this file is run directly (`node server/server.js`, the
 // path used for standalone testing) rather than only via the npm script.
@@ -1379,9 +1375,9 @@ function maybeHandleBareVerseNumber(transcript) {
   const now = Date.now();
   if (now - lastBareNumberAt < BARE_NUMBER_COOLDOWN_MS) return false;
 
-  // Keep digits (Deepgram/Whisper often render spoken numbers as "51" in
-  // the transcript, not the words "fifty one") — RE_NONALPHA strips those,
-  // so this uses its own alnum-preserving cleanup instead.
+  // Keep digits (STT engines often render spoken numbers as "51" in the
+  // transcript, not the words "fifty one") — RE_NONALPHA strips those, so
+  // this uses its own alnum-preserving cleanup instead.
   const words = transcript.toLowerCase()
     .replace(/[^a-z0-9\s]/g, ' ')
     .replace(RE_WHITESPACE, ' ')
@@ -2456,13 +2452,12 @@ app.post('/api/test-transcript', async (req, res) => {
 });
 
 // Unified start endpoint — body.engine selects 'deepgram' (cloud) or the
-// local sherpa-onnx engine, reached via 'offline' (current) or the legacy
-// aliases 'whisper'/'vosk'/'browser' left over from engines this one
-// replaced (so an operator's previously-saved setting keeps working across
-// upgrades). Default is deepgram for backward compatibility.
+// local sherpa-onnx engine, reached via 'offline' or 'browser' (the
+// Settings toggle's data-engine value). Default is deepgram for backward
+// compatibility.
 app.post('/api/start-listening', async (req, res) => {
   const engine = String(req.body?.engine || 'deepgram').toLowerCase();
-  if (['whisper', 'offline', 'vosk', 'browser'].includes(engine)) {
+  if (['offline', 'browser'].includes(engine)) {
     return res.json(await startOffline());
   }
   return res.json(await startDeepgram(req.body || {}));
@@ -2653,8 +2648,8 @@ app.post('/api/semantic-model/install', async (_req, res) => {
 // endpointing flag; for browser Web Speech API we set it = isFinal, since
 // each final result is its own utterance.
 // `words` (optional): [{word, start, end}] real per-word timestamps in
-// seconds, when the engine provides them (Deepgram always does; Whisper can
-// via word/token timestamps) — forwarded as-is to the client, where
+// seconds, when the engine provides them (Deepgram always does) —
+// forwarded as-is to the client, where
 // service.js's onTranscript hands it to LyricsFollower.ingest as meta.words
 // for real audio-time-based rate tracking instead of wall-clock estimation.
 // Nothing downstream of this function uses it — purely a pass-through.
@@ -2675,27 +2670,15 @@ async function handleTranscriptSegment(transcript, isFinal, confidence, speechFi
   if (!isFinal) {
     // Feed new words into the anchor trie immediately — don't wait for the
     // final. Quotes start matching while the preacher is mid-sentence.
-    // Used to be skipped for the offline engine: whisper.cpp's onPartial
-    // re-transcribed the entire growing audio window from scratch every
-    // pass (no stable append-only prefix guarantee the way Deepgram's
-    // interim API has), so the word-count-based watermark diff in
-    // streamNewWords couldn't tell a genuine new word from an earlier word
-    // whisper silently revised — feeding a revised tail into the anchor
-    // trie's persistent alignment state produced false sequential matches.
-    // The offline engine is sherpa-onnx (streaming transducer) now, not
-    // whisper.cpp — it emits a genuinely stable, append-only prefix (each
-    // partial only ever grows, confirmed directly: 13 consecutive partials
-    // on a real test utterance, none revising an earlier word), so this
-    // guard was silently disabling ALL interim detection — not just this
-    // line, verbatim/fingerprint/semantic below too — for the entire time
-    // the offline engine's been live, forcing every detection to wait for
-    // a full utterance endpoint instead of reacting mid-sentence like
-    // Deepgram already does. Removed. If a genuinely batch-style engine
-    // (re-transcribes-from-scratch, the way whisper.cpp did — no longer
-    // in the tree, removed once nothing required it) is ever added as
-    // another offline option, THAT engine needs its own stability flag
-    // here — not a blanket "offline == unstable" assumption, which is
-    // what this was.
+    // sherpa-onnx (streaming transducer) emits a genuinely stable,
+    // append-only prefix on interim — each partial only ever grows
+    // (confirmed directly: 13 consecutive partials on a real test
+    // utterance, none revising an earlier word) — so the word-count-based
+    // watermark diff in streamNewWords can safely tell a genuine new word
+    // from a revision. If a batch-style engine that re-transcribes from
+    // scratch each partial is ever added as another offline option, THAT
+    // engine needs its own stability flag here — not a blanket
+    // "offline == unstable" assumption.
     streamNewWords(transcript, false);
     maybeHandleNextVerseTrigger(transcript).catch(() => {});
     maybeAdvanceRangeOnLastWords(transcript);
@@ -2759,13 +2742,8 @@ async function handleTranscriptSegment(transcript, isFinal, confidence, speechFi
       if (!foundRef) {
         const interimWords = transcript.split(RE_SPACES).filter(Boolean).length;
         const now = Date.now();
-        // Same stale-Whisper caveat as streamNewWords above (see its own,
-        // fuller comment) — this used to skip interim verbatim/fingerprint/
-        // semantic entirely whenever the offline engine was active, on the
-        // assumption that ANY offline engine re-transcribes unstably like
-        // whisper.cpp did. sherpa-onnx (the current offline engine) streams
-        // a genuinely stable, append-only prefix, so that assumption no
-        // longer holds and the guard was removed — offline gets the same
+        // sherpa-onnx streams a genuinely stable, append-only prefix on
+        // interim (see streamNewWords above), so offline gets the same
         // "don't wait for the endpoint" interim detection Deepgram always had.
         if (interimWords >= 6 && now - lastInterimVerbatim > INTERIM_VERBATIM_MS) {
           lastInterimVerbatim = now;
@@ -3436,7 +3414,7 @@ function tryRangeAdvanceByDetection(verses, topScore) {
 // watermark and feed only the suffix that hasn't been streamed yet. This gets
 // each word into the trie the moment STT hears it (~1-3s before the final
 // lands) without double-feeding when the final repeats the same words. The
-// watermark resets on each final, matching Deepgram/Whisper utterance semantics.
+// watermark resets on each final, matching how STT utterance boundaries work.
 let streamWatermark = 0;
 
 function streamNewWords(transcript, isFinal) {
@@ -3694,7 +3672,7 @@ async function processForReferences(transcript, isFinal) {
   // "three, he said...") won't parse from the current segment alone — retry
   // against the previous final segment joined with this one before falling
   // back to weaker methods. Final segments only (interim text isn't a
-  // stable append-only prefix for Whisper — see streamNewWords above), and
+  // stable append-only prefix for every offline engine — see streamNewWords above), and
   // only within a short window so an unrelated sentence can't get spliced
   // into a citation by coincidence.
   if (!refs.length && isFinal && prevFinalTranscript

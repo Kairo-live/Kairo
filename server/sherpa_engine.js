@@ -1,16 +1,12 @@
 // KAIRO — Offline STT engine (sherpa-onnx + NVIDIA Nemotron streaming)
 //
-// Replaces whisper_engine.js as the offline engine. The reason for the swap,
-// in one line: whisper.cpp is a BATCH recognizer emulating streaming by
-// re-transcribing overlapping windows — inherently bursty, always behind, and
-// no amount of tuning closes the behavioral gap with Deepgram. sherpa-onnx
-// runs a streaming TRANSDUCER model (same architectural class as Deepgram's
+// Runs a streaming TRANSDUCER model (same architectural class as Deepgram's
 // own): it consumes audio frame-by-frame, keeps an internal encoder-state
 // cache, and emits tokens as they're recognized — each audio frame processed
-// exactly once, no re-transcription. That's the only way to get transcript
-// behavior that actually matches Deepgram's continuous word-by-word delivery,
-// which is the stated bar for the offline fallback: "consistent behavior and
-// similar performance, not a huge gap."
+// exactly once, no re-transcription. That's what gets transcript behavior
+// matching Deepgram's continuous word-by-word delivery, the stated bar for
+// the offline fallback: "consistent behavior and similar performance, not a
+// huge gap."
 //
 // Model: NVIDIA Nemotron Speech Streaming en 0.6b (560ms chunk, int8 ONNX).
 // A first attempt used an old LibriSpeech streaming zipformer — it streamed
@@ -21,17 +17,17 @@
 // crucially emits natural casing + punctuation, which the detection pipeline
 // downstream leans on for sentence segmentation.
 //
-// This module keeps the SAME public interface the old whisper.cpp engine
-// had, so server.js's startOffline()/feedOfflineAudio()/stopOffline() and
-// everything downstream of handleTranscriptSegment is untouched:
+// Public interface server.js's startOffline()/feedOfflineAudio()/
+// stopOffline() drive, and everything downstream of handleTranscriptSegment
+// consumes unchanged:
 //   new SherpaEngine({ modelDir, language, onPartial, onFinal, onError })
 //   .start()   async, throws a coded error the server maps to a friendly msg
 //   .feed(buffer)   PCM s16le, 16 kHz, mono, Node Buffer
 //   .stop()    async
 //
-// Audio contract is identical to the whisper path: 16 kHz mono signed-16-bit
-// PCM. sherpa-onnx wants Float32 in [-1, 1] with a { samples, sampleRate }
-// shape, converted on the way in.
+// Audio contract: 16 kHz mono signed-16-bit PCM in; sherpa-onnx wants
+// Float32 in [-1, 1] with a { samples, sampleRate } shape, converted on the
+// way in.
 'use strict';
 
 const path = require('path');

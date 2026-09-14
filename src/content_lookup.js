@@ -41,9 +41,10 @@
                           // rules out a false positive from one or two common words
     sustainMs: 1500,     // the same candidate must stay the clear best for this long
                           // before firing — one lucky transcript window isn't enough
-    missGraceMs: 800,    // a single below-threshold partial (Whisper revising its
-                          // window, a short pause) doesn't reset the sustain clock —
-                          // only losing the lead for longer than this does
+    missGraceMs: 800,    // a single below-threshold partial (an STT engine
+                          // revising its interim text, a short pause) doesn't
+                          // reset the sustain clock — only losing the lead
+                          // for longer than this does
     cooldownMs: 20000,   // minimum gap between two autonomous sends, so a burst of
                           // matching speech can't fire twice in quick succession
   };
@@ -134,8 +135,8 @@
     if (!best || best.score < this.cfg.confMatch
       || (secondScore > 0 && best.score < secondScore * this.cfg.leadMargin)) {
       // No qualifying candidate this window — a single jittery partial (a
-      // dropped word, Whisper revising its tail) shouldn't discard a real
-      // run in progress, only an actual gap longer than missGraceMs should.
+      // dropped word, an STT engine revising its tail) shouldn't discard a
+      // real run in progress, only an actual gap longer than missGraceMs should.
       if (this._bestId && now - this._bestLastSeenAt > this.cfg.missGraceMs) this._bestId = null;
       return;
     }

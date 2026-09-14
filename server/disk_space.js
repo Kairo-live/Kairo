@@ -1,5 +1,5 @@
 // Shared disk-space preflight check used by every model installer
-// (whisper_installer.js, mt_installer.js) before downloading a multi-hundred-
+// (sherpa_installer.js, mt_installer.js) before downloading a multi-hundred-
 // MB file — gives a clear error up front instead of the download running to
 // near-completion and failing with a bare ENOSPC.
 'use strict';

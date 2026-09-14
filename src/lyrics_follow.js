@@ -23,11 +23,11 @@
 //  • "Last 2–3 words of the block" ARMS an advance (anticipation, so the
 //    slide flips as the last word lands). "First words of the next block
 //    heard" is the CATCH-UP trigger. Both feed the same cursor.
-//  • Whisper re-transcribes its whole growing window each partial and can
-//    revise earlier words, so we never build incremental state from a
-//    partial — every ingest re-aligns only the RECENT TAIL of the
-//    transcript against a forward window of the lyrics. Stateless per call,
-//    immune to the window being rewritten underneath us.
+//  • A partial can still revise earlier words depending on the STT engine,
+//    so we never build incremental state from one — every ingest re-aligns
+//    only the RECENT TAIL of the transcript against a forward window of the
+//    lyrics. Stateless per call, immune to the window being rewritten
+//    underneath us.
 'use strict';
 
 (function (root) {
@@ -68,9 +68,9 @@
 
   // Same key() folding as tokenizeKeys, but keeps each surviving key's real
   // audio-relative start/end (seconds) alongside it. Fed from Deepgram's own
-  // `words` array (always present on a transcript event, no config needed)
-  // or Whisper's word-level timestamps — threaded through server.js -> WS ->
-  // onTranscript's meta.words. Built directly from the source `words` array
+  // `words` array (always present on a transcript event, no config needed),
+  // threaded through server.js -> WS -> onTranscript's meta.words. Built
+  // directly from the source `words` array
   // (not a separate map-then-filter pass against tokenizeKeys' own output),
   // so a dropped empty-key word can never desync a key from the wrong
   // timestamp the way two independently-filtered parallel arrays could.
@@ -302,10 +302,10 @@
     // `hi` bound), so it structurally can never rise on its own from a
     // presenter/singer who's jumped ahead without ever touching the blocks
     // in between, OR from real ASR noise degrading the in-block alignment
-    // right at a transition (Whisper re-transcribing its whole growing
-    // window can revise/drop earlier words between calls — see this file's
-    // own top-of-file note — which the smooth, always-appending replay
-    // harness doesn't fully exercise). A direct headHits hit against a
+    // right at a transition (a partial can revise/drop earlier words
+    // between calls, depending on the STT engine — see this file's own
+    // top-of-file note — which the smooth, always-appending replay harness
+    // doesn't fully exercise). A direct headHits hit against a
     // specific block is independent, self-contained evidence either way —
     // the same "trust this strong automatic signal" reasoning resync()
     // already applies for a manual operator jump (which also bumps
@@ -364,8 +364,8 @@
   // we only look at its tail). isFinal is accepted for parity with the WS
   // payload but doesn't change handling: every call re-aligns the tail.
   // meta.words (optional): [{word, start, end}] real per-word timestamps
-  // (seconds) — Deepgram always includes these; Whisper can via word/token
-  // timestamps. When present, `rate` is updated from the actual elapsed
+  // (seconds) — Deepgram always includes these. When present, `rate` is
+  // updated from the actual elapsed
   // AUDIO time of the matched words instead of wall-clock arrival timing,
   // which is a poor proxy since ASR delivers text in irregular bursts, not
   // smoothly. Falls back to the previous wall-clock estimate when absent.

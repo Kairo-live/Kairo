@@ -1,15 +1,13 @@
 // sherpa-onnx offline-model installer — the GUI-driven counterpart to a
-// manual download, same shape as whisper_installer.js (which this replaces
-// for the offline engine): same {phase, pct} progress events, same
-// isModelPresent/modelPath/modelsDir accessors, so server.js's
-// /api/whisper/status and /api/whisper/install endpoints and the Settings
-// installer UI keep working unchanged.
+// manual download: {phase, pct} progress events, plus isModelPresent/
+// modelPath/modelsDir accessors that server.js's /api/offline/* endpoints
+// and the Settings installer UI read directly.
 //
-// The model ships as a single .tar.bz2 from the sherpa-onnx GitHub releases.
-// After download it's extracted, the fp32 encoder/joiner (only the int8 ones
-// are used at runtime) and the test_wavs folder are pruned, and the
-// versioned directory is renamed to the canonical name sherpa_engine.js
-// looks for.
+// The model ships as a single .tar.bz2, mirrored on our own GitHub releases
+// (see MODEL_URL's own comment). After download it's extracted, the fp32
+// encoder/joiner (only the int8 ones are used at runtime) and the test_wavs
+// folder are pruned, and the versioned directory is renamed to the canonical
+// name sherpa_engine.js looks for.
 'use strict';
 
 const fs    = require('fs');
@@ -82,8 +80,7 @@ function modelDir(base) {
   return path.join(modelsDir(base), CANONICAL_DIR);
 }
 
-// Kept named modelPath() for a drop-in match with whisper_installer's export
-// (server.js's /api/whisper/status returns it) — it's a directory here.
+// server.js's /api/offline/status returns this — it's a directory here.
 function modelPath(base) {
   return modelDir(base);
 }
@@ -134,9 +131,7 @@ function headContentLength(url, maxRedirects = 5) {
   });
 }
 
-// Resumable, retrying download — same proven implementation as
-// whisper_installer.js (kept as a local copy rather than a shared import to
-// keep the two installers independent).
+// Resumable, retrying download.
 function download(url, dest, onProgress, { maxRedirects = 5, startByte = 0, total = 0 } = {}) {
   return new Promise((resolve, reject) => {
     if (total > 0 && startByte >= total) {

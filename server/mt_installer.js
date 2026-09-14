@@ -1,9 +1,9 @@
 // Local translation-model installer — thin wrapper around mt_engine.js that
 // reshapes @huggingface/transformers' own progress events into the same
-// {phase, pct}/{phase:'done'} shape whisper_installer.js established, and
-// adds the per-language indirection mt_engine.js needs (French/Spanish/
-// Portuguese are three independent model downloads, not one shared file —
-// see mt_engine.js for why).
+// {phase, pct}/{phase:'done'} shape the offline-model installer
+// (sherpa_installer.js) uses, and adds the per-language indirection
+// mt_engine.js needs (French/Spanish/Portuguese are three independent
+// model downloads, not one shared file — see mt_engine.js for why).
 'use strict';
 
 const fs = require('fs');

@@ -24,9 +24,10 @@ const SONG = {
   ],
 };
 
-// Builds a meta.words array (Deepgram/Whisper shape) for a line of text,
-// spaced at wordsPerSec — i.e. REAL per-word timestamps, not wall-clock
-// arrival time, matching what tokenizeKeysWithTimes/ingest expect.
+// Builds a meta.words array (the {word, start, end} shape real STT engines
+// use) for a line of text, spaced at wordsPerSec — i.e. REAL per-word
+// timestamps, not wall-clock arrival time, matching what
+// tokenizeKeysWithTimes/ingest expect.
 function wordsFor(text, startAt, wordsPerSec) {
   const words = text.split(/\s+/).filter(Boolean);
   const dur = 1 / wordsPerSec;

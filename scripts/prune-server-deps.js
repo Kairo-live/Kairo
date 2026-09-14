@@ -21,12 +21,6 @@
 //      source maps, test suites, CI config, and editor/VCS cruft that
 //      occasionally ships inside a published tarball.
 //
-// (smart-whisper used to get a dedicated build-artifact trim here too, but
-// as of the whisper.cpp → sherpa-onnx engine swap it's no longer a
-// dependency at all — see server/server.js's loadWhisperMod() comment —
-// so there's nothing left under node_modules for a smart-whisper pass to
-// find.)
-//
 // Safe to run repeatedly — everything it deletes is regenerable by a clean
 // `npm ci`, so this should run AFTER install and BEFORE `tauri build` reads
 // the directory as a bundle resource (wired into the build via

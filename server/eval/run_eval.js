@@ -50,9 +50,9 @@ function groundTruthVerseKeys(entry) {
 
 // Splits an utterance into growing-prefix word slices (3-8 words per step)
 // to approximate Deepgram's real interim cadence, then one final call with
-// the full text — see the plan's own note on why this models Deepgram's
-// cadence specifically (Whisper re-transcribes from scratch each partial
-// and has no stable-prefix guarantee, so it's excluded from this simulation).
+// the full text. Models Deepgram's cadence specifically — a batch-style
+// engine that re-transcribes from scratch each partial (no stable-prefix
+// guarantee) would need its own simulation shape, not this one.
 function chunkUtterance(text) {
   const words = text.split(/\s+/).filter(Boolean);
   const chunks = [];

@@ -1,7 +1,7 @@
 // Semantic-layer ("meaning-based Candidates") installer — same NDJSON
-// {phase, pct}/{phase:'done'} shape whisper_installer.js established,
-// mt_installer.js already reused. Two real steps, unlike the single-file
-// Whisper model or the MT installer's one-download-and-done:
+// {phase, pct}/{phase:'done'} shape the offline-model and MT installers
+// use. Two real steps, unlike either of those installers' single
+// one-download-and-done:
 //   1. Download embeddinggemma-300m (ONNX, ~197MB) via semantic_engine.js's
 //      installModel() — same @huggingface/transformers cache_dir mechanism
 //      mt_engine.js uses, so this reuses that library's own resumable HTTP
@@ -18,7 +18,7 @@
 // .gitignore) — a fresh install had NO path to ever get the semantic layer
 // working, silently, forever (semantic_engine.ensureLoaded's error was only
 // ever logged to the console, never surfaced to an operator). This is that
-// missing path, mirroring the Whisper/MT installers' existing pattern
+// missing path, mirroring the offline-model/MT installers' existing pattern
 // instead of inventing a third one.
 'use strict';
 

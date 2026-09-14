@@ -90,7 +90,7 @@ for (const t of sung) {
 
 // ── run the follower the way service.js will ────────────────────────────
 // service.js gets {type:'transcript', text, isFinal} where `text` is the
-// current (growing) whisper window. Emulate: a window of the last ~14 words,
+// current, growing interim window. Emulate: a window of the last ~14 words,
 // pushed ~every (60/WPM * wordsPerTick) seconds.
 const advances = [];
 const track = [];
