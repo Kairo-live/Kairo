@@ -9513,8 +9513,8 @@ async function bootstrapStartup() {
   // actually register the brand mark/wordmark that's the whole point of this
   // screen. Real startup work below still happens at its own pace; this only
   // holds the screen on a little longer, never makes it wait longer than it
-  // already would.
-  const MIN_DISPLAY_MS = 8500;
+  // already would. Owner: "lets keep the delay to 5s" (down from 8.5s).
+  const MIN_DISPLAY_MS = 5000;
   const startedAt = Date.now();
 
   try {
