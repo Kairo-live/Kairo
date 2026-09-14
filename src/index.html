@@ -1672,6 +1672,37 @@
                     // Reuse an existing display window if it's already open.
                     const existing = await WebviewWindow.getByLabel(label);
                     if (existing) {
+                        // Real incident: reassigning an output to a different
+                        // monitor (or re-picking a previously-used one) only
+                        // ever navigate()d this existing window — never
+                        // repositioned/resized it. A window that happened to
+                        // be sitting on the operator's own screen (from an
+                        // earlier fallback, a manual drag, or the OS restoring
+                        // it there after a restart) just stayed there forever;
+                        // only a brand-new window ever picked up opts.x/y/
+                        // width/height. Owner: "when a user selects a
+                        // previous output, it naturally defaults back to the
+                        // screen of the app running." A window can't be
+                        // moved/resized while fullscreen on most platforms,
+                        // so drop fullscreen first, reposition, then reapply
+                        // it — matching the fullscreen:true this is always
+                        // called with (see openDisplayOutput in app.js).
+                        try {
+                            await existing.setFullscreen(false);
+                            const { LogicalPosition, LogicalSize } = window.__TAURI__.dpi;
+                            if (opts.width != null && opts.height != null) {
+                                await existing.setSize(new LogicalSize(opts.width, opts.height));
+                            }
+                            if (opts.x != null && opts.y != null) {
+                                await existing.setPosition(new LogicalPosition(opts.x, opts.y));
+                            }
+                            if (opts.fullscreen) await existing.setFullscreen(true);
+                        } catch (e) {
+                            fetch('/api/debug-log', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({
+                                event: 'openDisplayWindow reposition failed', data: { label, error: String(e), message: e && e.message },
+                            }) }).catch(function(){});
+                            console.warn('[KAIRO] Failed to reposition existing display window:', e);
+                        }
                         await existing.show();
                         await existing.setFocus();
                         // Push the new URL so layout / opacity changes apply.
