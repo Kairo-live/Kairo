@@ -9,7 +9,7 @@
 'use strict';
 
 const assert = require('assert');
-const { pbFields } = require('./slide_import.js');
+const { pbFields, rtfToText } = require('./slide_import.js');
 
 // 1. pbFields' own doc comment promises "Returns null (never throws)" —
 //    but `buf.length` on a non-Buffer threw instead. walkPlaylistManifest
@@ -29,4 +29,36 @@ assert.deepStrictEqual(pbFields(Buffer.alloc(0)), [], 'pbFields(empty buffer) mu
 const real = pbFields(Buffer.from([0x08, 0x05]));
 assert.deepStrictEqual(real, [{ num: 1, wire: 0, value: 5 }], 'a real varint field must still parse');
 
-console.log('slide_import.test.js: 5/5 assertions passed');
+// 2. rtfToText's \'hh hex-escape handling mapped straight through
+//    String.fromCharCode (Latin-1), but RTF's \'hh is a byte in the
+//    document's ANSI codepage — Windows-1252 by default (\ansicpg1252),
+//    which diverges from Latin-1 exactly in the 0x80-0x9F range: that's
+//    where every curly quote/dash/ellipsis lives. Real incident: a
+//    ProPresenter announcement slide's smart quotes/apostrophes/em-dash
+//    silently vanished into invisible control characters on import.
+assert.strictEqual(
+  rtfToText(String.raw`{\rtf1\ansi\ansicpg1252 It\'92s a \'93great\'94 day \'96 don\'92t miss it\'85}`),
+  'It’s a “great” day – don’t miss it…',
+  'cp1252 smart quotes/dash/ellipsis must decode correctly, not vanish into control chars'
+);
+
+// 3. \uN (signed decimal Unicode code point) is RTF's OTHER real-world
+//    escape form — used for characters outside the ANSI codepage entirely.
+//    Before this fix it wasn't decoded at all: the generic control-word
+//    strip just deleted "\uN" outright, silently dropping the character
+//    (and never consumed the single ASCII fallback char RTF requires
+//    immediately after, which would otherwise leak into the output).
+assert.strictEqual(
+  rtfToText(String.raw`{\rtf1 Caf\u233? na\u239?ve}`),
+  'Café naïve',
+  '\\uN unicode escapes must decode to the real character, with their fallback char consumed'
+);
+
+// Plain ASCII must be completely unaffected by either fix above.
+assert.strictEqual(
+  rtfToText(String.raw`{\rtf1 Hello World, no special chars here.}`),
+  'Hello World, no special chars here.',
+  'plain ASCII RTF text must be unaffected'
+);
+
+console.log('slide_import.test.js: 8/8 assertions passed');

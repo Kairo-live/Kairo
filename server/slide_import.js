@@ -105,6 +105,25 @@ const decode = (s) => String(s)
   .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&apos;/g, "'");
 
 // ── RTF → plain text ──────────────────────────────────────────────────────
+// Windows-1252 differs from Latin-1/Unicode only in the 0x80-0x9F range —
+// and that's exactly where all the "smart" typography lives (curly quotes,
+// en/em dash, ellipsis, bullet). RTF's \'hh hex escape is a single byte in
+// the document's ANSI codepage (\ansicpg1252 is RTF's own default, and every
+// real sample seen from ProPresenter/Word/etc. uses it), NOT a raw Unicode
+// code point — mapping it straight through String.fromCharCode silently
+// turned every curly quote/dash/ellipsis into an invisible C1 control
+// character. Real incident: "It's a "great" day – don't miss it…" decoded
+// to "Its a great day  dont miss it". Undefined slots in this range fall
+// back to the raw byte (rare in practice, no better answer available).
+const CP1252_HIGH = {
+  0x80: '€', 0x82: '‚', 0x83: 'ƒ', 0x84: '„', 0x85: '…',
+  0x86: '†', 0x87: '‡', 0x88: 'ˆ', 0x89: '‰', 0x8A: 'Š',
+  0x8B: '‹', 0x8C: 'Œ', 0x8E: 'Ž', 0x91: '‘', 0x92: '’',
+  0x93: '“', 0x94: '”', 0x95: '•', 0x96: '–', 0x97: '—',
+  0x98: '˜', 0x99: '™', 0x9A: 'š', 0x9B: '›', 0x9C: 'œ',
+  0x9E: 'ž', 0x9F: 'Ÿ',
+};
+
 // Shared by ProPresenter 6 (RTFData attributes) and ProPresenter 7 (RTF blobs
 // embedded in protobuf text elements) — both wrap slide text in RTF the same
 // way. Formatting is discarded; only the readable text survives, since it's
@@ -118,7 +137,22 @@ function rtfToText(rtf) {
     .replace(/\{\\fonttbl[^{}]*\}/g, '')
     .replace(/\{\\colortbl[^{}]*\}/g, '')
     .replace(/\{\\\*[^}]*\}/g, '')
-    .replace(/\\'([0-9a-f]{2})/gi, (_, h) => String.fromCharCode(parseInt(h, 16)))
+    // \uN: a signed 16-bit decimal Unicode code point, RTF's own escape for
+    // any character outside the ANSI codepage — must run BEFORE the generic
+    // control-word strip below (which would otherwise eat "\u" as if it were
+    // an unrecognized keyword and silently drop the character). Per spec,
+    // \uN is followed by exactly one ASCII fallback character (the \ucN
+    // count, almost universally 1 and not tracked here) that must be
+    // consumed too, or it leaks into the output as extra/duplicate text.
+    .replace(/\\u(-?\d+) ?./g, (_, n) => {
+      let code = parseInt(n, 10);
+      if (code < 0) code += 65536;
+      return String.fromCharCode(code);
+    })
+    .replace(/\\'([0-9a-f]{2})/gi, (_, h) => {
+      const b = parseInt(h, 16);
+      return (b >= 0x80 && b <= 0x9F) ? (CP1252_HIGH[b] || String.fromCharCode(b)) : String.fromCharCode(b);
+    })
     .replace(/\\par[d]?\b/g, '\n')
     .replace(/\\line\b/g, '\n')
     // RTF's compact line-break form: a bare backslash immediately followed by
