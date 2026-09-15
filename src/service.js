@@ -3947,12 +3947,29 @@
     // as the multi-select image add above, just for imported blocks instead.
     if (isImportBlocks && pendingExtraBlockItems.length) {
       const extras = pendingExtraBlockItems; pendingExtraBlockItems = [];
+      // Same n derivation as the primary item above (acStructureMode wins over
+      // the raw delimiter input) — real incident: a 4-presentation ProPresenter
+      // playlist import kept its FIRST presentation's scene layout correctly
+      // (via the primary branch above) but the other 3 showed "0 slides",
+      // because this block read the delimiter input directly instead of
+      // acStructureMode, silently landing on a nonzero n even for a scene
+      // import (whose delimiter group is hidden, not zeroed), which then fed
+      // every block — none of which have `.lines` (they're `.layers` scenes)
+      // — into `.flatMap(b => b.lines || [])`, producing one block with zero
+      // lines.
       const delimInput = document.getElementById('ac-delim-input');
-      const n = delimInput ? Math.max(0, Math.floor(Number(delimInput.value)) || 0) : DEFAULT_LINES_PER_SLIDE;
+      const n = acStructureMode === 'paragraph'
+        ? 0
+        : (delimInput ? Math.max(0, Math.floor(Number(delimInput.value)) || 0) : DEFAULT_LINES_PER_SLIDE);
       for (const extra of extras) {
         const extraItem = n === 0
           ? { id: uid('slides'), type: 'slides', title: extra.name || 'Imported slides', themeId: item.themeId,
-              blocks: extra.blocks.map(b => b.image
+              // Mirrors the primary item's own `.layers`-first mapping above —
+              // see its comment for why dropping `.layers` here specifically
+              // would silently discard everything slide_import.js extracted.
+              blocks: extra.blocks.map(b => b.layers
+                ? { label: b.label, layers: b.layers, canvasSize: b.canvasSize, text: b.text || '' }
+                : b.image
                 ? { label: b.label, image: b.image }
                 : { label: b.label, text: (b.lines || []).join('\n') }) }
           // Same flatten-across-blocks reflow as the primary item above —
