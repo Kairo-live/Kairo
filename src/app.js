@@ -6389,6 +6389,17 @@ function writeItemSlideStyleFromSynthetic() {
     window.KairoService?.saveTimerScenes?.(item, { resend: false });
     return;
   }
+  // Same whole-save idea for a 'slides' item's own scene blocks (a
+  // ProPresenter import preserved as-authored) — see buildSyntheticLook's
+  // matching read branch. Without this, editing an imported slide would
+  // fall through to the diff-against-base-theme path below, which makes
+  // no sense for a slide with no base theme to diff against — the real
+  // imported layers would silently never actually update.
+  if (item.type === 'slides' && item.blocks?.[slideIndex]?.layers) {
+    item.blocks[slideIndex].layers = deepClone(activeLook.layers || []);
+    window.KairoService?.saveService?.();
+    return;
+  }
   const overrides = {};
   // Media Bin background (bgMedia) — buildSyntheticLook prepends a synthetic
   // '__bg-media' layer for it via applyBgMediaOverride, purely for this
@@ -7407,6 +7418,12 @@ function buildSyntheticLook(item, slideIndex) {
     const scene = item.scenes[slideIndex] || item.scenes[0];
     return { id: `scene:${item.id}:${slideIndex}`, layers: deepClone(scene?.layers || []) };
   }
+  // Same idea for a 'slides' item's own scene blocks (a ProPresenter
+  // import preserved as-authored — see slidesFor's 'slides' case) — its
+  // layers live directly on the block, not a separate item.scenes array.
+  if (item.type === 'slides' && item.blocks?.[slideIndex]?.layers) {
+    return { id: `scene:${item.id}:${slideIndex}`, layers: deepClone(item.blocks[slideIndex].layers) };
+  }
   const base = resolveItemBaseLook(item);
   const clone = deepClone(base) || { layers: [] };
   clone.id = `item-edit:${item.id}:${slideIndex}`;
@@ -7478,8 +7495,13 @@ function renderItemSlidesList() {
     // A scene slide's "player" setting — how long the live countdown shows
     // it before advancing to the next one — lives right on its own row,
     // the same place PowerPoint keeps a slide's advance timing next to the
-    // slide itself rather than in a separate list somewhere else.
-    if (s.isScene) {
+    // slide itself rather than in a separate list somewhere else. Timer-
+    // specific: a 'slides' item's own scene slides (a ProPresenter import
+    // preserved as-authored, see slidesFor's 'slides' case) have no
+    // item.scenes array or duration concept at all — s.isScene alone isn't
+    // enough to gate this, item.type must be 'timer' too.
+    const isTimerScene = item.type === 'timer' && s.isScene;
+    if (isTimerScene) {
       const durRow = document.createElement('div');
       durRow.className = 'ts-item-slide-duration';
       const durInp = document.createElement('input');
@@ -7528,20 +7550,20 @@ function renderItemSlidesList() {
       e.preventDefault();
       const sections = [];
       const editGroup = [];
-      if (s.isScene) {
+      if (isTimerScene) {
         editGroup.push({ label: 'Duplicate', onClick: () => duplicateTimerScene(item, s.sceneIndex) });
       } else if (window.KairoService.canDuplicateSlide(item, s)) {
         editGroup.push({ label: 'Duplicate', onClick: () => window.KairoService.duplicateSlide(item, i) });
       }
       const selection = window.KairoService.selectedSlideIndices.size
         ? window.KairoService.selectedSlideIndices : new Set([i]);
-      if (!s.isScene && window.KairoService.anySlidesDuplicable(item, selection)) {
+      if (!isTimerScene && window.KairoService.anySlidesDuplicable(item, selection)) {
         editGroup.push({
           label: selection.size > 1 ? `Copy ${selection.size} slides` : 'Copy',
           onClick: () => window.KairoService.copySlides(item, selection),
         });
       }
-      if (!s.isScene && window.KairoService.slideClipboard && item.type === 'slides') {
+      if (!isTimerScene && window.KairoService.slideClipboard && item.type === 'slides') {
         editGroup.push({ label: 'Paste', onClick: () => window.KairoService.pasteSlides(item, i) });
       }
       if (editGroup.length) sections.push(editGroup);
@@ -7551,7 +7573,7 @@ function renderItemSlidesList() {
       // beyond the scene case's small standalone X button, so a regular
       // (non-timer) slide couldn't be deleted from Full-scale edit's own
       // Slides panel at all without leaving to the Stack view first.
-      if (s.isScene) {
+      if (isTimerScene) {
         sections.push([{
           label: 'Delete', danger: true, disabled: item.scenes.length <= 1,
           onClick: () => {
@@ -7582,8 +7604,12 @@ function renderItemSlidesList() {
     // layers are the whole thing, same as a real theme's are (see
     // buildSyntheticLook's own scenes branch for why editing works the
     // same way). Every other item type keeps the base-theme + per-slide-
-    // override painting it always had.
-    const look = s.isScene ? { layers: item.scenes[s.sceneIndex]?.layers || [] } : baseLook;
+    // override painting it always had. `s.layers` (a 'slides' item's own
+    // scene slide — see slidesFor's 'slides' case — carries its layers
+    // directly, no separate item.scenes array to index into the way Timer
+    // needs) is checked first; Timer's own item.scenes lookup is the
+    // fallback for its differently-shaped isScene slides.
+    const look = s.isScene ? { layers: s.layers || item.scenes?.[s.sceneIndex]?.layers || [] } : baseLook;
     const style = s.isScene ? {} : (item.slideStyles?.[i] || {});
     window.KairoService.paintLookLayers(thumb, look, style, {
       verseText: s.text, referenceText: s.reference || '', translatedText: '',

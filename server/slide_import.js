@@ -461,6 +461,55 @@ function pbCollectMediaPaths(buf, out, depth = 0) {
   }
 }
 
+// Real layer fidelity for a live presentation Cue — position, font, color,
+// background/foreground images, not just flattened text. Owner: "The
+// proplaylist file has images, fonts etc... what they don't want is another
+// 30min to reformat it with fonts, structure etc."
+//
+// Reverse-engineered against the REAL, published (if unofficial) proto
+// schema at https://github.com/greyshirtguy/ProPresenter7-Proto rather than
+// guessed at — confirmed field-by-field against a real presentation file:
+//   Cue.actions          (repeated Action)     = field 10
+//   Action.slide         (oneof SlideType)     = field 23
+//   SlideType.presentation (PresentationSlide) = field 2
+//   PresentationSlide.base_slide (Slide)       = field 1
+// From there it's the exact same Slide/Element message theme_import.js's
+// decodeSlide already knows how to fully decode (.protheme uses the
+// identical schema) — reused directly rather than a second, parallel
+// implementation. staticText:true (see decodeElement's own comment) is the
+// one real behavioral difference a live presentation needs over a theme.
+//
+// Returns { layers, canvasSize } or null — a Cue with no ACTION_TYPE_
+// PRESENTATION_SLIDE action at all (a media/timer/clear/etc. cue) simply
+// has no field 23 to find, which is a normal, expected case here, not a
+// parse failure.
+function decodeCueSceneLayers(cueFields, mediaByBasename, warnings) {
+  const actions = cueFields.filter(f => f.num === 10 && f.wire === 2);
+  for (const actionField of actions) {
+    const actionFields = pbFields(actionField.raw);
+    if (!actionFields) continue;
+    const slideTypeField = pbFirst(actionFields, 23);
+    if (!slideTypeField || slideTypeField.wire !== 2) continue;
+    const slideTypeFields = pbFields(slideTypeField.raw);
+    const presField = slideTypeFields && pbFirst(slideTypeFields, 2);
+    if (!presField || presField.wire !== 2) continue;
+    const presFields = pbFields(presField.raw);
+    const baseSlideField = presFields && pbFirst(presFields, 1);
+    if (!baseSlideField || baseSlideField.wire !== 2) continue;
+    const slideFields = pbFields(baseSlideField.raw);
+    if (!slideFields) continue;
+    // Lazy require — theme_import.js requires this file, so a top-level
+    // require here would deadlock on the circular dependency during module
+    // load; by the time this function actually RUNS, both modules have
+    // long finished loading, so a require here just hits Node's module
+    // cache like any other require.
+    const { decodeSlide } = require('./theme_import.js');
+    const slide = decodeSlide(slideFields, '', mediaByBasename, warnings, true);
+    return { layers: slide.layers, canvasSize: slide.canvasSize };
+  }
+  return null;
+}
+
 // `resolveMedia`, when provided (only by fromProBundle — a standalone .pro/
 // .pro6/.pro7 file has no accompanying zip of media to resolve against),
 // maps a path found inside a Cue to a data: URL, or null if no matching zip
@@ -472,6 +521,8 @@ function fromPro7(buf, resolveMedia) {
   const cueOrder = pro7ArrangementOrder(rootFields);
   const cuesByUuid = new Map();
   const rawOrder = [];
+  const mediaByBasename = resolveMedia && resolveMedia.byBasename;
+  const sceneWarnings = [];
 
   for (const f of rootFields) {
     if (f.num !== 13 || f.wire !== 2) continue;
@@ -488,7 +539,21 @@ function fromPro7(buf, resolveMedia) {
       pbCollectMediaPaths(f.raw, paths);
       for (const p of paths) { image = resolveMedia(p); if (image) break; }
     }
-    const entry = { label, lines, image };
+    // Real per-slide layout/font/image fidelity — see decodeCueSceneLayers'
+    // own header comment. Wrapped in try/catch and only trusted when it
+    // finds something beyond a bare auto-generated background (a Cue with
+    // no presentation-slide action at all — a clear/media/timer cue —
+    // legitimately returns null or an empty canvas, which correctly falls
+    // through to the existing text/image extraction below rather than
+    // replacing real content with an empty scene).
+    let scene = null;
+    try {
+      scene = decodeCueSceneLayers(cueFields, mediaByBasename, sceneWarnings);
+      if (scene && !scene.layers.some(l => l.type !== 'background')) scene = null;
+    } catch (err) {
+      scene = null; // reverse-engineered format — a real parse miss here must never break the whole import
+    }
+    const entry = { label, lines, image, scene };
     if (uuid) cuesByUuid.set(uuid, entry);
     rawOrder.push(entry);
   }
@@ -501,15 +566,19 @@ function fromPro7(buf, resolveMedia) {
   for (const cue of ordered) {
     // A pure-image cue (no text) used to be dropped entirely ("media-only
     // cues have nothing presentable") — now it surfaces as an image block.
-    // A cue with BOTH text and an image keeps today's text-only behavior;
-    // rendering the image as a background behind that same slide's text is
-    // a follow-up once a real sample file confirms this reference shape is
-    // actually correct, rather than compounding an unverified guess.
-    if (!cue.lines.length && !cue.image) continue;
-    if (!cue.lines.length && cue.image) {
-      blocks.push({ label: cue.label || `Slide ${blocks.length + 1}`, lines: [], image: cue.image });
+    if (!cue.lines.length && !cue.image && !cue.scene) continue;
+    const label = cue.label || `Slide ${blocks.length + 1}`;
+    if (cue.scene) {
+      // Real layout/font/image fidelity, preserved as-authored rather than
+      // re-themed — see decodeCueSceneLayers. `text`/`lines` still carried
+      // alongside (search/plain-text fallback contexts that read block.text
+      // directly, same convention slidesFor()'s 'slides' case already
+      // tolerates for `.image` blocks having no `.text`).
+      blocks.push({ label, layers: cue.scene.layers, canvasSize: cue.scene.canvasSize, text: cue.lines.join('\n') });
+    } else if (!cue.lines.length && cue.image) {
+      blocks.push({ label, lines: [], image: cue.image });
     } else {
-      blocks.push({ label: cue.label || `Slide ${blocks.length + 1}`, lines: cue.lines });
+      blocks.push({ label, lines: cue.lines });
     }
   }
   if (!blocks.length) throw new Error('no slide text found in this ProPresenter 7 file');
@@ -546,7 +615,7 @@ function makeMediaResolver(files) {
     byBasename.set(name.split('/').pop().toLowerCase(), content);
   }
   if (!byBasename.size) return null;
-  return (path) => {
+  const resolve = (path) => {
     const base = String(path).split(/[\\/]/).pop().toLowerCase();
     const bytes = byBasename.get(base);
     if (!bytes) return null;
@@ -554,6 +623,12 @@ function makeMediaResolver(files) {
     const mime = IMAGE_MIME_BY_EXT[ext] || 'application/octet-stream';
     return `data:${mime};base64,${bytes.toString('base64')}`;
   };
+  // Raw-bytes basename map attached to the resolver function itself (not a
+  // second parameter threaded through every caller) — decodeCueSceneLayers
+  // below needs raw bytes (matching theme_import.js's decodeElement, which
+  // base64-encodes internally), not this closure's own data: URL strings.
+  resolve.byBasename = byBasename;
+  return resolve;
 }
 
 // ── ProPresenter bundle (.probundle) ──────────────────────────────────────

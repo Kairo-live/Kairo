@@ -183,7 +183,22 @@ function looksLikeReference(text) {
 // carrier) → a KAIRO layer, or null if it's not something worth importing
 // (an empty placeholder shape with no fill, no text, no media — see the
 // textDesc-but-empty check below).
-function decodeElement(elFields, mediaByBasename, scaleX, scaleY, warnings) {
+//
+// `staticText` — false (default) for .protheme import: role === 'verse'/
+// 'reference' at field [2] correctly means "leave this bound to whatever
+// scripture is live" for a THEME meant to be reused. true for a live
+// PRESENTATION import (slide_import.js's own fromPro7 scene extraction,
+// added later): confirmed against a real presentation that ProPresenter
+// reuses those exact same internal placeholder names ("verse"/"reference")
+// as its generic primary/secondary-text-box roles on ORDINARY slides that
+// have nothing to do with scripture (a plain announcement slide's body
+// text box decoded with role 'verse') — binding it live would replace the
+// preacher's actual authored words with whatever verse Kairo happens to
+// detect, exactly backwards from "preserve this file's real content."
+// staticText forces every text element's real authored text through as
+// static customText regardless of role, which is what an already-written,
+// one-off presentation needs.
+function decodeElement(elFields, mediaByBasename, scaleX, scaleY, warnings, staticText = false) {
   const rotation = num(elFields, 4, 0);
   const bounds = boundsFromFields(sub(elFields, 3) || [], scaleX, scaleY);
 
@@ -255,7 +270,8 @@ function decodeElement(elFields, mediaByBasename, scaleX, scaleY, warnings) {
     // confirmed to misclassify short numeric/punctuation text like "1." as a
     // scripture reference.
     const role = str(elFields, 2);
-    const binding = role === 'verse' ? 'verse'
+    const binding = staticText ? 'custom'
+      : role === 'verse' ? 'verse'
       : role === 'reference' ? 'reference'
       : role === 'number' ? 'custom'
       : looksLikeReference(text) ? 'reference' : 'custom';
@@ -289,7 +305,7 @@ function decodeElement(elFields, mediaByBasename, scaleX, scaleY, warnings) {
   return { rgbaOnly: true, bounds, rgba, rotation };
 }
 
-function decodeSlide(slideFields, name, mediaByBasename, warnings) {
+function decodeSlide(slideFields, name, mediaByBasename, warnings, staticText = false) {
   const size = sub(slideFields, 6);
   const canvasW = Math.round(num(size, 1, 1920)) || 1920;
   const canvasH = Math.round(num(size, 2, 1080)) || 1080;
@@ -305,7 +321,7 @@ function decodeSlide(slideFields, name, mediaByBasename, warnings) {
     const outer = pbFields(wrapper.raw);
     const elFields = sub(outer, 1);
     if (!elFields) continue;
-    const layer = decodeElement(elFields, mediaByBasename, scaleX, scaleY, warnings);
+    const layer = decodeElement(elFields, mediaByBasename, scaleX, scaleY, warnings, staticText);
     if (layer) decoded.push({ layer, bounds: layer.rgbaOnly ? layer.bounds : layer.pos });
   }
 
@@ -409,4 +425,13 @@ function fromProTheme(buf) {
   return { themes, warnings };
 }
 
-module.exports = { fromProTheme };
+module.exports = {
+  fromProTheme,
+  // Shared with slide_import.js's own .pro7 presentation reader — a live
+  // Cue's own slide content turns out to be the exact same Slide message
+  // shape ([1] repeated Element, [6] Size) a .protheme's ThemeSlideEntry
+  // uses, confirmed directly against a real presentation file. Real layer
+  // fidelity (position/font/color/images) for an imported presentation
+  // reuses this decoder rather than a second, parallel implementation.
+  decodeSlide, mediaMap,
+};

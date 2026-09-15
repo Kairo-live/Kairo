@@ -506,7 +506,17 @@
         // same shape as an 'image'-type item's own single slide so every
         // existing image-slide code path (flowRow, slideCard, fit mode)
         // handles it with no further branching.
-        return (item.blocks || []).map((b, i) => b.image
+        //
+        // A block carrying `.layers` is a REAL ProPresenter scene (position/
+        // font/color/images, preserved as-authored rather than re-themed —
+        // see slide_import.js's decodeCueSceneLayers). Unlike Timer's own
+        // isScene slides (which look up item.scenes[sceneIndex].layers by
+        // index), this item type carries its layers directly on the slide
+        // object — a 'slides' item's blocks are already 1:1 with its
+        // slides, with no separate scenes array to index into.
+        return (item.blocks || []).map((b, i) => b.layers
+          ? { label: b.label || `Slide ${i + 1}`, isScene: true, blockIndex: i, layers: b.layers, canvasSize: b.canvasSize, text: b.text || '', reference: '' }
+          : b.image
           ? { label: b.label || `Slide ${i + 1}`, image: b.image, text: '', reference: '' }
           : {
               label: b.label || `Slide ${i + 1}`,
@@ -1070,7 +1080,15 @@
     // must carry the real translation rather than sending blank and letting
     // a later re-render catch up.
     const translatedText = await awaitTranslatedText(item, slide);
-    const look = itemLookOverride(item);
+    // A scene slide (slide.layers — a ProPresenter import preserved
+    // as-authored, see slidesFor's 'slides' case) carries its OWN complete
+    // layer set, same as Theme Studio's editor already treats it (see
+    // buildSyntheticLook in app.js) — itemLookOverride is item-level only
+    // (a single themeId for the whole deck), which can never vary per
+    // slide the way a real per-slide scene needs to. Without this, the
+    // live output would show whatever item-level theme happens to be
+    // assigned (or nothing) instead of the slide's own preserved design.
+    const look = slide.isScene ? { layers: slide.layers || [] } : itemLookOverride(item);
     debugLog('send-slide', {
       itemId: item.id,
       itemType: item.type,
@@ -3821,9 +3839,19 @@
         : (delimInput ? Math.max(0, Math.floor(Number(delimInput.value)) || 0) : DEFAULT_LINES_PER_SLIDE);
       if (isImportBlocks && rawBlocks) {
         if (n === 0) {
-          // Keep each imported block as its own fixed slide.
+          // Keep each imported block as its own fixed slide. A block
+          // carrying `.layers` is a real ProPresenter scene (position/
+          // font/color/images preserved as-authored) — same gap as
+          // toBlocksItem's own copy of this mapping (see its comment):
+          // this is the actual FINAL commit path (toBlocksItem only
+          // builds the dialog's initial preview item), so losing .layers
+          // here specifically would have silently thrown away everything
+          // slide_import.js just extracted, right at the moment the
+          // operator clicks "Add slides."
           item.type = 'slides';
-          item.blocks = rawBlocks.map(b => b.image
+          item.blocks = rawBlocks.map(b => b.layers
+            ? { label: b.label, layers: b.layers, canvasSize: b.canvasSize, text: b.text || '' }
+            : b.image
             ? { label: b.label, image: b.image }
             : { label: b.label, text: (b.lines || []).join('\n') });
           delete item.linesPerSlide;
@@ -5442,10 +5470,18 @@
   function toBlocksItem(blocks, title) {
     return {
       id: uid('slides'), type: 'slides', title: title || 'Imported slides',
-      // A pure-image block (no lines) from a ProPresenter import carries
-      // its own `image` — kept as an image-only block rather than forced
-      // into a text slide; see slidesFor's 'slides' branch.
-      blocks: blocks.map(b => b.image
+      // A block carrying `.layers` is a real ProPresenter scene (position/
+      // font/color/images preserved as-authored — see slide_import.js's
+      // decodeCueSceneLayers and slidesFor's 'slides' branch). This used to
+      // fall through to the plain-text branch below, silently discarding
+      // every bit of that real layout the moment the raw import result
+      // became an actual playlist item — the one place all of it needs to
+      // survive into. A pure-image block (no lines, no layers) from an
+      // older-format ProPresenter import carries its own `image` — kept as
+      // an image-only block rather than forced into a text slide.
+      blocks: blocks.map(b => b.layers
+        ? { label: b.label, layers: b.layers, canvasSize: b.canvasSize, text: b.text || '' }
+        : b.image
         ? { label: b.label, image: b.image }
         : { label: b.label, text: (b.lines || []).join('\n') }),
     };
@@ -5689,7 +5725,14 @@
       const pending = preview.__pendingPaint;
       if (!pending) return;
       const { item, s, i, label } = pending;
-      paintLookLayers(preview, themeForItem(item), item.slideStyles?.[i] || {}, {
+      // A scene slide (s.layers — a ProPresenter import preserved
+      // as-authored, see slidesFor's 'slides' case) has no shared item
+      // theme to apply at all; themeForItem(item) would be either the
+      // wrong theme or nothing. Same convention Full-scale Edit's own
+      // thumbnail painter already uses for this (renderItemSlidesList).
+      const look = s.isScene ? { layers: s.layers || [] } : themeForItem(item);
+      const style = s.isScene ? {} : (item.slideStyles?.[i] || {});
+      paintLookLayers(preview, look, style, {
         verseText: s.text, referenceText: s.reference || '',
         translatedText: getTranslatedText(item, s, () => repaintSlidePreviews()),
       }, { hideReference: true });
