@@ -1599,9 +1599,13 @@ input[type="range"]:disabled { opacity: 0.4; cursor: default; }
 .display-output-del:disabled { opacity: 0.35; cursor: not-allowed; }
 .display-output-row { margin-top: 6px; }
 
-/* Output Looks — NDI/Syphon output status text, shown in the master-detail
-   detail panel's own title row (renderNativeOutputDetail, src/app.js). */
+/* Output Looks — connection/broadcast status text shown in each output's
+   detail-panel header (renderNativeOutputDetail/renderDisplayDetail/
+   renderObsDetail, src/app.js) — some prepend a .bs-dot, hence the flex row. */
 .native-output-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   font-size: 10.5px;
   color: var(--text-3);
   white-space: nowrap;
@@ -1691,7 +1695,11 @@ input[type="range"]:disabled { opacity: 0.4; cursor: default; }
   margin-bottom: 2px;
 }
 .outputs-detail-title { font-size: 14px; font-weight: 700; color: var(--text); margin: 0; flex: 1; }
-.outputs-detail-status { font-size: 11px; color: var(--text-3); }
+/* Compact label-beside-control row (Theme) — owner: "to save space, can we
+   not use the same theme picker from bible mode for outputs?" */
+.outputs-detail-inline-row { display: flex; align-items: center; gap: 10px; }
+.outputs-detail-inline-row .setting-label { flex-shrink: 0; margin: 0; }
+.outputs-detail-inline-row select { flex: 1; min-width: 0; }
 
 /* ── Playlist ───────────────────────────────────────────────────────────────
    Lives in the left sidebar above the transcript; selecting an item takes over

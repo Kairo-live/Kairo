@@ -2066,11 +2066,18 @@ async function testObsConnection(statusEl, btn) {
 // connection each click) — this just reads the server's already-tracked
 // obsConnected state, cheap enough to poll on an interval.
 function updateOBSHeaderStatus(connected, enabled) {
-  const dot = document.getElementById('obs-header-dot');
-  const txt = document.getElementById('obs-header-status');
-  if (!dot || !txt) return;
-  dot.className = 'bs-dot' + (connected ? ' connected' : enabled ? ' error' : '');
-  txt.textContent = connected ? 'Connected' : enabled ? 'Not connected' : 'Off';
+  // Two possible locations: the list row (always present once Outputs has
+  // rendered once) and the detail panel's own header (only present while
+  // OBS happens to be the selected output) — both re-queried fresh every
+  // call, never cached, since renderOutputsList/renderOutputsDetail rebuild
+  // their hosts via innerHTML='' regularly.
+  for (const [dotId, txtId] of [['obs-header-dot', 'obs-header-status'], ['obs-detail-dot', 'obs-detail-status']]) {
+    const dot = document.getElementById(dotId);
+    const txt = document.getElementById(txtId);
+    if (!dot || !txt) continue;
+    dot.className = 'bs-dot' + (connected ? ' connected' : enabled ? ' error' : '');
+    txt.textContent = connected ? 'Connected' : enabled ? 'Not connected' : 'Off';
+  }
 }
 async function pollOBSStatus() {
   try {
@@ -2082,9 +2089,11 @@ async function pollOBSStatus() {
 pollOBSStatus();
 setInterval(pollOBSStatus, 5000);
 
-// ── External Display: no toggle, no "Open" button — picking a monitor in
-// upsertPrimaryMonitorPicker's dropdown IS the action (see buildScreenSelect).
-// This IIFE just keeps the header status + the dropdown's own option list
+// ── External Display: picking a monitor in the Physical Screen select
+// (buildScreenSelect) is the real action; the header toggle (see
+// buildOutputRowToggle's 'display' case) is just a convenience mirror of
+// that same assign/None choice, not a separate control. This IIFE just
+// keeps the header status + the dropdown's own option list
 // live while Settings is open: header status reports whether a physical
 // external display is actually plugged in right now (not window-open
 // state — you can have a window open on your own laptop screen with
@@ -2092,8 +2101,18 @@ setInterval(pollOBSStatus, 5000);
 // command refreshDisplayStatus() already calls (real OS-level monitor
 // enumeration, not the Window Management API WebKit doesn't support).
 (function wireExternalDisplayStatus() {
-  const headerDot = document.getElementById('external-header-dot');
-  const headerTxt = document.getElementById('external-header-status');
+  // Re-queried fresh on every refresh() call below, NOT cached once here —
+  // the Outputs master-detail redesign rebuilds #outputs-list (and
+  // #outputs-detail, when External Display is selected) via innerHTML='',
+  // so a reference captured once at script-load time (when the whole
+  // Outputs pane hasn't even been rendered once yet) goes stale/null the
+  // instant either panel first renders. Real bug this caused: the whole
+  // rest of refresh() below silently stopped running every single tick
+  // after the FIRST real render, because it also called the now-deleted
+  // upsertPrimaryMonitorPicker() (removed in that same redesign, this
+  // being the one call site that got missed) — an uncaught exception in
+  // an async function with no caller awaiting it just dies silently, so
+  // this whole poller had been a no-op since that redesign shipped.
   let autoResumeDone = false;
 
   // Shares refreshDisplayStatus()'s own list_monitors call (and its
@@ -2134,10 +2153,20 @@ setInterval(pollOBSStatus, 5000);
       });
     }
     await refreshDisplayStatus();
-    upsertPrimaryMonitorPicker();
     const connected = cachedScreens.length > 1;
+    // List-row dot/text (renderOutputsList, always present once the
+    // Outputs pane has rendered at least once).
+    const headerDot = document.getElementById('external-header-dot');
+    const headerTxt = document.getElementById('external-header-status');
     if (headerDot) headerDot.className = 'bs-dot' + (connected ? ' connected' : '');
     if (headerTxt) headerTxt.textContent = connected ? 'External display connected' : 'No external display connected';
+    // Detail-panel header dot/text — only present while External Display
+    // is the SELECTED output (renderDisplayDetail). If it's showing right
+    // now, also re-render it so its screen picker's own option list picks
+    // up a display that was just plugged in/unplugged, not just the dot.
+    if (selectedOutputId === PRIMARY_DISPLAY && document.getElementById('external-detail-dot')) {
+      renderOutputsDetail();
+    }
   }
   refresh();
   // Real incident this fixes: a display plugged in AFTER the app was
@@ -8695,8 +8724,10 @@ function extraDisplays() {
 }
 
 // Every screen, primary first — used for theme assignment and broadcasting.
+// The primary's own name is renameable too (settings.primaryDisplayName —
+// see renderDisplayDetail), same as every other output.
 function displayOutputs() {
-  return [{ id: PRIMARY_DISPLAY, name: 'External Display' }, ...extraDisplays()];
+  return [{ id: PRIMARY_DISPLAY, name: settings.primaryDisplayName || 'External Display' }, ...extraDisplays()];
 }
 
 // Same id-generation shape the "+ Add another display" button already uses
@@ -8996,7 +9027,7 @@ function allConfiguredOutputs() {
   }
   for (const o of ndiOutputs())    list.push({ id: o.id, type: 'ndi', name: o.name, raw: o });
   for (const o of syphonOutputs()) list.push({ id: o.id, type: 'syphon', name: o.name, raw: o });
-  list.push({ id: 'obs', type: 'obs', name: 'OBS WebSocket' });
+  list.push({ id: 'obs', type: 'obs', name: settings.obsName || 'OBS WebSocket' });
   return list;
 }
 
@@ -9086,13 +9117,10 @@ function renderOutputsList() {
     row.appendChild(info);
 
     // On/off indicator, right in the list — owner: "each output should
-    // have an indicator to turn it on or off" (not just in the detail
-    // panel). Display is excluded: its "on" state IS the screen-assignment
-    // picker (None = off), a separate, already-visible concept — a second
-    // enable switch here would just be redundant/confusing for that type.
-    if (o.type !== 'display') {
-      row.appendChild(buildOutputRowToggle(o));
-    }
+    // have an indicator to turn it on or off. All displays" — every type
+    // including Display now gets one (buildOutputRowToggle's own 'display'
+    // case mirrors the Physical Screen picker's assign/None toggle).
+    row.appendChild(buildOutputRowToggle(o));
 
     row.addEventListener('click', () => {
       selectedOutputId = o.id;
@@ -9128,6 +9156,30 @@ function buildOutputRowToggle(o) {
     input.addEventListener('change', () => {
       settings.obsEnabled = input.checked;
       saveSettingsPatch({ obsEnabled: input.checked });
+      renderOutputsList();
+      if (selectedOutputId === o.id) renderOutputsDetail();
+    });
+    return label;
+  }
+
+  if (o.type === 'display') {
+    // "On" mirrors picking a real screen in the Physical Screen select;
+    // "off" mirrors picking "None — don't output here". Reuses the exact
+    // assign/open/close sequence buildScreenSelect's own change handler
+    // already does, rather than a second parallel implementation.
+    input.checked = !!outputScreenMap()[o.id];
+    input.addEventListener('change', () => {
+      if (input.checked) {
+        const s = outputScreenMap()[o.id] || cachedScreens[0];
+        if (!s) { input.checked = false; toast('No display connected to open on', 'error'); return; }
+        setOutputScreen(o.id, { width: s.width, height: s.height, left: s.left, top: s.top });
+        if (typeof openDisplayOutput === 'function') openDisplayOutput({ id: o.id, name: o.id });
+      } else {
+        setOutputScreen(o.id, null);
+        const label2 = `kairo-${o.id}`;
+        if (typeof closeDisplayWindow === 'function') closeDisplayWindow(label2);
+        else logDisplayLifecycleFallback('buildOutputRowToggle(display)', { outputId: o.id, reason: 'closeDisplayWindow not a function' });
+      }
       renderOutputsList();
       if (selectedOutputId === o.id) renderOutputsDetail();
     });
@@ -9185,14 +9237,36 @@ function detailGroup(labelText) {
   group.appendChild(lbl);
   return group;
 }
-function detailTitle(text, subtitleEl) {
+
+// Label beside the control instead of above it — owner: "to save space,
+// can we not use the same theme picker from bible mode for outputs?" —
+// a compact one-line row instead of detailGroup's stacked label+control,
+// used for Theme specifically since the detail panel is already tight on
+// vertical room with everything else an output needs.
+function detailInlineGroup(labelText, controlEl) {
+  const row = document.createElement('div');
+  row.className = 'outputs-detail-inline-row';
+  const lbl = document.createElement('label');
+  lbl.className = 'setting-label';
+  lbl.textContent = labelText;
+  row.appendChild(lbl);
+  row.appendChild(controlEl);
+  return row;
+}
+// Owner: "on or off toggle should be on the far right of each output
+// header. include indicator for each connection in the header as well.
+// All displays" — title (left) → connection status (middle) → on/off
+// toggle (far right, flex layout naturally pushes it there since title
+// has flex:1), for every output type uniformly.
+function detailTitle(text, statusEl, toggleEl) {
   const wrap = document.createElement('div');
   wrap.className = 'outputs-detail-header';
   const h = document.createElement('h3');
   h.className = 'outputs-detail-title';
   h.textContent = text;
   wrap.appendChild(h);
-  if (subtitleEl) wrap.appendChild(subtitleEl);
+  if (statusEl) wrap.appendChild(statusEl);
+  if (toggleEl) wrap.appendChild(toggleEl);
   return wrap;
 }
 
@@ -9217,28 +9291,54 @@ function buildThemeSelect(outputId) {
 }
 
 function renderDisplayDetail(host, o) {
-  host.appendChild(detailTitle(o.name));
-
+  // Connection indicator in the header (owner: "include indicator for
+  // each connection in the header as well. All displays"). Primary gets
+  // the real live dot wireExternalDisplayStatus's refresh() re-renders
+  // this whole panel to update (see its own comment) — 'external-detail-*'
+  // ids, distinct from the list row's 'external-header-*' ones since both
+  // exist in the DOM at once. Extra displays don't have their own live
+  // poller (only the primary's list_monitors call is polled) — reflects
+  // "is a screen currently assigned" instead, which is exactly as
+  // accurate and needs no separate polling loop.
+  const statusEl = document.createElement('span');
+  statusEl.className = 'native-output-status';
   if (o.primary) {
-    const status = document.createElement('div');
-    status.className = 'outputs-detail-status';
-    status.id = 'external-header-status'; // wireExternalDisplayStatus writes here
-    host.appendChild(status);
+    const dot = document.createElement('span');
+    dot.className = 'bs-dot';
+    dot.id = 'external-detail-dot';
+    dot.classList.toggle('connected', cachedScreens.length > 1);
+    statusEl.id = 'external-detail-status';
+    statusEl.textContent = cachedScreens.length > 1 ? 'External display connected' : 'No external display connected';
+    statusEl.prepend(dot);
   } else {
-    const nameGroup = detailGroup('Name');
-    const nameInput = document.createElement('input');
-    nameInput.type = 'text';
-    nameInput.className = 'setting-input';
-    nameInput.value = o.name;
-    nameInput.addEventListener('change', () => {
-      const list = extraDisplays().map(x => x.id === o.id ? { ...x, name: nameInput.value.trim() || x.name } : x);
+    const assigned = !!outputScreenMap()[o.id];
+    statusEl.textContent = assigned ? 'Assigned' : 'Not assigned';
+    statusEl.classList.toggle('is-active', assigned);
+  }
+  host.appendChild(detailTitle(o.name, statusEl, buildOutputRowToggle(o)));
+
+  // Renameable — the primary display included (owner: "users should be
+  // able to rename each output"), stored separately from extras since it
+  // isn't itself an entry in the extraDisplays array.
+  const nameGroup = detailGroup('Name');
+  const nameInput = document.createElement('input');
+  nameInput.type = 'text';
+  nameInput.className = 'setting-input';
+  nameInput.value = o.name;
+  nameInput.addEventListener('change', () => {
+    const newName = nameInput.value.trim() || o.name;
+    if (o.primary) {
+      settings.primaryDisplayName = newName;
+      saveSettingsPatch({ primaryDisplayName: newName });
+    } else {
+      const list = extraDisplays().map(x => x.id === o.id ? { ...x, name: newName } : x);
       settings.extraDisplays = list;
       saveSettingsPatch({ extraDisplays: list });
-      renderOutputsList();
-    });
-    nameGroup.appendChild(nameInput);
-    host.appendChild(nameGroup);
-  }
+    }
+    renderOutputsList();
+  });
+  nameGroup.appendChild(nameInput);
+  host.appendChild(nameGroup);
 
   const screenGroup = detailGroup('Physical screen');
   const screenSel = buildScreenSelect(o.id);
@@ -9253,11 +9353,9 @@ function renderDisplayDetail(host, o) {
   identifyBtn.addEventListener('click', () => identifyScreen(Number(screenSel.value)));
   host.appendChild(identifyBtn);
 
-  const themeGroup = detailGroup('Theme');
-  themeGroup.appendChild(buildThemeSelect(o.id));
-  host.appendChild(themeGroup);
+  host.appendChild(detailInlineGroup('Theme', buildThemeSelect(o.id)));
 
-  const layerGroup = detailGroup('Layers');
+  const layerGroup = detailGroup('Show on this output');
   layerGroup.appendChild(buildLayerChecksRow(o.id));
   host.appendChild(layerGroup);
 
@@ -9283,26 +9381,32 @@ function renderDisplayDetail(host, o) {
 }
 
 function renderObsDetail(host, o) {
-  host.appendChild(detailTitle(o.name));
+  // Connection indicator in the header — same 'obs-detail-*' ids
+  // updateOBSHeaderStatus already knows to write to (see its own comment),
+  // alongside the list row's 'obs-header-*' ids.
+  const statusEl = document.createElement('span');
+  statusEl.className = 'native-output-status';
+  statusEl.id = 'obs-detail-status';
+  statusEl.textContent = 'Checking…';
+  const dot = document.createElement('span');
+  dot.className = 'bs-dot';
+  dot.id = 'obs-detail-dot';
+  statusEl.prepend(dot);
+  host.appendChild(detailTitle(o.name, statusEl, buildOutputRowToggle(o)));
+  pollOBSStatus(); // one immediate check so this fresh dot isn't stuck on "Checking…" until the next 5s tick
 
-  const enabledGroup = detailGroup('');
-  enabledGroup.querySelector('label').remove();
-  const toggleLabel = document.createElement('label');
-  toggleLabel.className = 'output-toggle';
-  toggleLabel.title = 'Enable OBS WebSocket output';
-  const toggle = document.createElement('input');
-  toggle.type = 'checkbox';
-  toggle.checked = settings.obsEnabled === true;
-  const track = document.createElement('span');
-  track.className = 'output-toggle-track';
-  toggleLabel.appendChild(toggle); toggleLabel.appendChild(track);
-  toggleLabel.appendChild(document.createTextNode(' Enabled'));
-  enabledGroup.appendChild(toggleLabel);
-  toggle.addEventListener('change', () => {
-    settings.obsEnabled = toggle.checked;
-    saveSettingsPatch({ obsEnabled: toggle.checked });
+  const nameGroup = detailGroup('Name');
+  const nameInput = document.createElement('input');
+  nameInput.type = 'text';
+  nameInput.className = 'setting-input';
+  nameInput.value = o.name;
+  nameInput.addEventListener('change', () => {
+    settings.obsName = nameInput.value.trim() || o.name;
+    saveSettingsPatch({ obsName: settings.obsName });
+    renderOutputsList();
   });
-  host.appendChild(enabledGroup);
+  nameGroup.appendChild(nameInput);
+  host.appendChild(nameGroup);
 
   const urlGroup = detailGroup('URL');
   const urlInput = document.createElement('input');
@@ -9340,10 +9444,10 @@ function renderObsDetail(host, o) {
   testBtn.type = 'button';
   testBtn.className = 'modal-btn secondary';
   testBtn.textContent = 'Test';
-  const statusEl = document.createElement('span');
-  statusEl.style.cssText = 'font-size:11px;color:var(--text-2);';
-  testBtn.addEventListener('click', () => testObsConnection(statusEl, testBtn));
-  testRow.appendChild(testBtn); testRow.appendChild(statusEl);
+  const testStatusEl = document.createElement('span');
+  testStatusEl.style.cssText = 'font-size:11px;color:var(--text-2);';
+  testBtn.addEventListener('click', () => testObsConnection(testStatusEl, testBtn));
+  testRow.appendChild(testBtn); testRow.appendChild(testStatusEl);
   host.appendChild(testRow);
 
   const hint = document.createElement('p');
@@ -9367,7 +9471,11 @@ function renderNativeOutputDetail(host, o) {
   statusEl.className = 'native-output-status';
   statusEl.textContent = raw.enabled ? 'Broadcasting' : 'Off';
   statusEl.classList.toggle('is-active', !!raw.enabled);
-  host.appendChild(detailTitle(o.name, statusEl));
+  // On/off toggle now lives in the header (owner: "toggle should be on
+  // the far right of each output header") — the body's old separate
+  // Start/Stop button is gone, buildOutputRowToggle's ndi/syphon case is
+  // the one real implementation, shared with the list row's own toggle.
+  host.appendChild(detailTitle(o.name, statusEl, buildOutputRowToggle(o)));
 
   const nameGroup = detailGroup('Label (Settings only)');
   const nameInput = document.createElement('input');
@@ -9426,41 +9534,12 @@ function renderNativeOutputDetail(host, o) {
   wInput.addEventListener('change', scheduleRestart);
   hInput.addEventListener('change', scheduleRestart);
 
-  const themeGroup = detailGroup('Theme');
-  themeGroup.appendChild(buildThemeSelect(o.id));
-  host.appendChild(themeGroup);
+  host.appendChild(detailInlineGroup('Theme', buildThemeSelect(o.id)));
 
-  const layerGroup = detailGroup('Layers');
+  const layerGroup = detailGroup('Show on this output');
   layerGroup.appendChild(buildLayerChecksRow(o.id));
   host.appendChild(layerGroup);
 
-  const enableBtn = document.createElement('button');
-  enableBtn.type = 'button';
-  enableBtn.className = 'modal-btn primary';
-  enableBtn.style.marginTop = '4px';
-  enableBtn.textContent = raw.enabled ? 'Stop' : 'Start';
-  enableBtn.addEventListener('click', async () => {
-    if (!invokeFn) { toast(`${outputTypeLabel(kind)} not available (run inside the app)`, 'error'); return; }
-    const nowEnabled = !raw.enabled;
-    if (nowEnabled) {
-      enableBtn.textContent = 'Starting…'; enableBtn.disabled = true;
-      try {
-        await invokeFn(`${kind}_start`, {
-          id: o.id, sourceName: srcInput.value.trim() || 'KAIRO Scripture',
-          width: Math.max(160, Number(wInput.value) || 1920), height: Math.max(90, Number(hInput.value) || 1080),
-        });
-        updateNativeOutput(kind, o.id, { enabled: true });
-        window.KairoNativeOutputs?.pushToOne?.(kind, o.id);
-      } catch (e) {
-        toast(`${outputTypeLabel(kind)} failed: ` + e, 'error');
-      }
-    } else {
-      try { await invokeFn(`${kind}_stop`, { id: o.id }); } catch {}
-      updateNativeOutput(kind, o.id, { enabled: false });
-    }
-    renderOutputsList(); renderOutputsDetail();
-  });
-  host.appendChild(enableBtn);
 
   const del = document.createElement('button');
   del.type = 'button';
