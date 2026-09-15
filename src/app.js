@@ -162,14 +162,11 @@ const listenText         = listenBtn?.querySelector('.listen-text');
 const micDisplay         = document.getElementById('mic-display');
 const elapsedTimeEl      = document.getElementById('elapsed-time');
 const transcriptContent  = document.getElementById('transcript-content');
-const proPresenterStatus = document.getElementById('propresenter-status');
 const settingsBtn        = document.getElementById('settings-btn');
 const settingsModal      = document.getElementById('settings-modal');
 const closeSettingsBtn   = document.getElementById('close-settings');
 const cancelSettingsBtn  = document.getElementById('cancel-settings');
 const saveSettingsBtn    = document.getElementById('save-settings');
-const testPPBtn          = document.getElementById('test-propresenter-btn');
-const autoSendCheckbox   = document.getElementById('auto-send-checkbox');
 const autoSendSettings   = document.getElementById('auto-send-settings');
 
 // The Live Queue's "Auto-Deploy" badge used to be static markup — always
@@ -313,20 +310,14 @@ const translationSelect    = document.getElementById('translation-select');
 
 // Settings inputs
 const deepgramKeyInput    = document.getElementById('deepgram-key');
-const ppUrlInput          = document.getElementById('propresenter-url');
 const translationSettings = document.getElementById('translation-select-settings');
-const swapPPBtn           = document.getElementById('swap-pp-tokens-btn');
-const ppTokenOrderLabel   = document.getElementById('pp-token-order-label');
 const showConfSettings    = document.getElementById('show-confidence-settings');
 const audioSourceSettings = document.getElementById('audio-source-settings');
 const refreshDevicesBtn   = document.getElementById('refresh-devices-settings');
-const obsEnabledToggle   = document.getElementById('obs-enabled-toggle');
-const obsUrlInput        = document.getElementById('obs-url');
-const obsPasswordInput   = document.getElementById('obs-password');
-const obsTextSourceInput = document.getElementById('obs-text-source');
-const testObsBtn         = document.getElementById('test-obs-btn');
-const obsStatusEl        = document.getElementById('obs-status');
-const ppEnabledToggle    = document.getElementById('pp-enabled-toggle');
+// OBS's own fields (URL/password/text-source/enable/test) are built
+// dynamically now, inside the Outputs master-detail redesign's OBS detail
+// panel (renderObsDetail) — see testObsConnection's own comment for why a
+// fixed obs-status/test-obs-btn id no longer makes sense.
 
 // ── WebSocket ──────────────────────────────────────────────────────────────
 function connectWS() {
@@ -337,10 +328,8 @@ function connectWS() {
     console.log('[WS] Connected');
     clearTimeout(wsReconnectTimer);
     wsReconnectAttempts = 0;
-    updatePPStatus('Checking…', '');
     loadSettings();
     initCustomSelects();
-    checkPP();
   };
 
   ws.onmessage = (ev) => {
@@ -1334,30 +1323,6 @@ function handlePPSuccess(verse) {
   }
 }
 
-function updatePPStatus(text, cls) {
-  if (!proPresenterStatus) return;
-  proPresenterStatus.textContent = text;
-  // Colored text only — no separate dot. It used to sit right next to the
-  // sync toggle, which is ALSO red when on (this app's --green is red by
-  // brand, not literal green), so two red shapes touching read as visual
-  // clutter rather than two distinct pieces of information. The toggle
-  // already conveys on/off; the text alone conveys connection state,
-  // matching how OBS/Syphon/NDI's own status text already works (colored
-  // text, no dot).
-  proPresenterStatus.style.color =
-    cls === 'connected' ? 'var(--green)' :
-    cls === 'error'     ? 'var(--red)'   : 'var(--text-3)';
-}
-
-async function checkPP() {
-  try {
-    const r = await fetch(`${SERVER}/api/propresenter/test`);
-    const d = await r.json();
-    if (d.success) updatePPStatus('Connected', 'connected');
-    else           updatePPStatus('Not found', 'error');
-  } catch { updatePPStatus('Offline', ''); }
-}
-
 // Despite the name, this is the shared "push this verse everywhere" call
 // for every manual send in the app (Candidates, Live Queue, range cards,
 // direct search hits — 6 call sites). It used to hit ONLY
@@ -1892,44 +1857,28 @@ async function loadSettings() {
         ? `Key saved (${settings.deepgramApiKey}) — leave blank to keep`
         : 'Paste your Deepgram API key';
     }
-    if (ppUrlInput && settings.proPresenterUrl) ppUrlInput.value = settings.proPresenterUrl;
     if (translationSettings && settings.translation) translationSettings.value = settings.translation;
     if (translationSelect && settings.translation)   translationSelect.value   = settings.translation;
-    if (autoSendCheckbox)  autoSendCheckbox.checked  = settings.autoSend  !== false;
     if (autoSendSettings)  autoSendSettings.checked  = settings.autoSend  !== false;
     updateAutoDeployBadge();
     if (showConfSettings)  showConfSettings.checked   = settings.showConfidence !== false;
-    if (ppEnabledToggle)    ppEnabledToggle.checked    = settings.proPresenterEnabled !== false;
-    if (obsEnabledToggle)   obsEnabledToggle.checked   = settings.obsEnabled === true;
-    if (obsUrlInput && settings.obsUrl) obsUrlInput.value = settings.obsUrl;
-    if (obsPasswordInput && settings.obsPassword) obsPasswordInput.value = settings.obsPassword;
-    if (obsTextSourceInput && settings.obsTextSource) obsTextSourceInput.value = settings.obsTextSource;
-    // NDI/Syphon: each is now a LIST of independent named outputs (Output
-    // Looks), rendered + auto-resumed (any row with enabled:true starts
-    // itself) entirely by renderNdiOutputs()/renderSyphonOutputs() below —
-    // no separate toggle-sync needed here any more, each row owns its own
-    // persistence.
-    renderNdiOutputs();
-    renderSyphonOutputs();
     // Restore toggle-group state from persisted settings
     syncToggleGroup('speech-engine-toggle', 'engine', settings.speechEngine || 'deepgram');
-    updatePPTokenLabel();
     initCustomSelects();
-    // Per-output theme pickers live inside each output card.
-    renderOutputThemePickers();
-    renderOutputLayerPickers();
-    renderDisplayOutputs();
-    // Push the resolved per-output theme map to the server now, not just
-    // whenever a theme/display setting is next touched — applyOutputThemes()
-    // was previously only ever called as a side effect of the operator
-    // changing something in Settings, so the server's currentOutputThemes
-    // stayed {} for an entire session on a fresh launch. Anything server-
-    // side that depends on knowing the primary output's theme (e.g.
-    // attachBibleTranslations gating on the Multi-Language layout — see
-    // primaryOutputTranslateLang in server.js) silently did nothing until
-    // the operator happened to open Settings and touch a picker, which is
-    // exactly why the Multi-Language theme looked like it "worked sometimes
-    // and not others."
+    // Outputs — one unified master-detail render (see renderOutputsPane's
+    // own comment for the full list of what this replaced).
+    renderOutputsPane();
+    // Push the resolved per-output theme/layer maps to the server now, not
+    // just whenever a theme/display setting is next touched —
+    // applyOutputThemes() was previously only ever called as a side effect
+    // of the operator changing something in Settings, so the server's
+    // currentOutputThemes stayed {} for an entire session on a fresh
+    // launch. Anything server-side that depends on knowing the primary
+    // output's theme (e.g. attachBibleTranslations gating on the Multi-
+    // Language layout — see primaryOutputTranslateLang in server.js)
+    // silently did nothing until the operator happened to open Settings
+    // and touch a picker, which is exactly why the Multi-Language theme
+    // looked like it "worked sometimes and not others."
     applyOutputThemes();
     applyOutputLayers();
     // Language
@@ -2039,16 +1988,17 @@ async function saveCurrentSettings() {
     // why this field starts empty instead of pre-filled with the masked
     // value.
     ...(deepgramKeyInput?.value ? { deepgramApiKey: deepgramKeyInput.value } : {}),
-    proPresenterUrl:   ppUrlInput?.value          || 'http://localhost:1025',
     translation:       translationSettings?.value || 'KJV',
-    ppSwapTokenOrder:  settings.ppSwapTokenOrder  || false,
     autoSend:          autoSendSettings?.checked  !== false,
     showConfidence:    showConfSettings?.checked   !== false,
-    proPresenterEnabled: ppEnabledToggle?.checked !== false,
-    obsEnabled:          obsEnabledToggle?.checked === true,
-    obsUrl:              obsUrlInput?.value        || 'ws://localhost:4455',
-    obsPassword:         obsPasswordInput?.value   || '',
-    obsTextSource:       obsTextSourceInput?.value || 'Scripture',
+    // obsEnabled/obsUrl/obsPassword/obsTextSource are NOT collected here —
+    // the OBS detail panel (Outputs master-detail redesign) self-persists
+    // each field immediately on change, the same pattern NDI/Syphon
+    // outputs already use, since its fields only exist in the DOM while
+    // OBS happens to be the selected output. Reading them here (assuming
+    // they're always present) would silently overwrite real saved values
+    // with fallback defaults every time Save is clicked while a DIFFERENT
+    // output is selected.
     speechEngine:        readToggleGroup('speech-engine-toggle', 'engine') || settings.speechEngine || 'deepgram',
     ollamaUrl:           document.getElementById('ollama-url')?.value || 'http://localhost:11434',
     ollamaModel:         document.getElementById('ollama-model')?.value || settings.ollamaModel || 'qwen2.5:7b-instruct',
@@ -2065,21 +2015,11 @@ async function saveCurrentSettings() {
   }
   settings = { ...settings, ...updated };
   if (translationSelect && updated.translation) translationSelect.value = updated.translation;
-  if (autoSendCheckbox) autoSendCheckbox.checked = updated.autoSend;
   updateAutoDeployBadge();
   // Dismiss first-run banner now that a key may have been entered.
   showFirstRunBannerIfNeeded(settings);
   closeModal();
   toast('Settings saved', 'success');
-  checkPP();
-}
-
-function updatePPTokenLabel() {
-  if (!ppTokenOrderLabel) return;
-  const swapped = settings.ppSwapTokenOrder;
-  ppTokenOrderLabel.textContent = swapped
-    ? 'Token[0] = Reference · Token[1] = Verse Text'
-    : 'Token[0] = Verse Text · Token[1] = Reference';
 }
 
 settingsBtn?.addEventListener('click',    () => { settingsModal?.classList.remove('hidden'); showFirstSettingsPane(); });
@@ -2097,34 +2037,29 @@ document.getElementById('first-run-deepgram-key')?.addEventListener('keydown', (
   if (e.key === 'Enter') saveFirstRunChoice();
 });
 
-testPPBtn?.addEventListener('click', async () => {
-  testPPBtn.textContent = 'Testing…';
-  const r   = await fetch(`${SERVER}/api/propresenter/test`);
-  const d   = await r.json();
-  testPPBtn.textContent = 'Test';
-  if (d.success) { updatePPStatus('Connected', 'connected'); toast('ProPresenter connected: ' + d.version, 'success'); }
-  else           { updatePPStatus('Not found', 'error');     toast('ProPresenter: ' + d.error, 'error'); }
-});
-
-testObsBtn?.addEventListener('click', async () => {
-  testObsBtn.textContent = 'Testing…';
-  if (obsStatusEl) obsStatusEl.textContent = '';
+// Called from the OBS detail panel's own Test button (renderObsDetail,
+// built dynamically now — see the Outputs master-detail redesign) — takes
+// the status element + button to update directly rather than assuming a
+// single fixed DOM location the way the old static card did.
+async function testObsConnection(statusEl, btn) {
+  if (btn) btn.textContent = 'Testing…';
+  if (statusEl) statusEl.textContent = '';
   try {
     const r = await fetch(`${SERVER}/api/obs/test`);
     const d = await r.json();
-    testObsBtn.textContent = 'Test';
+    if (btn) btn.textContent = 'Test';
     if (d.success) {
-      if (obsStatusEl) { obsStatusEl.textContent = 'Connected (OBS ' + d.version + ')'; obsStatusEl.style.color = 'var(--green)'; }
+      if (statusEl) { statusEl.textContent = 'Connected (OBS ' + d.version + ')'; statusEl.style.color = 'var(--green)'; }
       toast('OBS connected: v' + d.version, 'success');
     } else {
-      if (obsStatusEl) { obsStatusEl.textContent = 'Failed: ' + d.error; obsStatusEl.style.color = 'var(--red)'; }
+      if (statusEl) { statusEl.textContent = 'Failed: ' + d.error; statusEl.style.color = 'var(--red)'; }
       toast('OBS: ' + d.error, 'error');
     }
   } catch (e) {
-    testObsBtn.textContent = 'Test';
-    if (obsStatusEl) { obsStatusEl.textContent = 'Error: ' + e.message; obsStatusEl.style.color = 'var(--red)'; }
+    if (btn) btn.textContent = 'Test';
+    if (statusEl) { statusEl.textContent = 'Error: ' + e.message; statusEl.style.color = 'var(--red)'; }
   }
-});
+}
 
 // ── OBS: lightweight periodic status → header indicator ────────────────────
 // Separate from the Test button's /api/obs/test (which opens a FRESH
@@ -2212,27 +2147,6 @@ setInterval(pollOBSStatus, 5000);
   // option list genuinely live while Settings is open.
   setInterval(refresh, 3000);
 })();
-
-swapPPBtn?.addEventListener('click', async () => {
-  settings.ppSwapTokenOrder = !settings.ppSwapTokenOrder;
-  updatePPTokenLabel();
-  try {
-    await fetch(`${SERVER}/api/settings`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ppSwapTokenOrder: settings.ppSwapTokenOrder }),
-    });
-  } catch (err) { toast('Could not save setting: ' + err.message, 'error'); }
-});
-
-autoSendCheckbox?.addEventListener('change', async () => {
-  settings.autoSend = autoSendCheckbox.checked;
-  if (autoSendSettings) autoSendSettings.checked = autoSendCheckbox.checked;
-  updateAutoDeployBadge();
-  try {
-    await fetch(`${SERVER}/api/settings`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ autoSend: settings.autoSend }) });
-  } catch (err) { toast('Could not save setting: ' + err.message, 'error'); }
-});
 
 function closeModal() { settingsModal?.classList.add('hidden'); }
 
@@ -8764,10 +8678,14 @@ newLookBtn?.addEventListener('click', () => {
 // list-of-named-instances shape as extraDisplays(), just with their own
 // settings arrays since an NDI/Syphon output also carries a network source
 // name extraDisplays() has no equivalent of.
+// ProPresenter's own integration is gone entirely (owner: "I don't think
+// anyone who owns ProPresenter will rather let us use messages to send to
+// their ProPresenter than just send themselves") — it picks Kairo up as a
+// normal NDI/Syphon input instead. OBS keeps its single fixed WebSocket
+// connection (not addable/multi-instance the way Displays/NDI/Syphon are).
 const OUTPUT_DEFS = [
-  { key: PRIMARY_DISPLAY, card: 'card-external',     label: 'External Display' },
-  { key: 'obs',           card: 'card-obs',          label: 'OBS' },
-  { key: 'propresenter',  card: 'card-propresenter', label: 'ProPresenter' },
+  { key: PRIMARY_DISPLAY, label: 'External Display' },
+  { key: 'obs',           label: 'OBS' },
 ];
 
 // Extra screens beyond the primary one. Stored in settings; empty by default.
@@ -8793,14 +8711,14 @@ function genOutputId(prefix) { return `${prefix}-${Date.now().toString(36)}${Mat
 // real to carry forward for it beyond the enabled state).
 function ndiOutputs() {
   if (!Array.isArray(settings.ndiOutputs)) {
-    settings.ndiOutputs = [{ id: genOutputId('ndi'), name: 'NDI Output', sourceName: 'KAIRO Scripture', enabled: !!settings.ndiEnabled }];
+    settings.ndiOutputs = [{ id: genOutputId('ndi'), name: 'NDI Output', sourceName: 'KAIRO Scripture', width: 1920, height: 1080, enabled: !!settings.ndiEnabled }];
     saveSettingsPatch({ ndiOutputs: settings.ndiOutputs });
   }
   return settings.ndiOutputs;
 }
 function syphonOutputs() {
   if (!Array.isArray(settings.syphonOutputs)) {
-    settings.syphonOutputs = [{ id: genOutputId('syphon'), name: 'Syphon Output', sourceName: 'KAIRO Scripture', enabled: !!settings.syphonEnabled }];
+    settings.syphonOutputs = [{ id: genOutputId('syphon'), name: 'Syphon Output', sourceName: 'KAIRO Scripture', width: 1920, height: 1080, enabled: !!settings.syphonEnabled }];
     saveSettingsPatch({ syphonOutputs: settings.syphonOutputs });
   }
   return settings.syphonOutputs;
@@ -8909,55 +8827,33 @@ function buildScreenSelect(outputId) {
   return sel;
 }
 
-// Inserted into #external-picker-row, alongside the theme picker
-// (renderOutputThemePickers) — half-width each, see .output-picker-row.
-function upsertPrimaryMonitorPicker() {
-  const row = document.getElementById('external-picker-row');
-  if (!row) return;
-  let group = row.querySelector('.output-screen-group');
-  if (!group) {
-    group = document.createElement('div');
-    group.className = 'setting-group output-screen-group';
-    const lbl = document.createElement('label');
-    lbl.className = 'setting-label';
-    lbl.textContent = 'Output Display';
-    group.appendChild(lbl);
-    group.appendChild(buildScreenSelect(PRIMARY_DISPLAY));
-    row.insertBefore(group, row.firstChild);
-  } else {
-    populateScreenOptions(group.querySelector('select'), PRIMARY_DISPLAY);
-  }
-}
-
-// Briefly numbers just the monitor CURRENTLY SELECTED in the Output
-// Display picker (not every connected screen) — this confirms "yes, this
-// dropdown's choice really is that physical monitor" for the one output
-// actually being configured, rather than a generic all-screens overview
-// that doesn't say which number corresponds to which dropdown entry.
+// Briefly numbers the given screen (Identify Displays, now wired per-row
+// inside the Outputs master-detail's display detail panel — see
+// renderExternalDisplayDetail/renderExtraDisplayDetail below — instead of
+// one fixed button+dropdown pair, since there's no longer one static
+// "the" screen picker to read from).
 let identifyWindowsOpen = false;
-document.getElementById('identify-displays-btn')?.addEventListener('click', async () => {
+async function identifyScreen(screenIdx) {
   if (identifyWindowsOpen) return;
   if (typeof openDisplayWindow !== 'function') {
-    logDisplayLifecycleFallback('identify-displays-btn', { reason: 'openDisplayWindow not a function' });
+    logDisplayLifecycleFallback('identifyScreen', { reason: 'openDisplayWindow not a function' });
     return;
   }
-  const sel = document.querySelector('#external-picker-row .output-screen-select');
-  const idx = sel ? Number(sel.value) : NaN;
-  const s = Number.isInteger(idx) ? cachedScreens[idx] : null;
+  const s = Number.isInteger(screenIdx) ? cachedScreens[screenIdx] : null;
   if (!s) { toast('Select a display first', 'error'); return; }
   identifyWindowsOpen = true;
   const label = 'kairo-identify-0';
   await openDisplayWindow(
     label,
-    `/identify.html?n=${idx + 1}&label=${encodeURIComponent(s.isPrimary ? 'This Mac’s screen' : `Display ${idx + 1}`)}`,
+    `/identify.html?n=${screenIdx + 1}&label=${encodeURIComponent(s.isPrimary ? 'This Mac’s screen' : `Display ${screenIdx + 1}`)}`,
     { width: s.width, height: s.height, x: s.left, y: s.top, fullscreen: false }
   );
   setTimeout(() => {
     if (typeof closeDisplayWindow === 'function') closeDisplayWindow(label);
-    else logDisplayLifecycleFallback('identify-displays-btn/auto-close', { label, reason: 'closeDisplayWindow not a function' });
+    else logDisplayLifecycleFallback('identifyScreen/auto-close', { label, reason: 'closeDisplayWindow not a function' });
     identifyWindowsOpen = false;
   }, 3000);
-});
+}
 
 function outputThemeMap() {
   const map = settings.outputThemes && typeof settings.outputThemes === 'object'
@@ -9080,249 +8976,436 @@ document.getElementById('bible-language')?.addEventListener('change', (e) => {
   saveSettingsPatch({ bibleLanguage: e.target.value });
 });
 
-// ── Extra display rows ────────────────────────────────────────────────────
-async function renderDisplayOutputs() {
-  await refreshDisplayStatus();
-  upsertPrimaryMonitorPicker();
+// ── Outputs master-detail ────────────────────────────────────────────────
+// Owner: "I like how ProPresenter does it better" (referencing its Screen
+// Configuration panel — one list of every output, a detail panel for
+// whichever's selected) — replaces the old per-type stacked cards
+// entirely. One flat list (owner confirmed: no Audience/Stage-style
+// grouping needed) of every configured output — External Display + extra
+// displays, every NDI output, every Syphon output, OBS — click one to see/
+// edit its full settings on the right. A single "+ Add Output" button asks
+// which kind (Display/NDI/Syphon — OBS isn't offered: it's one fixed
+// WebSocket connection, not an addable/multi-instance output the way the
+// other three are) rather than the old one-"+Add"-button-per-type layout.
+let selectedOutputId = null;
 
-  const host = document.getElementById('extra-displays-list');
-  if (host) {
-    const map = outputThemeMap();
-    host.innerHTML = '';
-
-    extraDisplays().forEach((d, i) => {
-      const row = document.createElement('div');
-      row.className = 'display-output-row';
-
-      const name = document.createElement('input');
-      name.type = 'text';
-      name.className = 'setting-input';
-      name.value = d.name || `Display ${i + 2}`;
-      name.placeholder = 'Screen name';
-      name.addEventListener('change', () => {
-        const list = extraDisplays().map(x => x.id === d.id ? { ...x, name: name.value.trim() || x.name } : x);
-        settings.extraDisplays = list;
-        saveSettingsPatch({ extraDisplays: list });
-        renderDisplayOutputs();
-      });
-
-      const sel = document.createElement('select');
-      sel.className = 'setting-input';
-      looks.forEach(l => {
-        const o = document.createElement('option');
-        o.value = l.id; o.textContent = l.name;
-        if (l.id === map[d.id]) o.selected = true;
-        sel.appendChild(o);
-      });
-      sel.addEventListener('change', () => {
-        settings.outputThemes = { ...outputThemeMap(), [d.id]: sel.value };
-        saveSettingsPatch({ outputThemes: settings.outputThemes });
-        applyOutputThemes();
-      });
-
-      // buildScreenSelect's own change handler opens/moves/closes the
-      // window immediately — no separate "Open" button needed, same as
-      // the primary External Display picker.
-      const screenSel = buildScreenSelect(d.id);
-
-      // Output Looks — same Slide/Media/Timer checkboxes as the fixed
-      // output cards (see buildLayerChecksRow), just per extra display row
-      // instead of per static card.
-      const layerChecks = buildLayerChecksRow(d.id);
-
-      const del = document.createElement('button');
-      del.className = 'modal-btn secondary display-output-del';
-      del.innerHTML = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>`;
-      del.title = 'Remove this display';
-      del.addEventListener('click', () => {
-        settings.extraDisplays = extraDisplays().filter(x => x.id !== d.id);
-        const map2 = { ...outputScreenMap() }; delete map2[d.id];
-        settings.outputScreens = map2;
-        saveSettingsPatch({ extraDisplays: settings.extraDisplays, outputScreens: map2 });
-        renderDisplayOutputs();
-        applyOutputThemes();
-      });
-
-      row.appendChild(name); row.appendChild(sel); row.appendChild(screenSel); row.appendChild(layerChecks); row.appendChild(del);
-      host.appendChild(row);
-    });
+function allConfiguredOutputs() {
+  const list = [];
+  for (const d of displayOutputs()) {
+    list.push({ id: d.id, type: 'display', name: d.name, primary: d.id === PRIMARY_DISPLAY });
   }
-
-  renderLivePreviewOutputSelect();
+  for (const o of ndiOutputs())    list.push({ id: o.id, type: 'ndi', name: o.name, raw: o });
+  for (const o of syphonOutputs()) list.push({ id: o.id, type: 'syphon', name: o.name, raw: o });
+  list.push({ id: 'obs', type: 'obs', name: 'OBS WebSocket' });
+  return list;
 }
 
-// ── NDI/Syphon: independent named native outputs ────────────────────────
-// Output Looks generalized these from one fixed sender each into a LIST,
-// mirroring extraDisplays()/renderDisplayOutputs() above almost exactly —
-// same row-per-instance shape, same settings-array persistence pattern —
-// just with an extra "source name" field (the actual network-visible name;
-// distinct from `name`, which is only this Settings list's own label) and
-// real start/stop against the native Tauri commands instead of a display
-// window. One shared builder for both since they're identical except which
-// command prefix / settings key / list host they talk to.
-const invokeFn_native = () => window.__TAURI__?.core?.invoke || window.__TAURI__?.invoke;
+function outputTypeLabel(type) {
+  return type === 'display' ? 'Display' : type === 'ndi' ? 'NDI' : type === 'syphon' ? 'Syphon' : 'OBS';
+}
 
-async function renderNativeOutputs(kind) {
-  // kind: 'ndi' | 'syphon'
-  const outputsFn = kind === 'ndi' ? ndiOutputs : syphonOutputs;
-  const host = document.getElementById(`${kind}-outputs-list`);
-  if (!host) return;
-  const invokeFn = invokeFn_native();
-  const themeMap = outputThemeMap();
-  host.innerHTML = '';
+// Entry point — called from loadSettings and from every add/remove/rename
+// action below. Replaces the old renderOutputThemePickers/
+// renderOutputLayerPickers/renderDisplayOutputs/renderNdiOutputs/
+// renderSyphonOutputs — one function per concern, all folded into the two
+// halves of this one list+detail pair now.
+function renderOutputsPane() {
+  if (!selectedOutputId) selectedOutputId = PRIMARY_DISPLAY;
+  renderOutputsList();
+  renderOutputsDetail();
+  wireOutputsAddMenu();
+  autoResumeNativeOutputs();
+}
 
-  outputsFn().forEach((o) => {
-    const row = document.createElement('div');
-    row.className = 'display-output-row native-output-row';
-
-    // Enabled toggle — same pill as every other output's on/off switch.
-    const toggleLabel = document.createElement('label');
-    toggleLabel.className = 'output-toggle';
-    toggleLabel.title = `Enable this ${kind === 'ndi' ? 'NDI' : 'Syphon'} output`;
-    const toggle = document.createElement('input');
-    toggle.type = 'checkbox';
-    toggle.checked = !!o.enabled;
-    const track = document.createElement('span');
-    track.className = 'output-toggle-track';
-    toggleLabel.appendChild(toggle); toggleLabel.appendChild(track);
-
-    const name = document.createElement('input');
-    name.type = 'text';
-    name.className = 'setting-input';
-    name.value = o.name || (kind === 'ndi' ? 'NDI Output' : 'Syphon Output');
-    name.placeholder = 'Label (Settings only)';
-    name.title = 'Label shown here in Settings only — not the network name';
-    name.addEventListener('change', () => {
-      updateNativeOutput(kind, o.id, { name: name.value.trim() || o.name });
-    });
-
-    const sourceName = document.createElement('input');
-    sourceName.type = 'text';
-    sourceName.className = 'setting-input';
-    sourceName.value = o.sourceName || 'KAIRO Scripture';
-    sourceName.placeholder = 'Network source name';
-    sourceName.title = 'The name this output appears as on the network/Syphon list';
-
-    const status = document.createElement('span');
-    status.className = 'native-output-status';
-    status.textContent = o.enabled ? 'Starting…' : 'Off';
-
-    const sel = document.createElement('select');
-    sel.className = 'setting-input';
-    looks.forEach(l => {
-      const opt = document.createElement('option');
-      opt.value = l.id; opt.textContent = l.name;
-      if (l.id === themeMap[o.id]) opt.selected = true;
-      sel.appendChild(opt);
-    });
-    sel.addEventListener('change', () => {
-      settings.outputThemes = { ...outputThemeMap(), [o.id]: sel.value };
-      saveSettingsPatch({ outputThemes: settings.outputThemes });
-      applyOutputThemes();
-    });
-
-    const layerChecks = buildLayerChecksRow(o.id);
-
-    const del = document.createElement('button');
-    del.className = 'modal-btn secondary display-output-del';
-    del.innerHTML = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>`;
-    del.title = `Remove this ${kind === 'ndi' ? 'NDI' : 'Syphon'} output`;
-    del.addEventListener('click', async () => {
-      if (invokeFn && o.enabled) { try { await invokeFn(`${kind}_stop`, { id: o.id }); } catch {} }
-      const list = outputsFn().filter(x => x.id !== o.id);
-      settings[`${kind}Outputs`] = list;
-      const themes = { ...outputThemeMap() }; delete themes[o.id];
-      const layerMapNext = { ...outputLayerMap() }; delete layerMapNext[o.id];
-      settings.outputThemes = themes; settings.outputLayers = layerMapNext;
-      saveSettingsPatch({ [`${kind}Outputs`]: list, outputThemes: themes, outputLayers: layerMapNext });
-      applyOutputThemes(); applyOutputLayers();
-      renderNativeOutputs(kind);
-    });
-
-    // Restart-with-new-name debounce — the network name is immutable per
-    // broadcasting session (matches the previous singleton implementation's
-    // own comment on this exact behavior), so a live rename means stop+start.
-    let debounce = null;
-    sourceName.addEventListener('input', () => {
-      updateNativeOutput(kind, o.id, { sourceName: sourceName.value.trim() || 'KAIRO Scripture' });
-      if (!o.enabled) return;
-      clearTimeout(debounce);
-      debounce = setTimeout(async () => {
-        if (!invokeFn) return;
-        try { await invokeFn(`${kind}_stop`, { id: o.id }); } catch {}
-        try { await invokeFn(`${kind}_start`, { id: o.id, sourceName: sourceName.value.trim() || 'KAIRO Scripture' }); } catch {}
-      }, 600);
-    });
-
-    toggle.addEventListener('change', async () => {
-      updateNativeOutput(kind, o.id, { enabled: toggle.checked });
-      if (!invokeFn) { status.textContent = `${kind === 'ndi' ? 'NDI' : 'Syphon'} not available (run inside the app)`; toggle.checked = false; return; }
-      if (toggle.checked) {
-        status.textContent = 'Starting…';
-        try {
-          await invokeFn(`${kind}_start`, { id: o.id, sourceName: sourceName.value.trim() || 'KAIRO Scripture' });
-          status.textContent = 'Broadcasting';
-          status.classList.add('is-active');
-          // Push whatever's already live immediately, same as the old
-          // singleton implementation, so this output doesn't sit blank
-          // until the next verse/media/timer change.
-          window.KairoNativeOutputs?.pushToOne?.(kind, o.id);
-        } catch (e) {
-          status.textContent = 'Failed: ' + e;
-          toggle.checked = false;
-          updateNativeOutput(kind, o.id, { enabled: false });
-        }
-      } else {
-        try { await invokeFn(`${kind}_stop`, { id: o.id }); } catch {}
-        status.textContent = 'Off';
-        status.classList.remove('is-active');
-      }
-    });
-
-    // Too many real fields (toggle/name/source-name/theme/3 layer checks/
-    // status/delete) to fit one flat row at Settings' actual panel width —
-    // two compact lines instead: top = identity/status/delete, bottom =
-    // the actual configuration (source name/theme/layers).
-    const topLine = document.createElement('div');
-    topLine.className = 'native-output-row-top';
-    topLine.appendChild(toggleLabel);
-    topLine.appendChild(name);
-    topLine.appendChild(status);
-    topLine.appendChild(del);
-
-    const bottomLine = document.createElement('div');
-    bottomLine.className = 'native-output-row-bottom';
-    bottomLine.appendChild(sourceName);
-    bottomLine.appendChild(sel);
-    bottomLine.appendChild(layerChecks);
-
-    row.appendChild(topLine);
-    row.appendChild(bottomLine);
-    host.appendChild(row);
-
-    // Auto-resume: a row saved as enabled starts itself on load, same as
-    // the old singleton toggle's own restore-on-relaunch behavior.
-    if (o.enabled && invokeFn) {
-      status.textContent = 'Starting…';
-      invokeFn(`${kind}_start`, { id: o.id, sourceName: sourceName.value.trim() || 'KAIRO Scripture' })
-        .then(() => { status.textContent = 'Broadcasting'; status.classList.add('is-active'); })
-        .catch(e => { status.textContent = 'Failed: ' + e; });
-    } else if (o.enabled && !invokeFn) {
-      status.textContent = `${kind === 'ndi' ? 'NDI' : 'Syphon'} not available (run inside the app)`;
+// Any NDI/Syphon output saved as enabled starts itself once, on the first
+// real render after settings load — matches how the old per-type card
+// rendering used to auto-resume every enabled row, and how External
+// Display's own auto-reopen already works (wireExternalDisplayStatus).
+// One-shot: renderOutputsPane/renderOutputsList re-run often (every
+// add/remove/rename), which must NOT re-trigger a start() on an output
+// the operator may have deliberately stopped since launch.
+let nativeOutputsAutoResumeDone = false;
+function autoResumeNativeOutputs() {
+  if (nativeOutputsAutoResumeDone) return;
+  nativeOutputsAutoResumeDone = true;
+  const invokeFn = window.__TAURI__?.core?.invoke || window.__TAURI__?.invoke;
+  if (!invokeFn) return;
+  for (const kind of ['ndi', 'syphon']) {
+    for (const o of (kind === 'ndi' ? ndiOutputs() : syphonOutputs())) {
+      if (!o.enabled) continue;
+      invokeFn(`${kind}_start`, {
+        id: o.id, sourceName: o.sourceName || 'KAIRO Scripture',
+        width: o.width || 1920, height: o.height || 1080,
+      })
+        .then(() => { window.KairoNativeOutputs?.pushToOne?.(kind, o.id); renderOutputsList(); if (selectedOutputId === o.id) renderOutputsDetail(); })
+        .catch(err => console.warn(`[${kind}] auto-resume failed:`, err));
     }
-  });
-
-  const addBtn = document.getElementById(`add-${kind}-output-btn`);
-  if (addBtn && !addBtn.dataset.wired) {
-    addBtn.dataset.wired = '1';
-    addBtn.addEventListener('click', () => {
-      const list = outputsFn();
-      const next = [...list, { id: genOutputId(kind), name: `${kind === 'ndi' ? 'NDI' : 'Syphon'} Output ${list.length + 1}`, sourceName: 'KAIRO Scripture', enabled: false }];
-      settings[`${kind}Outputs`] = next;
-      saveSettingsPatch({ [`${kind}Outputs`]: next });
-      renderNativeOutputs(kind);
-    });
   }
+}
+
+function renderOutputsList() {
+  const host = document.getElementById('outputs-list');
+  if (!host) return;
+  const outputs = allConfiguredOutputs();
+  if (!outputs.some(o => o.id === selectedOutputId)) selectedOutputId = outputs[0]?.id || null;
+  host.innerHTML = '';
+  outputs.forEach(o => {
+    const row = document.createElement('button');
+    row.type = 'button';
+    row.className = 'outputs-list-item' + (o.id === selectedOutputId ? ' active' : '');
+    row.dataset.outputId = o.id;
+
+    const dot = document.createElement('span');
+    dot.className = 'bs-dot';
+    // Stable ids for the two outputs that already have their own live
+    // status-polling logic elsewhere (wireExternalDisplayStatus,
+    // pollOBSStatus) — everything else (extra displays, NDI/Syphon
+    // instances) gets a plain per-row dot with no separate poller,
+    // updated directly by that row's own detail-panel actions instead.
+    if (o.id === PRIMARY_DISPLAY) dot.id = 'external-header-dot';
+    else if (o.type === 'obs')    dot.id = 'obs-header-dot';
+    else if (o.type === 'ndi' || o.type === 'syphon') dot.classList.toggle('connected', !!o.raw?.enabled);
+
+    const info = document.createElement('span');
+    info.className = 'outputs-list-item-info';
+    const nameEl = document.createElement('span');
+    nameEl.className = 'outputs-list-item-name';
+    nameEl.textContent = o.name;
+    const typeEl = document.createElement('span');
+    typeEl.className = 'outputs-list-item-type';
+    typeEl.textContent = outputTypeLabel(o.type);
+    info.appendChild(nameEl);
+    info.appendChild(typeEl);
+
+    row.appendChild(dot);
+    row.appendChild(info);
+    row.addEventListener('click', () => {
+      selectedOutputId = o.id;
+      renderOutputsList();
+      renderOutputsDetail();
+    });
+    host.appendChild(row);
+  });
+}
+
+function renderOutputsDetail() {
+  const host = document.getElementById('outputs-detail');
+  if (!host) return;
+  host.innerHTML = '';
+  const o = allConfiguredOutputs().find(x => x.id === selectedOutputId);
+  if (!o) { host.textContent = 'Select an output.'; return; }
+  if (o.type === 'display') renderDisplayDetail(host, o);
+  else if (o.type === 'obs') renderObsDetail(host, o);
+  else renderNativeOutputDetail(host, o); // ndi/syphon
+}
+
+// Small local helpers shared by every detail-panel builder below — keeps
+// each builder itself readable (just the fields that actually differ per
+// type) instead of repeating this boilerplate four times.
+function detailGroup(labelText) {
+  const group = document.createElement('div');
+  group.className = 'setting-group';
+  const lbl = document.createElement('label');
+  lbl.className = 'setting-label';
+  lbl.textContent = labelText;
+  group.appendChild(lbl);
+  return group;
+}
+function detailTitle(text, subtitleEl) {
+  const wrap = document.createElement('div');
+  wrap.className = 'outputs-detail-header';
+  const h = document.createElement('h3');
+  h.className = 'outputs-detail-title';
+  h.textContent = text;
+  wrap.appendChild(h);
+  if (subtitleEl) wrap.appendChild(subtitleEl);
+  return wrap;
+}
+
+// The theme <select> — same shape the old renderOutputThemePickers built
+// per-card, just returned directly for a detail panel to append.
+function buildThemeSelect(outputId) {
+  const sel = document.createElement('select');
+  sel.className = 'setting-input';
+  const map = outputThemeMap();
+  looks.forEach(l => {
+    const opt = document.createElement('option');
+    opt.value = l.id; opt.textContent = l.name;
+    if (l.id === map[outputId]) opt.selected = true;
+    sel.appendChild(opt);
+  });
+  sel.addEventListener('change', () => {
+    settings.outputThemes = { ...outputThemeMap(), [outputId]: sel.value };
+    saveSettingsPatch({ outputThemes: settings.outputThemes });
+    applyOutputThemes();
+  });
+  return sel;
+}
+
+function renderDisplayDetail(host, o) {
+  host.appendChild(detailTitle(o.name));
+
+  if (o.primary) {
+    const status = document.createElement('div');
+    status.className = 'outputs-detail-status';
+    status.id = 'external-header-status'; // wireExternalDisplayStatus writes here
+    host.appendChild(status);
+  } else {
+    const nameGroup = detailGroup('Name');
+    const nameInput = document.createElement('input');
+    nameInput.type = 'text';
+    nameInput.className = 'setting-input';
+    nameInput.value = o.name;
+    nameInput.addEventListener('change', () => {
+      const list = extraDisplays().map(x => x.id === o.id ? { ...x, name: nameInput.value.trim() || x.name } : x);
+      settings.extraDisplays = list;
+      saveSettingsPatch({ extraDisplays: list });
+      renderOutputsList();
+    });
+    nameGroup.appendChild(nameInput);
+    host.appendChild(nameGroup);
+  }
+
+  const screenGroup = detailGroup('Physical screen');
+  const screenSel = buildScreenSelect(o.id);
+  screenGroup.appendChild(screenSel);
+  host.appendChild(screenGroup);
+
+  const identifyBtn = document.createElement('button');
+  identifyBtn.type = 'button';
+  identifyBtn.className = 'modal-btn secondary';
+  identifyBtn.textContent = 'Identify Display';
+  identifyBtn.style.marginBottom = '4px';
+  identifyBtn.addEventListener('click', () => identifyScreen(Number(screenSel.value)));
+  host.appendChild(identifyBtn);
+
+  const themeGroup = detailGroup('Theme');
+  themeGroup.appendChild(buildThemeSelect(o.id));
+  host.appendChild(themeGroup);
+
+  const layerGroup = detailGroup('Layers');
+  layerGroup.appendChild(buildLayerChecksRow(o.id));
+  host.appendChild(layerGroup);
+
+  if (!o.primary) {
+    const del = document.createElement('button');
+    del.type = 'button';
+    del.className = 'modal-btn secondary display-output-del';
+    del.textContent = 'Remove this display';
+    del.addEventListener('click', () => {
+      settings.extraDisplays = extraDisplays().filter(x => x.id !== o.id);
+      const screens = { ...outputScreenMap() }; delete screens[o.id];
+      settings.outputScreens = screens;
+      const themes = { ...outputThemeMap() }; delete themes[o.id];
+      const layers = { ...outputLayerMap() }; delete layers[o.id];
+      settings.outputThemes = themes; settings.outputLayers = layers;
+      saveSettingsPatch({ extraDisplays: settings.extraDisplays, outputScreens: screens, outputThemes: themes, outputLayers: layers });
+      selectedOutputId = PRIMARY_DISPLAY;
+      applyOutputThemes(); applyOutputLayers();
+      renderOutputsList(); renderOutputsDetail();
+    });
+    host.appendChild(del);
+  }
+}
+
+function renderObsDetail(host, o) {
+  host.appendChild(detailTitle(o.name));
+
+  const enabledGroup = detailGroup('');
+  enabledGroup.querySelector('label').remove();
+  const toggleLabel = document.createElement('label');
+  toggleLabel.className = 'output-toggle';
+  toggleLabel.title = 'Enable OBS WebSocket output';
+  const toggle = document.createElement('input');
+  toggle.type = 'checkbox';
+  toggle.checked = settings.obsEnabled === true;
+  const track = document.createElement('span');
+  track.className = 'output-toggle-track';
+  toggleLabel.appendChild(toggle); toggleLabel.appendChild(track);
+  toggleLabel.appendChild(document.createTextNode(' Enabled'));
+  enabledGroup.appendChild(toggleLabel);
+  toggle.addEventListener('change', () => {
+    settings.obsEnabled = toggle.checked;
+    saveSettingsPatch({ obsEnabled: toggle.checked });
+  });
+  host.appendChild(enabledGroup);
+
+  const urlGroup = detailGroup('URL');
+  const urlInput = document.createElement('input');
+  urlInput.type = 'text';
+  urlInput.className = 'setting-input';
+  urlInput.placeholder = 'ws://localhost:4455';
+  urlInput.value = settings.obsUrl || '';
+  urlInput.addEventListener('change', () => { settings.obsUrl = urlInput.value || 'ws://localhost:4455'; saveSettingsPatch({ obsUrl: settings.obsUrl }); });
+  urlGroup.appendChild(urlInput);
+  host.appendChild(urlGroup);
+
+  const passGroup = detailGroup('Password');
+  const passInput = document.createElement('input');
+  passInput.type = 'password';
+  passInput.className = 'setting-input';
+  passInput.placeholder = 'Leave blank if no password';
+  passInput.value = settings.obsPassword || '';
+  passInput.addEventListener('change', () => { settings.obsPassword = passInput.value || ''; saveSettingsPatch({ obsPassword: settings.obsPassword }); });
+  passGroup.appendChild(passInput);
+  host.appendChild(passGroup);
+
+  const srcGroup = detailGroup('Text Source Name');
+  const srcInput = document.createElement('input');
+  srcInput.type = 'text';
+  srcInput.className = 'setting-input';
+  srcInput.placeholder = 'Scripture';
+  srcInput.value = settings.obsTextSource || '';
+  srcInput.addEventListener('change', () => { settings.obsTextSource = srcInput.value || 'Scripture'; saveSettingsPatch({ obsTextSource: settings.obsTextSource }); });
+  srcGroup.appendChild(srcInput);
+  host.appendChild(srcGroup);
+
+  const testRow = document.createElement('div');
+  testRow.style.cssText = 'display:flex;align-items:center;gap:8px;';
+  const testBtn = document.createElement('button');
+  testBtn.type = 'button';
+  testBtn.className = 'modal-btn secondary';
+  testBtn.textContent = 'Test';
+  const statusEl = document.createElement('span');
+  statusEl.style.cssText = 'font-size:11px;color:var(--text-2);';
+  testBtn.addEventListener('click', () => testObsConnection(statusEl, testBtn));
+  testRow.appendChild(testBtn); testRow.appendChild(statusEl);
+  host.appendChild(testRow);
+
+  const hint = document.createElement('p');
+  hint.className = 'setting-hint';
+  hint.style.marginTop = '8px';
+  hint.textContent = 'For full Slide/Media/Timer parity in OBS, add a Syphon (same machine) or NDI (network) source instead — see the NDI/Syphon outputs above.';
+  host.appendChild(hint);
+}
+
+// NDI/Syphon detail panel — name, network source name, resolution,
+// enable toggle, theme, layers, remove. Owner: "have an add button at the
+// top, so the user can define what kind of output they want with screen
+// resolution" — width/height live here, editable any time, not just at
+// creation (the "add" flow just seeds sensible 1920x1080 defaults).
+function renderNativeOutputDetail(host, o) {
+  const kind = o.type; // 'ndi' | 'syphon'
+  const raw = o.raw;
+  const invokeFn = window.__TAURI__?.core?.invoke || window.__TAURI__?.invoke;
+
+  const statusEl = document.createElement('span');
+  statusEl.className = 'native-output-status';
+  statusEl.textContent = raw.enabled ? 'Broadcasting' : 'Off';
+  statusEl.classList.toggle('is-active', !!raw.enabled);
+  host.appendChild(detailTitle(o.name, statusEl));
+
+  const nameGroup = detailGroup('Label (Settings only)');
+  const nameInput = document.createElement('input');
+  nameInput.type = 'text'; nameInput.className = 'setting-input'; nameInput.value = raw.name || o.name;
+  nameInput.addEventListener('change', () => {
+    updateNativeOutput(kind, o.id, { name: nameInput.value.trim() || raw.name });
+    renderOutputsList();
+  });
+  nameGroup.appendChild(nameInput);
+  host.appendChild(nameGroup);
+
+  const srcGroup = detailGroup('Network Source Name');
+  const srcInput = document.createElement('input');
+  srcInput.type = 'text'; srcInput.className = 'setting-input'; srcInput.value = raw.sourceName || 'KAIRO Scripture';
+  srcGroup.appendChild(srcInput);
+  host.appendChild(srcGroup);
+
+  const resGroup = detailGroup('Resolution');
+  const resRow = document.createElement('div');
+  resRow.style.cssText = 'display:flex;align-items:center;gap:6px;';
+  const wInput = document.createElement('input');
+  wInput.type = 'number'; wInput.className = 'setting-input'; wInput.min = '160'; wInput.max = '7680';
+  wInput.value = raw.width || 1920; wInput.style.width = '90px';
+  const xEl = document.createElement('span'); xEl.textContent = '×'; xEl.style.color = 'var(--text-3)';
+  const hInput = document.createElement('input');
+  hInput.type = 'number'; hInput.className = 'setting-input'; hInput.min = '90'; hInput.max = '4320';
+  hInput.value = raw.height || 1080; hInput.style.width = '90px';
+  resRow.appendChild(wInput); resRow.appendChild(xEl); resRow.appendChild(hInput);
+  resGroup.appendChild(resRow);
+  host.appendChild(resGroup);
+
+  // Restart-with-new-settings debounce — the network name AND resolution
+  // are only read at start() time (native texture/frame allocation), so
+  // changing either while broadcasting means stop+start, same as before.
+  let debounce = null;
+  function scheduleRestart() {
+    updateNativeOutput(kind, o.id, {
+      sourceName: srcInput.value.trim() || 'KAIRO Scripture',
+      width: Math.max(160, Number(wInput.value) || 1920),
+      height: Math.max(90, Number(hInput.value) || 1080),
+    });
+    if (!raw.enabled) return;
+    clearTimeout(debounce);
+    debounce = setTimeout(async () => {
+      if (!invokeFn) return;
+      try { await invokeFn(`${kind}_stop`, { id: o.id }); } catch {}
+      try {
+        await invokeFn(`${kind}_start`, {
+          id: o.id, sourceName: srcInput.value.trim() || 'KAIRO Scripture',
+          width: Math.max(160, Number(wInput.value) || 1920), height: Math.max(90, Number(hInput.value) || 1080),
+        });
+      } catch {}
+    }, 600);
+  }
+  srcInput.addEventListener('input', scheduleRestart);
+  wInput.addEventListener('change', scheduleRestart);
+  hInput.addEventListener('change', scheduleRestart);
+
+  const themeGroup = detailGroup('Theme');
+  themeGroup.appendChild(buildThemeSelect(o.id));
+  host.appendChild(themeGroup);
+
+  const layerGroup = detailGroup('Layers');
+  layerGroup.appendChild(buildLayerChecksRow(o.id));
+  host.appendChild(layerGroup);
+
+  const enableBtn = document.createElement('button');
+  enableBtn.type = 'button';
+  enableBtn.className = 'modal-btn primary';
+  enableBtn.style.marginTop = '4px';
+  enableBtn.textContent = raw.enabled ? 'Stop' : 'Start';
+  enableBtn.addEventListener('click', async () => {
+    if (!invokeFn) { toast(`${outputTypeLabel(kind)} not available (run inside the app)`, 'error'); return; }
+    const nowEnabled = !raw.enabled;
+    if (nowEnabled) {
+      enableBtn.textContent = 'Starting…'; enableBtn.disabled = true;
+      try {
+        await invokeFn(`${kind}_start`, {
+          id: o.id, sourceName: srcInput.value.trim() || 'KAIRO Scripture',
+          width: Math.max(160, Number(wInput.value) || 1920), height: Math.max(90, Number(hInput.value) || 1080),
+        });
+        updateNativeOutput(kind, o.id, { enabled: true });
+        window.KairoNativeOutputs?.pushToOne?.(kind, o.id);
+      } catch (e) {
+        toast(`${outputTypeLabel(kind)} failed: ` + e, 'error');
+      }
+    } else {
+      try { await invokeFn(`${kind}_stop`, { id: o.id }); } catch {}
+      updateNativeOutput(kind, o.id, { enabled: false });
+    }
+    renderOutputsList(); renderOutputsDetail();
+  });
+  host.appendChild(enableBtn);
+
+  const del = document.createElement('button');
+  del.type = 'button';
+  del.className = 'modal-btn secondary display-output-del';
+  del.style.marginTop = '4px';
+  del.textContent = `Remove this ${outputTypeLabel(kind)} output`;
+  del.addEventListener('click', async () => {
+    if (invokeFn && raw.enabled) { try { await invokeFn(`${kind}_stop`, { id: o.id }); } catch {} }
+    const list = (kind === 'ndi' ? ndiOutputs() : syphonOutputs()).filter(x => x.id !== o.id);
+    settings[`${kind}Outputs`] = list;
+    const themes = { ...outputThemeMap() }; delete themes[o.id];
+    const layers = { ...outputLayerMap() }; delete layers[o.id];
+    settings.outputThemes = themes; settings.outputLayers = layers;
+    saveSettingsPatch({ [`${kind}Outputs`]: list, outputThemes: themes, outputLayers: layers });
+    selectedOutputId = PRIMARY_DISPLAY;
+    applyOutputThemes(); applyOutputLayers();
+    renderOutputsList(); renderOutputsDetail();
+  });
+  host.appendChild(del);
 }
 
 function updateNativeOutput(kind, id, patch) {
@@ -9332,8 +9415,50 @@ function updateNativeOutput(kind, id, patch) {
   saveSettingsPatch({ [`${kind}Outputs`]: list });
 }
 
-function renderNdiOutputs()    { return renderNativeOutputs('ndi'); }
-function renderSyphonOutputs() { return renderNativeOutputs('syphon'); }
+// "+ Add Output" — a small type-chooser popover (mirrors the existing
+// .svc-popover pattern used elsewhere, e.g. the Add-to-playlist menu)
+// instead of one separate "+Add" button per output type.
+function wireOutputsAddMenu() {
+  const btn = document.getElementById('outputs-add-btn');
+  const menu = document.getElementById('outputs-add-menu');
+  if (!btn || !menu || btn.dataset.wired) return;
+  btn.dataset.wired = '1';
+  btn.addEventListener('click', () => {
+    if (!menu.classList.contains('hidden')) { menu.classList.add('hidden'); return; }
+    const r = btn.getBoundingClientRect();
+    menu.style.top = `${r.bottom + 4}px`;
+    menu.style.left = `${r.left}px`;
+    menu.classList.remove('hidden');
+  });
+  document.addEventListener('click', (e) => {
+    if (!menu.classList.contains('hidden') && !menu.contains(e.target) && !btn.contains(e.target)) {
+      menu.classList.add('hidden');
+    }
+  });
+  menu.querySelectorAll('[data-add-type]').forEach(item => {
+    item.addEventListener('click', () => {
+      const type = item.dataset.addType;
+      menu.classList.add('hidden');
+      if (type === 'display') {
+        const list = extraDisplays();
+        const next = [...list, { id: `display-${Date.now().toString(36)}`, name: `Display ${list.length + 2}` }];
+        settings.extraDisplays = next;
+        saveSettingsPatch({ extraDisplays: next });
+        selectedOutputId = next[next.length - 1].id;
+        applyOutputThemes();
+      } else {
+        const outputsFn = type === 'ndi' ? ndiOutputs : syphonOutputs;
+        const list = outputsFn();
+        const next = [...list, { id: genOutputId(type), name: `${outputTypeLabel(type)} Output ${list.length + 1}`, sourceName: 'KAIRO Scripture', width: 1920, height: 1080, enabled: false }];
+        settings[`${type}Outputs`] = next;
+        saveSettingsPatch({ [`${type}Outputs`]: next });
+        selectedOutputId = next[next.length - 1].id;
+      }
+      renderOutputsList();
+      renderOutputsDetail();
+    });
+  });
+}
 
 // Report whether a second screen is actually attached, so the operator knows
 // whether "Open" will land on a projector or just stack on this monitor.
@@ -9436,77 +9561,6 @@ async function verifyDisplayWindowOpened(label) {
   }
 }
 
-document.getElementById('add-display-btn')?.addEventListener('click', () => {
-  const list = extraDisplays();
-  const next = [...list, { id: `display-${Date.now().toString(36)}`, name: `Display ${list.length + 2}` }];
-  settings.extraDisplays = next;
-  saveSettingsPatch({ extraDisplays: next });
-  renderDisplayOutputs();
-  applyOutputThemes();
-});
-
-// Inject a Theme picker into each output card body. Rebuilt whenever the theme
-// list changes so newly created themes appear without reopening Settings.
-function renderOutputThemePickers() {
-  const map = outputThemeMap();
-  OUTPUT_DEFS.forEach(({ key, card }) => {
-    const body = document.querySelector(`#${card} .output-card-body`);
-    if (!body) return;
-
-    let group = body.querySelector('.output-theme-group');
-    if (!group) {
-      group = document.createElement('div');
-      group.className = 'setting-group output-theme-group';
-      const lbl = document.createElement('label');
-      lbl.className = 'setting-label';
-      lbl.textContent = 'Theme';
-      const sel = document.createElement('select');
-      sel.className = 'setting-input output-theme-select';
-      sel.dataset.outputKey = key;
-      sel.addEventListener('change', () => {
-        settings.outputThemes = { ...outputThemeMap(), [key]: sel.value };
-        saveSettingsPatch({ outputThemes: settings.outputThemes });
-        applyOutputThemes();
-      });
-      const hint = document.createElement('div');
-      hint.style.cssText = 'font-size:11px;color:var(--text-3);margin-top:4px;';
-      hint.textContent = 'Design this output uses. Edit designs in Theme Studio.';
-      group.appendChild(lbl); group.appendChild(sel); group.appendChild(hint);
-      // External Display pairs its theme picker half-width with the
-      // monitor picker (populateMonitorPicker) instead of taking the full
-      // card width on its own row — both live in #external-picker-row.
-      const pickerRow = document.getElementById('external-picker-row');
-      if (card === 'card-external' && pickerRow) pickerRow.appendChild(group);
-      else body.insertBefore(group, body.firstChild);
-    }
-
-    const sel = group.querySelector('select');
-    const want = map[key];
-    sel.innerHTML = '';
-    looks.forEach(l => {
-      const o = document.createElement('option');
-      o.value = l.id; o.textContent = l.name;
-      if (l.id === want) o.selected = true;
-      sel.appendChild(o);
-    });
-
-    // Mirror the assignment into the card header so the output→theme mapping
-    // is readable without expanding every card.
-    const header = document.querySelector(`#${card} .output-card-header`);
-    if (header) {
-      let badge = header.querySelector('.output-theme-badge');
-      if (!badge) {
-        badge = document.createElement('span');
-        badge.className = 'output-theme-badge';
-        const chevron = header.querySelector('.output-card-chevron');
-        header.insertBefore(badge, chevron || null);
-      }
-      badge.textContent = looks.find(l => l.id === want)?.name || '—';
-    }
-  });
-}
-
-// Push the current per-output assignment to every display client.
 async function applyOutputThemes() {
   const map = outputThemeMap();
   const themes = {};
@@ -9587,24 +9641,10 @@ async function applyOutputLayers() {
   }
 }
 
-// Only the outputs that genuinely have real multi-layer content are worth
-// a Layers control. Of OUTPUT_DEFS' remaining fixed cards (ndi/syphon moved
-// out to their own dynamic lists — see ndiOutputs()/syphonOutputs() above,
-// each row builds its own layer-checks row directly via buildLayerChecksRow,
-// not through this function at all), only the primary External Display
-// qualifies — OBS and ProPresenter only ever carry Slide/verse content (see
-// the Output Looks plan's own "Non-goals": OBS's WebSocket integration is a
-// single text-source push, ProPresenter's is its Message/token API), so a
-// Media/Timer checkbox for either would be dead UI. Their existing simple
-// on/off toggle (obsEnabled/proPresenterEnabled) is untouched.
-function isLayerCapableOutput(key) {
-  return key === PRIMARY_DISPLAY;
-}
 
 // Builds one reusable Slide/Media/Timer checkbox row for a given output —
-// shared by renderOutputLayerPickers (the fixed OUTPUT_DEFS cards) and
-// renderDisplayOutputs (dynamically-added extra display rows), so the two
-// don't drift into two separately-maintained copies of the same control.
+// used by every detail-panel renderer that has one (display/NDI/Syphon;
+// OBS doesn't — see the Outputs master-detail redesign's own Non-goals).
 function buildLayerChecksRow(outputId) {
   const row = document.createElement('div');
   row.className = 'output-layer-checks';
@@ -9628,38 +9668,6 @@ function buildLayerChecksRow(outputId) {
     row.appendChild(wrap);
   });
   return row;
-}
-
-// Inject a Slide/Media/Timer checkbox row into each layer-capable output
-// card's body, right alongside the existing .output-theme-group — mirrors
-// renderOutputThemePickers's own structure (same card lookup, same
-// insert-once-then-update pattern) function-for-function.
-function renderOutputLayerPickers() {
-  const map = outputLayerMap();
-  OUTPUT_DEFS.forEach(({ key, card }) => {
-    if (!isLayerCapableOutput(key)) return;
-    const body = document.querySelector(`#${card} .output-card-body`);
-    if (!body) return;
-
-    let group = body.querySelector('.output-layer-group');
-    if (!group) {
-      group = document.createElement('div');
-      group.className = 'setting-group output-layer-group';
-      const lbl = document.createElement('label');
-      lbl.className = 'setting-label';
-      lbl.textContent = 'Layers';
-      group.appendChild(lbl);
-      group.appendChild(buildLayerChecksRow(key));
-      const theme = body.querySelector('.output-theme-group');
-      if (theme) theme.insertAdjacentElement('afterend', group);
-      else body.insertBefore(group, body.firstChild);
-    } else {
-      const want = map[key];
-      group.querySelectorAll('input[type="checkbox"]').forEach(cb => {
-        cb.checked = want[cb.dataset.layerKey] !== false;
-      });
-    }
-  });
 }
 
 // Persist a partial settings change without clobbering unrelated fields.

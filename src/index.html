@@ -1491,170 +1491,46 @@
             </section>
 
             <section class="settings-pane" data-pane="outputs">
-                <!-- ── OUTPUTS ────────────────────────────────────── -->
-                <div class="settings-section">
+                <!-- ── OUTPUTS ────────────────────────────────────────────
+                     Master-detail, mirroring ProPresenter's own Screen
+                     Configuration panel (owner: "I like how ProPresenter
+                     does it better") — one flat list of every configured
+                     output (External Display + extra displays, NDI, Syphon,
+                     OBS) on the left; the selected one's full settings
+                     (theme, Output Looks layers, source name, resolution,
+                     screen assignment, …) on the right. ProPresenter's own
+                     message-push integration is gone entirely (owner: "I
+                     don't think anyone who owns ProPresenter will rather
+                     let us use messages to send to their ProPresenter than
+                     just send themselves") — it picks Kairo up as a normal
+                     NDI/Syphon input instead, same as any other source.
+                     Everything below is built by renderOutputsPane() and
+                     friends (src/app.js) — no static per-type markup here
+                     beyond this shell + the add-type popover. -->
+                <div class="settings-section outputs-shell">
                     <div class="settings-section-label">Outputs</div>
-                    <p class="setting-hint" style="margin:-4px 0 12px;">Enable any number of destinations at once. Each one renders with its own theme — set it per output below.</p>
-
-                    <!-- Card 1: External Display — first in the list since it's the
-                         primary/default output every service actually needs; the
-                         broadcast integrations below it (ProPresenter, OBS, Syphon,
-                         NDI) are opt-in add-ons on top of it, not equals to it.
-                         Matches OUTPUT_DEFS' own ordering (src/app.js), which
-                         already put it first for the same reason. -->
-                    <div class="output-card" id="card-external">
-                        <div class="output-card-header" data-card="external">
-                            <span class="output-card-name">External Display</span>
-                            <span class="output-header-status">
-                                <span class="bs-dot" id="external-header-dot"></span>
-                                <span id="external-header-status">Checking…</span>
-                            </span>
-                            <span class="output-card-chevron">▾</span>
+                    <p class="setting-hint" style="margin:-4px 0 8px;">Add as many outputs as you need — each gets its own theme, its own Slide/Media/Timer visibility, and (for NDI/Syphon) its own resolution.</p>
+                    <div class="outputs-master-detail">
+                        <div class="outputs-list-col">
+                            <button id="outputs-add-btn" class="modal-btn secondary outputs-add-btn">+ Add Output</button>
+                            <div id="outputs-list" class="outputs-list"></div>
                         </div>
-                        <div class="output-card-body">
-                            <!-- No enable toggle, no "Open" button — picking a
-                                 monitor here IS the action, same as every other
-                                 presentation app. Selecting one immediately opens/
-                                 moves a fullscreen window there; selecting "None"
-                                 closes it. Theme picker (inserted by
-                                 renderOutputThemePickers) and the monitor picker
-                                 (populateMonitorPicker) share this row, half-width
-                                 each, filled in JS-side in that order. -->
-                            <div class="output-picker-row" id="external-picker-row"></div>
-                            <div style="display:flex;align-items:center;gap:8px;">
-                                <button id="identify-displays-btn" class="modal-btn secondary" style="font-size:11px;padding:4px 10px;">Identify Displays</button>
-                                <span style="font-size:11px;color:var(--text-3);">Briefly numbers each connected screen so you can tell which is which.</span>
-                            </div>
-
-                            <!-- Additional screens (stage monitor, foyer, …) — each
-                                 just its own monitor + theme picker, same as above. -->
-                            <div id="extra-displays-list"></div>
-                            <button id="add-display-btn" class="modal-btn secondary" style="width:100%;justify-content:center;margin-top:8px;">+ Add another display</button>
-                        </div>
-                    </div>
-
-                    <!-- Card 2: ProPresenter -->
-                    <div class="output-card" id="card-propresenter">
-                        <div class="output-card-header" data-card="propresenter">
-                            <label class="output-toggle" title="Enable ProPresenter output">
-                                <input type="checkbox" id="pp-enabled-toggle" checked>
-                                <span class="output-toggle-track"></span>
-                            </label>
-                            <span class="output-card-name">ProPresenter</span>
-                            <!-- Sync status + auto-send toggle — shares the header row with
-                                 the theme badge (output-theme-badge, inserted by JS right
-                                 before the chevron) rather than sitting on its own row
-                                 below, so both "what this output shows" and "is it live"
-                                 read at a glance without expanding the card. -->
-                            <span class="pp-header-sync" title="Toggle auto-send to ProPresenter">
-                                <label class="sync-toggle">
-                                    <input type="checkbox" id="auto-send-checkbox">
-                                    <span class="sync-track"><span class="sync-thumb"></span></span>
-                                </label>
-                                <span class="rs-pp-status" id="propresenter-status">Checking…</span>
-                            </span>
-                            <span class="output-card-chevron">▾</span>
-                        </div>
-                        <div class="output-card-body output-card-body--collapsed">
-                            <div class="setting-group">
-                                <label class="setting-label">URL</label>
-                                <div style="display:flex;gap:6px;">
-                                    <input type="text" id="propresenter-url" class="setting-input" value="http://localhost:1025" style="flex:1;">
-                                    <button id="test-propresenter-btn" class="modal-btn secondary" style="white-space:nowrap;">Test</button>
-                                </div>
-                            </div>
-                            <div class="setting-group">
-                                <label class="setting-label">PP Text Token Order</label>
-                                <div style="display:flex;gap:8px;align-items:center;">
-                                    <span id="pp-token-order-label" style="font-size:12px;color:var(--text-2);flex:1;">Token[0] = Verse Text &nbsp;·&nbsp; Token[1] = Reference</span>
-                                    <button id="swap-pp-tokens-btn" class="modal-btn secondary" style="white-space:nowrap;font-size:11px;">⇄ Swap</button>
-                                </div>
-                                <div style="font-size:11px;color:var(--text-3);margin-top:4px;">If reference and text appear on the wrong layer in PP, click Swap.</div>
-                            </div>
-                        </div>
-                    </div>
-
-                    <!-- Card 3: OBS WebSocket -->
-                    <div class="output-card" id="card-obs">
-                        <div class="output-card-header" data-card="obs">
-                            <label class="output-toggle" title="Enable OBS WebSocket output">
-                                <input type="checkbox" id="obs-enabled-toggle">
-                                <span class="output-toggle-track"></span>
-                            </label>
-                            <span class="output-card-name">OBS WebSocket</span>
-                            <span class="output-header-status">
-                                <span class="bs-dot" id="obs-header-dot"></span>
-                                <span id="obs-header-status">Checking…</span>
-                            </span>
-                            <span class="output-card-chevron">▾</span>
-                        </div>
-                        <div class="output-card-body output-card-body--collapsed">
-                            <div class="setting-group">
-                                <label class="setting-label">URL</label>
-                                <input type="text" id="obs-url" class="setting-input" placeholder="ws://localhost:4455">
-                            </div>
-                            <div class="setting-group">
-                                <label class="setting-label">Password</label>
-                                <input type="password" id="obs-password" class="setting-input" placeholder="Leave blank if no password">
-                            </div>
-                            <div class="setting-group">
-                                <label class="setting-label">Text Source Name</label>
-                                <input type="text" id="obs-text-source" class="setting-input" placeholder="Scripture">
-                            </div>
-                            <div style="display:flex;align-items:center;gap:8px;">
-                                <button id="test-obs-btn" class="modal-btn secondary">Test</button>
-                                <span id="obs-status" style="font-size:11px;color:var(--text-2);"></span>
-                            </div>
-                        </div>
-                    </div>
-
-                    <!-- Card 4: Syphon — a LIST of independent named outputs (Output
-                         Looks: "you should be able to create multiple Syphon or NDI
-                         outputs" — mirrors ProPresenter's own Screen Configuration
-                         list, e.g. separate "Atem"/"NDI Output" entries, and Kairo's
-                         own pre-existing extraDisplays() pattern for External
-                         Display). No single card-level enable toggle — each row
-                         below owns its own on/off state. Rows are built dynamically
-                         by renderSyphonOutputs() (src/app.js). -->
-                    <div class="output-card" id="card-syphon">
-                        <div class="output-card-header" data-card="syphon">
-                            <span class="output-card-name">Syphon</span>
-                            <span class="output-header-status">
-                                <span class="bs-dot" id="syphon-header-dot"></span>
-                                <span id="syphon-header-status">Checking…</span>
-                            </span>
-                            <span class="output-card-chevron">▾</span>
-                        </div>
-                        <div class="output-card-body output-card-body--collapsed">
-                            <p class="setting-hint" style="margin:0 0 4px;">Each Syphon output broadcasts independently — add one per destination (e.g. a confidence monitor showing only Slide, a program feed showing everything). Any compatible app (ProPresenter, OBS Syphon plugin, Resolume, MadMapper) can pick one up by name.</p>
-                            <div id="syphon-outputs-list" class="native-outputs-list"></div>
-                            <button id="add-syphon-output-btn" class="modal-btn secondary" style="align-self:flex-start;">+ Add Syphon Output</button>
-                        </div>
-                    </div>
-
-                    <!-- Card 5: NDI (native sender) — same list-of-independent-
-                         outputs shape as Syphon above; renderNdiOutputs() builds
-                         the rows. -->
-                    <div class="output-card" id="card-ndi">
-                        <div class="output-card-header" data-card="ndi">
-                            <span class="output-card-name">NDI</span>
-                            <span class="output-header-status">
-                                <span class="bs-dot" id="ndi-header-dot"></span>
-                                <span id="ndi-header-status">Checking…</span>
-                            </span>
-                            <span class="output-card-chevron">▾</span>
-                        </div>
-                        <div class="output-card-body output-card-body--collapsed">
-                            <p class="setting-hint" style="margin:0 0 4px;">Each NDI output broadcasts independently — add one per destination (vMix, TriCaster, OBS-NDI, another PC on the network, etc.).</p>
-                            <div id="ndi-install-hint" style="display:none;font-size:11px;color:var(--text-2);line-height:1.55;padding:10px 12px;background:rgba(232,64,74,0.08);border-left:2px solid var(--red);border-radius:4px;margin-bottom:4px;">
-                                <strong style="color:var(--text);">NDI runtime not found.</strong> Install free <a href="https://ndi.video/tools/" target="_blank" rel="noopener" style="color:var(--blue);">NDI Tools</a> (or the NDI SDK) so KAIRO can broadcast directly.
-                            </div>
-                            <div id="ndi-outputs-list" class="native-outputs-list"></div>
-                            <button id="add-ndi-output-btn" class="modal-btn secondary" style="align-self:flex-start;">+ Add NDI Output</button>
-                        </div>
+                        <div class="outputs-detail-col" id="outputs-detail"></div>
                     </div>
                 </div>
 
+                <!-- Add-output type chooser — positioned near outputs-add-btn
+                     when opened. OBS isn't offered here: it's a single
+                     fixed WebSocket connection (one OBS instance), not a
+                     rendered/addable output the way Displays/NDI/Syphon are. -->
+                <div id="outputs-add-menu" class="svc-popover hidden">
+                    <div class="svc-popover-label">Add Output</div>
+                    <div class="svc-popover-list">
+                        <button type="button" class="svc-popover-item" data-add-type="display">Display / Projector</button>
+                        <button type="button" class="svc-popover-item" data-add-type="ndi">NDI</button>
+                        <button type="button" class="svc-popover-item" data-add-type="syphon">Syphon</button>
+                    </div>
+                </div>
             </section>
 
             </div><!-- /settings-panes -->

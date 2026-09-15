@@ -27,8 +27,10 @@ use tiny_skia::{Color as SkColor, Pixmap, Rect, Transform};
 
 // ── Frame size ──────────────────────────────────────────────────────────
 // 1280×720 — same as the NDI sender, gives receivers a familiar dimension.
-const FRAME_W: u32 = 1280;
-const FRAME_H: u32 = 720;
+// Output Looks: resolution is now per-output-configurable (see SyphonHandle's
+// own frame_w/frame_h fields) — these two are only the fallback default.
+const DEFAULT_FRAME_W: u32 = 1280;
+const DEFAULT_FRAME_H: u32 = 720;
 
 // ── CGL bindings ────────────────────────────────────────────────────────
 // We only need a tiny subset of CGL to spin up an offscreen OpenGL context
@@ -119,6 +121,11 @@ pub struct SyphonHandle {
     latest_reference: String,
     latest_media: Option<image::RgbaImage>,
     latest_timer: String,
+    // This output's own configured resolution (Output Looks' "add an
+    // output" flow asks for it) — set once in start(), read by every
+    // render_and_publish() call after. DEFAULT_FRAME_W/H until start() runs.
+    frame_w: u32,
+    frame_h: u32,
 }
 
 impl Default for SyphonHandle {
@@ -135,6 +142,8 @@ impl Default for SyphonHandle {
             latest_reference: String::new(),
             latest_media: None,
             latest_timer: String::new(),
+            frame_w: DEFAULT_FRAME_W,
+            frame_h: DEFAULT_FRAME_H,
         }
     }
 }
@@ -152,11 +161,16 @@ pub fn is_syphon_available() -> bool {
     AnyClass::get("SyphonOpenGLServer").is_some()
 }
 
-pub fn start(source_name: &str, shared: Arc<Mutex<SyphonHandle>>) -> Result<(), String> {
+/// `width`/`height`: this output's own configured resolution (0 or negative
+/// falls back to DEFAULT_FRAME_W/H).
+pub fn start(source_name: &str, width: u32, height: u32, shared: Arc<Mutex<SyphonHandle>>) -> Result<(), String> {
     let mut h = shared.lock().map_err(|e| e.to_string())?;
     if h.server.is_some() {
         return Err("Syphon already running".into());
     }
+    h.frame_w = if width > 0 { width } else { DEFAULT_FRAME_W };
+    h.frame_h = if height > 0 { height } else { DEFAULT_FRAME_H };
+    let (frame_w, frame_h) = (h.frame_w, h.frame_h);
 
     // 1. Create CGL context — accelerated, legacy GL profile, double-buffered.
     //    Legacy is enough for our 2D upload-and-publish flow and avoids the
@@ -206,14 +220,14 @@ pub fn start(source_name: &str, shared: Arc<Mutex<SyphonHandle>>) -> Result<(), 
         gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_WRAP_T,    gl::CLAMP_TO_EDGE as i32);
         gl::TexImage2D(
             gl::TEXTURE_2D, 0, gl::RGBA as i32,
-            FRAME_W as i32, FRAME_H as i32, 0,
+            frame_w as i32, frame_h as i32, 0,
             gl::RGBA, gl::UNSIGNED_BYTE, std::ptr::null(),
         );
         h.tex_id = tex;
     }
 
     // 4. Allocate a reusable tiny-skia pixmap.
-    h.pixmap = match Pixmap::new(FRAME_W, FRAME_H) {
+    h.pixmap = match Pixmap::new(frame_w, frame_h) {
         Some(p) => Some(p),
         None => {
             free_native_resources(&mut h);
@@ -264,7 +278,7 @@ pub fn start(source_name: &str, shared: Arc<Mutex<SyphonHandle>>) -> Result<(), 
     drop(h);
     update("Nothing on display", "", shared)?;
 
-    eprintln!("[Syphon] server '{}' broadcasting {}x{}", source_name, FRAME_W, FRAME_H);
+    eprintln!("[Syphon] server '{}' broadcasting {}x{}", source_name, frame_w, frame_h);
     Ok(())
 }
 
@@ -345,6 +359,7 @@ fn render_and_publish(h: &mut SyphonHandle) -> Result<(), String> {
     // mutable pixmap (rendering) and the immutable server reference (publish).
     let ctx    = h.ctx;
     let tex_id = h.tex_id;
+    let (frame_w, frame_h) = (h.frame_w, h.frame_h);
 
     // Render via tiny-skia + cosmic-text (same look as ndi.rs). font_system/
     // swash_cache are created once in start() and reused here rather than
@@ -357,7 +372,7 @@ fn render_and_publish(h: &mut SyphonHandle) -> Result<(), String> {
         let pixmap      = h.pixmap.as_mut().ok_or("pixmap missing")?;
         let font_system = h.font_system.as_mut().ok_or("font system missing")?;
         let swash_cache = h.swash_cache.as_mut().ok_or("swash cache missing")?;
-        render_frame(pixmap, &h.latest_verse, &h.latest_reference, h.latest_media.as_ref(), &h.latest_timer, font_system, swash_cache);
+        render_frame(pixmap, frame_w, frame_h, &h.latest_verse, &h.latest_reference, h.latest_media.as_ref(), &h.latest_timer, font_system, swash_cache);
         pixmap.data().as_ptr()
     };
 
@@ -367,7 +382,7 @@ fn render_and_publish(h: &mut SyphonHandle) -> Result<(), String> {
         gl::BindTexture(gl::TEXTURE_2D, tex_id);
         gl::TexSubImage2D(
             gl::TEXTURE_2D, 0, 0, 0,
-            FRAME_W as i32, FRAME_H as i32,
+            frame_w as i32, frame_h as i32,
             gl::RGBA, gl::UNSIGNED_BYTE,
             pixels_ptr as *const _,
         );
@@ -379,9 +394,9 @@ fn render_and_publish(h: &mut SyphonHandle) -> Result<(), String> {
         let server = h.server.as_ref().unwrap();
         let region = NSRect {
             origin: NSPoint { x: 0.0, y: 0.0 },
-            size: NSSize { width: FRAME_W as f64, height: FRAME_H as f64 },
+            size: NSSize { width: frame_w as f64, height: frame_h as f64 },
         };
-        let size = NSSize { width: FRAME_W as f64, height: FRAME_H as f64 };
+        let size = NSSize { width: frame_w as f64, height: frame_h as f64 };
         let _: () = msg_send![
             &**server,
             publishFrameTexture: tex_id,
@@ -400,6 +415,8 @@ fn render_and_publish(h: &mut SyphonHandle) -> Result<(), String> {
 // `update`, but the pixmap allocation is reused.
 fn render_frame(
     pixmap: &mut Pixmap,
+    frame_w: u32,
+    frame_h: u32,
     verse: &str,
     reference: &str,
     media: Option<&image::RgbaImage>,
@@ -419,12 +436,12 @@ fn render_frame(
     // Subtle bottom 38% darker band — lower-third look. Only drawn when
     // there's verse/reference text to sit on; skipped for a bare Media-only
     // frame so a plain background image shows completely clean.
-    let band_h = (FRAME_H as f32 * 0.38) as f32;
+    let band_h = (frame_h as f32 * 0.38) as f32;
     if !verse.is_empty() || !reference.is_empty() {
         let mut band_paint = tiny_skia::Paint::default();
         band_paint.set_color(SkColor::from_rgba8(10, 14, 20, if media.is_some() { 190 } else { 255 }));
         band_paint.anti_alias = false;
-        if let Some(band) = Rect::from_xywh(0.0, FRAME_H as f32 - band_h, FRAME_W as f32, band_h) {
+        if let Some(band) = Rect::from_xywh(0.0, frame_h as f32 - band_h, frame_w as f32, band_h) {
             pixmap.fill_rect(band, &band_paint, Transform::identity(), None);
         }
     }
@@ -435,8 +452,8 @@ fn render_frame(
             reference,
             28.0, 700,
             CtColor::rgb(232, 64, 74),
-            72.0, FRAME_H as f32 - band_h + 32.0,
-            FRAME_W as f32 - 144.0,
+            72.0, frame_h as f32 - band_h + 32.0,
+            frame_w as f32 - 144.0,
         );
     }
     if !verse.is_empty() {
@@ -445,8 +462,8 @@ fn render_frame(
             verse,
             40.0, 500,
             CtColor::rgb(255, 255, 255),
-            72.0, FRAME_H as f32 - band_h + 90.0,
-            FRAME_W as f32 - 144.0,
+            72.0, frame_h as f32 - band_h + 90.0,
+            frame_w as f32 - 144.0,
         );
     }
 
@@ -459,7 +476,7 @@ fn render_frame(
         badge_paint.anti_alias = false;
         let badge_w = 150.0;
         let badge_h = 52.0;
-        if let Some(badge) = Rect::from_xywh(FRAME_W as f32 - badge_w - 24.0, 24.0, badge_w, badge_h) {
+        if let Some(badge) = Rect::from_xywh(frame_w as f32 - badge_w - 24.0, 24.0, badge_w, badge_h) {
             pixmap.fill_rect(badge, &badge_paint, Transform::identity(), None);
         }
         draw_text(
@@ -467,7 +484,7 @@ fn render_frame(
             timer,
             30.0, 700,
             CtColor::rgb(255, 145, 48), // brand orange
-            FRAME_W as f32 - badge_w - 8.0, 32.0,
+            frame_w as f32 - badge_w - 8.0, 32.0,
             badge_w - 8.0,
         );
     }
@@ -479,21 +496,24 @@ fn render_frame(
 // Cover-fit a decoded image into the whole frame — see ndi.rs's own copy of
 // this exact function for the full reasoning (identical logic, duplicated
 // rather than shared since these two files have no common module today).
+// Reads the pixmap's OWN actual dimensions (already allocated at this
+// output's real configured resolution) rather than a fixed frame-size const.
 fn blit_cover_image(pixmap: &mut Pixmap, img: &image::RgbaImage) {
+    let (pix_w, pix_h) = (pixmap.width(), pixmap.height());
     let (iw, ih) = (img.width(), img.height());
     if iw == 0 || ih == 0 { return; }
-    let scale = (FRAME_W as f32 / iw as f32).max(FRAME_H as f32 / ih as f32);
+    let scale = (pix_w as f32 / iw as f32).max(pix_h as f32 / ih as f32);
     let (sw, sh) = (
         (iw as f32 * scale).round().max(1.0) as u32,
         (ih as f32 * scale).round().max(1.0) as u32,
     );
     let resized = image::imageops::resize(img, sw, sh, image::imageops::FilterType::Triangle);
-    let crop_x = (sw.saturating_sub(FRAME_W)) / 2;
-    let crop_y = (sh.saturating_sub(FRAME_H)) / 2;
+    let crop_x = (sw.saturating_sub(pix_w)) / 2;
+    let crop_y = (sh.saturating_sub(pix_h)) / 2;
     let pw = pixmap.width();
     let data = pixmap.data_mut();
-    for y in 0..FRAME_H.min(sh.saturating_sub(crop_y)) {
-        for x in 0..FRAME_W.min(sw.saturating_sub(crop_x)) {
+    for y in 0..pix_h.min(sh.saturating_sub(crop_y)) {
+        for x in 0..pix_w.min(sw.saturating_sub(crop_x)) {
             let px = resized.get_pixel(x + crop_x, y + crop_y).0;
             let (r, g, b, a) = (px[0] as u16, px[1] as u16, px[2] as u16, px[3] as u16);
             let idx = ((y * pw + x) * 4) as usize;
@@ -526,8 +546,11 @@ fn draw_text(
     buf.set_text(font_system, text, attrs, Shaping::Advanced);
     buf.shape_until_scroll(font_system, false);
 
+    // Capture the pixmap's own real dimensions before the mutable borrow
+    // below — same reasoning as blit_cover_image's own copy of this.
+    let (pix_w, pix_h) = (pixmap.width(), pixmap.height());
     let pixels: &mut [u8] = pixmap.data_mut();
-    let stride = (FRAME_W * 4) as usize;
+    let stride = (pix_w * 4) as usize;
     let r = color.r();
     let g = color.g();
     let b = color.b();
@@ -535,7 +558,7 @@ fn draw_text(
     buf.draw(font_system, swash_cache, color, |gx, gy, _w, _h, gc| {
         let px = (x as i32) + gx;
         let py = (y as i32) + gy;
-        if px < 0 || py < 0 || px >= FRAME_W as i32 || py >= FRAME_H as i32 {
+        if px < 0 || py < 0 || px >= pix_w as i32 || py >= pix_h as i32 {
             return;
         }
         // Alpha blend the glyph onto the pixmap.

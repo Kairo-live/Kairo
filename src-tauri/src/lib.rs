@@ -567,7 +567,7 @@ fn ndi_available() -> bool {
 }
 
 #[tauri::command]
-fn ndi_start(app: AppHandle, id: String, source_name: String) -> Result<(), String> {
+fn ndi_start(app: AppHandle, id: String, source_name: String, width: Option<i32>, height: Option<i32>) -> Result<(), String> {
     let state = app.state::<NdiState>();
     let handle = state.handle_for(&id)?;
     {
@@ -580,7 +580,7 @@ fn ndi_start(app: AppHandle, id: String, source_name: String) -> Result<(), Stri
             return Ok(()); // idempotent — already broadcasting or starting
         }
     }
-    let result = ndi::start(&source_name, handle.clone());
+    let result = ndi::start(&source_name, width.unwrap_or(0), height.unwrap_or(0), handle.clone());
     if result.is_err() {
         // start() failed before ever reaching the point where it would clear
         // the reservation itself — clear it here so a retry isn't blocked.
@@ -652,9 +652,9 @@ fn syphon_available() -> bool {
 
 #[cfg(target_os = "macos")]
 #[tauri::command]
-fn syphon_start(app: AppHandle, id: String, source_name: String) -> Result<(), String> {
+fn syphon_start(app: AppHandle, id: String, source_name: String, width: Option<u32>, height: Option<u32>) -> Result<(), String> {
     let state = app.state::<SyphonState>();
-    syphon::start(&source_name, state.handle_for(&id)?)
+    syphon::start(&source_name, width.unwrap_or(0), height.unwrap_or(0), state.handle_for(&id)?)
 }
 
 #[cfg(target_os = "macos")]
@@ -703,7 +703,7 @@ fn syphon_update_timer(app: AppHandle, id: String, text: String) -> Result<(), S
 fn syphon_available() -> bool { false }
 #[cfg(not(target_os = "macos"))]
 #[tauri::command]
-fn syphon_start(_id: String, _source_name: String) -> Result<(), String> {
+fn syphon_start(_id: String, _source_name: String, _width: Option<u32>, _height: Option<u32>) -> Result<(), String> {
     Err("Syphon is macOS-only".into())
 }
 #[cfg(not(target_os = "macos"))]

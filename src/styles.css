@@ -1599,37 +1599,8 @@ input[type="range"]:disabled { opacity: 0.4; cursor: default; }
 .display-output-del:disabled { opacity: 0.35; cursor: not-allowed; }
 .display-output-row { margin-top: 6px; }
 
-/* Output Looks: NDI/Syphon outputs — a LIST of independent named instances
-   (renderNativeOutputs, src/app.js), not one fixed sender each. Too many
-   real fields (toggle/name/source-name/theme/3 layer checks/status/delete)
-   for the base .display-output-row's flat 5-column grid (built for the
-   simpler display-row shape) — a two-line card instead. */
-.native-outputs-list { display: flex; flex-direction: column; gap: 8px; margin: 4px 0; }
-.native-output-row {
-  display: flex !important; /* override .display-output-row's grid */
-  flex-direction: column;
-  align-items: stretch; /* override .display-output-row's center — these two
-                            inner lines should span the row, not shrink-center */
-  gap: 6px;
-  padding: 10px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--bg);
-}
-.native-output-row-top {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.native-output-row-top input[type="text"] { flex: 1; min-width: 0; }
-.native-output-row-bottom {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-.native-output-row-bottom input[type="text"],
-.native-output-row-bottom select { flex: 1; min-width: 110px; }
+/* Output Looks — NDI/Syphon output status text, shown in the master-detail
+   detail panel's own title row (renderNativeOutputDetail, src/app.js). */
 .native-output-status {
   font-size: 10.5px;
   color: var(--text-3);
@@ -1637,6 +1608,75 @@ input[type="range"]:disabled { opacity: 0.4; cursor: default; }
   flex-shrink: 0;
 }
 .native-output-status.is-active { color: var(--green); }
+
+/* ── Outputs master-detail ─────────────────────────────────────────────
+   Owner: "I like how ProPresenter does it better" (its own Screen
+   Configuration panel — a list of every output, detail for whichever's
+   selected) — replaces the old per-type stacked cards. Two columns: a
+   narrow scrollable list, a wider detail panel for whichever's selected. */
+.outputs-master-detail {
+  display: grid;
+  grid-template-columns: 180px 1fr;
+  gap: 14px;
+  align-items: start;
+  min-height: 320px;
+}
+.outputs-list-col { display: flex; flex-direction: column; gap: 8px; }
+.outputs-add-btn { width: 100%; justify-content: center; }
+.outputs-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 4px;
+  max-height: 420px;
+  overflow-y: auto;
+}
+.outputs-list-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 8px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-2);
+  cursor: pointer;
+  text-align: left;
+  transition: background var(--trans), color var(--trans);
+}
+.outputs-list-item:hover { background: var(--bg-hover); color: var(--text); }
+.outputs-list-item.active { background: var(--selected-dim); color: var(--selected-text); }
+.outputs-list-item .bs-dot { flex-shrink: 0; }
+.outputs-list-item-info { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.outputs-list-item-name {
+  font-size: 12px; font-weight: 600;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.outputs-list-item-type {
+  font-size: 9.5px; letter-spacing: 0.04em; text-transform: uppercase;
+  color: var(--text-3);
+}
+.outputs-detail-col {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 320px;
+}
+.outputs-detail-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 2px;
+}
+.outputs-detail-title { font-size: 14px; font-weight: 700; color: var(--text); margin: 0; flex: 1; }
+.outputs-detail-status { font-size: 11px; color: var(--text-3); }
 
 /* ── Playlist ───────────────────────────────────────────────────────────────
    Lives in the left sidebar above the transcript; selecting an item takes over

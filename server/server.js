@@ -2,7 +2,9 @@
 // Express + WebSocket. Handles:
 //   • Deepgram live STT
 //   • Scripture detection: reference parser → verbatim phrase → fingerprint coverage
-//   • ProPresenter REST API integration
+//   • OBS WebSocket integration (ProPresenter picks Kairo up as an NDI/Syphon
+//     input instead of a live message-push integration — see
+//     clearExternalOutputs' own comment for why)
 //   • Settings persistence
 //
 // Detection speed improvements:
@@ -284,24 +286,6 @@ setInterval(() => {
     .then(() => { if (obsConnected) broadcast({ type: 'obs-status', connected: true }); })
     .catch(() => {});   // expected during passive retry — don't log
 }, OBS_RECONNECT_MS);
-
-// ── ProPresenter health-check loop ────────────────────────────────────────
-// ProPresenter's API is stateless HTTP, so "reconnect" really means polling
-// /version and surfacing the live reachable/unreachable state to the UI.
-// Operators routinely launch Kairo first, then PP — this gives them an
-// immediate visual once PP comes up, without having to click "Test" again.
-let lastPpStatus = null;   // null | true | false — change-only broadcast
-const PP_HEALTH_MS = 30_000;
-setInterval(async () => {
-  const s = loadSettings();
-  if (s.proPresenterEnabled === false) return;
-  const r  = await testProPresenterConnection();
-  const ok = !!r.success;
-  if (ok !== lastPpStatus) {
-    lastPpStatus = ok;
-    broadcast({ type: 'pp-status', connected: ok, version: r.version || null });
-  }
-}, PP_HEALTH_MS);
 
 // ── Detection Worker ──────────────────────────────────────────────────────
 let detectionWorker  = null;
@@ -1112,9 +1096,11 @@ function applyScriptureLanguage(verses) {
 
 // The "Translation" dropdown (KJV/NIV/NLT/ESV/NASB/NKJV) never actually
 // swapped displayed text — verse.text was hardcoded to kjv_text everywhere;
-// settings.translation only affected the label appended for ProPresenter
-// (see sendToProPresenter/sendToOBS's own `const t = settings.translation
-// || 'KJV'`). Real distinct text for NKJV/NIV/ESV/NASB (owner had these
+// settings.translation only affected the label appended for OBS (see
+// sendToOBS's own `const t = settings.translation || 'KJV'`; ProPresenter's
+// own equivalent was removed along with its message-push integration — see
+// clearExternalOutputs' own comment). Real distinct text for NKJV/NIV/ESV/
+// NASB (owner had these
 // as real, complete translation files all along — found intact outside the
 // project dir; the earlier "only KJV+NLT are real" state was this data
 // never having been wired in, not the data never existing) now loads from
@@ -1818,16 +1804,6 @@ app.post('/api/settings', async (req, res) => {
   res.json({ ok: true });
 });
 
-app.get('/api/propresenter/test', async (_, res) => {
-  res.json(await testProPresenterConnection());
-});
-
-app.post('/api/propresenter/send', async (req, res) => {
-  const { verse } = req.body;
-  if (!verse) return res.status(400).json({ error: 'No verse provided' });
-  res.json({ ok: await sendToProPresenter(verse) });
-});
-
 // Import slides from a document. The file arrives base64-encoded so this stays
 // on the existing JSON transport rather than needing multipart handling.
 const slideImport = require('./slide_import');
@@ -1874,9 +1850,9 @@ app.post('/api/theme/import-protheme', (req, res) => {
   }
 });
 
-// Send a playlist slide. Unlike /api/propresenter/send this also broadcasts to
-// every display window, and carries an optional per-item `look` so a song can
-// render on the lyrics theme while scripture stays on the output's own theme.
+// Send a playlist slide — broadcasts to every display window (plus NDI/
+// Syphon), and carries an optional per-item `look` so a song can render on
+// the lyrics theme while scripture stays on the output's own theme.
 app.post('/api/service/send', async (req, res) => {
   const { verse, look } = req.body;
   if (!verse) return res.status(400).json({ error: 'No slide provided' });
@@ -1957,11 +1933,6 @@ app.post('/api/translate', async (req, res) => {
   } catch (err) {
     res.status(err.code === 'NO_TRANSLATE_ENGINE' ? 400 : 500).json({ error: err.message, code: err.code || null });
   }
-});
-
-app.post('/api/propresenter/clear', async (_, res) => {
-  await clearProPresenter();
-  res.json({ ok: true });
 });
 
 // ── Media library (images/video for the independent output layer) ────────
@@ -4148,7 +4119,7 @@ function maybeCorrectMiscitation(topMatch, sourceText) {
   });
 
   // Push to outputs directly — bypass broadcastDetection's same-key dedup since
-  // we specifically want to replace the mis-cited verse on ProPresenter/OBS.
+  // we specifically want to replace the mis-cited verse on OBS.
   lastSentBook       = topMatch.book;
   lastSentBookTime   = now;
   lastDetectedRef    = `${topMatch.book}|${topMatch.chapter}|${topMatch.verse}`;
@@ -4804,137 +4775,26 @@ async function sendToOutputs(verse) {
   // rather than re-reading settings.json from disk on every single verse —
   // this runs on the detection hot path and disk I/O here adds latency
   // directly to seconds-to-screen.
+  // ProPresenter's own message-push integration was removed (owner: "I
+  // don't think anyone who owns ProPresenter will rather let us use
+  // messages to send to their ProPresenter than just send themselves") —
+  // ProPresenter picks Kairo up as a normal NDI/Syphon input instead, same
+  // as any other video source, which also gives it full Media/Timer parity
+  // a text-message push never could. OBS is unaffected — its own simple
+  // text-source WebSocket integration stays as a lightweight option
+  // alongside recommending an NDI/Syphon source there too.
   const tasks = [];
-  if (settings.proPresenterEnabled !== false) tasks.push(sendToProPresenter(verse).catch(err => console.warn('[ProPresenter] send failed:', err.message)));
-  if (settings.obsEnabled && obsConnected)    tasks.push(sendToOBS(verse).catch(err => console.warn('[OBS] send failed:', err.message)));
+  if (settings.obsEnabled && obsConnected) tasks.push(sendToOBS(verse).catch(err => console.warn('[OBS] send failed:', err.message)));
   await Promise.all(tasks);
 }
 
-// ── ProPresenter ──────────────────────────────────────────────────────────
-let _ppCachedMsg = null;
-let _ppCachedUrl = null;
-
-async function sendToProPresenter(verse) {
-  const url = settings.proPresenterUrl || 'http://localhost:1025';
-  const t   = settings.translation || 'KJV';
-
-  const vKey = `${verse.book}|${verse.chapter}|${verse.verse}`;
-  const now  = Date.now();
-  if (vKey === lastSentRef && now - lastSentTime < SEND_DEDUP_MS) return true;
-  lastSentRef  = vKey;
-  lastSentTime = now;
-
-  const refLine   = `${verse.reference} (${t})`;
-  const verseText = verse.text;
-  const jsonHeaders = { headers: { 'Content-Type': 'application/json' }, timeout: 3000 };
-
-  try {
-    try {
-      if (!_ppCachedMsg || _ppCachedUrl !== url) {
-        const messagesRes = await axios.get(`${url}/v1/messages`, { timeout: 3000 });
-        const messages    = Array.isArray(messagesRes.data) ? messagesRes.data : [];
-        const scriptureMsg = messages.find(m => {
-          const name = (m.id?.name || m.name || '').toLowerCase();
-          return /scripture|bible|verse|kairo/.test(name);
-        });
-        if (scriptureMsg) {
-          const msgId     = scriptureMsg.id?.uuid || scriptureMsg.uuid || scriptureMsg.id;
-          const detailRes = await axios.get(`${url}/v1/message/${msgId}`, { timeout: 3000 });
-          const tokens    = detailRes.data.tokens || detailRes.data.message?.tokens || [];
-          _ppCachedMsg = { msgId, tokens };
-          _ppCachedUrl = url;
-        } else {
-          _ppCachedMsg = null; _ppCachedUrl = url;
-        }
-      }
-
-      if (_ppCachedMsg) {
-        const { msgId, tokens } = _ppCachedMsg;
-        const swapOrder = settings.ppSwapTokenOrder || false;
-        let triggerTokens;
-
-        if (tokens.length >= 2) {
-          let refAssigned = false, textAssigned = false;
-          const nameAttempt = tokens.map(tk => {
-            const tName = (tk.name || tk.id?.name || '').toLowerCase();
-            let value = null;
-            if (!refAssigned && /ref|book|passage|location|cite|title|header|citation/i.test(tName)) {
-              value = refLine; refAssigned = true;
-            } else if (!textAssigned && /text|body|content|verse|scripture|lyric|line|quote/i.test(tName)) {
-              value = verseText; textAssigned = true;
-            }
-            return { name: tk.name || tk.id?.name, value };
-          });
-          if (refAssigned && textAssigned) {
-            triggerTokens = nameAttempt.map(t2 => ({ name: t2.name, text: { text: t2.value } }));
-          } else {
-            const first  = swapOrder ? refLine : verseText;
-            const second = swapOrder ? verseText : refLine;
-            triggerTokens = tokens.map((tk, idx) => ({
-              name: tk.name || tk.id?.name,
-              text: { text: idx === 0 ? first : idx === 1 ? second : '' },
-            }));
-          }
-        } else if (tokens.length === 1) {
-          const tokenName = tokens[0].name || tokens[0].id?.name || 'Text';
-          triggerTokens = [{ name: tokenName, text: { text: `${refLine}\r\n${verseText}` } }];
-        } else {
-          triggerTokens = [
-            { name: 'Reference', text: { text: refLine } },
-            { name: 'Text',      text: { text: verseText } },
-          ];
-        }
-
-        await axios.post(`${url}/v1/message/${msgId}/trigger`, JSON.stringify(triggerTokens), jsonHeaders);
-        broadcast({ type: 'propresenter-success', verse: { reference: verse.reference, text: verseText } });
-        return true;
-      }
-    } catch { _ppCachedMsg = null; _ppCachedUrl = null; }
-
-    await axios.put(`${url}/v1/stage/message`, JSON.stringify(`${refLine}\r\n\r\n${verseText}`), jsonHeaders);
-    broadcast({ type: 'propresenter-success', verse: { reference: verse.reference, text: verseText } });
-    return true;
-
-  } catch (err) {
-    broadcast({ type: 'propresenter-error', error: err.message });
-    return false;
-  }
-}
-
-async function clearProPresenter() {
-  const url = settings.proPresenterUrl || 'http://localhost:1025';
-  try {
-    if (_ppCachedMsg?.msgId) {
-      await axios.delete(`${url}/v1/message/${_ppCachedMsg.msgId}/trigger`, { timeout: 3000 });
-    }
-  } catch {}
-}
-
 // Clearing the KAIRO output window alone isn't "the display" for an
-// operator running ProPresenter/OBS alongside it — those only ever receive
-// discrete sendToOutputs() pushes (see above), never a "clear" of their
-// own, so the last slide sent would keep showing there even after the
-// internal display went blank. Both layer-clear routes below call this for
-// the slide layer, matching what actually gets pushed externally today
-// (verse sends only — there's no media-layer equivalent sent out).
+// operator running OBS alongside it — OBS only ever receives discrete
+// sendToOutputs() pushes (see above), never a "clear" of its own, so the
+// last slide sent would keep showing there even after the internal display
+// went blank. Both layer-clear routes below call this for the slide layer.
 async function clearExternalOutputs() {
-  await Promise.all([clearProPresenter(), clearOBSText()]);
-}
-
-async function testProPresenterConnection() {
-  const url = settings.proPresenterUrl || 'http://localhost:1025';
-  try {
-    const r = await axios.get(`${url}/version`, { timeout: 3000 });
-    const version = r.data?.data?.host_description || r.data?.host_description || r.data?.version || 'Connected';
-    return { success: true, version };
-  } catch {
-    try {
-      const r2 = await axios.get(`${url}/v1/version`, { timeout: 3000 });
-      return { success: true, version: r2.data?.version || 'Connected' };
-    } catch (e2) {
-      return { success: false, error: e2.message };
-    }
-  }
+  await clearOBSText();
 }
 
 // ── Start ─────────────────────────────────────────────────────────────────
@@ -4965,8 +4825,8 @@ server.on('error', (err) => {
 // (server/eval/run_eval.js), which does `require('../server.js')` to call
 // into the SAME functions the live path uses (handleTranscriptSegment,
 // resetDetectionSession) rather than a reimplementation that could drift,
-// without wanting a real Deepgram connection, OBS/ProPresenter polling, or
-// an HTTP server bound to the live port.
+// without wanting a real Deepgram connection, OBS polling, or an HTTP
+// server bound to the live port.
 if (require.main === module) {
   startListening();
 } else {

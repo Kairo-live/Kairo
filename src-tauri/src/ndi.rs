@@ -22,8 +22,11 @@ use std::time::Duration;
 use crossbeam_channel::{bounded, Sender};
 use libloading::{Library, Symbol};
 
-const FRAME_W: i32 = 1280;
-const FRAME_H: i32 = 720;
+// Output Looks: resolution is now per-output-configurable (the "add" flow
+// on the frontend asks for it, alongside the network source name) — these
+// two are only the fallback when a caller passes 0/invalid values.
+const DEFAULT_FRAME_W: i32 = 1280;
+const DEFAULT_FRAME_H: i32 = 720;
 const SEND_FPS_N: i32 = 15;     // Frame-rate numerator (15/1 = 15 fps)
 const SEND_FPS_D: i32 = 1;
 // FourCC for BGRA = ('B','G','R','A') little-endian = 0x41524742
@@ -249,10 +252,15 @@ pub fn is_libndi_available() -> bool {
 
 /// Start the NDI sender on a background thread. Returns Err if libndi can't
 /// be loaded — the caller surfaces this to the UI as a friendly install hint.
-pub fn start(source_name: &str, shared: Arc<Mutex<NdiHandle>>) -> Result<(), String> {
+/// `width`/`height`: this output's own configured resolution (Output Looks'
+/// "add an output" flow asks for it) — 0 or negative falls back to the
+/// DEFAULT_FRAME_W/H above rather than producing a zero-size/invalid frame.
+pub fn start(source_name: &str, width: i32, height: i32, shared: Arc<Mutex<NdiHandle>>) -> Result<(), String> {
     let lib = LibNdi::try_load()
         .ok_or_else(|| "NDI runtime not found. Install NDI Tools from ndi.video/tools (free) and try again.".to_string())?;
 
+    let frame_w = if width > 0 { width } else { DEFAULT_FRAME_W };
+    let frame_h = if height > 0 { height } else { DEFAULT_FRAME_H };
     let (tx, rx) = bounded::<NdiCmd>(64);
 
     let name = source_name.to_string();
@@ -279,10 +287,10 @@ pub fn start(source_name: &str, shared: Arc<Mutex<NdiHandle>>) -> Result<(), Str
                 (lib.destroy)();
                 return;
             }
-            eprintln!("[NDI] Sender '{}' created — broadcasting {}x{} @ {}fps", name, FRAME_W, FRAME_H, SEND_FPS_N);
+            eprintln!("[NDI] Sender '{}' created — broadcasting {}x{} @ {}fps", name, frame_w, frame_h, SEND_FPS_N);
 
             // Persistent BGRA buffer we re-render into.
-            let mut buf: Vec<u8> = vec![0u8; (FRAME_W * FRAME_H * 4) as usize];
+            let mut buf: Vec<u8> = vec![0u8; (frame_w * frame_h * 4) as usize];
             let mut latest_verse = String::new();
             let mut latest_ref   = String::new();
             let mut latest_timer = String::new();
@@ -299,7 +307,7 @@ pub fn start(source_name: &str, shared: Arc<Mutex<NdiHandle>>) -> Result<(), Str
             let mut font_system = FontSystem::new();
             let mut swash_cache = SwashCache::new();
             // Render initial empty/idle frame
-            render_frame(&mut buf, &latest_verse, &latest_ref, latest_media.as_ref(), &latest_timer, &mut font_system, &mut swash_cache);
+            render_frame(&mut buf, frame_w, frame_h, &latest_verse, &latest_ref, latest_media.as_ref(), &latest_timer, &mut font_system, &mut swash_cache);
 
             let frame_period = Duration::from_millis(1000 / SEND_FPS_N as u64);
             loop {
@@ -334,21 +342,21 @@ pub fn start(source_name: &str, shared: Arc<Mutex<NdiHandle>>) -> Result<(), Str
                 }
                 if should_stop { break; }
                 if got_update {
-                    render_frame(&mut buf, &latest_verse, &latest_ref, latest_media.as_ref(), &latest_timer, &mut font_system, &mut swash_cache);
+                    render_frame(&mut buf, frame_w, frame_h, &latest_verse, &latest_ref, latest_media.as_ref(), &latest_timer, &mut font_system, &mut swash_cache);
                 }
 
                 // Send the current frame.
                 let frame = NdiVideoFrameV2T {
-                    xres: FRAME_W,
-                    yres: FRAME_H,
+                    xres: frame_w,
+                    yres: frame_h,
                     fourcc: FOURCC_BGRA,
                     frame_rate_n: SEND_FPS_N,
                     frame_rate_d: SEND_FPS_D,
-                    picture_aspect_ratio: FRAME_W as f32 / FRAME_H as f32,
+                    picture_aspect_ratio: frame_w as f32 / frame_h as f32,
                     frame_format_type: 1, // progressive
                     timecode: i64::MIN,    // NDI_SEND_TIMECODE_SYNTHESIZE
                     p_data: buf.as_ptr(),
-                    line_stride_in_bytes: FRAME_W * 4,
+                    line_stride_in_bytes: frame_w * 4,
                     p_metadata: std::ptr::null(),
                     timestamp: 0,
                 };
@@ -395,6 +403,8 @@ pub fn start(source_name: &str, shared: Arc<Mutex<NdiHandle>>) -> Result<(), Str
 
 fn render_frame(
     buf: &mut [u8],
+    frame_w: i32,
+    frame_h: i32,
     verse: &str,
     reference: &str,
     media: Option<&image::RgbaImage>,
@@ -407,7 +417,7 @@ fn render_frame(
 
     // Skia pixmap that aliases our shared buffer. We re-use the same allocation
     // every frame to avoid GC churn.
-    let mut pixmap = Pixmap::new(FRAME_W as u32, FRAME_H as u32).unwrap();
+    let mut pixmap = Pixmap::new(frame_w as u32, frame_h as u32).unwrap();
     // Media layer is the base: a real photo/graphic fills the whole frame
     // (cover fit, same convention as display.html's default image `fit`)
     // when active, exactly like it would sit BEHIND the slide/timer layers
@@ -422,12 +432,12 @@ fn render_frame(
     // there's actual verse/reference text to put on it; skip it over a bare
     // Media-only frame (nothing to letterbox) so a plain background image
     // shows completely clean.
-    let band_h = (FRAME_H as f32 * 0.38) as f32;
+    let band_h = (frame_h as f32 * 0.38) as f32;
     if !verse.is_empty() || !reference.is_empty() {
         let mut band_paint = tiny_skia::Paint::default();
         band_paint.set_color(SkColor::from_rgba8(10, 14, 20, if media.is_some() { 190 } else { 255 }));
         band_paint.anti_alias = false;
-        let band = Rect::from_xywh(0.0, FRAME_H as f32 - band_h, FRAME_W as f32, band_h).unwrap();
+        let band = Rect::from_xywh(0.0, frame_h as f32 - band_h, frame_w as f32, band_h).unwrap();
         pixmap.fill_rect(band, &band_paint, Transform::identity(), None);
     }
 
@@ -443,8 +453,8 @@ fn render_frame(
             reference,
             "sans-serif", 28.0, 700,
             CtColor::rgb(232, 64, 74), // brand red
-            72.0, FRAME_H as f32 - band_h + 32.0,
-            FRAME_W as f32 - 144.0,
+            72.0, frame_h as f32 - band_h + 32.0,
+            frame_w as f32 - 144.0,
         );
     }
     // Verse — larger, white.
@@ -454,8 +464,8 @@ fn render_frame(
             verse,
             "sans-serif", 40.0, 500,
             CtColor::rgb(255, 255, 255),
-            72.0, FRAME_H as f32 - band_h + 90.0,
-            FRAME_W as f32 - 144.0,
+            72.0, frame_h as f32 - band_h + 90.0,
+            frame_w as f32 - 144.0,
         );
     }
 
@@ -468,14 +478,14 @@ fn render_frame(
         badge_paint.anti_alias = false;
         let badge_w = 150.0;
         let badge_h = 52.0;
-        let badge = Rect::from_xywh(FRAME_W as f32 - badge_w - 24.0, 24.0, badge_w, badge_h).unwrap();
+        let badge = Rect::from_xywh(frame_w as f32 - badge_w - 24.0, 24.0, badge_w, badge_h).unwrap();
         pixmap.fill_rect(badge, &badge_paint, Transform::identity(), None);
         draw_text(
             &mut pixmap, font_system, swash_cache,
             timer,
             "sans-serif", 30.0, 700,
             CtColor::rgb(255, 145, 48), // brand orange
-            FRAME_W as f32 - badge_w - 8.0, 32.0,
+            frame_w as f32 - badge_w - 8.0, 32.0,
             badge_w - 8.0,
         );
     }
@@ -485,7 +495,7 @@ fn render_frame(
     // r/g/b/a one at a time) gives the compiler a much better shot at
     // auto-vectorizing this per-frame pass.
     let src = pixmap.data();
-    let n   = (FRAME_W * FRAME_H) as usize * 4;
+    let n   = (frame_w * frame_h) as usize * 4;
     let copy_len = n.min(src.len()).min(buf.len());
     for (dst_px, src_px) in buf[..copy_len].chunks_exact_mut(4).zip(src[..copy_len].chunks_exact(4)) {
         dst_px[0] = src_px[2];
@@ -500,20 +510,24 @@ fn render_frame(
     // (before the band/text draws), so there's nothing underneath yet to
     // blend against.
     fn blit_cover_image(pixmap: &mut tiny_skia::Pixmap, img: &image::RgbaImage) {
+        // Reads the pixmap's OWN actual dimensions rather than a fixed
+        // frame-size const — it's already allocated at this output's real
+        // configured resolution by the time render_frame calls this.
+        let (pix_w, pix_h) = (pixmap.width(), pixmap.height());
         let (iw, ih) = (img.width(), img.height());
         if iw == 0 || ih == 0 { return; }
-        let scale = (FRAME_W as f32 / iw as f32).max(FRAME_H as f32 / ih as f32);
+        let scale = (pix_w as f32 / iw as f32).max(pix_h as f32 / ih as f32);
         let (sw, sh) = (
             (iw as f32 * scale).round().max(1.0) as u32,
             (ih as f32 * scale).round().max(1.0) as u32,
         );
         let resized = image::imageops::resize(img, sw, sh, image::imageops::FilterType::Triangle);
-        let crop_x = (sw.saturating_sub(FRAME_W as u32)) / 2;
-        let crop_y = (sh.saturating_sub(FRAME_H as u32)) / 2;
+        let crop_x = (sw.saturating_sub(pix_w)) / 2;
+        let crop_y = (sh.saturating_sub(pix_h)) / 2;
         let pw = pixmap.width();
         let data = pixmap.data_mut();
-        for y in 0..(FRAME_H as u32).min(sh.saturating_sub(crop_y)) {
-            for x in 0..(FRAME_W as u32).min(sw.saturating_sub(crop_x)) {
+        for y in 0..pix_h.min(sh.saturating_sub(crop_y)) {
+            for x in 0..pix_w.min(sw.saturating_sub(crop_x)) {
                 let px = resized.get_pixel(x + crop_x, y + crop_y).0;
                 let (r, g, b, a) = (px[0] as u16, px[1] as u16, px[2] as u16, px[3] as u16);
                 // tiny-skia Pixmap data is premultiplied RGBA — straight-alpha
