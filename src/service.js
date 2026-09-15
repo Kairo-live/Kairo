@@ -5518,6 +5518,27 @@
       : { label: b.label, lines: b.lines || (b.text ? b.text.split('\n') : []) });
   }
 
+  // Server dedupes repeated images across an import (one file's background reused
+  // across many slides/layers) into a single `media` array plus `srcRef`/`imageRef`
+  // indices on each block/layer, to avoid a multi-hundred-MB response. Expand those
+  // references back into real `src`/`image` values here so nothing downstream
+  // (beginImportResult, toBlocksItem, confirmAddConfirm) needs to know about the wire format.
+  function rehydrateMedia(d) {
+    const media = d && d.media;
+    if (!Array.isArray(media) || !media.length) return d;
+    const rehydrateBlocks = (blocks) => {
+      for (const b of blocks || []) {
+        if (b.imageRef !== undefined) { b.image = media[b.imageRef]; delete b.imageRef; }
+        for (const l of (b.layers || [])) {
+          if (l.srcRef !== undefined) { l.src = media[l.srcRef]; delete l.srcRef; }
+        }
+      }
+    };
+    if (Array.isArray(d.items)) { for (const item of d.items) rehydrateBlocks(item.blocks); }
+    else if (Array.isArray(d.blocks)) rehydrateBlocks(d.blocks);
+    return d;
+  }
+
   async function importArrayBufferAsFile(file) {
     const buf = await file.arrayBuffer();
     const bytes = new Uint8Array(buf);
@@ -5531,7 +5552,7 @@
     }, MEDIA_UPLOAD_TIMEOUT_MS);
     const d = await r.json();
     if (!r.ok || d.error) throw new Error(d.error || 'import failed');
-    return d;
+    return rehydrateMedia(d);
   }
 
   async function importTextViaServer(text) {
@@ -5541,7 +5562,7 @@
     });
     const d = await r.json();
     if (d.error) throw new Error(d.error);
-    return d;
+    return rehydrateMedia(d);
   }
 
   // A .proplaylist import resolves to multiple presentations (one per item

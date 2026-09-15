@@ -1844,10 +1844,15 @@ app.post('/api/service/import', (req, res) => {
     // than one flat block list — everything else keeps the single-item shape.
     if (out.items) {
       if (!out.items.length) return res.status(422).json({ error: 'No presentations found in that playlist' });
-      return res.json({ ok: true, format: out.format, items: out.items });
+      // Dedup identical image src values into a shared media array before
+      // this goes over the wire — see dedupeImageLayers' own comment for
+      // the real incident (a 344MB response from a 31MB source file).
+      const media = slideImport.dedupeImageLayers(out.items);
+      return res.json({ ok: true, format: out.format, items: out.items, media });
     }
     if (!out.blocks.length) return res.status(422).json({ error: 'No text found in that file' });
-    res.json({ ok: true, ...out });
+    const media = slideImport.dedupeImageLayers(out.blocks);
+    res.json({ ok: true, ...out, media });
   } catch (err) {
     res.status(422).json({ error: err.message, code: err.code || null });
   }

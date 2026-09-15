@@ -726,6 +726,50 @@ function fromProPlaylist(buf) {
   return presentations;
 }
 
+// Dedup identical base64 image `src` values across every block/layer of an
+// import result before it goes over the wire. Real incident, owner-
+// reported: "the add modal had a delay before showing... especially when
+// trying to import files" — traced to a real 9-slide presentation sharing
+// just 5 unique background images, but producing 167 image LAYERS (one per
+// slide × text/image combo) each re-embedding its own full base64 copy —
+// a 344MB response for a 31MB source file, instead of the ~15MB the 5
+// unique images actually need. decodeElement (theme_import.js) resolves
+// media per-Element with no memory of what it already encoded, since it
+// has no reason to — a single .protheme slide never repeats the same
+// image across many elements the way a whole deck repeats one background
+// across many slides.
+//
+// Replaces each image layer's `src` with an index into a shared `media`
+// array carried once on the response; server.js's /api/service/import
+// route calls this right before responding. The client rehydrates real
+// src values back in immediately on receipt (service.js, right where this
+// exact response is first parsed) — transparent to every other layer of
+// the app, which still only ever sees a real data: URI, same as before
+// this existed.
+function dedupeImageLayers(itemsOrBlocks) {
+  const media = [];
+  const indexBySrc = new Map();
+  const ref = (src) => {
+    let idx = indexBySrc.get(src);
+    if (idx === undefined) { idx = media.length; media.push(src); indexBySrc.set(src, idx); }
+    return idx;
+  };
+  const dedupeBlocks = (blocks) => {
+    for (const b of blocks || []) {
+      if (b.image) { b.imageRef = ref(b.image); delete b.image; }
+      for (const l of (b.layers || [])) {
+        if (l.type === 'image' && l.src) { l.srcRef = ref(l.src); delete l.src; }
+      }
+    }
+  };
+  if (Array.isArray(itemsOrBlocks) && itemsOrBlocks[0] && itemsOrBlocks[0].blocks) {
+    for (const item of itemsOrBlocks) dedupeBlocks(item.blocks); // playlist shape
+  } else {
+    dedupeBlocks(itemsOrBlocks); // single-presentation flat block list
+  }
+  return media;
+}
+
 function importSlides(filename, buf) {
   const ext = String(filename || '').toLowerCase().split('.').pop();
   switch (ext) {
@@ -758,7 +802,7 @@ function importSlides(filename, buf) {
 }
 
 module.exports = {
-  importSlides, fromText,
+  importSlides, fromText, dedupeImageLayers,
   // Shared with theme_import.js (.protheme is the same zip-of-protobuf
   // family as .pro7/.probundle/.proplaylist) so the wire-format reader has
   // one implementation, not two drifting copies.
