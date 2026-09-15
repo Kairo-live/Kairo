@@ -1508,11 +1508,15 @@
                      friends (src/app.js) — no static per-type markup here
                      beyond this shell + the add-type popover. -->
                 <div class="settings-section outputs-shell">
-                    <div class="settings-section-label">Outputs</div>
-                    <p class="setting-hint" style="margin:-4px 0 8px;">Add as many outputs as you need — each gets its own theme, its own Slide/Media/Timer visibility, and (for NDI/Syphon) its own resolution.</p>
+                    <div class="outputs-shell-header">
+                        <div>
+                            <div class="settings-section-label" style="border-bottom:none;padding-bottom:0;margin-bottom:2px;">Outputs</div>
+                            <p class="setting-hint" style="margin:0;">Add as many outputs as you need — each gets its own theme, its own Slide/Media/Timer visibility, and (for NDI/Syphon) its own resolution.</p>
+                        </div>
+                        <button id="outputs-add-btn" class="modal-btn primary outputs-add-btn">+ Add Output</button>
+                    </div>
                     <div class="outputs-master-detail">
                         <div class="outputs-list-col">
-                            <button id="outputs-add-btn" class="modal-btn secondary outputs-add-btn">+ Add Output</button>
                             <div id="outputs-list" class="outputs-list"></div>
                         </div>
                         <div class="outputs-detail-col" id="outputs-detail"></div>

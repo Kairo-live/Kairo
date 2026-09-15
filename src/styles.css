@@ -1612,17 +1612,28 @@ input[type="range"]:disabled { opacity: 0.4; cursor: default; }
 /* ── Outputs master-detail ─────────────────────────────────────────────
    Owner: "I like how ProPresenter does it better" (its own Screen
    Configuration panel — a list of every output, detail for whichever's
-   selected) — replaces the old per-type stacked cards. Two columns: a
-   narrow scrollable list, a wider detail panel for whichever's selected. */
+   selected) — replaces the old per-type stacked cards. "+ Add Output"
+   lives in its own full-width header row (own grid row, above both
+   columns) rather than inside the list column — the list/detail borders
+   then both start at the exact same y position (a real reported bug:
+   having the button inside the list column pushed ITS border down,
+   visibly misaligned against the detail column's border starting higher). */
+.outputs-shell-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 4px;
+}
+.outputs-add-btn { flex-shrink: 0; }
 .outputs-master-detail {
   display: grid;
-  grid-template-columns: 180px 1fr;
+  grid-template-columns: 200px 1fr;
   gap: 14px;
   align-items: start;
   min-height: 320px;
 }
-.outputs-list-col { display: flex; flex-direction: column; gap: 8px; }
-.outputs-add-btn { width: 100%; justify-content: center; }
+.outputs-list-col { display: flex; flex-direction: column; }
 .outputs-list {
   display: flex;
   flex-direction: column;
@@ -1649,7 +1660,7 @@ input[type="range"]:disabled { opacity: 0.4; cursor: default; }
 .outputs-list-item:hover { background: var(--bg-hover); color: var(--text); }
 .outputs-list-item.active { background: var(--selected-dim); color: var(--selected-text); }
 .outputs-list-item .bs-dot { flex-shrink: 0; }
-.outputs-list-item-info { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.outputs-list-item-info { display: flex; flex-direction: column; gap: 1px; min-width: 0; flex: 1; }
 .outputs-list-item-name {
   font-size: 12px; font-weight: 600;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -1658,6 +1669,10 @@ input[type="range"]:disabled { opacity: 0.4; cursor: default; }
   font-size: 9.5px; letter-spacing: 0.04em; text-transform: uppercase;
   color: var(--text-3);
 }
+/* On/off indicator per row (Display excluded — its "on" state is already
+   the screen-assignment picker itself, a separate concept from a plain
+   enable switch). Stops its own click from also selecting the row. */
+.outputs-list-item .output-toggle { flex-shrink: 0; }
 .outputs-detail-col {
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);

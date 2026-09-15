@@ -9050,10 +9050,15 @@ function renderOutputsList() {
   if (!outputs.some(o => o.id === selectedOutputId)) selectedOutputId = outputs[0]?.id || null;
   host.innerHTML = '';
   outputs.forEach(o => {
-    const row = document.createElement('button');
-    row.type = 'button';
+    // A plain <div> (not <button>) — a real on/off <input> lives inside
+    // each row (see below), and a checkbox/label nested inside a <button>
+    // is invalid HTML that behaves inconsistently across browsers. Keyboard/
+    // click selection still works via tabindex + a click handler on the row.
+    const row = document.createElement('div');
     row.className = 'outputs-list-item' + (o.id === selectedOutputId ? ' active' : '');
     row.dataset.outputId = o.id;
+    row.tabIndex = 0;
+    row.setAttribute('role', 'button');
 
     const dot = document.createElement('span');
     dot.className = 'bs-dot';
@@ -9079,13 +9084,82 @@ function renderOutputsList() {
 
     row.appendChild(dot);
     row.appendChild(info);
+
+    // On/off indicator, right in the list — owner: "each output should
+    // have an indicator to turn it on or off" (not just in the detail
+    // panel). Display is excluded: its "on" state IS the screen-assignment
+    // picker (None = off), a separate, already-visible concept — a second
+    // enable switch here would just be redundant/confusing for that type.
+    if (o.type !== 'display') {
+      row.appendChild(buildOutputRowToggle(o));
+    }
+
     row.addEventListener('click', () => {
       selectedOutputId = o.id;
       renderOutputsList();
       renderOutputsDetail();
     });
+    row.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); row.click(); }
+    });
     host.appendChild(row);
   });
+}
+
+// The on/off switch embedded directly in each list row (see its own call
+// site's comment above). Reuses the exact enable/disable logic each detail
+// panel's own toggle/Start-Stop button already has — one real
+// implementation per output type, called from two places, not duplicated.
+function buildOutputRowToggle(o) {
+  const label = document.createElement('label');
+  label.className = 'output-toggle';
+  label.title = `Enable this ${outputTypeLabel(o.type)} output`;
+  const input = document.createElement('input');
+  input.type = 'checkbox';
+  const track = document.createElement('span');
+  track.className = 'output-toggle-track';
+  label.appendChild(input); label.appendChild(track);
+  // Never let the toggle's own click also select the row underneath it —
+  // both fire on the same event otherwise (label click bubbles to row).
+  label.addEventListener('click', (e) => e.stopPropagation());
+
+  if (o.type === 'obs') {
+    input.checked = settings.obsEnabled === true;
+    input.addEventListener('change', () => {
+      settings.obsEnabled = input.checked;
+      saveSettingsPatch({ obsEnabled: input.checked });
+      renderOutputsList();
+      if (selectedOutputId === o.id) renderOutputsDetail();
+    });
+    return label;
+  }
+
+  // ndi/syphon
+  const kind = o.type;
+  input.checked = !!o.raw.enabled;
+  input.addEventListener('change', async () => {
+    const invokeFn = window.__TAURI__?.core?.invoke || window.__TAURI__?.invoke;
+    if (!invokeFn) { input.checked = false; toast(`${outputTypeLabel(kind)} not available (run inside the app)`, 'error'); return; }
+    if (input.checked) {
+      try {
+        await invokeFn(`${kind}_start`, {
+          id: o.id, sourceName: o.raw.sourceName || 'KAIRO Scripture',
+          width: o.raw.width || 1920, height: o.raw.height || 1080,
+        });
+        updateNativeOutput(kind, o.id, { enabled: true });
+        window.KairoNativeOutputs?.pushToOne?.(kind, o.id);
+      } catch (e) {
+        input.checked = false;
+        toast(`${outputTypeLabel(kind)} failed: ` + e, 'error');
+      }
+    } else {
+      try { await invokeFn(`${kind}_stop`, { id: o.id }); } catch {}
+      updateNativeOutput(kind, o.id, { enabled: false });
+    }
+    renderOutputsList();
+    if (selectedOutputId === o.id) renderOutputsDetail();
+  });
+  return label;
 }
 
 function renderOutputsDetail() {
