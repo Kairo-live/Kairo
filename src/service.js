@@ -5535,14 +5535,46 @@
       : { label: b.label, lines: b.lines || (b.text ? b.text.split('\n') : []) });
   }
 
+  // ProPresenter's own source images routinely come in far above the fixed
+  // 1920x1080 canvas every Kairo slide actually renders at (real incident:
+  // a 4800x2700 PNG background, 15MB as base64) — every one of those bytes
+  // gets re-sent on EVERY single click-to-send (the live "look" payload is
+  // sent fresh each time, not cached/referenced), which is exactly what
+  // turned into the reported "tiny delay" the moment a click sent that
+  // slide. Same canvas-based downscale `readImage`/`readImageFromUrl`
+  // already use for a manually-imported image, just sourced from a data URI
+  // already in memory instead of a File/URL.
+  function resizeDataUriIfOversized(src) {
+    return new Promise(resolve => {
+      const m = typeof src === 'string' && /^data:(image\/\w+);base64,/.exec(src);
+      if (!m) return resolve(src); // not an image data URI — leave untouched
+      const img = new Image();
+      img.onerror = () => resolve(src); // never lose the image over a decode failure
+      img.onload = () => {
+        const scale = Math.min(1, 1920 / img.naturalWidth);
+        if (scale >= 1) return resolve(src); // already within the real canvas size
+        const c = document.createElement('canvas');
+        c.width = Math.round(img.naturalWidth * scale);
+        c.height = Math.round(img.naturalHeight * scale);
+        c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+        resolve(c.toDataURL(/png|webp/i.test(m[1]) ? 'image/png' : 'image/jpeg', 0.86));
+      };
+      img.src = src;
+    });
+  }
+
   // Server dedupes repeated images across an import (one file's background reused
   // across many slides/layers) into a single `media` array plus `srcRef`/`imageRef`
   // indices on each block/layer, to avoid a multi-hundred-MB response. Expand those
   // references back into real `src`/`image` values here so nothing downstream
   // (beginImportResult, toBlocksItem, confirmAddConfirm) needs to know about the wire format.
-  function rehydrateMedia(d) {
+  // Downscales each UNIQUE media entry once here too (see resizeDataUriIfOversized) —
+  // the natural, cheap place to do it, since `media` already holds each real
+  // image exactly once no matter how many slides/layers reference it.
+  async function rehydrateMedia(d) {
     const media = d && d.media;
     if (!Array.isArray(media) || !media.length) return d;
+    for (let i = 0; i < media.length; i++) media[i] = await resizeDataUriIfOversized(media[i]);
     const rehydrateBlocks = (blocks) => {
       for (const b of blocks || []) {
         if (b.imageRef !== undefined) { b.image = media[b.imageRef]; delete b.imageRef; }
