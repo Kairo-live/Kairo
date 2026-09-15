@@ -2066,18 +2066,29 @@ async function testObsConnection(statusEl, btn) {
 // connection each click) — this just reads the server's already-tracked
 // obsConnected state, cheap enough to poll on an interval.
 function updateOBSHeaderStatus(connected, enabled) {
-  // Two possible locations: the list row (always present once Outputs has
-  // rendered once) and the detail panel's own header (only present while
-  // OBS happens to be the selected output) — both re-queried fresh every
-  // call, never cached, since renderOutputsList/renderOutputsDetail rebuild
-  // their hosts via innerHTML='' regularly.
-  for (const [dotId, txtId] of [['obs-header-dot', 'obs-header-status'], ['obs-detail-dot', 'obs-detail-status']]) {
+  // Two possible locations: the list row (dot only — no paired text
+  // element there, just the row's own name/type) and the detail panel's
+  // own header (dot AND text, only present while OBS happens to be the
+  // selected output) — both re-queried fresh every call, never cached,
+  // since renderOutputsList/renderOutputsDetail rebuild their hosts via
+  // innerHTML='' regularly. Dot and text are updated independently, NOT
+  // gated behind both existing together — a real bug this replaced: the
+  // list row's dot never updated at all, because the old code required
+  // BOTH to be found before touching either, and the list row never had
+  // an 'obs-header-status' text element to begin with.
+  const cls = 'bs-dot' + (connected ? ' connected' : enabled ? ' error' : '');
+  const text = connected ? 'Connected' : enabled ? 'Not connected' : 'Off';
+  for (const dotId of ['obs-header-dot', 'obs-detail-dot']) {
     const dot = document.getElementById(dotId);
-    const txt = document.getElementById(txtId);
-    if (!dot || !txt) continue;
-    dot.className = 'bs-dot' + (connected ? ' connected' : enabled ? ' error' : '');
-    txt.textContent = connected ? 'Connected' : enabled ? 'Not connected' : 'Off';
+    if (dot) dot.className = cls;
   }
+  // The detail header's status text lives in its own nested span
+  // (obs-detail-status-text), NOT directly on the wrapper that also holds
+  // the dot — a real bug this fixes: setting .textContent on a wrapper
+  // that has a prepended <span class="bs-dot"> child wipes the dot out
+  // entirely, since textContent assignment replaces ALL child nodes.
+  const txt = document.getElementById('obs-detail-status-text');
+  if (txt) txt.textContent = text;
 }
 async function pollOBSStatus() {
   try {
@@ -9381,17 +9392,20 @@ function renderDisplayDetail(host, o) {
 }
 
 function renderObsDetail(host, o) {
-  // Connection indicator in the header — same 'obs-detail-*' ids
-  // updateOBSHeaderStatus already knows to write to (see its own comment),
-  // alongside the list row's 'obs-header-*' ids.
+  // Connection indicator in the header — dot + text as separate sibling
+  // elements (NOT text set directly on the wrapper, which would wipe the
+  // dot via .textContent replacing all children — a real bug this fixes).
+  // Same ids updateOBSHeaderStatus already knows to write to.
   const statusEl = document.createElement('span');
   statusEl.className = 'native-output-status';
-  statusEl.id = 'obs-detail-status';
-  statusEl.textContent = 'Checking…';
   const dot = document.createElement('span');
   dot.className = 'bs-dot';
   dot.id = 'obs-detail-dot';
-  statusEl.prepend(dot);
+  const statusText = document.createElement('span');
+  statusText.id = 'obs-detail-status-text';
+  statusText.textContent = 'Checking…';
+  statusEl.appendChild(dot);
+  statusEl.appendChild(statusText);
   host.appendChild(detailTitle(o.name, statusEl, buildOutputRowToggle(o)));
   pollOBSStatus(); // one immediate check so this fresh dot isn't stuck on "Checking…" until the next 5s tick
 
@@ -9469,8 +9483,13 @@ function renderNativeOutputDetail(host, o) {
 
   const statusEl = document.createElement('span');
   statusEl.className = 'native-output-status';
-  statusEl.textContent = raw.enabled ? 'Broadcasting' : 'Off';
   statusEl.classList.toggle('is-active', !!raw.enabled);
+  const statusDot = document.createElement('span');
+  statusDot.className = 'bs-dot' + (raw.enabled ? ' connected' : '');
+  const statusText = document.createElement('span');
+  statusText.textContent = raw.enabled ? 'Broadcasting' : 'Off';
+  statusEl.appendChild(statusDot);
+  statusEl.appendChild(statusText);
   // On/off toggle now lives in the header (owner: "toggle should be on
   // the far right of each output header") — the body's old separate
   // Start/Stop button is gone, buildOutputRowToggle's ndi/syphon case is
