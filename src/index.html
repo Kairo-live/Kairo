@@ -1138,6 +1138,10 @@
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M6 8h.01M10 8h.01M14 8h.01M18 8h.01M6 12h.01M10 12h.01M14 12h.01M18 12h.01M8 16h8"/></svg>
                     <span>Shortcuts</span>
                 </button>
+                <button class="settings-nav-item" data-pane="help">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 2-3 4"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+                    <span>Help</span>
+                </button>
                 <!-- appVersion rides along on the same GET /api/settings the
                      rest of this panel already loads from (loadSettings() in
                      app.js) — not its own request. Same mark as the toolbar
@@ -1296,6 +1300,131 @@
                     <div class="settings-section-label">Shortcuts</div>
                     <p class="setting-hint" style="font-size:11px;color:var(--text-3);margin-bottom:10px;">Click Change, then press a key combo. These are independent of the app's native menu shortcuts.</p>
                     <div id="hotkeys-list"></div>
+                </div>
+            </section>
+
+            <section class="settings-pane" data-pane="help">
+                <!-- ── HELP ────────────────────────────────────────────
+                     MAINTENANCE CONTRACT — read this before touching any
+                     user-facing workflow: whenever a change ships that
+                     alters something described below (an import menu's
+                     wording, a renamed button, a new output type, a
+                     changed detection behavior, a new tab), update the
+                     matching <details> block in THIS SAME change, not as
+                     a follow-up. This is the one place an operator learns
+                     the app without asking someone else — it going stale
+                     silently defeats the entire point of it existing.
+                     Keep entries short and task-oriented ("how do I do
+                     the thing"), not an exhaustive feature dump. -->
+                <div class="settings-section">
+                    <div class="settings-section-label">Help &amp; Guide</div>
+                    <p class="setting-hint" style="margin:-4px 0 4px;">How Kairo works, start to finish. Click a section to expand it.</p>
+
+                    <div class="help-groups">
+                        <details class="help-group" open>
+                            <summary>Getting started</summary>
+                            <div class="help-body">
+                                <p>Kairo listens to whoever's preaching, matches what's said against the Bible in real time, and puts the right verse on screen automatically — the same way a slide operator would, without someone driving it live.</p>
+                                <ol>
+                                    <li>Open <strong>Settings → Audio</strong> and pick the microphone (or audio-routing device, e.g. BlackHole) capturing the preacher.</li>
+                                    <li>Open <strong>Settings → Outputs</strong> and turn on at least one destination — usually External Display for the projector/screen.</li>
+                                    <li>Set the spoken language under <strong>Settings → Language</strong> if it isn't English.</li>
+                                    <li>Press <strong>Start</strong> in the Bible tab. Live Status switches from Idle to Listening, and the Live Transcript Log starts filling in as words are heard.</li>
+                                </ol>
+                                <p>Everything else — playlists, slides, songs, themes — can be prepared before or during the service; detection runs independently in the background the whole time.</p>
+                            </div>
+                        </details>
+
+                        <details class="help-group">
+                            <summary>Live scripture detection</summary>
+                            <div class="help-body">
+                                <p>A verse can reach the screen two ways, and both are meant to just work without anyone pressing a button:</p>
+                                <ul>
+                                    <li><strong>A citation is spoken</strong> — "turn to Romans chapter 8, verse 28" — sends that verse immediately.</li>
+                                    <li><strong>Scripture is read aloud</strong>, cited or not — Kairo matches the actual words against the Bible text itself, so a passage read without ever naming chapter/verse still reaches the screen.</li>
+                                </ul>
+                                <p>A confident match auto-sends straight to Live Status/the output. A weaker or ambiguous match shows up under <strong>Possible Matches</strong> instead — click one there to send it manually. This two-tier behavior is deliberate: a wrong verse on screen is worse than a missed one, so anything Kairo isn't confident about waits for a human glance rather than guessing.</p>
+                                <p>Reading forward through a passage (verse 1, then 2, then 3…) is tracked automatically, including a spoken "range" citation ("verses 1 to 9") — the display advances verse-by-verse as the reading continues, without needing each one re-cited.</p>
+                            </div>
+                        </details>
+
+                        <details class="help-group">
+                            <summary>Building a service</summary>
+                            <div class="help-body">
+                                <p>The left sidebar is your run-of-show — a playlist of items in the order they'll go out. Each top tab is a different kind of content to add:</p>
+                                <ul>
+                                    <li><strong>Bible</strong> — search and add specific verses directly; also where Live Status, the transcript log, and Possible Matches live during a service.</li>
+                                    <li><strong>Slides</strong> — your own slide decks (announcements, sermon notes, anything not scripture).</li>
+                                    <li><strong>Songs</strong> — hymns and lyrics, with section labels (Verse/Chorus/Bridge) and line-by-line/section navigation.</li>
+                                    <li><strong>Timer</strong> — countdowns for service segments, sent to the output's own timer layer independently of whatever slide/verse is showing.</li>
+                                    <li><strong>Media</strong> — images and video, sent to their own independent media layer (doesn't interrupt or get interrupted by slides/verses).</li>
+                                </ul>
+                                <p>Use <strong>+ New</strong> in the sidebar to create additional named playlists (e.g. one per service) — Default is just the one that's there from the start.</p>
+                                <p>Click any slide in an item to send it live; the currently-live slide is highlighted. Right-click a slide for more options (duplicate, delete, split, etc.).</p>
+                            </div>
+                        </details>
+
+                        <details class="help-group">
+                            <summary>Importing content</summary>
+                            <div class="help-body">
+                                <p>Bring in existing material instead of rebuilding it by hand, from either <strong>File → Import</strong> or the <strong>+</strong> button on a playlist item:</p>
+                                <ul>
+                                    <li><strong>Import file…</strong> — text, Word, PowerPoint, and ProPresenter files (<code>.pro6</code>/<code>.pro7</code>/<code>.probundle</code>/<code>.proplaylist</code>).</li>
+                                    <li><strong>Paste from clipboard</strong> — pasted lyrics/text, split into slides automatically.</li>
+                                </ul>
+                                <p><strong>ProPresenter files are handled specially.</strong> Kairo auto-detects them and preserves the file's own design exactly as authored — fonts, colors, positions, images, layer structure — instead of reformatting it into a Kairo theme. The Add dialog shows a notice confirming this rather than asking you to pick a theme, since none is needed. A playlist file with several presentations imports all of them at once, each keeping its own original layout.</p>
+                                <p>A plain text/Word import instead asks how to split it into slides (by paragraph, or a fixed number of lines each) and which theme to render it with, since there's no original design to preserve.</p>
+                            </div>
+                        </details>
+
+                        <details class="help-group">
+                            <summary>Theme Studio &amp; looks</summary>
+                            <div class="help-body">
+                                <p>Theme Studio (the Looks tab) is where a slide's actual design lives — background, text position/font/color, animations. A theme applies to every slide in an item that doesn't have its own override.</p>
+                                <p>A ProPresenter-imported slide is the one exception: it carries its own preserved layout directly (see Importing above), independent of whichever theme is assigned to the rest of the item — editing it in Full-Scale Edit adjusts that one slide's own layers, not a shared theme.</p>
+                                <p>The Multi-Language theme is a special split layout — the verse's own language on one side, a translated version on the other (see Multi-Language below).</p>
+                            </div>
+                        </details>
+
+                        <details class="help-group">
+                            <summary>Sending to outputs</summary>
+                            <div class="help-body">
+                                <p>Turn on any number of destinations at once under <strong>Settings → Outputs</strong> — each one renders with its own assigned theme:</p>
+                                <ul>
+                                    <li><strong>External Display</strong> — the primary output, a real window sent to a projector/screen/monitor. Enable it first; it's what most services actually need.</li>
+                                    <li><strong>ProPresenter, OBS, Syphon, NDI</strong> — opt-in broadcast integrations on top of External Display, for routing Kairo's output into other production software.</li>
+                                </ul>
+                                <p>If the external display doesn't come back after restarting the app, reselect it under Outputs — this should now happen automatically on launch, but a manual reselect always forces it.</p>
+                            </div>
+                        </details>
+
+                        <details class="help-group">
+                            <summary>Multi-language</summary>
+                            <div class="help-body">
+                                <p>Under <strong>Settings → Language</strong>: <em>Spoken language</em> is what the preacher is actually speaking (drives transcription). <em>Scripture language</em> is what a matched verse displays in — install additional <strong>Scripture packs</strong> to add languages, downloaded once for offline use.</p>
+                                <p><strong>Slide Translation Models</strong> are separate — they translate ordinary (non-scripture) slide/sermon text for the Multi-Language split theme, using a small bundled local model with no setup, API key, or internet connection required once downloaded.</p>
+                            </div>
+                        </details>
+
+                        <details class="help-group">
+                            <summary>Keyboard shortcuts</summary>
+                            <div class="help-body">
+                                <p>See the <strong>Shortcuts</strong> section (just above this one) for the full customizable list — click Change next to any action, then press the new key combo.</p>
+                            </div>
+                        </details>
+
+                        <details class="help-group">
+                            <summary>Troubleshooting</summary>
+                            <div class="help-body">
+                                <ul>
+                                    <li><strong>Nothing is being detected</strong> — confirm the right microphone/audio device is selected under Settings → Audio and that Live Status shows Listening, not Idle.</li>
+                                    <li><strong>A verse is correct but never appears live</strong> — check Possible Matches; a lower-confidence detection waits there for a manual click rather than auto-sending.</li>
+                                    <li><strong>The output window is blank or on the wrong screen</strong> — reselect it under Settings → Outputs → External Display.</li>
+                                    <li><strong>An imported file lost its look</strong> — only ProPresenter files preserve their own design automatically; a plain text/Word import always uses a Kairo theme instead, by design.</li>
+                                </ul>
+                            </div>
+                        </details>
+                    </div>
                 </div>
             </section>
 
