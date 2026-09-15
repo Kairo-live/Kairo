@@ -3718,6 +3718,16 @@
       item, showDelimiter: !!opts.showDelimiter, isImportBlocks: !!opts.isImportBlocks, rawBlocks: opts.rawBlocks || null,
       destination, libraryId: opts.libraryId || null,
     };
+    // A block carrying `.layers` is a real ProPresenter scene (position/
+    // font/color/images preserved as-authored — see slide_import.js's
+    // decodeCueSceneLayers). Neither the theme picker nor the slide-
+    // structure choice below has any effect on it at all (isScene slides
+    // never consult item.themeId, and re-flowing would destroy the real
+    // per-slide layout) — hidden in favor of one clear line saying so,
+    // rather than showing two controls that quietly do nothing.
+    const isSceneImport = !!(acDraft.rawBlocks && acDraft.rawBlocks.some(b => b.layers));
+    document.getElementById('ac-scene-notice')?.classList.toggle('hidden', !isSceneImport);
+    document.getElementById('ac-theme-group')?.classList.toggle('hidden', isSceneImport);
 
     const titleInp = document.getElementById('ac-title');
     if (titleInp) titleInp.value = item.title || '';
@@ -3782,10 +3792,15 @@
       // wins over the generic lyrics-theme guess — round-trips correctly
       // when editing an existing library entry.
       if (item.themeId && all.some(l => l.id === item.themeId)) themeSel.value = item.themeId;
+      // Scene import: no theme applies, so no theme should be recorded on
+      // the item either (item.themeId isn't read for rendering an isScene
+      // slide, but leaving a stale value from a previous dialog use around
+      // for no reason is its own small confusion to avoid).
+      if (isSceneImport) themeSel.value = '';
     }
 
     const delimGroup = document.getElementById('ac-delim-group');
-    if (delimGroup) delimGroup.style.display = acDraft.showDelimiter ? '' : 'none';
+    if (delimGroup) delimGroup.style.display = (acDraft.showDelimiter && !isSceneImport) ? '' : 'none';
     const delimInput = document.getElementById('ac-delim-input');
     if (delimInput) delimInput.value = DEFAULT_LINES_PER_SLIDE;
     setAcStructureMode(opts.defaultKeepAsIs ? 'paragraph' : 'lines');

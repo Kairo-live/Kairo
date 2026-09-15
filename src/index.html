@@ -738,7 +738,23 @@
                     <label class="setting-label">Folder</label>
                     <select id="ac-folder" class="setting-input"></select>
                 </div>
-                <div class="setting-group">
+                <!-- Owner: "when I import a file .proplaylist it still asks me
+                     to select theme, but it doesn't include options to
+                     preserve file design" — a scene-based ProPresenter import
+                     (real fonts/layout/images extracted per slide, see
+                     slide_import.js) never consults a theme or a slide-
+                     structure choice at all (see slidesFor's 'slides' case /
+                     sendSlide's own isScene check) — showing both anyway, with
+                     nothing explaining why picking one does nothing, was
+                     exactly the confusing dead-end control being reported.
+                     openAddConfirm toggles these two groups' hidden state
+                     against this one instead. -->
+                <div class="setting-group hidden" id="ac-scene-notice">
+                    <p class="setting-hint" style="color:var(--accent);">
+                        ✓ This file's original design (fonts, layout, images) will be kept as-is — no theme needed.
+                    </p>
+                </div>
+                <div class="setting-group" id="ac-theme-group">
                     <label class="setting-label">Theme</label>
                     <select id="ac-theme" class="setting-input"></select>
                 </div>
