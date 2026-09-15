@@ -3,11 +3,14 @@
 // install NDI Tools (free, ubiquitous in pro AV) and KAIRO finds the dylib
 // at standard install paths.
 //
-// Frame rendering is done in pure Rust with tiny-skia + cosmic-text: no
-// webview capture, no platform-specific screen-capture APIs. A background
-// thread re-renders only when verse text changes and pushes frames to NDI
-// at a low cadence (NDI receivers tolerate any rate; we use 15fps for
-// efficiency since static text doesn't need 60fps).
+// Frame rendering is done in pure Rust with tiny-skia + cosmic-text (+ the
+// `image` crate for Media-layer photos): no webview capture, no platform-
+// specific screen-capture APIs. A background thread re-renders only when
+// something actually changed (verse/media/timer text) and pushes frames to
+// NDI at a low cadence (NDI receivers tolerate any rate; we use 15fps for
+// efficiency since this content doesn't need 60fps — see Output Looks'
+// plan for why real video playback is a deliberately separate, later
+// phase rather than bundled into this same change).
 
 use std::ffi::{c_void, CString};
 use std::os::raw::{c_char, c_int};
@@ -150,6 +153,13 @@ fn candidate_libndi_paths() -> Vec<PathBuf> {
 #[derive(Clone, Debug)]
 pub enum NdiCmd {
     SetText { verse: String, reference: String },
+    // `None` clears the Media layer (matches display.html's renderMediaStage(null)
+    // semantics — Output Looks toggling Media off for this output sends this).
+    // Raw encoded bytes (png/jpeg), decoded once on the render thread itself
+    // rather than on the caller's thread, so a slow decode never blocks the
+    // Tauri command handler.
+    SetMedia { bytes: Option<Vec<u8>> },
+    SetTimer { text: String },
     Stop,
 }
 
@@ -173,6 +183,20 @@ impl NdiHandle {
     pub fn update(&self, verse: String, reference: String) {
         if let Some(tx) = &self.tx {
             let _ = tx.send(NdiCmd::SetText { verse, reference });
+        }
+    }
+    /// `bytes: None` clears the Media layer. A no-op (silently dropped, same
+    /// as `update()` above) when the sender isn't running — Output Looks'
+    /// client-side call sites already only invoke this when NDI is actually
+    /// enabled, but this stays defensive rather than assuming that.
+    pub fn update_media(&self, bytes: Option<Vec<u8>>) {
+        if let Some(tx) = &self.tx {
+            let _ = tx.send(NdiCmd::SetMedia { bytes });
+        }
+    }
+    pub fn update_timer(&self, text: String) {
+        if let Some(tx) = &self.tx {
+            let _ = tx.send(NdiCmd::SetTimer { text });
         }
     }
     pub fn stop(&mut self) {
@@ -261,6 +285,12 @@ pub fn start(source_name: &str, shared: Arc<Mutex<NdiHandle>>) -> Result<(), Str
             let mut buf: Vec<u8> = vec![0u8; (FRAME_W * FRAME_H * 4) as usize];
             let mut latest_verse = String::new();
             let mut latest_ref   = String::new();
+            let mut latest_timer = String::new();
+            // Decoded once when SetMedia arrives (not per frame) — decoding a
+            // real 2-15MB photo every 15fps tick would be wasted work for
+            // content that only changes when the operator actually changes
+            // slides. `None` = no Media-layer content active right now.
+            let mut latest_media: Option<image::RgbaImage> = None;
             // FontSystem::new() scans and loads every system font — tens to
             // hundreds of ms. Created once here rather than per render_frame
             // call, since that used to happen on every verse update and added
@@ -269,7 +299,7 @@ pub fn start(source_name: &str, shared: Arc<Mutex<NdiHandle>>) -> Result<(), Str
             let mut font_system = FontSystem::new();
             let mut swash_cache = SwashCache::new();
             // Render initial empty/idle frame
-            render_frame(&mut buf, &latest_verse, &latest_ref, &mut font_system, &mut swash_cache);
+            render_frame(&mut buf, &latest_verse, &latest_ref, latest_media.as_ref(), &latest_timer, &mut font_system, &mut swash_cache);
 
             let frame_period = Duration::from_millis(1000 / SEND_FPS_N as u64);
             loop {
@@ -284,11 +314,27 @@ pub fn start(source_name: &str, shared: Arc<Mutex<NdiHandle>>) -> Result<(), Str
                             latest_ref   = reference;
                             got_update   = true;
                         }
+                        NdiCmd::SetMedia { bytes } => {
+                            latest_media = bytes.and_then(|b| {
+                                match image::load_from_memory(&b) {
+                                    Ok(img) => Some(img.to_rgba8()),
+                                    Err(e) => {
+                                        eprintln!("[NDI] Media decode failed: {e}");
+                                        None
+                                    }
+                                }
+                            });
+                            got_update = true;
+                        }
+                        NdiCmd::SetTimer { text } => {
+                            latest_timer = text;
+                            got_update   = true;
+                        }
                     }
                 }
                 if should_stop { break; }
                 if got_update {
-                    render_frame(&mut buf, &latest_verse, &latest_ref, &mut font_system, &mut swash_cache);
+                    render_frame(&mut buf, &latest_verse, &latest_ref, latest_media.as_ref(), &latest_timer, &mut font_system, &mut swash_cache);
                 }
 
                 // Send the current frame.
@@ -351,6 +397,8 @@ fn render_frame(
     buf: &mut [u8],
     verse: &str,
     reference: &str,
+    media: Option<&image::RgbaImage>,
+    timer: &str,
     font_system: &mut cosmic_text::FontSystem,
     swash_cache: &mut cosmic_text::SwashCache,
 ) {
@@ -360,16 +408,28 @@ fn render_frame(
     // Skia pixmap that aliases our shared buffer. We re-use the same allocation
     // every frame to avoid GC churn.
     let mut pixmap = Pixmap::new(FRAME_W as u32, FRAME_H as u32).unwrap();
-    pixmap.fill(SkColor::from_rgba8(0, 0, 0, 230));
+    // Media layer is the base: a real photo/graphic fills the whole frame
+    // (cover fit, same convention as display.html's default image `fit`)
+    // when active, exactly like it would sit BEHIND the slide/timer layers
+    // on a real display window. Falls back to the original plain black fill
+    // when Media isn't active — zero visual change from before this feature.
+    match media {
+        Some(img) => blit_cover_image(&mut pixmap, img),
+        None => pixmap.fill(SkColor::from_rgba8(0, 0, 0, 230)),
+    }
 
-    // A subtle bottom 38% darker band for lower-third feel. Matches the
-    // visual style of the in-app lower-third themes.
-    let mut band_paint = tiny_skia::Paint::default();
-    band_paint.set_color(SkColor::from_rgba8(10, 14, 20, 255));
-    band_paint.anti_alias = false;
+    // A subtle bottom 38% darker band for lower-third feel — only when
+    // there's actual verse/reference text to put on it; skip it over a bare
+    // Media-only frame (nothing to letterbox) so a plain background image
+    // shows completely clean.
     let band_h = (FRAME_H as f32 * 0.38) as f32;
-    let band   = Rect::from_xywh(0.0, FRAME_H as f32 - band_h, FRAME_W as f32, band_h).unwrap();
-    pixmap.fill_rect(band, &band_paint, Transform::identity(), None);
+    if !verse.is_empty() || !reference.is_empty() {
+        let mut band_paint = tiny_skia::Paint::default();
+        band_paint.set_color(SkColor::from_rgba8(10, 14, 20, if media.is_some() { 190 } else { 255 }));
+        band_paint.anti_alias = false;
+        let band = Rect::from_xywh(0.0, FRAME_H as f32 - band_h, FRAME_W as f32, band_h).unwrap();
+        pixmap.fill_rect(band, &band_paint, Transform::identity(), None);
+    }
 
     // Text: render with cosmic-text into the pixmap. We treat each glyph as
     // an alpha mask drawn with the layer's color. font_system/swash_cache are
@@ -399,6 +459,27 @@ fn render_frame(
         );
     }
 
+    // Timer — top-right corner badge, independent of the verse/media layers
+    // below it (matches display.html's own timer badge being a separate,
+    // always-on-top overlay, not part of the slide layer it sits above).
+    if !timer.is_empty() {
+        let mut badge_paint = tiny_skia::Paint::default();
+        badge_paint.set_color(SkColor::from_rgba8(10, 14, 20, 210));
+        badge_paint.anti_alias = false;
+        let badge_w = 150.0;
+        let badge_h = 52.0;
+        let badge = Rect::from_xywh(FRAME_W as f32 - badge_w - 24.0, 24.0, badge_w, badge_h).unwrap();
+        pixmap.fill_rect(badge, &badge_paint, Transform::identity(), None);
+        draw_text(
+            &mut pixmap, font_system, swash_cache,
+            timer,
+            "sans-serif", 30.0, 700,
+            CtColor::rgb(255, 145, 48), // brand orange
+            FRAME_W as f32 - badge_w - 8.0, 32.0,
+            badge_w - 8.0,
+        );
+    }
+
     // Skia stores RGBA premul; NDI BGRA expects byte-order B,G,R,A. Swap.
     // chunks_exact + zip over 4-byte pixels (rather than indexing scalar
     // r/g/b/a one at a time) gives the compiler a much better shot at
@@ -412,6 +493,42 @@ fn render_frame(
         dst_px[2] = src_px[0];
         dst_px[3] = src_px[3];
     }
+    // Cover-fit a decoded image into the whole frame (scale to fill both
+    // dimensions, crop the overflow, centered) — same "cover" convention
+    // display.html's own image layers default to. Writes premultiplied RGBA
+    // directly into the pixmap's base layer since this always runs first
+    // (before the band/text draws), so there's nothing underneath yet to
+    // blend against.
+    fn blit_cover_image(pixmap: &mut tiny_skia::Pixmap, img: &image::RgbaImage) {
+        let (iw, ih) = (img.width(), img.height());
+        if iw == 0 || ih == 0 { return; }
+        let scale = (FRAME_W as f32 / iw as f32).max(FRAME_H as f32 / ih as f32);
+        let (sw, sh) = (
+            (iw as f32 * scale).round().max(1.0) as u32,
+            (ih as f32 * scale).round().max(1.0) as u32,
+        );
+        let resized = image::imageops::resize(img, sw, sh, image::imageops::FilterType::Triangle);
+        let crop_x = (sw.saturating_sub(FRAME_W as u32)) / 2;
+        let crop_y = (sh.saturating_sub(FRAME_H as u32)) / 2;
+        let pw = pixmap.width();
+        let data = pixmap.data_mut();
+        for y in 0..(FRAME_H as u32).min(sh.saturating_sub(crop_y)) {
+            for x in 0..(FRAME_W as u32).min(sw.saturating_sub(crop_x)) {
+                let px = resized.get_pixel(x + crop_x, y + crop_y).0;
+                let (r, g, b, a) = (px[0] as u16, px[1] as u16, px[2] as u16, px[3] as u16);
+                // tiny-skia Pixmap data is premultiplied RGBA — straight-alpha
+                // source values need premultiplying (a no-op when a == 255,
+                // the overwhelming common case for a background image).
+                let idx = ((y * pw + x) * 4) as usize;
+                if idx + 3 >= data.len() { continue; }
+                data[idx + 0] = (r * a / 255) as u8;
+                data[idx + 1] = (g * a / 255) as u8;
+                data[idx + 2] = (b * a / 255) as u8;
+                data[idx + 3] = a as u8;
+            }
+        }
+    }
+
     // Helpers for text drawing
     fn draw_text(
         pixmap: &mut tiny_skia::Pixmap,

@@ -2221,15 +2221,28 @@ app.post('/api/lang/install', async (req, res) => {
   }
 });
 
+// Output Looks: `layers` is a third, independent optional field alongside
+// `look`/`themes` — { [outputId]: { slide, media, timer } }, applyOutputLayers'
+// (src/app.js) own per-output visibility map. Always included in the SAME
+// look-update broadcast whichever branch below fires, rather than a second
+// route/message type, since display.html already has one message handler
+// for "the main window just pushed output configuration."
 app.post('/api/look/apply', (req, res) => {
-  const { look, themes } = req.body;
+  const { look, themes, layers } = req.body;
+  const layersOut = layers && typeof layers === 'object' ? layers : null;
   if (themes && typeof themes === 'object') {
     currentOutputThemes = themes;
-    broadcast({ type: 'look-update', themes, look: look || null });
+    broadcast({ type: 'look-update', themes, look: look || null, layers: layersOut });
     return res.json({ ok: true, outputs: Object.keys(themes).length });
   }
+  // layers-only call (applyOutputLayers sends nothing else) — the one shape
+  // neither of the two branches above already covers.
+  if (layersOut && !look) {
+    broadcast({ type: 'look-update', layers: layersOut });
+    return res.json({ ok: true, outputs: Object.keys(layersOut).length });
+  }
   if (!look || typeof look !== 'object') return res.status(400).json({ error: 'No look provided' });
-  broadcast({ type: 'look-update', look });
+  broadcast({ type: 'look-update', look, layers: layersOut });
   res.json({ ok: true });
 });
 

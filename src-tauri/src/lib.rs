@@ -263,12 +263,35 @@ fn generate_auth_token() -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
 }
 
+// Output Looks: multiple independent named NDI/Syphon outputs (e.g. "Atem"
+// AND "NDI Output" as separate senders at once) rather than one fixed
+// sender each — mirrors ProPresenter's own Screen Configuration list, and
+// Kairo's own pre-existing extraDisplays() pattern for External Display.
+// Keyed by an id the frontend generates (settings.ndiOutputs/syphonOutputs,
+// src/app.js) — each id gets its own independent handle/sender thread the
+// first time anything touches it; ndi.rs/syphon.rs themselves are
+// completely unaware multiple instances exist, they only ever see one
+// Arc<Mutex<Handle>> at a time, same as before this change.
 #[cfg(target_os = "macos")]
-struct SyphonState(Arc<Mutex<syphon::SyphonHandle>>);
+struct SyphonState(Arc<Mutex<std::collections::HashMap<String, Arc<Mutex<syphon::SyphonHandle>>>>>);
+#[cfg(target_os = "macos")]
+impl SyphonState {
+    fn handle_for(&self, id: &str) -> Result<Arc<Mutex<syphon::SyphonHandle>>, String> {
+        let mut map = self.0.lock().map_err(|e| e.to_string())?;
+        Ok(map.entry(id.to_string()).or_insert_with(|| Arc::new(Mutex::new(syphon::SyphonHandle::default()))).clone())
+    }
+}
 
 /// Shared NDI sender state. The frontend manipulates this through the
-/// ndi_* Tauri commands; the actual sender thread runs inside the ndi module.
-struct NdiState(Arc<Mutex<ndi::NdiHandle>>);
+/// ndi_* Tauri commands; the actual sender thread for a given id runs
+/// inside the ndi module, unchanged — see the keyed-collection comment above.
+struct NdiState(Arc<Mutex<std::collections::HashMap<String, Arc<Mutex<ndi::NdiHandle>>>>>);
+impl NdiState {
+    fn handle_for(&self, id: &str) -> Result<Arc<Mutex<ndi::NdiHandle>>, String> {
+        let mut map = self.0.lock().map_err(|e| e.to_string())?;
+        Ok(map.entry(id.to_string()).or_insert_with(|| Arc::new(Mutex::new(ndi::NdiHandle::default()))).clone())
+    }
+}
 
 // ── Node.js binary resolution ─────────────────────────────────────────────
 
@@ -544,40 +567,76 @@ fn ndi_available() -> bool {
 }
 
 #[tauri::command]
-fn ndi_start(app: AppHandle, source_name: String) -> Result<(), String> {
+fn ndi_start(app: AppHandle, id: String, source_name: String) -> Result<(), String> {
     let state = app.state::<NdiState>();
+    let handle = state.handle_for(&id)?;
     {
         // Check-and-reserve happens under one lock acquisition so two
         // near-simultaneous calls can't both pass the check before either's
         // background thread has actually installed its sender — see
         // try_reserve_start's doc comment.
-        let mut h = state.0.lock().map_err(|e| e.to_string())?;
+        let mut h = handle.lock().map_err(|e| e.to_string())?;
         if !h.try_reserve_start() {
             return Ok(()); // idempotent — already broadcasting or starting
         }
     }
-    let result = ndi::start(&source_name, state.0.clone());
+    let result = ndi::start(&source_name, handle.clone());
     if result.is_err() {
         // start() failed before ever reaching the point where it would clear
         // the reservation itself — clear it here so a retry isn't blocked.
-        if let Ok(mut h) = state.0.lock() { h.clear_starting(); }
+        if let Ok(mut h) = handle.lock() { h.clear_starting(); }
     }
     result
 }
 
 #[tauri::command]
-fn ndi_stop(app: AppHandle) -> Result<(), String> {
+fn ndi_stop(app: AppHandle, id: String) -> Result<(), String> {
     let state = app.state::<NdiState>();
-    let mut h = state.0.lock().map_err(|e| e.to_string())?;
+    let handle = state.handle_for(&id)?;
+    let mut h = handle.lock().map_err(|e| e.to_string())?;
     h.stop();
     Ok(())
 }
 
 #[tauri::command]
-fn ndi_update(app: AppHandle, verse: String, reference: String) -> Result<(), String> {
+fn ndi_update(app: AppHandle, id: String, verse: String, reference: String) -> Result<(), String> {
     let state = app.state::<NdiState>();
-    let h = state.0.lock().map_err(|e| e.to_string())?;
+    let handle = state.handle_for(&id)?;
+    let h = handle.lock().map_err(|e| e.to_string())?;
     h.update(verse, reference);
+    Ok(())
+}
+
+// Output Looks — Media/Timer layer parity for the native NDI sender (see
+// ndi.rs's own render_frame). `image_base64: None` clears the Media layer
+// (mirrors display.html's renderMediaStage(null)); Some(b64) is standard
+// (non-URL-safe) base64-encoded PNG/JPEG bytes, the same encoding this app
+// already uses for media data URIs elsewhere (e.g. server.js's import
+// route's dataBase64 field) — decoded here, not on the frontend, so the
+// render thread only ever receives raw bytes to hand to `image::load_from_memory`.
+#[tauri::command]
+fn ndi_update_media(app: AppHandle, id: String, image_base64: Option<String>) -> Result<(), String> {
+    let state = app.state::<NdiState>();
+    let handle = state.handle_for(&id)?;
+    let h = handle.lock().map_err(|e| e.to_string())?;
+    let bytes = match image_base64 {
+        Some(b64) => Some(
+            base64::engine::general_purpose::STANDARD
+                .decode(b64)
+                .map_err(|e| format!("invalid media base64: {e}"))?,
+        ),
+        None => None,
+    };
+    h.update_media(bytes);
+    Ok(())
+}
+
+#[tauri::command]
+fn ndi_update_timer(app: AppHandle, id: String, text: String) -> Result<(), String> {
+    let state = app.state::<NdiState>();
+    let handle = state.handle_for(&id)?;
+    let h = handle.lock().map_err(|e| e.to_string())?;
+    h.update_timer(text);
     Ok(())
 }
 
@@ -593,23 +652,48 @@ fn syphon_available() -> bool {
 
 #[cfg(target_os = "macos")]
 #[tauri::command]
-fn syphon_start(app: AppHandle, source_name: String) -> Result<(), String> {
+fn syphon_start(app: AppHandle, id: String, source_name: String) -> Result<(), String> {
     let state = app.state::<SyphonState>();
-    syphon::start(&source_name, state.0.clone())
+    syphon::start(&source_name, state.handle_for(&id)?)
 }
 
 #[cfg(target_os = "macos")]
 #[tauri::command]
-fn syphon_stop(app: AppHandle) -> Result<(), String> {
+fn syphon_stop(app: AppHandle, id: String) -> Result<(), String> {
     let state = app.state::<SyphonState>();
-    syphon::stop(state.0.clone())
+    syphon::stop(state.handle_for(&id)?)
 }
 
 #[cfg(target_os = "macos")]
 #[tauri::command]
-fn syphon_update(app: AppHandle, verse: String, reference: String) -> Result<(), String> {
+fn syphon_update(app: AppHandle, id: String, verse: String, reference: String) -> Result<(), String> {
     let state = app.state::<SyphonState>();
-    syphon::update(&verse, &reference, state.0.clone())
+    syphon::update(&verse, &reference, state.handle_for(&id)?)
+}
+
+// Output Looks — Media/Timer layer parity for the native Syphon sender.
+// Same base64 handling and clear-on-None convention as ndi_update_media —
+// see its own comment.
+#[cfg(target_os = "macos")]
+#[tauri::command]
+fn syphon_update_media(app: AppHandle, id: String, image_base64: Option<String>) -> Result<(), String> {
+    let state = app.state::<SyphonState>();
+    let bytes = match image_base64 {
+        Some(b64) => Some(
+            base64::engine::general_purpose::STANDARD
+                .decode(b64)
+                .map_err(|e| format!("invalid media base64: {e}"))?,
+        ),
+        None => None,
+    };
+    syphon::update_media(bytes, state.handle_for(&id)?)
+}
+
+#[cfg(target_os = "macos")]
+#[tauri::command]
+fn syphon_update_timer(app: AppHandle, id: String, text: String) -> Result<(), String> {
+    let state = app.state::<SyphonState>();
+    syphon::update_timer(&text, state.handle_for(&id)?)
 }
 
 // Stubs for non-macOS platforms — frontend calls these unconditionally and
@@ -619,15 +703,21 @@ fn syphon_update(app: AppHandle, verse: String, reference: String) -> Result<(),
 fn syphon_available() -> bool { false }
 #[cfg(not(target_os = "macos"))]
 #[tauri::command]
-fn syphon_start(_source_name: String) -> Result<(), String> {
+fn syphon_start(_id: String, _source_name: String) -> Result<(), String> {
     Err("Syphon is macOS-only".into())
 }
 #[cfg(not(target_os = "macos"))]
 #[tauri::command]
-fn syphon_stop() -> Result<(), String> { Ok(()) }
+fn syphon_stop(_id: String) -> Result<(), String> { Ok(()) }
 #[cfg(not(target_os = "macos"))]
 #[tauri::command]
-fn syphon_update(_verse: String, _reference: String) -> Result<(), String> { Ok(()) }
+fn syphon_update(_id: String, _verse: String, _reference: String) -> Result<(), String> { Ok(()) }
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+fn syphon_update_media(_id: String, _image_base64: Option<String>) -> Result<(), String> { Ok(()) }
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+fn syphon_update_timer(_id: String, _text: String) -> Result<(), String> { Ok(()) }
 
 // ── App entry ─────────────────────────────────────────────────────────────
 
@@ -662,11 +752,11 @@ pub fn run() {
         )
         .manage(ServerProcess(Arc::new(Mutex::new(None))))
         .manage(server_config)
-        .manage(NdiState(Arc::new(Mutex::new(ndi::NdiHandle::default()))));
+        .manage(NdiState(Arc::new(Mutex::new(std::collections::HashMap::new()))));
 
     #[cfg(target_os = "macos")]
     {
-        builder = builder.manage(SyphonState(Arc::new(Mutex::new(syphon::SyphonHandle::default()))));
+        builder = builder.manage(SyphonState(Arc::new(Mutex::new(std::collections::HashMap::new()))));
     }
 
     builder
@@ -682,10 +772,14 @@ pub fn run() {
             ndi_start,
             ndi_stop,
             ndi_update,
+            ndi_update_media,
+            ndi_update_timer,
             syphon_available,
             syphon_start,
             syphon_stop,
             syphon_update,
+            syphon_update_media,
+            syphon_update_timer,
         ])
         .menu(|handle| build_app_menu(handle))
         .on_menu_event(|app, event| {
@@ -866,11 +960,24 @@ pub fn run() {
                 // stop_and_join (not plain stop) actually waits for the
                 // background thread's NDIlib_send_destroy/NDIlib_destroy to
                 // run, bounded so a hung native call can't hang shutdown.
-                app.state::<NdiState>().0.lock().unwrap_or_else(|p| p.into_inner())
-                    .stop_and_join(std::time::Duration::from_millis(500));
+                // Now a keyed collection (Output Looks: multiple independent
+                // NDI outputs) — stop every instance that was ever touched,
+                // not just a single fixed sender.
+                {
+                    let ndi_state = app.state::<NdiState>();
+                    let ndi_map = ndi_state.0.lock().unwrap_or_else(|p| p.into_inner());
+                    for handle in ndi_map.values() {
+                        handle.lock().unwrap_or_else(|p| p.into_inner())
+                            .stop_and_join(std::time::Duration::from_millis(500));
+                    }
+                }
                 #[cfg(target_os = "macos")]
                 {
-                    let _ = syphon::stop(app.state::<SyphonState>().0.clone());
+                    let syphon_state = app.state::<SyphonState>();
+                    let syphon_map = syphon_state.0.lock().unwrap_or_else(|p| p.into_inner());
+                    for handle in syphon_map.values() {
+                        let _ = syphon::stop(handle.clone());
+                    }
                 }
             }
         });

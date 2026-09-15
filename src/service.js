@@ -5355,6 +5355,13 @@
     if (!cleared) {
       const ot = remainingMs < 0, wn = !ot && remainingMs <= 60000;
       const f = (ot ? '+' : '') + formatTime(Math.abs(remainingMs) / 1000);
+      // Output Looks — Timer layer parity for NDI/Syphon (native, non-
+      // webview senders — see app.js's wireNdiBridge for why this crosses
+      // into app.js's own closure via an exposed hook instead of a direct
+      // call). Runs every tick (same per-second granularity already used
+      // for the visible UI updates right below) — cheap on the Rust side,
+      // just a string + text re-render, no per-tick decode/composite cost.
+      window.KairoNativeOutputs?.pushTimer(f);
       document.querySelectorAll('#slide-preview-timer [data-binding="timer"]').forEach(el => {
         el.textContent = f;
         el.classList.toggle('is-overtime', ot);
@@ -5407,6 +5414,7 @@
       }
     } else {
       onTimerSlide({ clear: true });
+      window.KairoNativeOutputs?.pushTimer('');
     }
 
     const seg = segmentList.find(s => s.triggerId === msg.triggerId);

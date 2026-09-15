@@ -967,6 +967,55 @@
         return payload && payload.look ? payload.look : null;
     }
 
+    // ── Output Looks: this output's Slide/Media/Timer visibility ───────────
+    // Same dual-delivery pattern as the theme map above (localStorage +
+    // 'storage' event for instant same-origin propagation, plus a WS
+    // look-update broadcast as the belt-and-suspenders path) — see
+    // applyOutputLayers/outputLayerMap in app.js. Defaults ALL THREE true
+    // when nothing is configured for this output (or nothing at all has
+    // ever been pushed yet), matching outputLayerMap's own zero-config-safe
+    // default — a fresh install/window behaves exactly like before this
+    // feature existed.
+    const DEFAULT_LAYERS = { slide: true, media: true, timer: true };
+    let outputLayers = DEFAULT_LAYERS;
+
+    function loadOutputLayers() {
+        try {
+            const map = JSON.parse(localStorage.getItem('kairo-output-layers') || 'null');
+            if (map && map[OUTPUT_KEY]) return { ...DEFAULT_LAYERS, ...map[OUTPUT_KEY] };
+        } catch {}
+        return DEFAULT_LAYERS;
+    }
+
+    function pickLayers(payload) {
+        if (payload && payload.layers && payload.layers[OUTPUT_KEY]) {
+            return { ...DEFAULT_LAYERS, ...payload.layers[OUTPUT_KEY] };
+        }
+        return null;
+    }
+
+    // Applying a new layer map means some layer may have just turned OFF —
+    // actively clear that layer's current content rather than merely
+    // skipping future updates for it, reusing the exact same clear paths
+    // 'clear-layer' already uses for a manual Clear Slide/Media/Timer click.
+    // Called on load, on every 'storage' event, and on every 'look-update'
+    // broadcast — all three are real, independent ways this value changes.
+    function applyOutputLayers(next) {
+        const prev = outputLayers;
+        outputLayers = next;
+        if (prev.slide && !next.slide) clearDisplay();
+        if (prev.media && !next.media) renderMediaStage(null);
+        if (prev.timer && !next.timer) {
+            timerBadgeEl?.classList.add('hidden');
+            clockBadgeEl?.classList.add('hidden');
+            if (timerLayer) timerLayer.innerHTML = '';
+            if (timerScenes && timerScenes.length) renderMediaStage(null);
+            timerScenes = null;
+            activeSceneIndex = -1;
+        }
+    }
+    outputLayers = loadOutputLayers();
+
     // The theme configured for this output in Settings. Content-level overrides
     // (a playlist item's own theme) are temporary and revert to this.
     let assignedLook = null;
@@ -1517,6 +1566,12 @@
                 applyLook(assignedLook, true);
             } catch {}
         }
+        if (e.key === 'kairo-output-layers' && e.newValue) {
+            try {
+                const map = JSON.parse(e.newValue);
+                if (map && map[OUTPUT_KEY]) applyOutputLayers({ ...DEFAULT_LAYERS, ...map[OUTPUT_KEY] });
+            } catch {}
+        }
     });
 
     // Re-fit when the output window resizes (projector attach, fullscreen toggle).
@@ -1579,7 +1634,13 @@
 
     // ── Message handler ────────────────────────────────────────────────────
     function handleMessage(msg) {
+        // Output Looks: this output's own Slide/Media/Timer visibility (see
+        // applyOutputLayers/pickLayers above) — a disabled layer simply never
+        // renders new content; toggling it back on picks up the next real
+        // update normally (no separate "resend" needed, matching how the
+        // real output already behaves after any other kind of reconnect).
         if (msg.type === 'detection' && msg.target === 'viewer') {
+            if (!outputLayers.slide) return;
             const verse = msg.verses && msg.verses[0];
             if (verse) {
                 // A playlist item may carry its own theme (lyrics vs scripture).
@@ -1599,6 +1660,7 @@
         }
 
         if (msg.type === 'range-active') {
+            if (!outputLayers.slide) return;
             const verse = msg.verses && msg.verses[0];
             if (verse) {
                 showVerse(verse.text || verse.verse || '', verse.reference || verse.ref || '', true, verse.translatedText || '');
@@ -1647,6 +1709,7 @@
         }
 
         if (msg.type === 'media' && msg.target === 'viewer') {
+            if (!outputLayers.media) return;
             renderMediaStage(msg.src, msg.kind, msg.fit);
             return;
         }
@@ -1655,6 +1718,7 @@
         // independent timer layer (or clear it). The slide layer is left
         // exactly as it was.
         if (msg.type === 'timer-slide') {
+            if (!outputLayers.timer) return;
             // Uses the look carried in the message directly — never touches
             // activeLook, so the slide layer's own theme is unaffected.
             if (msg.clear) {
@@ -1704,6 +1768,8 @@
         if (msg.type === 'look-update') {
             const mine = pickLook(msg);
             if (mine) { assignedLook = mine; try { applyLook(mine, true); } catch {} }
+            const myLayers = pickLayers(msg);
+            if (myLayers) { try { applyOutputLayers(myLayers); } catch {} }
             return;
         }
 

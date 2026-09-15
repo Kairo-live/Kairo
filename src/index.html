@@ -1608,13 +1608,16 @@
                         </div>
                     </div>
 
-                    <!-- Card 4: Syphon -->
+                    <!-- Card 4: Syphon — a LIST of independent named outputs (Output
+                         Looks: "you should be able to create multiple Syphon or NDI
+                         outputs" — mirrors ProPresenter's own Screen Configuration
+                         list, e.g. separate "Atem"/"NDI Output" entries, and Kairo's
+                         own pre-existing extraDisplays() pattern for External
+                         Display). No single card-level enable toggle — each row
+                         below owns its own on/off state. Rows are built dynamically
+                         by renderSyphonOutputs() (src/app.js). -->
                     <div class="output-card" id="card-syphon">
                         <div class="output-card-header" data-card="syphon">
-                            <label class="output-toggle" title="Enable Syphon output">
-                                <input type="checkbox" id="syphon-enabled-toggle">
-                                <span class="output-toggle-track"></span>
-                            </label>
                             <span class="output-card-name">Syphon</span>
                             <span class="output-header-status">
                                 <span class="bs-dot" id="syphon-header-dot"></span>
@@ -1623,30 +1626,17 @@
                             <span class="output-card-chevron">▾</span>
                         </div>
                         <div class="output-card-body output-card-body--collapsed">
-                            <div class="setting-group">
-                                <label class="setting-label">Source Name</label>
-                                <div style="display:flex;gap:6px;">
-                                    <input type="text" id="syphon-source-name" class="setting-input" value="KAIRO Scripture" style="flex:1;">
-                                    <button id="test-syphon-btn" class="modal-btn secondary" style="white-space:nowrap;">Test</button>
-                                </div>
-                                <div style="font-size:11px;color:var(--text-3);margin-top:4px;">This name appears on the Syphon network for any compatible app (ProPresenter, OBS Syphon plugin, Resolume, MadMapper).</div>
-                            </div>
-                            <div style="display:flex;align-items:center;gap:8px;margin:14px 0 6px 0;">
-                                <span id="syphon-status" style="font-size:11px;color:var(--text-3);">Checking Syphon framework…</span>
-                            </div>
-                            <div id="syphon-active-hint" style="display:none;font-size:11px;color:var(--text-3);line-height:1.55;padding:10px 12px;background:rgba(77,182,172,0.06);border-left:2px solid var(--blue);border-radius:4px;">
-                                Broadcasting at <strong style="color:var(--text);">1280×720</strong>. Detected verses render directly into the Syphon frame in real time — no capture window required.
-                            </div>
+                            <p class="setting-hint" style="margin:0 0 4px;">Each Syphon output broadcasts independently — add one per destination (e.g. a confidence monitor showing only Slide, a program feed showing everything). Any compatible app (ProPresenter, OBS Syphon plugin, Resolume, MadMapper) can pick one up by name.</p>
+                            <div id="syphon-outputs-list" class="native-outputs-list"></div>
+                            <button id="add-syphon-output-btn" class="modal-btn secondary" style="align-self:flex-start;">+ Add Syphon Output</button>
                         </div>
                     </div>
 
-                    <!-- Card 5: NDI (native sender) -->
+                    <!-- Card 5: NDI (native sender) — same list-of-independent-
+                         outputs shape as Syphon above; renderNdiOutputs() builds
+                         the rows. -->
                     <div class="output-card" id="card-ndi">
                         <div class="output-card-header" data-card="ndi">
-                            <label class="output-toggle" title="Enable NDI output">
-                                <input type="checkbox" id="ndi-enabled-toggle">
-                                <span class="output-toggle-track"></span>
-                            </label>
                             <span class="output-card-name">NDI</span>
                             <span class="output-header-status">
                                 <span class="bs-dot" id="ndi-header-dot"></span>
@@ -1655,23 +1645,12 @@
                             <span class="output-card-chevron">▾</span>
                         </div>
                         <div class="output-card-body output-card-body--collapsed">
-                            <div class="setting-group">
-                                <label class="setting-label">Source Name</label>
-                                <div style="display:flex;gap:6px;">
-                                    <input type="text" id="ndi-source-name" class="setting-input" value="KAIRO Scripture" style="flex:1;">
-                                    <button id="test-ndi-btn" class="modal-btn secondary" style="white-space:nowrap;">Test</button>
-                                </div>
-                                <div style="font-size:11px;color:var(--text-3);margin-top:4px;">This name appears on the network for vMix, TriCaster, OBS-NDI, NDI Tools, etc.</div>
+                            <p class="setting-hint" style="margin:0 0 4px;">Each NDI output broadcasts independently — add one per destination (vMix, TriCaster, OBS-NDI, another PC on the network, etc.).</p>
+                            <div id="ndi-install-hint" style="display:none;font-size:11px;color:var(--text-2);line-height:1.55;padding:10px 12px;background:rgba(232,64,74,0.08);border-left:2px solid var(--red);border-radius:4px;margin-bottom:4px;">
+                                <strong style="color:var(--text);">NDI runtime not found.</strong> Install free <a href="https://ndi.video/tools/" target="_blank" rel="noopener" style="color:var(--blue);">NDI Tools</a> (or the NDI SDK) so KAIRO can broadcast directly.
                             </div>
-                            <div style="display:flex;align-items:center;gap:8px;margin:14px 0 6px 0;">
-                                <span id="ndi-status" style="font-size:11px;color:var(--text-3);">Checking NDI runtime…</span>
-                            </div>
-                            <div id="ndi-install-hint" style="display:none;font-size:11px;color:var(--text-2);line-height:1.55;padding:10px 12px;background:rgba(232,64,74,0.08);border-left:2px solid var(--red);border-radius:4px;">
-                                <strong style="color:var(--text);">NDI runtime not found.</strong> Install free <a href="https://ndi.video/tools/" target="_blank" rel="noopener" style="color:var(--blue);">NDI Tools</a> (or the NDI SDK) so KAIRO can broadcast directly. After install, click Test.
-                            </div>
-                            <div id="ndi-active-hint" style="display:none;font-size:11px;color:var(--text-3);line-height:1.55;padding:10px 12px;background:rgba(77,182,172,0.06);border-left:2px solid var(--blue);border-radius:4px;">
-                                Broadcasting at <strong style="color:var(--text);">1280×720 / 15 fps</strong>. Detected verses render directly to the NDI frame in real time — no capture bridge required.
-                            </div>
+                            <div id="ndi-outputs-list" class="native-outputs-list"></div>
+                            <button id="add-ndi-output-btn" class="modal-btn secondary" style="align-self:flex-start;">+ Add NDI Output</button>
                         </div>
                     </div>
                 </div>
@@ -2032,246 +2011,33 @@
           data: { openDisplayWindow: typeof window.openDisplayWindow === 'function', closeDisplayWindow: typeof window.closeDisplayWindow === 'function' },
         }) }).catch(function(){});
 
-        // Syphon: NATIVE sender driven through Tauri commands defined in
-        // src-tauri/src/syphon.rs. Syphon.framework is bundled with the app,
-        // so unlike NDI there's no SDK to install. Frames are rendered in
-        // Rust and pushed directly to the Syphon network — no window required.
+        // Syphon/NDI: Output Looks generalized these from one fixed sender
+        // each into a LIST of independent named outputs (see the Card 4/5
+        // HTML comments above) — all start/stop/update/UI logic for
+        // individual rows now lives in app.js's renderSyphonOutputs()/
+        // renderNdiOutputs() (mirrors renderDisplayOutputs' extraDisplays
+        // rows). This inline script now only does the one thing that's
+        // still card-level, not per-row: checking whether the Syphon
+        // framework / NDI runtime is present at all, to set the card
+        // header's status dot — an individual row can't broadcast if the
+        // underlying native runtime isn't there regardless of its own state.
         (function() {
-            var syphonStatusEl = document.getElementById('syphon-status');
-            var syphonToggle   = document.getElementById('syphon-enabled-toggle');
-            var syphonName     = document.getElementById('syphon-source-name');
-            var testSyphonBtn  = document.getElementById('test-syphon-btn');
-            var activeHint     = document.getElementById('syphon-active-hint');
-            var syphonHeaderDot = document.getElementById('syphon-header-dot');
-            var syphonHeaderTxt = document.getElementById('syphon-header-status');
             var invokeFn = window.__TAURI__?.core?.invoke || window.__TAURI__?.invoke;
-
-            function setSyphonStatus(text, kind) {
-                if (syphonHeaderDot) syphonHeaderDot.className = 'bs-dot' + (kind === 'active' ? ' connected' : kind === 'error' ? ' error' : '');
-                if (syphonHeaderTxt) syphonHeaderTxt.textContent = kind === 'active' ? 'Broadcasting' : kind === 'error' ? 'Error' : kind === 'warn' ? 'Not found' : 'Off';
-                if (!syphonStatusEl) return;
-                syphonStatusEl.textContent = text;
-                syphonStatusEl.style.color =
-                    kind === 'active' ? 'var(--green)' :
-                    kind === 'error'  ? 'var(--red)'   :
-                    kind === 'warn'   ? '#fbbf24'      : 'var(--text-3)';
+            function setHeader(prefix, ok, checking) {
+                var dot = document.getElementById(prefix + '-header-dot');
+                var txt = document.getElementById(prefix + '-header-status');
+                if (dot) dot.className = 'bs-dot' + (ok ? ' connected' : checking ? '' : ' error');
+                if (txt) txt.textContent = checking ? 'Checking…' : ok ? 'Ready' : 'Not found';
             }
-            function showActiveHint(on) {
-                if (activeHint) activeHint.style.display = on ? '' : 'none';
+            async function check(prefix, cmd) {
+                if (!invokeFn) { setHeader(prefix, false, false); return; }
+                try { setHeader(prefix, await invokeFn(cmd), false); }
+                catch (e) { setHeader(prefix, false, false); }
             }
-
-            async function detectAvailability() {
-                if (!invokeFn) {
-                    // Plain browser dev-preview — no Tauri commands available.
-                    setSyphonStatus('Syphon not available (run inside the app)', 'warn');
-                    return false;
-                }
-                try {
-                    var ok = await invokeFn('syphon_available');
-                    if (ok) {
-                        setSyphonStatus('Syphon framework loaded — ready', 'idle');
-                    } else {
-                        setSyphonStatus('Syphon framework missing', 'error');
-                        if (syphonToggle) { syphonToggle.checked = false; syphonToggle.disabled = true; }
-                    }
-                    return !!ok;
-                } catch (e) {
-                    setSyphonStatus('Syphon check failed: ' + e, 'error');
-                    return false;
-                }
-            }
-
-            async function startSyphon() {
-                if (!invokeFn) return;
-                var name = (syphonName?.value || 'KAIRO Scripture').trim() || 'KAIRO Scripture';
-                try {
-                    await invokeFn('syphon_start', { sourceName: name });
-                    setSyphonStatus('● Broadcasting "' + name + '"', 'active');
-                    showActiveHint(true);
-                    // Push the current preview text immediately so the Syphon source
-                    // doesn't show a blank frame until the next verse fires.
-                    var verse = document.getElementById('preview-verse-text')?.textContent || '';
-                    var ref   = document.getElementById('preview-verse-ref')?.textContent  || '';
-                    if (verse && verse !== 'Nothing on display') {
-                        invokeFn('syphon_update', { verse: verse, reference: ref }).catch(function(){});
-                    }
-                } catch (e) {
-                    setSyphonStatus('Failed: ' + e, 'error');
-                    if (syphonToggle) syphonToggle.checked = false;
-                }
-            }
-            async function stopSyphon() {
-                if (!invokeFn) return;
-                try { await invokeFn('syphon_stop'); } catch (_) {}
-                setSyphonStatus('Not broadcasting', 'idle');
-                showActiveHint(false);
-            }
-
-            if (syphonToggle) {
-                syphonToggle.addEventListener('change', function() {
-                    if (syphonToggle.checked) startSyphon();
-                    else                      stopSyphon();
-                });
-            }
-
-            // Test button: re-detect framework + (re)start if toggle is on.
-            if (testSyphonBtn) {
-                testSyphonBtn.addEventListener('click', async function() {
-                    testSyphonBtn.textContent = 'Testing…';
-                    if (syphonToggle) syphonToggle.disabled = false;
-                    try {
-                        var avail = await detectAvailability();
-                        if (avail && syphonToggle?.checked) {
-                            await startSyphon();
-                        } else if (avail) {
-                            setSyphonStatus('Syphon framework loaded — toggle on to broadcast', 'idle');
-                        }
-                    } finally {
-                        testSyphonBtn.textContent = 'Test';
-                    }
-                });
-            }
-
-            // Re-broadcast when the source name changes while broadcasting.
-            // SyphonServer's name is immutable per session, so we restart.
-            if (syphonName) {
-                var debounce = null;
-                syphonName.addEventListener('input', function() {
-                    if (!syphonToggle?.checked) return;
-                    clearTimeout(debounce);
-                    debounce = setTimeout(function() {
-                        stopSyphon().then(startSyphon);
-                    }, 600);
-                });
-            }
-
-            // Initial detection (slight delay so Tauri runtime is mounted).
-            setTimeout(detectAvailability, 250);
-        })();
-
-        // NDI: NATIVE sender driven through Tauri commands defined in src-tauri.
-        // Loads libndi at runtime from NDI Tools / NDI SDK install paths.
-        // Frames are rendered server-side in Rust (tiny-skia + cosmic-text)
-        // and pushed directly to the network — no display window needed.
-        (function() {
-            var ndiStatusEl  = document.getElementById('ndi-status');
-            var ndiToggle    = document.getElementById('ndi-enabled-toggle');
-            var ndiNameInput = document.getElementById('ndi-source-name');
-            var testNdiBtn   = document.getElementById('test-ndi-btn');
-            var installHint  = document.getElementById('ndi-install-hint');
-            var activeHint   = document.getElementById('ndi-active-hint');
-            var ndiHeaderDot = document.getElementById('ndi-header-dot');
-            var ndiHeaderTxt = document.getElementById('ndi-header-status');
-            var invokeFn = window.__TAURI__?.core?.invoke || window.__TAURI__?.invoke;
-
-            function setNdiStatus(text, kind) {
-                if (ndiHeaderDot) ndiHeaderDot.className = 'bs-dot' + (kind === 'active' ? ' connected' : kind === 'error' ? ' error' : '');
-                if (ndiHeaderTxt) ndiHeaderTxt.textContent = kind === 'active' ? 'Broadcasting' : kind === 'error' ? 'Error' : kind === 'warn' ? 'Not found' : 'Off';
-                if (!ndiStatusEl) return;
-                ndiStatusEl.textContent = text;
-                ndiStatusEl.style.color =
-                    kind === 'active' ? 'var(--green)' :
-                    kind === 'error'  ? 'var(--red)'   :
-                    kind === 'warn'   ? '#fbbf24'      : 'var(--text-3)';
-            }
-            function showHint(which) {
-                if (installHint) installHint.style.display = which === 'install' ? '' : 'none';
-                if (activeHint)  activeHint.style.display  = which === 'active'  ? '' : 'none';
-            }
-
-            async function detectAvailability() {
-                if (!invokeFn) {
-                    // Running in plain browser (dev preview) — no Tauri commands.
-                    setNdiStatus('NDI not available (run inside the app)', 'warn');
-                    return false;
-                }
-                try {
-                    var ok = await invokeFn('ndi_available');
-                    if (ok) {
-                        setNdiStatus('NDI runtime detected — ready', 'idle');
-                        showHint(null);
-                    } else {
-                        setNdiStatus('NDI runtime not installed', 'warn');
-                        showHint('install');
-                        if (ndiToggle) { ndiToggle.checked = false; ndiToggle.disabled = true; }
-                    }
-                    return !!ok;
-                } catch (e) {
-                    setNdiStatus('NDI check failed: ' + e, 'error');
-                    return false;
-                }
-            }
-
-            async function startNdi() {
-                if (!invokeFn) return;
-                var name = (ndiNameInput?.value || 'KAIRO Scripture').trim() || 'KAIRO Scripture';
-                try {
-                    await invokeFn('ndi_start', { sourceName: name });
-                    setNdiStatus('● Broadcasting "' + name + '"', 'active');
-                    showHint('active');
-                    // Push the current preview text immediately so the NDI source
-                    // doesn't show a blank frame until the next verse fires.
-                    var verse = document.getElementById('preview-verse-text')?.textContent || '';
-                    var ref   = document.getElementById('preview-verse-ref')?.textContent  || '';
-                    if (verse && verse !== 'Nothing on display') {
-                        invokeFn('ndi_update', { verse: verse, reference: ref }).catch(function(){});
-                    }
-                } catch (e) {
-                    setNdiStatus('Failed: ' + e, 'error');
-                    if (ndiToggle) ndiToggle.checked = false;
-                }
-            }
-            async function stopNdi() {
-                if (!invokeFn) return;
-                try { await invokeFn('ndi_stop'); } catch (_) {}
-                setNdiStatus('Not broadcasting', 'idle');
-                showHint(null);
-            }
-
-            // Toggle handler
-            if (ndiToggle) {
-                ndiToggle.addEventListener('change', function() {
-                    if (ndiToggle.checked) startNdi();
-                    else                   stopNdi();
-                });
-            }
-
-            // Test = re-detect + (re)start. If the user installed NDI Tools
-            // after launching, this picks it up.
-            if (testNdiBtn) {
-                testNdiBtn.addEventListener('click', async function() {
-                    testNdiBtn.textContent = 'Testing…';
-                    if (ndiToggle) ndiToggle.disabled = false;
-                    try {
-                        var avail = await detectAvailability();
-                        if (avail && ndiToggle?.checked) {
-                            await startNdi();
-                        } else if (avail) {
-                            // Available but toggle off — tell user to flip it.
-                            setNdiStatus('NDI runtime detected — toggle on to broadcast', 'idle');
-                        }
-                    } finally {
-                        testNdiBtn.textContent = 'Test';
-                    }
-                });
-            }
-
-            // Re-broadcast source-name changes while live.
-            if (ndiNameInput) {
-                var debounce = null;
-                ndiNameInput.addEventListener('input', function() {
-                    if (!ndiToggle?.checked) return;
-                    clearTimeout(debounce);
-                    debounce = setTimeout(function() {
-                        // Restart sender with the new name (NDI source name is
-                        // immutable per session, so recreate).
-                        stopNdi().then(startNdi);
-                    }, 600);
-                });
-            }
-
-            // Initial detection (debounce slightly so window has time to mount Tauri).
-            setTimeout(detectAvailability, 250);
+            setTimeout(function() {
+                check('syphon', 'syphon_available');
+                check('ndi', 'ndi_available');
+            }, 250);
         })();
 
         // Display windows are opened per-screen from the Outputs pane —

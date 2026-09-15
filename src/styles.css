@@ -1599,6 +1599,45 @@ input[type="range"]:disabled { opacity: 0.4; cursor: default; }
 .display-output-del:disabled { opacity: 0.35; cursor: not-allowed; }
 .display-output-row { margin-top: 6px; }
 
+/* Output Looks: NDI/Syphon outputs — a LIST of independent named instances
+   (renderNativeOutputs, src/app.js), not one fixed sender each. Too many
+   real fields (toggle/name/source-name/theme/3 layer checks/status/delete)
+   for the base .display-output-row's flat 5-column grid (built for the
+   simpler display-row shape) — a two-line card instead. */
+.native-outputs-list { display: flex; flex-direction: column; gap: 8px; margin: 4px 0; }
+.native-output-row {
+  display: flex !important; /* override .display-output-row's grid */
+  flex-direction: column;
+  align-items: stretch; /* override .display-output-row's center — these two
+                            inner lines should span the row, not shrink-center */
+  gap: 6px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+}
+.native-output-row-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.native-output-row-top input[type="text"] { flex: 1; min-width: 0; }
+.native-output-row-bottom {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.native-output-row-bottom input[type="text"],
+.native-output-row-bottom select { flex: 1; min-width: 110px; }
+.native-output-status {
+  font-size: 10.5px;
+  color: var(--text-3);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.native-output-status.is-active { color: var(--green); }
+
 /* ── Playlist ───────────────────────────────────────────────────────────────
    Lives in the left sidebar above the transcript; selecting an item takes over
    the centre column. */
@@ -2908,6 +2947,46 @@ select {
 /* Collapsed state — hidden unless card is expanded or output is enabled */
 .output-card-body--collapsed { display: none; }
 .output-card.expanded .output-card-body--collapsed { display: flex; }
+
+/* Output Looks — the Slide/Media/Timer checkbox row (.output-layer-group,
+   built by renderOutputLayerPickers/buildLayerChecksRow in app.js) sits
+   next to the existing .output-theme-group inside each layer-capable
+   output card, and inside each extra-display row. Plain native checkboxes
+   (not the pill .output-toggle above, which is for the output's own on/off
+   switch — three of those side by side would read as three separate
+   enable toggles, not one grouped "which layers" control). */
+.output-layer-checks {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.output-layer-check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text-2);
+  cursor: pointer;
+  user-select: none;
+}
+
+.output-layer-check input[type="checkbox"] {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  accent-color: var(--brand);
+  cursor: pointer;
+}
+
+/* Inside a display-output-row (extra displays list), the group is one flex
+   item among several (name/theme/screen/delete) — column layout would be
+   too tall next to those; lay the three checks out horizontally instead. */
+.display-output-row .output-layer-checks {
+  flex-direction: row;
+  gap: 10px;
+  flex-shrink: 0;
+}
 
 /* Pill toggle switch */
 .output-toggle {

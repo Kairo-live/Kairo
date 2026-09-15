@@ -1817,6 +1817,8 @@ dependencies = [
  "num-traits",
  "png 0.18.1",
  "tiff",
+ "zune-core",
+ "zune-jpeg",
 ]
 
 [[package]]
@@ -2031,6 +2033,7 @@ dependencies = [
  "crossbeam-channel",
  "getrandom 0.2.17",
  "gl",
+ "image",
  "libloading 0.8.9",
  "objc2 0.5.2",
  "objc2-foundation 0.2.2",

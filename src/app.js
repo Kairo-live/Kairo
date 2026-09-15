@@ -208,7 +208,66 @@ const previewSectionBadge = document.getElementById('preview-section-badge');
 // step UI updates (e.g. clear → new verse fires two mutations in one tick).
 (function wireNdiBridge() {
   const tauriInvoke = window.__TAURI__?.core?.invoke || window.__TAURI__?.invoke;
-  if (!tauriInvoke || !previewVerseText) return;
+  // Output Looks — Media/Timer layer parity for these two native, non-
+  // webview senders (see ndi.rs/syphon.rs's own render_frame). pushMedia is
+  // called directly from renderMediaPreview below (the one authoritative
+  // call site whenever the media layer changes). pushTimer is called from
+  // service.js's onTimerAction — a separate script/closure with no direct
+  // access to tauriInvoke/outputLayerMap — via this exposed hook, the one
+  // place this module needs to be called INTO rather than calling out,
+  // unlike every other service.js/app.js interaction (which flows through
+  // window.KairoService in the opposite direction). Both start as no-ops so
+  // a call before this IIFE runs (or when Tauri isn't available at all)
+  // never throws.
+  // Output Looks: multiple independent named instances per kind now, not
+  // one fixed sender each (owner: "you should be able to create multiple
+  // Syphon or NDI outputs" — see ndiOutputs()/syphonOutputs()/
+  // renderNativeOutputs() above). Last-known value of each layer lets
+  // pushToOne catch a freshly-started output up immediately, and lets
+  // pushMedia/pushTimer skip a disabled instance without losing track of
+  // what to send once it's re-enabled.
+  window.KairoNativeOutputs = { pushMedia() {}, pushTimer() {}, pushToOne() {} };
+  if (!tauriInvoke) return;
+  let lastVerse = '', lastRef = '', lastMediaDataUri = null, lastTimerText = '';
+  function enabledNativeOutputs(kind) {
+    return (kind === 'ndi' ? ndiOutputs() : syphonOutputs()).filter(o => o.enabled);
+  }
+  window.KairoNativeOutputs.pushMedia = function pushMedia(dataUri) {
+    // `dataUri`: a `data:image/…;base64,…` string, or falsy to clear.
+    // Anything else (a video src, a plain http(s)/blob URL) is silently
+    // skipped — real video playback for these two senders is Output Looks'
+    // own Phase 2, deliberately not bundled into this change (see the plan).
+    const m = typeof dataUri === 'string' && /^data:image\/\w+;base64,(.*)$/.exec(dataUri);
+    lastMediaDataUri = m ? dataUri : null;
+    const b64 = m ? m[1] : null;
+    const layers = outputLayerMap();
+    for (const kind of ['ndi', 'syphon']) {
+      for (const o of enabledNativeOutputs(kind)) {
+        if (layers[o.id]?.media === false) continue;
+        tauriInvoke(`${kind}_update_media`, { id: o.id, imageBase64: b64 }).catch(() => {});
+      }
+    }
+  };
+  window.KairoNativeOutputs.pushTimer = function pushTimer(text) {
+    lastTimerText = text || '';
+    const layers = outputLayerMap();
+    for (const kind of ['ndi', 'syphon']) {
+      for (const o of enabledNativeOutputs(kind)) {
+        if (layers[o.id]?.timer === false) continue;
+        tauriInvoke(`${kind}_update_timer`, { id: o.id, text: lastTimerText }).catch(() => {});
+      }
+    }
+  };
+  window.KairoNativeOutputs.pushToOne = function pushToOne(kind, id) {
+    const want = outputLayerMap()[id] || { slide: true, media: true, timer: true };
+    if (want.slide !== false) tauriInvoke(`${kind}_update`, { id, verse: lastVerse, reference: lastRef }).catch(() => {});
+    if (want.media !== false) {
+      const m = typeof lastMediaDataUri === 'string' && /^data:image\/\w+;base64,(.*)$/.exec(lastMediaDataUri);
+      tauriInvoke(`${kind}_update_media`, { id, imageBase64: m ? m[1] : null }).catch(() => {});
+    }
+    if (want.timer !== false) tauriInvoke(`${kind}_update_timer`, { id, text: lastTimerText }).catch(() => {});
+  };
+  if (!previewVerseText) return;
   let scheduled = false;
   let lastSent = '';
   function pushToOutputs() {
@@ -219,12 +278,18 @@ const previewSectionBadge = document.getElementById('preview-section-badge');
     const sig   = blank ? '' : (ref + '' + verse);
     if (sig === lastSent) return;
     lastSent = sig;
-    const v = blank ? '' : verse;
-    const r = blank ? '' : ref;
-    // Each output's _update is a no-op if that output isn't running, so we
-    // can fire unconditionally to both NDI and Syphon without checking state.
-    tauriInvoke('ndi_update',    { verse: v, reference: r }).catch(() => {});
-    tauriInvoke('syphon_update', { verse: v, reference: r }).catch(() => {});
+    lastVerse = blank ? '' : verse;
+    lastRef   = blank ? '' : ref;
+    const layers = outputLayerMap();
+    // Each output's _update is a no-op if that specific instance isn't
+    // running, so we only need to skip ones Output Looks has disabled
+    // Slide for — not check "is it actually broadcasting" here too.
+    for (const kind of ['ndi', 'syphon']) {
+      for (const o of enabledNativeOutputs(kind)) {
+        if (layers[o.id]?.slide === false) continue;
+        tauriInvoke(`${kind}_update`, { id: o.id, verse: lastVerse, reference: lastRef }).catch(() => {});
+      }
+    }
   }
   function schedule() {
     if (scheduled) return;
@@ -794,6 +859,12 @@ function renderMediaPreview(src, kind, fit) {
   const host = document.getElementById('slide-preview-media');
   if (!host) return;
   host.innerHTML = '';
+  // Output Looks — Media layer parity for NDI/Syphon (see wireNdiBridge's
+  // own comment for why this call lives here specifically). `kind ===
+  // 'video'` is silently skipped inside pushMedia itself (Phase 2, not this
+  // change) rather than here, so a video clearing back to no-media still
+  // correctly clears the native senders' Media layer too.
+  window.KairoNativeOutputs?.pushMedia(kind === 'video' ? null : src);
   if (!src) {
     host.classList.add('hidden');
     // Restore the placeholder only if there's no real verse text either —
@@ -1833,34 +1904,20 @@ async function loadSettings() {
     if (obsUrlInput && settings.obsUrl) obsUrlInput.value = settings.obsUrl;
     if (obsPasswordInput && settings.obsPassword) obsPasswordInput.value = settings.obsPassword;
     if (obsTextSourceInput && settings.obsTextSource) obsTextSourceInput.value = settings.obsTextSource;
-    // NDI/Syphon: their start/stop/status logic lives in index.html's inline
-    // scripts (native Tauri outputs, wired independently since that script
-    // runs before app.js loads) — but neither toggle's checked state was
-    // ever persisted to settings or restored on relaunch, so both silently
-    // reset to off every session even if the operator had them broadcasting
-    // last time. This only adds the missing persistence layer as a SECOND
-    // listener alongside the inline script's own — addEventListener doesn't
-    // replace, so its start/stop handling is untouched. Auto-resume
-    // dispatches a real 'change' event (not a direct function call — those
-    // are scoped inside the inline script's own IIFE) so the inline
-    // script's existing startNdi()/startSyphon() fires exactly as if the
-    // operator had just clicked the toggle themselves.
-    const ndiToggleEl    = document.getElementById('ndi-enabled-toggle');
-    const syphonToggleEl = document.getElementById('syphon-enabled-toggle');
-    [['ndiEnabled', ndiToggleEl], ['syphonEnabled', syphonToggleEl]].forEach(([key, el]) => {
-      if (!el) return;
-      el.addEventListener('change', () => saveSettingsPatch({ [key]: el.checked }));
-      if (settings[key] && !el.disabled) {
-        el.checked = true;
-        el.dispatchEvent(new Event('change'));
-      }
-    });
+    // NDI/Syphon: each is now a LIST of independent named outputs (Output
+    // Looks), rendered + auto-resumed (any row with enabled:true starts
+    // itself) entirely by renderNdiOutputs()/renderSyphonOutputs() below —
+    // no separate toggle-sync needed here any more, each row owns its own
+    // persistence.
+    renderNdiOutputs();
+    renderSyphonOutputs();
     // Restore toggle-group state from persisted settings
     syncToggleGroup('speech-engine-toggle', 'engine', settings.speechEngine || 'deepgram');
     updatePPTokenLabel();
     initCustomSelects();
     // Per-output theme pickers live inside each output card.
     renderOutputThemePickers();
+    renderOutputLayerPickers();
     renderDisplayOutputs();
     // Push the resolved per-output theme map to the server now, not just
     // whenever a theme/display setting is next touched — applyOutputThemes()
@@ -1874,6 +1931,7 @@ async function loadSettings() {
     // exactly why the Multi-Language theme looked like it "worked sometimes
     // and not others."
     applyOutputThemes();
+    applyOutputLayers();
     // Language
     const sttLang = document.getElementById('stt-language');
     if (sttLang) sttLang.value = settings.sttLanguage || 'en-US';
@@ -8698,10 +8756,16 @@ newLookBtn?.addEventListener('click', () => {
 // card as extra rows. PRIMARY_DISPLAY itself is declared near the top of
 // the file now (see the comment there) — it has to exist before
 // wireExternalDisplayStatus's IIFE runs at load.
+// NDI/Syphon are deliberately NOT here — Output Looks generalized them from
+// one fixed sender each into a LIST of independent named outputs (owner:
+// "you should be able to create multiple Syphon or NDI outputs", matching
+// ProPresenter's own Screen Configuration list). See ndiOutputs()/
+// syphonOutputs()/renderNdiOutputs()/renderSyphonOutputs() below — same
+// list-of-named-instances shape as extraDisplays(), just with their own
+// settings arrays since an NDI/Syphon output also carries a network source
+// name extraDisplays() has no equivalent of.
 const OUTPUT_DEFS = [
   { key: PRIMARY_DISPLAY, card: 'card-external',     label: 'External Display' },
-  { key: 'ndi',           card: 'card-ndi',          label: 'NDI' },
-  { key: 'syphon',        card: 'card-syphon',       label: 'Syphon' },
   { key: 'obs',           card: 'card-obs',          label: 'OBS' },
   { key: 'propresenter',  card: 'card-propresenter', label: 'ProPresenter' },
 ];
@@ -8717,8 +8781,38 @@ function displayOutputs() {
   return [{ id: PRIMARY_DISPLAY, name: 'External Display' }, ...extraDisplays()];
 }
 
+// Same id-generation shape the "+ Add another display" button already uses
+// (see add-display-btn's own handler) — app.js has no shared uid() helper
+// of its own (that's a service.js-internal one, a separate closure/script).
+function genOutputId(prefix) { return `${prefix}-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`; }
+
+// settings.ndiOutputs/syphonOutputs: [{id, name, sourceName, enabled}, …].
+// One-time migration from the old singleton settings.ndiEnabled/syphonEnabled
+// flags (the source name was never actually persisted pre-migration — it
+// always reset to the HTML's own default each launch — so there's nothing
+// real to carry forward for it beyond the enabled state).
+function ndiOutputs() {
+  if (!Array.isArray(settings.ndiOutputs)) {
+    settings.ndiOutputs = [{ id: genOutputId('ndi'), name: 'NDI Output', sourceName: 'KAIRO Scripture', enabled: !!settings.ndiEnabled }];
+    saveSettingsPatch({ ndiOutputs: settings.ndiOutputs });
+  }
+  return settings.ndiOutputs;
+}
+function syphonOutputs() {
+  if (!Array.isArray(settings.syphonOutputs)) {
+    settings.syphonOutputs = [{ id: genOutputId('syphon'), name: 'Syphon Output', sourceName: 'KAIRO Scripture', enabled: !!settings.syphonEnabled }];
+    saveSettingsPatch({ syphonOutputs: settings.syphonOutputs });
+  }
+  return settings.syphonOutputs;
+}
+
 function allOutputKeys() {
-  return [...OUTPUT_DEFS.map(d => d.key), ...extraDisplays().map(d => d.id)];
+  return [
+    ...OUTPUT_DEFS.map(d => d.key),
+    ...extraDisplays().map(d => d.id),
+    ...ndiOutputs().map(d => d.id),
+    ...syphonOutputs().map(d => d.id),
+  ];
 }
 
 // ── Physical screen assignment ───────────────────────────────────────────
@@ -9031,6 +9125,11 @@ async function renderDisplayOutputs() {
       // the primary External Display picker.
       const screenSel = buildScreenSelect(d.id);
 
+      // Output Looks — same Slide/Media/Timer checkboxes as the fixed
+      // output cards (see buildLayerChecksRow), just per extra display row
+      // instead of per static card.
+      const layerChecks = buildLayerChecksRow(d.id);
+
       const del = document.createElement('button');
       del.className = 'modal-btn secondary display-output-del';
       del.innerHTML = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>`;
@@ -9044,13 +9143,197 @@ async function renderDisplayOutputs() {
         applyOutputThemes();
       });
 
-      row.appendChild(name); row.appendChild(sel); row.appendChild(screenSel); row.appendChild(del);
+      row.appendChild(name); row.appendChild(sel); row.appendChild(screenSel); row.appendChild(layerChecks); row.appendChild(del);
       host.appendChild(row);
     });
   }
 
   renderLivePreviewOutputSelect();
 }
+
+// ── NDI/Syphon: independent named native outputs ────────────────────────
+// Output Looks generalized these from one fixed sender each into a LIST,
+// mirroring extraDisplays()/renderDisplayOutputs() above almost exactly —
+// same row-per-instance shape, same settings-array persistence pattern —
+// just with an extra "source name" field (the actual network-visible name;
+// distinct from `name`, which is only this Settings list's own label) and
+// real start/stop against the native Tauri commands instead of a display
+// window. One shared builder for both since they're identical except which
+// command prefix / settings key / list host they talk to.
+const invokeFn_native = () => window.__TAURI__?.core?.invoke || window.__TAURI__?.invoke;
+
+async function renderNativeOutputs(kind) {
+  // kind: 'ndi' | 'syphon'
+  const outputsFn = kind === 'ndi' ? ndiOutputs : syphonOutputs;
+  const host = document.getElementById(`${kind}-outputs-list`);
+  if (!host) return;
+  const invokeFn = invokeFn_native();
+  const themeMap = outputThemeMap();
+  host.innerHTML = '';
+
+  outputsFn().forEach((o) => {
+    const row = document.createElement('div');
+    row.className = 'display-output-row native-output-row';
+
+    // Enabled toggle — same pill as every other output's on/off switch.
+    const toggleLabel = document.createElement('label');
+    toggleLabel.className = 'output-toggle';
+    toggleLabel.title = `Enable this ${kind === 'ndi' ? 'NDI' : 'Syphon'} output`;
+    const toggle = document.createElement('input');
+    toggle.type = 'checkbox';
+    toggle.checked = !!o.enabled;
+    const track = document.createElement('span');
+    track.className = 'output-toggle-track';
+    toggleLabel.appendChild(toggle); toggleLabel.appendChild(track);
+
+    const name = document.createElement('input');
+    name.type = 'text';
+    name.className = 'setting-input';
+    name.value = o.name || (kind === 'ndi' ? 'NDI Output' : 'Syphon Output');
+    name.placeholder = 'Label (Settings only)';
+    name.title = 'Label shown here in Settings only — not the network name';
+    name.addEventListener('change', () => {
+      updateNativeOutput(kind, o.id, { name: name.value.trim() || o.name });
+    });
+
+    const sourceName = document.createElement('input');
+    sourceName.type = 'text';
+    sourceName.className = 'setting-input';
+    sourceName.value = o.sourceName || 'KAIRO Scripture';
+    sourceName.placeholder = 'Network source name';
+    sourceName.title = 'The name this output appears as on the network/Syphon list';
+
+    const status = document.createElement('span');
+    status.className = 'native-output-status';
+    status.textContent = o.enabled ? 'Starting…' : 'Off';
+
+    const sel = document.createElement('select');
+    sel.className = 'setting-input';
+    looks.forEach(l => {
+      const opt = document.createElement('option');
+      opt.value = l.id; opt.textContent = l.name;
+      if (l.id === themeMap[o.id]) opt.selected = true;
+      sel.appendChild(opt);
+    });
+    sel.addEventListener('change', () => {
+      settings.outputThemes = { ...outputThemeMap(), [o.id]: sel.value };
+      saveSettingsPatch({ outputThemes: settings.outputThemes });
+      applyOutputThemes();
+    });
+
+    const layerChecks = buildLayerChecksRow(o.id);
+
+    const del = document.createElement('button');
+    del.className = 'modal-btn secondary display-output-del';
+    del.innerHTML = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>`;
+    del.title = `Remove this ${kind === 'ndi' ? 'NDI' : 'Syphon'} output`;
+    del.addEventListener('click', async () => {
+      if (invokeFn && o.enabled) { try { await invokeFn(`${kind}_stop`, { id: o.id }); } catch {} }
+      const list = outputsFn().filter(x => x.id !== o.id);
+      settings[`${kind}Outputs`] = list;
+      const themes = { ...outputThemeMap() }; delete themes[o.id];
+      const layerMapNext = { ...outputLayerMap() }; delete layerMapNext[o.id];
+      settings.outputThemes = themes; settings.outputLayers = layerMapNext;
+      saveSettingsPatch({ [`${kind}Outputs`]: list, outputThemes: themes, outputLayers: layerMapNext });
+      applyOutputThemes(); applyOutputLayers();
+      renderNativeOutputs(kind);
+    });
+
+    // Restart-with-new-name debounce — the network name is immutable per
+    // broadcasting session (matches the previous singleton implementation's
+    // own comment on this exact behavior), so a live rename means stop+start.
+    let debounce = null;
+    sourceName.addEventListener('input', () => {
+      updateNativeOutput(kind, o.id, { sourceName: sourceName.value.trim() || 'KAIRO Scripture' });
+      if (!o.enabled) return;
+      clearTimeout(debounce);
+      debounce = setTimeout(async () => {
+        if (!invokeFn) return;
+        try { await invokeFn(`${kind}_stop`, { id: o.id }); } catch {}
+        try { await invokeFn(`${kind}_start`, { id: o.id, sourceName: sourceName.value.trim() || 'KAIRO Scripture' }); } catch {}
+      }, 600);
+    });
+
+    toggle.addEventListener('change', async () => {
+      updateNativeOutput(kind, o.id, { enabled: toggle.checked });
+      if (!invokeFn) { status.textContent = `${kind === 'ndi' ? 'NDI' : 'Syphon'} not available (run inside the app)`; toggle.checked = false; return; }
+      if (toggle.checked) {
+        status.textContent = 'Starting…';
+        try {
+          await invokeFn(`${kind}_start`, { id: o.id, sourceName: sourceName.value.trim() || 'KAIRO Scripture' });
+          status.textContent = 'Broadcasting';
+          status.classList.add('is-active');
+          // Push whatever's already live immediately, same as the old
+          // singleton implementation, so this output doesn't sit blank
+          // until the next verse/media/timer change.
+          window.KairoNativeOutputs?.pushToOne?.(kind, o.id);
+        } catch (e) {
+          status.textContent = 'Failed: ' + e;
+          toggle.checked = false;
+          updateNativeOutput(kind, o.id, { enabled: false });
+        }
+      } else {
+        try { await invokeFn(`${kind}_stop`, { id: o.id }); } catch {}
+        status.textContent = 'Off';
+        status.classList.remove('is-active');
+      }
+    });
+
+    // Too many real fields (toggle/name/source-name/theme/3 layer checks/
+    // status/delete) to fit one flat row at Settings' actual panel width —
+    // two compact lines instead: top = identity/status/delete, bottom =
+    // the actual configuration (source name/theme/layers).
+    const topLine = document.createElement('div');
+    topLine.className = 'native-output-row-top';
+    topLine.appendChild(toggleLabel);
+    topLine.appendChild(name);
+    topLine.appendChild(status);
+    topLine.appendChild(del);
+
+    const bottomLine = document.createElement('div');
+    bottomLine.className = 'native-output-row-bottom';
+    bottomLine.appendChild(sourceName);
+    bottomLine.appendChild(sel);
+    bottomLine.appendChild(layerChecks);
+
+    row.appendChild(topLine);
+    row.appendChild(bottomLine);
+    host.appendChild(row);
+
+    // Auto-resume: a row saved as enabled starts itself on load, same as
+    // the old singleton toggle's own restore-on-relaunch behavior.
+    if (o.enabled && invokeFn) {
+      status.textContent = 'Starting…';
+      invokeFn(`${kind}_start`, { id: o.id, sourceName: sourceName.value.trim() || 'KAIRO Scripture' })
+        .then(() => { status.textContent = 'Broadcasting'; status.classList.add('is-active'); })
+        .catch(e => { status.textContent = 'Failed: ' + e; });
+    } else if (o.enabled && !invokeFn) {
+      status.textContent = `${kind === 'ndi' ? 'NDI' : 'Syphon'} not available (run inside the app)`;
+    }
+  });
+
+  const addBtn = document.getElementById(`add-${kind}-output-btn`);
+  if (addBtn && !addBtn.dataset.wired) {
+    addBtn.dataset.wired = '1';
+    addBtn.addEventListener('click', () => {
+      const list = outputsFn();
+      const next = [...list, { id: genOutputId(kind), name: `${kind === 'ndi' ? 'NDI' : 'Syphon'} Output ${list.length + 1}`, sourceName: 'KAIRO Scripture', enabled: false }];
+      settings[`${kind}Outputs`] = next;
+      saveSettingsPatch({ [`${kind}Outputs`]: next });
+      renderNativeOutputs(kind);
+    });
+  }
+}
+
+function updateNativeOutput(kind, id, patch) {
+  const outputsFn = kind === 'ndi' ? ndiOutputs : syphonOutputs;
+  const list = outputsFn().map(x => x.id === id ? { ...x, ...patch } : x);
+  settings[`${kind}Outputs`] = list;
+  saveSettingsPatch({ [`${kind}Outputs`]: list });
+}
+
+function renderNdiOutputs()    { return renderNativeOutputs('ndi'); }
+function renderSyphonOutputs() { return renderNativeOutputs('syphon'); }
 
 // Report whether a second screen is actually attached, so the operator knows
 // whether "Open" will land on a projector or just stack on this monitor.
@@ -9257,6 +9540,126 @@ async function applyOutputThemes() {
   if (!lastPreviewHadOwnLook && previewVerseText && previewVerseText.textContent !== 'Nothing on display') {
     renderPreviewScreen(previewVerseText.textContent, previewVerseRef?.textContent || '', null);
   }
+}
+
+// ── Output Looks — per-output Slide/Media/Timer visibility ─────────────────
+// "a user can send only media content to a specific screen or only timer"
+// (owner, referencing ProPresenter's own Edit Looks panel). Mirrors
+// outputThemeMap/applyOutputThemes/renderOutputThemePickers exactly — same
+// settings-object shape family, same localStorage+storage-event delivery to
+// display.html, same /api/look/apply broadcast, same per-card UI injection.
+// Any output missing from settings.outputLayers (or missing one of the three
+// keys) defaults to ALL THREE true — a fresh install, or any output nobody
+// has touched yet, behaves exactly like today, zero config needed.
+function outputLayerMap() {
+  const src = settings.outputLayers && typeof settings.outputLayers === 'object' ? settings.outputLayers : {};
+  const map = {};
+  for (const key of [...allOutputKeys(), 'ndi', 'syphon']) {
+    const entry = src[key] && typeof src[key] === 'object' ? src[key] : {};
+    map[key] = {
+      slide: entry.slide !== false,
+      media: entry.media !== false,
+      timer: entry.timer !== false,
+    };
+  }
+  return map;
+}
+
+// Push the current per-output layer visibility to every display client —
+// same dual delivery path as applyOutputThemes: localStorage (picked up
+// instantly by every same-origin display.html window via its existing
+// 'storage' listener) + a server broadcast (belt-and-suspenders, and the
+// only path a non-webview output like NDI/Syphon can observe at all — see
+// their own gating in wireNdiBridge below, which reads this same map
+// directly rather than through a broadcast round-trip).
+async function applyOutputLayers() {
+  const map = outputLayerMap();
+  localStorage.setItem('kairo-output-layers', JSON.stringify(map));
+  localStorage.setItem('kairo-active-look-ts', Date.now().toString());
+  try {
+    await fetch(`${SERVER}/api/look/apply`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ layers: map }),
+    });
+  } catch (err) {
+    console.warn('[Look] per-output layer broadcast failed:', err.message);
+  }
+}
+
+// Only the outputs that genuinely have real multi-layer content are worth
+// a Layers control. Of OUTPUT_DEFS' remaining fixed cards (ndi/syphon moved
+// out to their own dynamic lists — see ndiOutputs()/syphonOutputs() above,
+// each row builds its own layer-checks row directly via buildLayerChecksRow,
+// not through this function at all), only the primary External Display
+// qualifies — OBS and ProPresenter only ever carry Slide/verse content (see
+// the Output Looks plan's own "Non-goals": OBS's WebSocket integration is a
+// single text-source push, ProPresenter's is its Message/token API), so a
+// Media/Timer checkbox for either would be dead UI. Their existing simple
+// on/off toggle (obsEnabled/proPresenterEnabled) is untouched.
+function isLayerCapableOutput(key) {
+  return key === PRIMARY_DISPLAY;
+}
+
+// Builds one reusable Slide/Media/Timer checkbox row for a given output —
+// shared by renderOutputLayerPickers (the fixed OUTPUT_DEFS cards) and
+// renderDisplayOutputs (dynamically-added extra display rows), so the two
+// don't drift into two separately-maintained copies of the same control.
+function buildLayerChecksRow(outputId) {
+  const row = document.createElement('div');
+  row.className = 'output-layer-checks';
+  const want = outputLayerMap()[outputId];
+  [['slide', 'Slide'], ['media', 'Media'], ['timer', 'Timer']].forEach(([layerKey, label]) => {
+    const wrap = document.createElement('label');
+    wrap.className = 'output-layer-check';
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.checked = want[layerKey] !== false;
+    cb.dataset.layerKey = layerKey;
+    cb.addEventListener('change', () => {
+      const current = outputLayerMap();
+      current[outputId] = { ...current[outputId], [layerKey]: cb.checked };
+      settings.outputLayers = current;
+      saveSettingsPatch({ outputLayers: current });
+      applyOutputLayers();
+    });
+    wrap.appendChild(cb);
+    wrap.appendChild(document.createTextNode(label));
+    row.appendChild(wrap);
+  });
+  return row;
+}
+
+// Inject a Slide/Media/Timer checkbox row into each layer-capable output
+// card's body, right alongside the existing .output-theme-group — mirrors
+// renderOutputThemePickers's own structure (same card lookup, same
+// insert-once-then-update pattern) function-for-function.
+function renderOutputLayerPickers() {
+  const map = outputLayerMap();
+  OUTPUT_DEFS.forEach(({ key, card }) => {
+    if (!isLayerCapableOutput(key)) return;
+    const body = document.querySelector(`#${card} .output-card-body`);
+    if (!body) return;
+
+    let group = body.querySelector('.output-layer-group');
+    if (!group) {
+      group = document.createElement('div');
+      group.className = 'setting-group output-layer-group';
+      const lbl = document.createElement('label');
+      lbl.className = 'setting-label';
+      lbl.textContent = 'Layers';
+      group.appendChild(lbl);
+      group.appendChild(buildLayerChecksRow(key));
+      const theme = body.querySelector('.output-theme-group');
+      if (theme) theme.insertAdjacentElement('afterend', group);
+      else body.insertBefore(group, body.firstChild);
+    } else {
+      const want = map[key];
+      group.querySelectorAll('input[type="checkbox"]').forEach(cb => {
+        cb.checked = want[cb.dataset.layerKey] !== false;
+      });
+    }
+  });
 }
 
 // Persist a partial settings change without clobbering unrelated fields.
