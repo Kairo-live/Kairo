@@ -1,13 +1,26 @@
 [package]
 name = "kairo"
 version = "2.7.0"
-description = "KAIRO — AI Scripture Assistant"
-authors = ["KAIRO"]
+description = "Kairo — AI Scripture Assistant"
+authors = ["Kairo"]
 edition = "2021"
 
 [lib]
 name = "kairo_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
+
+# The package name above stays lowercase (crate-naming convention, and
+# renaming it would ripple into Cargo.lock/dependency references for no
+# real benefit) — but it's also literally what macOS shows as the process
+# name for an unbundled `cargo run` dev binary (Dock tooltip, Activity
+# Monitor), which is where the Dock's "kairo" label was actually coming
+# from — tauri.conf.json's productName only takes effect once a real .app
+# bundle exists (a release build, or a bundled dev run), not for the bare
+# executable. This gives the compiled BINARY its own name, independent of
+# the package identity, so even the raw dev process shows "Kairo".
+[[bin]]
+name = "Kairo"
+path = "src/main.rs"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -63,6 +76,20 @@ objc2            = "0.5"
 objc2-foundation = { version = "0.2", features = ["NSString", "NSDictionary", "NSValue", "NSGeometry"] }
 core-foundation  = "0.10"
 gl               = "0.14"
+
+# Spout — Windows' equivalent of Syphon (same-machine, zero-copy sharing).
+# spout2-rs's DirectX 11 backend owns its own D3D11 device internally and
+# sends plain CPU pixel buffers (Sender::new + send_image(&pixels, w, h)),
+# so — like Syphon's CGL path — no external graphics context setup is
+# needed from spout.rs's side. Deliberately NOT a hand-rolled FFI binding to
+# Spout's own C++ interface (SpoutLibrary's exported interface is a raw
+# C++ vtable, not flat C functions the way libndi's are) — getting a vtable
+# layout wrong by hand, with no Windows machine available to test against
+# the real DLL, risks silent memory corruption, a strictly worse failure
+# mode than a clean crash. Target-scoped so macOS/Linux builds never touch
+# this dependency at all.
+[target.'cfg(windows)'.dependencies]
+spout2-rs = "0.1"
 
 [profile.release]
 panic = "abort"

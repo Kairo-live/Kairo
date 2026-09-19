@@ -1,5 +1,5 @@
 {
-  "productName": "KAIRO",
+  "productName": "Kairo",
   "version": "2.7.0",
   "identifier": "com.kairo.scripture",
   "build": {
@@ -13,7 +13,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "KAIRO",
+        "title": "Kairo",
         "width": 1280,
         "height": 820,
         "minWidth": 1000,

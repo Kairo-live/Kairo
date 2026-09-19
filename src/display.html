@@ -971,13 +971,19 @@
     // Same dual-delivery pattern as the theme map above (localStorage +
     // 'storage' event for instant same-origin propagation, plus a WS
     // look-update broadcast as the belt-and-suspenders path) — see
-    // applyOutputLayers/outputLayerMap in app.js. Defaults ALL THREE true
+    // applyOutputLayers/outputLayerMap in app.js. Defaults ALL FOUR true
     // when nothing is configured for this output (or nothing at all has
     // ever been pushed yet), matching outputLayerMap's own zero-config-safe
     // default — a fresh install/window behaves exactly like before this
     // feature existed.
-    const DEFAULT_LAYERS = { slide: true, media: true, timer: true };
+    const DEFAULT_LAYERS = { bible: true, slide: true, media: true, timer: true };
     let outputLayers = DEFAULT_LAYERS;
+    // Which of Bible/Slide the CURRENTLY shown slide-layer content actually
+    // is — set by handleMessage whenever it renders through showVerse/
+    // renderImageStage below, read by applyOutputLayers so turning off
+    // "Slide" doesn't blank a Bible verse that's currently on screen (and
+    // vice versa).
+    let currentSlideIsBible = false;
 
     function loadOutputLayers() {
         try {
@@ -1003,7 +1009,11 @@
     function applyOutputLayers(next) {
         const prev = outputLayers;
         outputLayers = next;
-        if (prev.slide && !next.slide) clearDisplay();
+        // Only actually blank the slide layer if the layer that just turned
+        // off is the one the CURRENTLY showing content belongs to — turning
+        // off Slide shouldn't blank a Bible verse that's on screen, and
+        // turning off Bible shouldn't blank an announcement slide.
+        if ((currentSlideIsBible ? (prev.bible && !next.bible) : (prev.slide && !next.slide))) clearDisplay();
         if (prev.media && !next.media) renderMediaStage(null);
         if (prev.timer && !next.timer) {
             timerBadgeEl?.classList.add('hidden');
@@ -1634,15 +1644,27 @@
 
     // ── Message handler ────────────────────────────────────────────────────
     function handleMessage(msg) {
-        // Output Looks: this output's own Slide/Media/Timer visibility (see
-        // applyOutputLayers/pickLayers above) — a disabled layer simply never
-        // renders new content; toggling it back on picks up the next real
-        // update normally (no separate "resend" needed, matching how the
-        // real output already behaves after any other kind of reconnect).
+        // Output Looks: this output's own Bible/Slide/Media/Timer visibility
+        // (see applyOutputLayers/pickLayers above) — a disabled layer simply
+        // never renders new content; toggling it back on picks up the next
+        // real update normally (no separate "resend" needed, matching how
+        // the real output already behaves after any other kind of
+        // reconnect).
+        //
+        // Bible vs. Slide: this same 'detection' message type carries BOTH
+        // auto-detected/manually-sent scripture AND a plain Slides-tab
+        // slide (they share one send path — see server.js's /api/service/
+        // send) — real scripture always carries book/chapter/verse, a
+        // plain slide never does, so that's the classifier. No separate
+        // "kind" field needed. Bible takes precedence when a message could
+        // ever read as either (owner: "by their order, bible supersedes
+        // because it's the top").
         if (msg.type === 'detection' && msg.target === 'viewer') {
-            if (!outputLayers.slide) return;
             const verse = msg.verses && msg.verses[0];
+            const isBible = !!(verse && verse.book && verse.chapter && verse.verse);
+            if (isBible ? !outputLayers.bible : !outputLayers.slide) return;
             if (verse) {
+                currentSlideIsBible = isBible;
                 // A playlist item may carry its own theme (lyrics vs scripture).
                 // Anything without one falls back to this output's assigned theme.
                 applyContentLook(msg.look);
@@ -1660,9 +1682,12 @@
         }
 
         if (msg.type === 'range-active') {
-            if (!outputLayers.slide) return;
+            // A range is always a formally-cited scripture passage — always
+            // the Bible layer, never Slide.
+            if (!outputLayers.bible) return;
             const verse = msg.verses && msg.verses[0];
             if (verse) {
+                currentSlideIsBible = true;
                 showVerse(verse.text || verse.verse || '', verse.reference || verse.ref || '', true, verse.translatedText || '');
             } else {
                 setRangeActive(true);
@@ -1999,7 +2024,18 @@
     // simply never fire (confirmed the hard way on the main window).
     setTimeout(() => {
         const w = window.__TAURI__?.window?.getCurrentWindow?.();
-        w?.show().catch(() => {});
+        if (!w) return;
+        w.show().catch(() => {});
+        // Fullscreen is requested HERE, after show() — not at window
+        // creation (index.html's own WebviewWindow options deliberately
+        // pass fullscreen:false now) — see index.html's own comment for
+        // why: requesting it at creation made macOS's native fullscreen-
+        // transition animation (a real cross-fade, not an instant cut —
+        // "white screen before fading to black") capture its "before"
+        // frame from the window's default backing store, before this
+        // page had painted anything dark at all. Doing it now means real
+        // dark content already exists to fade FROM.
+        if (params.get('fs') === '1') w.setFullscreen(true).catch(() => {});
     }, 50);
     </script>
 </body>

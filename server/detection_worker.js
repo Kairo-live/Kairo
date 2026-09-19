@@ -944,6 +944,34 @@ function lookupRange(book, chapter, verseStart, verseEnd) {
   return results;
 }
 
+// One-time index: for each requested (already-normalized-by-caller) name,
+// every "book|chapter" that mentions it in the KJV text — built once at
+// startup and cached by the caller (server.js), not re-scanned per
+// detection. Backs the named-entity corroboration signal in
+// detection_scoring.js: a real spoken name ("Isaac") recently heard, cross-
+// checked against which chapter a weak-but-real textual match belongs to.
+// Reuses verseNormWords (already pre-split in init(), one word array per
+// verse) rather than re-splitting verseNormText here — a per-verse Set of
+// its own words gives O(1) membership checks instead of an O(wordCount)
+// substring/array scan per name.
+function buildNameIndex(names) {
+  const wanted = (names || []).map(n => norm(n)).filter(Boolean);
+  if (!wanted.length) return {};
+  const index = new Map(); // normName -> Set<"book|chapter">
+  for (const n of wanted) index.set(n, new Set());
+  for (let i = 0; i < verseMetadata.length; i++) {
+    const words = verseNormWords.get(i);
+    if (!words) continue;
+    const wordSet = new Set(words);
+    for (const n of wanted) {
+      if (wordSet.has(n)) index.get(n).add(`${verseMetadata[i].book}|${verseMetadata[i].chapter}`);
+    }
+  }
+  const out = {};
+  for (const [n, set] of index) out[n] = [...set];
+  return out;
+}
+
 // KJV markup → display text. {supplied words} are part of the verse — unwrap
 // them; {notes with a colon} ("{banqueting...: Heb. house of wine}") and
 // [section headings] ("[A Psalm of David.]") are translator apparatus that
@@ -1512,6 +1540,11 @@ parentPort.on('message', async (msg) => {
           results.push(v);
         }
         parentPort.postMessage({ type: 'rangeResult', id: msg.id, results });
+        break;
+      }
+      case 'buildNameIndex': {
+        const result = buildNameIndex(msg.names);
+        parentPort.postMessage({ type: 'nameIndexResult', id: msg.id, result });
         break;
       }
       case 'textSearch': {

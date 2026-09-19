@@ -74,6 +74,26 @@ const ENSEMBLE_BOOST = 0.08;
 const SAME_BOOK_WINDOW_MS = 60000;
 const LEDGER_WINDOW_MS = 20000;
 
+// Named-entity corroboration — a real spoken proper name (e.g. "Isaac")
+// recently heard, cross-checked (in server.js, via nameChapterIndex)
+// against whether the CANDIDATE's own chapter actually mentions that name
+// anywhere. Real incident this targets: "Genesis 26:14" — a stream hit
+// whose own B is deliberately hard-capped at 0.55-0.60 (see
+// calibrateMethodScore's own stream-case comment for exactly why that cap
+// is hard, not soft — a prior fix that let this same evidence shape
+// through unconditionally caused a real false positive). This bonus is
+// DELIBERATELY smaller than what it'd take to single-handedly rescue that
+// hard-capped floor — B(0.60) + this alone still lands under
+// VIEWER_MIN_SCORE once D()'s different-chapter penalty applies, since
+// namedEntityCorroborated doesn't participate in the selfSufficient check
+// below (B alone still decides that). It's meant to work ALONGSIDE other
+// real evidence (cross-method agreement, momentum), not replace the need
+// for it — the same "additional, not sufficient alone" shape as every
+// other A() term. Starting value, not yet harness-validated — same
+// "principled, not data-derived" caveat this file's own design doc gives
+// every other coefficient.
+const NAMED_ENTITY_BOOST = 0.15;
+
 // ── B(method, rawResult) — per-method calibration ───────────────────────────
 
 function clamp01(x) { return Math.max(0, Math.min(1, x)); }
@@ -458,7 +478,8 @@ function scoreCandidate(candidate, method, rawResult, ctx) {
   const D = selfSufficient
     ? 0
     : distanceTerm({ ...candidate, now: ctx.now }, ctx.activeContext, ctx.alreadyShown);
-  const A = ctx.ledger ? ctx.ledger.total(candidate) : 0;
+  const A = (ctx.ledger ? ctx.ledger.total(candidate) : 0)
+    + (ctx.namedEntityCorroborated ? NAMED_ENTITY_BOOST : 0);
   let finalScore = clamp01(B + D + A);
   // FIFTH real regression in this exact area, found live (owner testing,
   // 2026-09-07): the range-collision fix above (inDifferentBookDuringRange)
@@ -481,7 +502,7 @@ function scoreCandidate(candidate, method, rawResult, ctx) {
   if (inDifferentBookDuringRange && method !== 'direct') {
     finalScore = Math.min(finalScore, VIEWER_MIN_SCORE - 0.05);
   }
-  return { finalScore, breakdown: { B, D, A, method } };
+  return { finalScore, breakdown: { B, D, A, method, namedEntityCorroborated: !!ctx.namedEntityCorroborated } };
 }
 
 /**

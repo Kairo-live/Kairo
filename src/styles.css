@@ -878,8 +878,16 @@ input[type="range"]:disabled { opacity: 0.4; cursor: default; }
 .conf-mid        { background: #3b2f08; color: #fde68a; }  /* 60–79% — amber */
 .conf-low        { background: #3b0f0f; color: #fca5a5; }  /* < 60%  — red   */
 
-/* Locked verse card (JS compat) */
-.locked-verse-card      { background: var(--bg-card); border-radius: var(--radius); padding: 10px 12px; margin-bottom: 8px; border-left: 3px solid var(--blue); transition: transform 0.2s; -webkit-user-select: none; user-select: none; cursor: pointer; }
+/* Locked verse card (JS compat) — base background/border-radius/padding/
+   margin/border-left/transition all used to be redeclared here AND again
+   below in the "Unified verse card" block with different values
+   (var(--radius) vs var(--radius-lg), 3px vs 2px border-left, etc.) —
+   conflicting border-radius + mismatched per-side border widths is exactly
+   what rendered as a warped/blobby outline on every card. Trimmed to only
+   the properties genuinely unique to this block (cursor/user-select/hover
+   slide); the unified block below now owns background/border/radius/
+   padding/margin as the single source of truth. */
+.locked-verse-card      { -webkit-user-select: none; user-select: none; cursor: pointer; }
 .locked-verse-card:hover { transform: translateX(2px); }
 .locked-verse-header    { display: flex; align-items: center; gap: 6px; margin-bottom: 3px; }
 .locked-verse-num       { font-weight: 800; color: var(--blue); font-size: 10px; letter-spacing: 0.3px; }
@@ -1076,6 +1084,50 @@ input[type="range"]:disabled { opacity: 0.4; cursor: default; }
 
 /* ── Live screen (matches the main output's real aspect ratio — see
    applyOutputAspect in app.js; falls back to 16:9 until detected) ── */
+#monitor-grid-toggle-btn.active { color: var(--selected-text); background: var(--selected-dim); }
+
+/* Monitor grid — one tile per configured output (renderMonitorGrid,
+   app.js), shown instead of the single .live-screen preview above. */
+.outputs-monitor-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 8px;
+}
+.monitor-grid-tile {
+  border: 1px solid var(--border-md);
+  border-radius: var(--radius);
+  background: var(--bg-panel);
+  padding: 8px 10px;
+  min-height: 90px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.monitor-grid-tile-header {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.monitor-grid-tile-body {
+  flex: 1;
+  font-size: 10px;
+  color: var(--text-2);
+  overflow: hidden;
+  margin-top: 2px;
+}
+.monitor-grid-tile-body.is-empty { color: var(--text-3); font-style: italic; }
+.monitor-grid-tile.is-disabled { opacity: 0.5; }
+.monitor-grid-tile-ref { font-weight: 700; color: var(--text); margin-bottom: 2px; }
+.monitor-grid-tile-text {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
 .live-screen {
   aspect-ratio: var(--kairo-output-aspect, 16 / 9);
   background: linear-gradient(160deg, #1a1a1c 0%, #141416 50%, #0f0f11 100%);
@@ -1612,6 +1664,15 @@ input[type="range"]:disabled { opacity: 0.4; cursor: default; }
   flex-shrink: 0;
 }
 .native-output-status.is-active { color: var(--green); }
+/* A native start() failure (e.g. NDI runtime not installed) — toast() is a
+   permanent no-op in this app, so this is the only place the real reason
+   ever reaches the user. Long messages need to wrap, unlike the terse
+   "Broadcasting"/"Off" states this element otherwise only ever shows. */
+.output-status-error {
+  color: var(--red, #e05a5a);
+  white-space: normal;
+  text-align: left;
+}
 
 /* ── Outputs master-detail ─────────────────────────────────────────────
    Owner: "I like how ProPresenter does it better" (its own Screen
@@ -1630,6 +1691,39 @@ input[type="range"]:disabled { opacity: 0.4; cursor: default; }
   margin-bottom: 4px;
 }
 .outputs-add-btn { flex-shrink: 0; }
+
+/* Output Control matrix — layers as rows, outputs as columns (see
+   renderOutputControlMatrix in app.js). */
+.output-control-matrix { overflow-x: auto; }
+.ocm-table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 12px;
+}
+.ocm-table th, .ocm-table td {
+  padding: 8px 10px;
+  text-align: center;
+  border-bottom: 1px solid var(--border);
+}
+.ocm-table thead th {
+  font-weight: 600;
+  color: var(--text-2);
+  font-size: 11px;
+  white-space: nowrap;
+  border-bottom: 1px solid var(--border-md);
+}
+.ocm-table tbody th {
+  text-align: left;
+  color: var(--text-2);
+  font-weight: 600;
+  white-space: nowrap;
+}
+.ocm-table input[type="checkbox"] {
+  width: 15px;
+  height: 15px;
+  accent-color: var(--brand);
+  cursor: pointer;
+}
 .outputs-master-detail {
   display: grid;
   grid-template-columns: 200px 1fr;
@@ -1673,6 +1767,23 @@ input[type="range"]:disabled { opacity: 0.4; cursor: default; }
   font-size: 9.5px; letter-spacing: 0.04em; text-transform: uppercase;
   color: var(--text-3);
 }
+/* Per-row Slide/Media/Timer summary — owner: "you cannot see all of the
+   selected output per display" without opening each one's detail panel.
+   All three always shown (not just the off ones) so the row reads as a
+   real status line, not just an anomaly flag. */
+.outputs-layers-summary { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 1px; }
+.outputs-layers-summary-item {
+  font-size: 9px; letter-spacing: 0.03em; text-transform: uppercase;
+  color: var(--text-2);
+}
+.outputs-layers-summary-item.is-off {
+  color: var(--text-3);
+  text-decoration: line-through;
+  opacity: 0.6;
+}
+/* Plain-language version of the same summary, in the detail panel's own
+   Layers section (buildOutputLayersHint). */
+.outputs-layers-hint { margin-top: 6px; }
 /* On/off indicator per row (Display excluded — its "on" state is already
    the screen-assignment picker itself, a separate concept from a plain
    enable switch). Stops its own click from also selecting the row. */
@@ -1689,10 +1800,21 @@ input[type="range"]:disabled { opacity: 0.4; cursor: default; }
 .outputs-detail-header {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 10px;
   padding-bottom: 10px;
   border-bottom: 1px solid var(--border);
   margin-bottom: 2px;
+}
+/* A failed start()'s status text is long and needs to wrap — drop it to its
+   own full-width second line instead of overflowing past the panel edge
+   (title/toggle stay together on the first line since only this element's
+   order/basis change). */
+.native-output-status.has-error {
+  order: 2;
+  flex: 1 1 100%;
+  min-width: 0;
+  margin-top: 2px;
 }
 .outputs-detail-title { font-size: 14px; font-weight: 700; color: var(--text); margin: 0; flex: 1; }
 /* Compact label-beside-control row (Theme) — owner: "to save space, can we
@@ -2424,6 +2546,17 @@ input[type="range"]:disabled { opacity: 0.4; cursor: default; }
 .svc-popover-item.danger { color: var(--red); }
 .svc-popover-item.danger:hover { background: var(--red-dim); }
 .svc-popover-item.has-submenu { display: flex; align-items: center; justify-content: space-between; width: 100%; }
+/* Add-output menu (Outputs settings pane) — NDI/Syphon each carry a real
+   external requirement (a separate runtime install, a single-platform
+   limit) that a first-time user has no way to know before clicking — shown
+   right in the menu instead of only surfacing as a failed-toggle error. */
+.svc-popover-item-hint {
+  display: block;
+  font-size: 10px;
+  color: var(--text-3);
+  font-weight: 400;
+  margin-top: 1px;
+}
 .svc-popover-item.has-submenu::after { content: '\203A'; color: var(--text-3); margin-left: 8px; }
 
 /* ── Full-scale edit ──────────────────────────────────────────────────────
@@ -3018,6 +3151,18 @@ select {
    (not the pill .output-toggle above, which is for the output's own on/off
    switch — three of those side by side would read as three separate
    enable toggles, not one grouped "which layers" control). */
+/* Owner: "maybe create a separate section for users to customize their
+   output, don't cluster it with the main output control" — a distinct
+   bordered card instead of just another row in the same field stack as
+   Name/Physical Screen/Theme. */
+.output-layers-section {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-md);
+  border-radius: var(--radius);
+  background: var(--bg-hover);
+}
+
 .output-layer-checks {
   display: flex;
   flex-direction: column;
@@ -3771,6 +3916,13 @@ select {
   flex-shrink: 0;
 }
 
+/* Translation-to select (Off/French/Spanish/Portuguese) — full language
+   names, needs more room than the 3-5 letter version abbreviations above. */
+.cs-translate-to-select {
+  width: 92px;
+  flex-shrink: 0;
+}
+
 /* cs-preview-section removed — viewer now lives in right sidebar */
 
 .cs-section-header {
@@ -4218,6 +4370,17 @@ select {
 }
 .rs-layer-clear-btn:hover { color: var(--red); border-color: var(--red); }
 .rs-layer-clear-btn.rs-layer-clear-all { color: var(--text-3); }
+/* Icon-only now (was "Clear All" text) — fixed compact width instead of
+   flex:1, so it doesn't take as much room as the four text buttons now
+   that Clear Bible joined them. */
+.rs-layer-clear-all-icon {
+  flex: 0 0 auto;
+  width: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px;
+}
 
 /* ── Media tab ────────────────────────────────────────────────────────── */
 .media-folder-rail {
@@ -4791,8 +4954,11 @@ select {
   align-items: center;
   justify-content: space-between;
   padding: 8px 14px;
-  background: rgba(255,255,255,0.08);
-  border-top: 1px solid rgba(255,255,255,0.2);
+  /* Was a raw white-alpha overlay (rgba(255,255,255,0.08/0.2)) — didn't
+     read as part of the brand palette. Swapped for the actual named grey
+     tokens already used everywhere else for an elevated dark surface. */
+  background: var(--bg-hover);
+  border-top: 1px solid var(--border-md);
   gap: 10px;
   flex-shrink: 0;
 }
@@ -4980,21 +5146,6 @@ select {
   transition: opacity 0.12s;
 }
 .cand-send:hover { opacity: 0.85; }
-.cand-promote {
-  font-family: var(--font-head);
-  font-size: 9px;
-  font-weight: 600;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  padding: 3px 10px;
-  background: transparent;
-  color: var(--text-3);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  cursor: pointer;
-  transition: color 0.12s, border-color 0.12s;
-}
-.cand-promote:hover { color: var(--text); border-color: var(--text-3); }
 
 /* Auto-sent record in candidates — green left accent */
 .rs-candidates-body .candidate-sent {

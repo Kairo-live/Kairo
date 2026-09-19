@@ -65,7 +65,21 @@ const kCGLPFADoubleBuffer: CGLPixelFormatAttribute = 5;
 
 // dlsym for loading GL function pointers — preferred over creating a real
 // CGL context just to query addresses. OpenGL.framework's symbols are in
-// the global symbol table so RTLD_DEFAULT (null handle) resolves them.
+// the global symbol table, reachable via the RTLD_DEFAULT pseudo-handle.
+//
+// IMPORTANT: RTLD_DEFAULT is NOT a null pointer — it's the special sentinel
+// value (void*)-2 defined in <dlfcn.h>. A literal null handle is only valid
+// when it's the return value of an actual `dlopen()` call; passing NULL
+// directly to dlsym() is undefined behavior per the dlsym(3) manpage ("handle
+// must be a valid handle returned by dlopen()"). This was the real cause of
+// the native GL crash reported by a real user: `gl::load_with` silently
+// accepted whatever dlsym(NULL, ...) returned for each symbol (sometimes a
+// stale/garbage or null pointer depending on process state — reproduced with
+// a real SIGABRT the first time a user actually clicked to enable a Syphon
+// output), and every later `gl::*` call permanently panics with "gl function
+// was not loaded" the moment it hits an unresolved pointer.
+const RTLD_DEFAULT: *mut c_void = -2isize as *mut c_void;
+
 #[link(name = "c")]
 extern "C" {
     fn dlsym(handle: *mut c_void, symbol: *const i8) -> *mut c_void;
@@ -96,6 +110,26 @@ unsafe impl Encode for NSRect {
 unsafe impl RefEncode for NSPoint { const ENCODING_REF: Encoding = Encoding::Pointer(&Self::ENCODING); }
 unsafe impl RefEncode for NSSize  { const ENCODING_REF: Encoding = Encoding::Pointer(&Self::ENCODING); }
 unsafe impl RefEncode for NSRect  { const ENCODING_REF: Encoding = Encoding::Pointer(&Self::ENCODING); }
+
+// `CGLContextObj` is declared here as a bare `*mut c_void` (we only need it
+// as an opaque handle to pass around), so `msg_send!` would otherwise encode
+// it as a generic `^v` pointer. `SyphonOpenGLServer`'s real
+// `initWithName:context:options:` selector declares its `context:` parameter
+// as the real `CGLContextObj` type (`struct _CGLContextObject *`), and
+// objc2's runtime signature check compares the two — this wrapper gives that
+// argument the correctly-named opaque-struct-pointer encoding
+// (`^{_CGLContextObject}`), which objc2 treats as equivalent to the real,
+// deeply-nested `_CGLContextObject` encoding since a struct with an empty
+// field list is always considered opaque/equivalent to any struct of the
+// same name (see objc2-encode's `compare_encodings`). Without this, the
+// call panics with "invalid message send" the first time Syphon actually
+// starts — a second, previously-masked bug behind the GL-loading crash this
+// file also fixes (the process aborted before ever reaching this call).
+#[repr(transparent)]
+struct CglContextArg(CGLContextObj);
+unsafe impl Encode for CglContextArg {
+    const ENCODING: Encoding = Encoding::Pointer(&Encoding::Struct("_CGLContextObject", &[]));
+}
 
 // ── Handle ──────────────────────────────────────────────────────────────
 pub struct SyphonHandle {
@@ -204,9 +238,32 @@ pub fn start(source_name: &str, width: u32, height: u32, shared: Arc<Mutex<Sypho
     GL_LOADED.call_once(|| unsafe {
         gl::load_with(|name| {
             let cs = CString::new(name).unwrap();
-            dlsym(std::ptr::null_mut(), cs.as_ptr()) as *const _
+            dlsym(RTLD_DEFAULT, cs.as_ptr()) as *const _
         });
     });
+
+    // 2b. Verify every GL function this file actually calls resolved to a
+    // real pointer before touching any of them — `Once` means this whole
+    // process only ever gets one chance to load them, so a failure here has
+    // to be a clean, reportable error, not a later panic inside GenTextures/
+    // TexImage2D/etc. (see the RTLD_DEFAULT comment above for why this used
+    // to fail and abort the whole app).
+    let unresolved: Vec<&str> = [
+        ("glGenTextures", gl::GenTextures::is_loaded()),
+        ("glBindTexture", gl::BindTexture::is_loaded()),
+        ("glTexParameteri", gl::TexParameteri::is_loaded()),
+        ("glTexImage2D", gl::TexImage2D::is_loaded()),
+        ("glTexSubImage2D", gl::TexSubImage2D::is_loaded()),
+        ("glDeleteTextures", gl::DeleteTextures::is_loaded()),
+        ("glFlush", gl::Flush::is_loaded()),
+    ]
+    .into_iter()
+    .filter_map(|(name, loaded)| if loaded { None } else { Some(name) })
+    .collect();
+    if !unresolved.is_empty() {
+        free_native_resources(&mut h);
+        return Err(format!("Syphon: failed to resolve GL functions: {}", unresolved.join(", ")));
+    }
 
     // 3. Create the texture Syphon will publish from. We re-upload pixels
     //    into it on every `update` instead of allocating per frame.
@@ -258,7 +315,7 @@ pub fn start(source_name: &str, width: u32, height: u32, shared: Arc<Mutex<Sypho
         let server: *mut AnyObject = msg_send![
             alloc,
             initWithName: &*name,
-            context: h.ctx,
+            context: CglContextArg(h.ctx),
             options: std::ptr::null::<NSDictionary<NSString, AnyObject>>(),
         ];
         if server.is_null() {
@@ -579,3 +636,27 @@ fn draw_text(
 // silence unused-import warnings for `sel` if the macro path drifts
 #[allow(dead_code)]
 fn _keep_sel() { let _ = sel!(stop); }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Regression test for the real SIGABRT crash: `dlsym(NULL, ...)` (not
+    // RTLD_DEFAULT) could leave one or more GL function pointers unresolved,
+    // and the first subsequent `gl::GenTextures`/etc. call would panic and
+    // abort the whole process. This exercises the exact start() path a real
+    // "enable Syphon" click drives, in a real process, end to end.
+    #[test]
+    fn start_and_stop_do_not_crash() {
+        if !is_syphon_available() {
+            eprintln!("Syphon.framework not available in this environment — skipping");
+            return;
+        }
+        let handle = Arc::new(Mutex::new(SyphonHandle::default()));
+        start("KairoRegressionTest", 320, 180, handle.clone())
+            .expect("syphon::start should succeed without panicking");
+        update("Test verse", "Test 1:1", handle.clone())
+            .expect("syphon::update should succeed after start");
+        stop(handle).expect("syphon::stop should succeed");
+    }
+}

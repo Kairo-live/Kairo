@@ -6,6 +6,8 @@
 mod ndi;
 #[cfg(target_os = "macos")]
 mod syphon;
+#[cfg(target_os = "windows")]
+mod spout;
 mod fonts;
 
 use std::process::{Child, Command};
@@ -279,6 +281,20 @@ impl SyphonState {
     fn handle_for(&self, id: &str) -> Result<Arc<Mutex<syphon::SyphonHandle>>, String> {
         let mut map = self.0.lock().map_err(|e| e.to_string())?;
         Ok(map.entry(id.to_string()).or_insert_with(|| Arc::new(Mutex::new(syphon::SyphonHandle::default()))).clone())
+    }
+}
+
+// Windows' equivalent of SyphonState above — same keyed-collection shape,
+// same reasoning, just backed by spout.rs's handle type. The frontend's
+// syphon_* commands (see below) dispatch to whichever of these two exists
+// on the current platform; there is never a build with both.
+#[cfg(target_os = "windows")]
+struct SyphonState(Arc<Mutex<std::collections::HashMap<String, Arc<Mutex<spout::SpoutHandle>>>>>);
+#[cfg(target_os = "windows")]
+impl SyphonState {
+    fn handle_for(&self, id: &str) -> Result<Arc<Mutex<spout::SpoutHandle>>, String> {
+        let mut map = self.0.lock().map_err(|e| e.to_string())?;
+        Ok(map.entry(id.to_string()).or_insert_with(|| Arc::new(Mutex::new(spout::SpoutHandle::default()))).clone())
     }
 }
 
@@ -696,26 +712,84 @@ fn syphon_update_timer(app: AppHandle, id: String, text: String) -> Result<(), S
     syphon::update_timer(&text, state.handle_for(&id)?)
 }
 
-// Stubs for non-macOS platforms — frontend calls these unconditionally and
-// expects a clean `false` / no-op rather than an "unknown command" error.
-#[cfg(not(target_os = "macos"))]
+// ── Spout commands (Windows only) ─────────────────────────────────────────
+// Same command names as the macOS block above (syphon_*, not spout_*) —
+// the frontend treats "same-machine native sender" as one concept with a
+// platform-dependent label (see app.js's nativeSenderLabel/outputTypeLabel)
+// rather than two separate integrations, so it only ever calls syphon_*
+// regardless of OS. spout2-rs's DX11 Sender owns its own D3D11 device, so
+// unlike Syphon there's no separate is_spout_available() capability check
+// worth exposing — see spout::is_spout_available's own comment.
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn syphon_available() -> bool {
+    spout::is_spout_available()
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn syphon_start(app: AppHandle, id: String, source_name: String, width: Option<u32>, height: Option<u32>) -> Result<(), String> {
+    let state = app.state::<SyphonState>();
+    spout::start(&source_name, width.unwrap_or(0), height.unwrap_or(0), state.handle_for(&id)?)
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn syphon_stop(app: AppHandle, id: String) -> Result<(), String> {
+    let state = app.state::<SyphonState>();
+    spout::stop(state.handle_for(&id)?)
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn syphon_update(app: AppHandle, id: String, verse: String, reference: String) -> Result<(), String> {
+    let state = app.state::<SyphonState>();
+    spout::update(&verse, &reference, state.handle_for(&id)?)
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn syphon_update_media(app: AppHandle, id: String, image_base64: Option<String>) -> Result<(), String> {
+    let state = app.state::<SyphonState>();
+    let bytes = match image_base64 {
+        Some(b64) => Some(
+            base64::engine::general_purpose::STANDARD
+                .decode(b64)
+                .map_err(|e| format!("invalid media base64: {e}"))?,
+        ),
+        None => None,
+    };
+    spout::update_media(bytes, state.handle_for(&id)?)
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn syphon_update_timer(app: AppHandle, id: String, text: String) -> Result<(), String> {
+    let state = app.state::<SyphonState>();
+    spout::update_timer(&text, state.handle_for(&id)?)
+}
+
+// Stubs for every other platform (Linux) — frontend calls these
+// unconditionally and expects a clean `false` / no-op rather than an
+// "unknown command" error.
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 #[tauri::command]
 fn syphon_available() -> bool { false }
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 #[tauri::command]
 fn syphon_start(_id: String, _source_name: String, _width: Option<u32>, _height: Option<u32>) -> Result<(), String> {
-    Err("Syphon is macOS-only".into())
+    Err("Syphon/Spout aren't available on this platform".into())
 }
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 #[tauri::command]
 fn syphon_stop(_id: String) -> Result<(), String> { Ok(()) }
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 #[tauri::command]
 fn syphon_update(_id: String, _verse: String, _reference: String) -> Result<(), String> { Ok(()) }
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 #[tauri::command]
 fn syphon_update_media(_id: String, _image_base64: Option<String>) -> Result<(), String> { Ok(()) }
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 #[tauri::command]
 fn syphon_update_timer(_id: String, _text: String) -> Result<(), String> { Ok(()) }
 
@@ -754,7 +828,7 @@ pub fn run() {
         .manage(server_config)
         .manage(NdiState(Arc::new(Mutex::new(std::collections::HashMap::new()))));
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     {
         builder = builder.manage(SyphonState(Arc::new(Mutex::new(std::collections::HashMap::new()))));
     }
@@ -977,6 +1051,14 @@ pub fn run() {
                     let syphon_map = syphon_state.0.lock().unwrap_or_else(|p| p.into_inner());
                     for handle in syphon_map.values() {
                         let _ = syphon::stop(handle.clone());
+                    }
+                }
+                #[cfg(target_os = "windows")]
+                {
+                    let spout_state = app.state::<SyphonState>();
+                    let spout_map = spout_state.0.lock().unwrap_or_else(|p| p.into_inner());
+                    for handle in spout_map.values() {
+                        let _ = spout::stop(handle.clone());
                     }
                 }
             }

@@ -332,13 +332,25 @@
                      just KJV/NLT when the other four turned out to be
                      unwired labels; restored once the real source files
                      were found and connected. -->
-                <select id="translation-select" class="cs-select cs-translation-select">
+                <select id="translation-select" class="cs-select cs-translation-select" title="Primary — the main displayed Bible version">
                     <option value="KJV" selected>KJV</option>
                     <option value="NKJV">NKJV</option>
                     <option value="NLT">NLT</option>
                     <option value="NIV">NIV</option>
                     <option value="ESV">ESV</option>
                     <option value="NASB">NASB</option>
+                </select>
+                <!-- Owner: "there should be 2 dropdowns, 1 for primary and
+                     translation" — this is the SAME settings.bibleTranslateTo
+                     the Multi-Language theme's "Translate to" popover
+                     already drives (service.js), just surfaced directly
+                     here instead of requiring Theme → Multi-Language →
+                     Translate to just to change it. Options are populated
+                     in app.js from MT_LANGUAGES (the same fr/es/pt list
+                     every other translate-language picker in the app uses)
+                     so this can't silently drift out of sync with them. -->
+                <select id="bible-translate-to-select" class="cs-select cs-translate-to-select" title="Translation — a second language shown alongside Primary on the Multi-Language theme">
+                    <option value="">Off</option>
                 </select>
                 <button id="bible-theme-btn" class="ls-icon-btn ls-icon-btn-labeled svc-card-theme-btn cs-theme-btn" title="Theme for auto-detected &amp; searched scripture">
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
@@ -567,10 +579,20 @@
                  still-running countdown silently bring the badge back a
                  second later. -->
             <div class="rs-layer-clear-bar">
+                <!-- Bible and Slide share the same on-screen slide/text
+                     slot (see display.html's showVerse/clearDisplay — one
+                     visual area, not two), so Clear Bible reuses the exact
+                     same clearOutputLayer('slide') action Clear Slide
+                     already triggers rather than a parallel near-duplicate. -->
+                <button id="clear-bible-layer-btn" class="rs-layer-clear-btn" title="Clear the Bible/slide layer">Clear Bible</button>
                 <button id="clear-slide-layer-btn" class="rs-layer-clear-btn" title="Clear the slide/text layer only">Clear Slide</button>
                 <button id="clear-timer-layer-btn" class="rs-layer-clear-btn" title="Stop the live segment timer/clock">Clear Timer</button>
                 <button id="clear-media-layer-btn" class="rs-layer-clear-btn" title="Clear the media layer only">Clear Media</button>
-                <button id="clear-all-layers-btn" class="rs-layer-clear-btn rs-layer-clear-all" title="Clear everything on the output">Clear All</button>
+                <!-- Icon-only — was full text ("Clear All"), too wide once
+                     Clear Bible joined the row. -->
+                <button id="clear-all-layers-btn" class="rs-layer-clear-btn rs-layer-clear-all rs-layer-clear-all-icon" title="Clear everything on the output">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg>
+                </button>
             </div>
 
             <!-- Live preview — compact 16:9 in right sidebar. The output
@@ -581,6 +603,15 @@
                 <div class="rs-preview-output-row">
                     <span class="rs-preview-output-label">Monitoring</span>
                     <select id="live-preview-output-select" class="rs-preview-output-select" title="Which output this preview is monitoring"></select>
+                    <!-- Owner: "the monitor view will just be a grid based on
+                         the number of active outputs, can be triggered with
+                         a button in the monitoring section right next to
+                         the dropdown." Toggles between the single preview
+                         below and a grid of one compact tile per configured
+                         output (renderMonitorGrid in app.js). -->
+                    <button id="monitor-grid-toggle-btn" class="ls-icon-btn" title="Show all outputs at once" aria-pressed="false">
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+                    </button>
                 </div>
                 <div class="live-screen" id="slide-preview">
                     <!-- Mirrors the real output's media layer — sits behind
@@ -613,6 +644,16 @@
                     <div class="live-screen-timer hidden" id="slide-preview-timer"></div>
                     <div class="live-screen-badge">LIVE</div>
                 </div>
+                <!-- Grid mode — one compact tile per configured output,
+                     shown instead of the single #slide-preview above.
+                     Built by renderMonitorGrid (app.js): each tile is a
+                     text/status summary (name, connection dot, what's on
+                     that output's own Bible/Slide/Media/Timer layers right
+                     now, per that output's own outputLayerMap()) — not a
+                     full pixel-accurate visual clone of the real themed
+                     output, which would need a much larger per-tile
+                     renderer. -->
+                <div class="outputs-monitor-grid hidden" id="outputs-monitor-grid"></div>
                 <!-- Range navigation -->
                 <div id="range-nav-bar" class="range-nav-bar" style="display:none">
                     <div class="range-nav-left">
@@ -1389,12 +1430,15 @@
                         <details class="help-group">
                             <summary>Sending to outputs</summary>
                             <div class="help-body">
-                                <p>Turn on any number of destinations at once under <strong>Settings → Outputs</strong> — each one renders with its own assigned theme:</p>
+                                <p><strong>Settings → Outputs</strong> lists every destination on the left; click one to see and edit its settings on the right. Use <strong>+ Add Output</strong> (top right) to add a Display/Projector, an NDI output, or a Syphon output — each new one can be renamed and given its own theme. The switch in each output's header (list row or detail panel) turns that destination on or off; a dot next to it shows whether it's actually connected/broadcasting.</p>
                                 <ul>
-                                    <li><strong>External Display</strong> — the primary output, a real window sent to a projector/screen/monitor. Enable it first; it's what most services actually need.</li>
-                                    <li><strong>ProPresenter, OBS, Syphon, NDI</strong> — opt-in broadcast integrations on top of External Display, for routing Kairo's output into other production software.</li>
+                                    <li><strong>External Display</strong> — a real window sent to a projector/screen/monitor. Enable at least one; it's what most services actually need. If it doesn't come back after restarting the app, reselect it here — this should happen automatically on launch, but a manual reselect always forces it.</li>
+                                    <li><strong>NDI</strong> — broadcasts over the network to any NDI-aware app (OBS, vMix, ProPresenter, etc.), on any platform. Requires the free <strong>NDI Tools</strong> runtime installed on this machine first (ndi.video/tools) — Kairo doesn't bundle it. If the toggle won't turn on, the output's status line will say why (usually "NDI runtime not found").</li>
+                                    <li><strong>Syphon (macOS) / Spout (Windows)</strong> — same idea as NDI but same-machine only, and bundled with Kairo (nothing extra to install). Any Syphon- or Spout-aware app on the same computer (OBS, ProPresenter, Resolume, etc.) can pick it up directly. The Add Output menu only offers the one that matches the computer Kairo is running on.</li>
+                                    <li><strong>OBS</strong> — a lightweight built-in text push into a single OBS Text Source, for a quick lower-third without adding an NDI/Syphon source in OBS. For full parity (images, video, timer, not just verse text), add an NDI or Syphon source inside OBS pointed at Kairo instead — that's the recommended setup.</li>
+                                    <li><strong>ProPresenter</strong> — there's no separate Kairo-side integration for it. Add Kairo as an NDI or Syphon source directly inside ProPresenter, the same way you would in OBS.</li>
                                 </ul>
-                                <p>If the external display doesn't come back after restarting the app, reselect it under Outputs — this should now happen automatically on launch, but a manual reselect always forces it.</p>
+                                <p>Each NDI/Syphon output also has its own configurable resolution and network/source name, editable any time under its detail panel.</p>
                             </div>
                         </details>
 
@@ -1420,6 +1464,7 @@
                                     <li><strong>Nothing is being detected</strong> — confirm the right microphone/audio device is selected under Settings → Audio and that Live Status shows Listening, not Idle.</li>
                                     <li><strong>A verse is correct but never appears live</strong> — check Possible Matches; a lower-confidence detection waits there for a manual click rather than auto-sending.</li>
                                     <li><strong>The output window is blank or on the wrong screen</strong> — reselect it under Settings → Outputs → External Display.</li>
+                                    <li><strong>An NDI output won't turn on</strong> — install the free NDI Tools runtime (ndi.video/tools) and try the toggle again; Kairo doesn't bundle it. The output's own status line shows the exact reason when it fails.</li>
                                     <li><strong>An imported file lost its look</strong> — only ProPresenter files preserve their own design automatically; a plain text/Word import always uses a Kairo theme instead, by design.</li>
                                 </ul>
                             </div>
@@ -1523,6 +1568,27 @@
                     </div>
                 </div>
 
+                <!-- Output Control — owner: "create a new subsection called
+                     output control, this will have a vertical list of all
+                     things that can be sent to the display" (referencing
+                     ProPresenter's own Looks matrix — layers as rows,
+                     destinations as columns). Every output's own detail
+                     panel above already has its own Bible/Slide/Media/Timer
+                     checkboxes (buildLayerChecksRow) for editing one output
+                     at a time; this is the same outputLayerMap() data, just
+                     as one matrix so every output's layers are visible and
+                     editable together without clicking into each one.
+                     Built by renderOutputControlMatrix() (src/app.js). -->
+                <div class="settings-section outputs-shell">
+                    <div class="outputs-shell-header">
+                        <div>
+                            <div class="settings-section-label" style="border-bottom:none;padding-bottom:0;margin-bottom:2px;">Output Control</div>
+                            <p class="setting-hint" style="margin:0;">Every output's Bible/Slide/Media/Timer visibility, at a glance — the same setting as each output's own "Show on this output" above.</p>
+                        </div>
+                    </div>
+                    <div id="output-control-matrix" class="output-control-matrix"></div>
+                </div>
+
                 <!-- Add-output type chooser — positioned near outputs-add-btn
                      when opened. OBS isn't offered here: it's a single
                      fixed WebSocket connection (one OBS instance), not a
@@ -1531,8 +1597,8 @@
                     <div class="svc-popover-label">Add Output</div>
                     <div class="svc-popover-list">
                         <button type="button" class="svc-popover-item" data-add-type="display">Display / Projector</button>
-                        <button type="button" class="svc-popover-item" data-add-type="ndi">NDI</button>
-                        <button type="button" class="svc-popover-item" data-add-type="syphon">Syphon</button>
+                        <button type="button" class="svc-popover-item" data-add-type="ndi" title="Requires the free NDI Tools runtime — ndi.video/tools">NDI<span class="svc-popover-item-hint">Requires NDI Tools installation</span></button>
+                        <button type="button" class="svc-popover-item" id="add-output-syphon-btn" data-add-type="syphon">Syphon<span class="svc-popover-item-hint">macOS only</span></button>
                     </div>
                 </div>
             </section>
@@ -1782,8 +1848,21 @@
                             }) }).catch(function(){});
                             console.warn('[KAIRO] Failed to reposition existing display window:', e);
                         }
-                        await existing.show();
-                        await existing.setFocus();
+                        // Deliberately NOT show()/setFocus() here before the
+                        // reload below — that used to make an ALREADY-VISIBLE
+                        // window flash to WebKit's default white background
+                        // the instant navigate() started reloading it, then
+                        // back to dark once display.html's CSS repainted —
+                        // visible on the real output screen every time an
+                        // output got reassigned to a different monitor.
+                        // Hidden instead, so the reload happens off-screen —
+                        // same fix already applied to fresh window creation
+                        // below, and display.html's own boot script (its
+                        // "Reveal the window" step) already calls show()
+                        // itself on EVERY load, fresh or reloaded, once its
+                        // own dark CSS has actually settled, so nothing here
+                        // needs to show it again.
+                        try { await existing.hide(); } catch {}
                         // Push the new URL so layout / opacity changes apply.
                         // A navigate() is a real page reload of display.html — it
                         // boots blank by design, so anything genuinely live (a
@@ -1803,7 +1882,10 @@
                         return;
                     }
                     const win = new WebviewWindow(label, {
-                        url: location.origin + url,
+                        // fullscreen intent rides on the URL (see &fs=1 below)
+                        // instead of the constructor option right below this —
+                        // see that option's own comment for why.
+                        url: location.origin + url + (url.indexOf('?') === -1 ? '?' : '&') + 'fs=' + (opts.fullscreen ? '1' : '0'),
                         title: 'KAIRO Display',
                         width:  opts.width  || 1280,
                         height: opts.height || 720,
@@ -1812,7 +1894,18 @@
                         decorations:  false,
                         alwaysOnTop:  true,
                         resizable:    true,
-                        fullscreen:   opts.fullscreen || false,
+                        // Deliberately ALWAYS false here, regardless of
+                        // opts.fullscreen — requesting fullscreen at
+                        // construction made macOS's own native fullscreen-
+                        // transition animation (a real cross-fade, not an
+                        // instant cut — matches "white screen before fading
+                        // to black") capture its "before" frame from the
+                        // window's default backing store, before display.html
+                        // had painted anything at all. display.html's own
+                        // reveal script (its "Reveal the window" step) now
+                        // requests fullscreen itself, right after show() —
+                        // once real dark content already exists to fade FROM.
+                        fullscreen:   false,
                         skipTaskbar:  false,
                         // Same fix as the main window's own splash->show
                         // sequence (see signal_main_ready in app.js): a

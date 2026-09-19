@@ -121,6 +121,26 @@ const RE_NONALPHA   = /[^a-z\s]/g;
 const RE_WHITESPACE = /\s+/g;
 const RE_SPACES     = /\s+/;
 
+// Major biblical PERSON names — single source of truth shared by the
+// Deepgram keyterm boost list (startDeepgram) and the named-entity
+// corroboration index (buildNameIndex/nameChapterIndex below). Book names
+// already double as person names for several of these (John, Mark, Luke,
+// James, Peter, Joshua, Ruth, Samuel, Nehemiah, Esther, Job, Timothy,
+// Titus) and stay in the separate book-name keyterm list, not duplicated
+// here.
+const BIBLE_PERSON_NAMES = [
+  'Isaac','Abraham','Sarah','Jacob','Esau','Rebekah','Rachel','Leah',
+  'Joseph','Moses','Aaron','Miriam','Deborah','Gideon','Samson',
+  'Naomi','Saul','David','Solomon','Elijah','Elisha','Noah','Adam','Eve',
+  'Mary','Nicodemus','Lazarus','Martha','Zacchaeus','Barnabas',
+  'Stephen','Cornelius','Herod','Pilate','Judas','Nathanael',
+  'Bartholomew','Thomas','Andrew','Philip','Matthias',
+];
+// Lowercased for the fast per-word membership check in handleTranscriptSegment
+// — built once here rather than re-lowercasing BIBLE_PERSON_NAMES on every
+// transcript segment.
+const BIBLE_PERSON_NAMES_LC = new Set(BIBLE_PERSON_NAMES.map(n => n.toLowerCase()));
+
 // ── Settings ──────────────────────────────────────────────────────────────
 // In production (Tauri bundle) the resource dir is read-only on macOS/Windows.
 // lib.rs passes KAIRO_APP_DATA_DIR pointing to the user-writable app-data folder.
@@ -293,6 +313,43 @@ let workerBasicReady = false;   // all three layers ready after init
 let workerSemanticReady = false; // embedding model + corpus loaded (background, arrives seconds after workerBasicReady)
 const pendingCallbacks = new Map();
 let workerMsgId = 0;
+
+// ── Named-entity corroboration ──────────────────────────────────────────
+// normName mirrors detection_worker.js's own norm() closely enough for
+// plain alphabetic names (the only kind BIBLE_PERSON_NAMES contains) —
+// keeps the keys nameChapterIndex is populated under (worker-side) and
+// looked up under (here) consistent without sharing a module.
+function normName(s) { return String(s || '').toLowerCase().replace(RE_NONALPHA, '').replace(RE_WHITESPACE, ' ').trim(); }
+
+// normName(name) -> Set<"book|chapter"> — built once, below, after the
+// worker's corpus is loaded. Empty until then; every lookup site treats a
+// miss as "no corroboration" rather than waiting on it, same as every other
+// optional-enhancement signal in this file.
+let nameChapterIndex = new Map();
+
+// The most recently heard biblical person name, and when — a real spoken
+// name is a genuine content signal (see detection_scoring.js's
+// NAMED_ENTITY_BOOST), decayed the same way activeContext already is
+// elsewhere in this file. Updated once per transcript segment in
+// handleTranscriptSegment, read by broadcastDetection's shadow-scoring
+// block — module-level state instead of threading it through every call
+// site, same pattern as lastOutputVerse/referenceContext.
+let recentlyMentionedName   = null; // normalized (normName'd)
+let recentlyMentionedNameAt = 0;
+const NAMED_ENTITY_WINDOW_MS = 45000; // matches CONTEXT_EXPIRE_MS's own "still recent" order of magnitude
+
+async function buildNameChapterIndex() {
+  try {
+    const msg = await workerCall('buildNameIndex', { names: BIBLE_PERSON_NAMES }, 15000);
+    const raw = msg.result || {};
+    const map = new Map();
+    for (const [name, chapters] of Object.entries(raw)) map.set(name, new Set(chapters));
+    nameChapterIndex = map;
+    console.log(`[Server] Named-entity index built — ${map.size} names across the KJV corpus.`);
+  } catch (err) {
+    console.warn('[Server] Named-entity index build failed (non-fatal, corroboration signal just stays off):', err.message);
+  }
+}
 // Resolves once the detection worker's 'ready' message arrives — the eval
 // harness (server/eval/run_eval.js) awaits this instead of polling
 // workerBasicReady, since it requires this module directly rather than
@@ -311,6 +368,7 @@ function spawnDetectionWorker() {
       broadcast({ type: 'worker-ready' });
       console.log('[Server] Detection worker ready (reference + verbatim + fingerprint).');
       _resolveWorkerReady();
+      buildNameChapterIndex(); // fire-and-forget — see its own comment
       return;
     }
     if (msg.type === 'initError') {
@@ -497,6 +555,16 @@ wss.on('connection', (ws) => {
     animation: settings.outputAnimation || 'fade',
     speed: settings.outputAnimationSpeed || 1,
   }));
+  // Same snapshot-on-connect idea, extended to each independent output
+  // layer's own current content — see lastSlideBroadcast/lastMediaBroadcast/
+  // lastTimerBroadcast's own comment for the incident this fixes (a newly
+  // opened or reconnected display started blank instead of showing what
+  // was already live everywhere else). Each is `null` when that layer is
+  // genuinely cleared right now, so nothing is sent for it — display.html
+  // already starts blank by default, exactly matching that state.
+  if (lastSlideBroadcast) ws.send(JSON.stringify(lastSlideBroadcast));
+  if (lastMediaBroadcast) ws.send(JSON.stringify(lastMediaBroadcast));
+  if (lastTimerBroadcast) ws.send(JSON.stringify(lastTimerBroadcast));
 
   // Forward binary audio frames to whichever engine is active.
   // - Deepgram: streamed straight to the WS connection (Deepgram does endpointing)
@@ -585,12 +653,39 @@ wss.on('connection', (ws) => {
 const _broadcastListeners = [];
 function onBroadcast(fn) { _broadcastListeners.push(fn); }
 
+// Snapshot of each independent output layer's own most recent broadcast —
+// replayed to any freshly (re)connected WS client below, extending the same
+// snapshot-on-connect idea 'connection-state'/'output-transition' already
+// use (see wss.on('connection')'s own comment on the incident that pattern
+// fixed). Real incident this covers: opening a NEW display output — or any
+// display reconnecting after a network blip, or the brief freeze a macOS
+// display-connect event can cause — started blank and stayed blank until
+// the NEXT real detection/update, even though something was already live
+// on every other output. `null` means "this layer is currently cleared" —
+// intentionally distinct from "never set," so a genuinely-cleared layer
+// replays as cleared, not as whatever was showing before the clear.
+let lastSlideBroadcast = null; // last 'detection'(target:'viewer') or 'range-active'
+let lastMediaBroadcast = null; // last 'media'
+let lastTimerBroadcast = null; // last 'timer-slide'
+
 function broadcast(data) {
   const msg = JSON.stringify(data);
   for (const ws of clients) {
     if (ws.readyState === ws.OPEN) ws.send(msg);
   }
   for (const fn of _broadcastListeners) { try { fn(data); } catch {} }
+
+  if ((data.type === 'detection' && data.target === 'viewer') || data.type === 'range-active') {
+    lastSlideBroadcast = data;
+  } else if (data.type === 'media') {
+    lastMediaBroadcast = data;
+  } else if (data.type === 'timer-slide') {
+    lastTimerBroadcast = data.clear ? null : data;
+  } else if (data.type === 'clear-layer') {
+    if (data.layer === 'slide' || data.layer === 'all') lastSlideBroadcast = null;
+    if (data.layer === 'media' || data.layer === 'all') lastMediaBroadcast = null;
+    if (data.layer === 'timer' || data.layer === 'all') lastTimerBroadcast = null;
+  }
 }
 
 // ── Deepgram state ────────────────────────────────────────────────────────
@@ -1611,8 +1706,7 @@ let lastTopicBuild    = 0;
 
 // Called on every final transcript — accumulates word frequencies
 function accumulateTopicWords(transcript) {
-  const norm = s => s.toLowerCase().replace(RE_NONALPHA, '').replace(RE_WHITESPACE, ' ').trim();
-  const words = norm(transcript).split(' ')
+  const words = normName(transcript).split(' ')
     .filter(w => w.length >= 5);   // 5+ chars — skips most noise words naturally
   for (const w of words) {
     topicWordCounts.set(w, (topicWordCounts.get(w) || 0) + 1);
@@ -2652,6 +2746,24 @@ async function handleTranscriptSegment(transcript, isFinal, confidence, speechFi
   // of a wall-clock timer.
   if (isFinal && transcript) wordsHeard += transcript.trim().split(RE_SPACES).filter(Boolean).length;
 
+  // Named-entity corroboration — scan every segment (interim included, so a
+  // name lands before its own final arrives) for a recognized biblical
+  // person name. Cheap: one Set lookup per word, no regex per word. Whoever
+  // was mentioned MOST RECENTLY wins outright (not merged/accumulated) —
+  // matches how activeContext/referenceContext already treat "what's
+  // current" elsewhere in this file.
+  if (transcript) {
+    const words = transcript.split(RE_SPACES);
+    for (let i = words.length - 1; i >= 0; i--) {
+      const w = words[i].toLowerCase().replace(RE_NONALPHA, '');
+      if (w && BIBLE_PERSON_NAMES_LC.has(w)) {
+        recentlyMentionedName = w;
+        recentlyMentionedNameAt = Date.now();
+        break;
+      }
+    }
+  }
+
   // ── Interim transcripts ───────────────────────────────────────
   // Reference parser fires on interim for < 2s explicit citations.
   // Fingerprint also fires on longer interim segments so paraphrase
@@ -3139,6 +3251,18 @@ async function startDeepgram(config = {}) {
         'Hebrews','James','Peter','Jude','Revelation',
         'Chapter','Verse','Scripture',
         'brethren','righteous','salvation','covenant',
+        // Major biblical PERSON names — book names above double as person
+        // names for several of these already (John, Mark, Luke, James,
+        // Peter, Joshua, Ruth, Samuel, Nehemiah, Esther, Job, Timothy,
+        // Titus), so only genuinely new names are added here. Real
+        // incident this targets: a live sermon's "Isaac" was transcribed
+        // as "Ezekiel" (Ezekiel was already boosted as a book, Isaac
+        // wasn't boosted as anything) — nothing in the model's config gave
+        // it a reason to prefer the correct, less-common word. General ASR
+        // models tend to mangle proper names most, the same reasoning the
+        // existing book-name list is already built on. Shared with
+        // nameChapterIndex below — one source of truth.
+        ...BIBLE_PERSON_NAMES,
       ];
     }
     const myConnection = deepgramConnection = dg.listen.live(dgConfig);
@@ -4517,6 +4641,21 @@ async function broadcastDetection(verses, method, topScore, target) {
         df: verses[0].df,
         idf: verses[0].idf,
       };
+      // Named-entity corroboration: a real biblical person name spoken
+      // recently (recentlyMentionedName, set in handleTranscriptSegment),
+      // cross-checked against nameChapterIndex — does the CANDIDATE'S OWN
+      // chapter actually mention that name anywhere? Chapter-level, not
+      // verse-level: a name is often introduced once and referred to by
+      // pronoun for the rest of the passage (real incident this targets —
+      // Genesis 26:14, "Isaac" spoken, doesn't itself contain the word
+      // "Isaac" in every verse of that account). Window matches D()'s own
+      // SAME_BOOK_WINDOW_MS order of magnitude — a name mentioned minutes
+      // ago shouldn't still be corroborating an unrelated later match.
+      const namedEntityCorroborated = !!(
+        recentlyMentionedName &&
+        (now - recentlyMentionedNameAt) < NAMED_ENTITY_WINDOW_MS &&
+        nameChapterIndex.get(recentlyMentionedName)?.has(`${candidate.book}|${candidate.chapter}`)
+      );
       const { finalScore, breakdown } = detectionScoring.scoreCandidate(candidate, method, rawResult, {
         activeContext, alreadyShown, ledger: shadowLedger, now,
         // A formally-established range ("read verses 1 to 3") is a much
@@ -4525,8 +4664,9 @@ async function broadcastDetection(verses, method, topScore, target) {
         // / Romans 7:22, both near-duplicate phrasing with Psalm 1, hijacked
         // the display mid-range).
         rangeActiveBook: rangeCurrentVerse ? rangeCurrentVerse.book : null,
+        namedEntityCorroborated,
       });
-      if (process.env.KAIRO_DEBUG_SCORING) console.log('[DEBUG-SCORING]', JSON.stringify({ candidate, method, rawResult, activeContext, rangeActiveBook: rangeCurrentVerse ? rangeCurrentVerse.book : null, finalScore, breakdown }));
+      if (process.env.KAIRO_DEBUG_SCORING) console.log('[DEBUG-SCORING]', JSON.stringify({ candidate, method, rawResult, activeContext, rangeActiveBook: rangeCurrentVerse ? rangeCurrentVerse.book : null, namedEntityCorroborated, finalScore, breakdown }));
       // Read corroboration BEFORE record() — same "don't corroborate
       // itself" ordering as scoreCandidate's own ledger.total() read above;
       // decideTarget's semantic exemption needs to know whether a DIFFERENT

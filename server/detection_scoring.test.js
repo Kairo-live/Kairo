@@ -327,6 +327,55 @@ test('A real, moderate-IDF df=1 stream anchor ("Genesis 26:14") reaches Candidat
   assert.ok(finalScore < VIEWER_MIN_SCORE, `must still stay well short of auto-send on its own, got ${finalScore}`);
 });
 
+test('Named-entity corroboration alone does NOT rescue the hard-capped Genesis 26:14 floor (reopening the reverted false-positive would be worse than the miss)', () => {
+  // Same exact real incident/numbers as the test above, plus a spoken
+  // "Isaac" the candidate's chapter genuinely mentions. Must NOT
+  // single-handedly cross VIEWER_MIN_SCORE — this signal is designed to
+  // work ALONGSIDE other real evidence, never to replace the need for it
+  // (see NAMED_ENTITY_BOOST's own comment for why: B alone was already
+  // hard-capped here for a documented reason, a prior fix letting this
+  // exact evidence shape through unconditionally caused a real false
+  // positive the same night).
+  const ledger = new EvidenceLedger();
+  const candidate = { book: 'Genesis', chapter: 26, verse: 14 };
+  const rawResult = { confirmed: false, df: 1, idf: 13.7, similarity: 0.55 };
+  const { finalScore } = scoreCandidate(candidate, 'stream', rawResult, {
+    activeContext: null, ledger, now: T0, namedEntityCorroborated: true,
+  });
+  assert.ok(finalScore < VIEWER_MIN_SCORE, `named-entity alone must not be sufficient, got ${finalScore}`);
+  assert.equal(decideTarget(finalScore, 'stream'), 'suggestions');
+});
+
+test('Named-entity corroboration COMBINED with independent cross-method agreement clears the bar (neither alone does)', () => {
+  // Same Genesis 26:14 evidence, but two OTHER methods also independently
+  // hit this verse (real, plausible scenario — verbatim/fingerprint often
+  // fire alongside stream on the same transcript). Demonstrates the
+  // intended shape: this signal tips a case that's already close, it
+  // doesn't manufacture confidence alone.
+  const candidate = { book: 'Genesis', chapter: 26, verse: 14 };
+  const rawResult = { confirmed: false, df: 1, idf: 13.7, similarity: 0.55 };
+
+  const ledgerNoName = new EvidenceLedger();
+  ledgerNoName.record(candidate, 'verbatim', T0 - 3000);
+  ledgerNoName.record(candidate, 'fingerprint', T0 - 2000);
+  const withoutNamedEntity = scoreCandidate(candidate, 'stream', rawResult, {
+    activeContext: null, ledger: ledgerNoName, now: T0,
+  });
+  assert.ok(withoutNamedEntity.finalScore < VIEWER_MIN_SCORE,
+    `cross-method agreement alone must still fall short, got ${withoutNamedEntity.finalScore}`);
+
+  const ledgerWithName = new EvidenceLedger();
+  ledgerWithName.record(candidate, 'verbatim', T0 - 3000);
+  ledgerWithName.record(candidate, 'fingerprint', T0 - 2000);
+  const withNamedEntity = scoreCandidate(candidate, 'stream', rawResult, {
+    activeContext: null, ledger: ledgerWithName, now: T0, namedEntityCorroborated: true,
+  });
+  assert.ok(withNamedEntity.finalScore >= VIEWER_MIN_SCORE,
+    `named-entity + cross-method agreement together should clear the bar, got ${withNamedEntity.finalScore}`);
+  assert.equal(decideTarget(withNamedEntity.finalScore, 'stream'), 'viewer');
+  assert.equal(withNamedEntity.breakdown.namedEntityCorroborated, true);
+});
+
 test('The SAME real incident ("come and let us reason together") reaches Candidates via VERBATIM\'s own moderate-IDF floor, cold start or not', () => {
   // Owner's own framing, live: "if it understands context, a preacher
   // saying 'come and let us reason together' will show up immediately in

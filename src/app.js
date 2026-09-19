@@ -307,6 +307,7 @@ const scriptureSearchInput = document.getElementById('scripture-search-input');
 const scriptureSearchBtn   = document.getElementById('scripture-search-btn');
 const scriptureSearchClear = document.getElementById('scripture-search-clear');
 const translationSelect    = document.getElementById('translation-select');
+const bibleTranslateToSelect = document.getElementById('bible-translate-to-select');
 
 // Settings inputs
 const deepgramKeyInput    = document.getElementById('deepgram-key');
@@ -544,6 +545,17 @@ const TRANSCRIPT_LOG_MAX_SPANS = 400;
 // continuous speech; forcing a scrollHeight reflow on every single one adds
 // up. Coalesce into at most one scroll per rendered frame.
 let _transcriptScrollScheduled = false;
+// "Stick to bottom" threshold — an operator scrolling up mid-service to
+// review something they might have missed used to get yanked straight back
+// to the bottom by the very next interim update (several times a second
+// during continuous speech), making manual review impossible. Only force-
+// scroll when they were already at/near the bottom (i.e. actually
+// following along), same pattern any chat/log UI needs.
+const TRANSCRIPT_SCROLL_STICK_PX = 40;
+function isTranscriptAtBottom() {
+  if (!transcriptContent) return true;
+  return transcriptContent.scrollHeight - transcriptContent.scrollTop - transcriptContent.clientHeight <= TRANSCRIPT_SCROLL_STICK_PX;
+}
 function scheduleTranscriptScroll() {
   if (_transcriptScrollScheduled) return;
   _transcriptScrollScheduled = true;
@@ -555,6 +567,11 @@ function scheduleTranscriptScroll() {
 
 function handleTranscript(msg) {
   if (!transcriptDiv) showEmptyTranscript(false);
+  // Checked BEFORE any DOM mutation below — appending content grows
+  // scrollHeight regardless of where the operator's scrolled to, so this
+  // has to reflect whether they were following along prior to this
+  // update, not be skewed by how much new content just arrived.
+  const wasAtBottom = isTranscriptAtBottom();
   if (msg.isFinal) {
     const span = document.createElement('span');
     span.className = 'transcript-final';
@@ -570,11 +587,11 @@ function handleTranscript(msg) {
     sessionTranscriptParts.push({ time: new Date().toLocaleTimeString(), text: msg.text });
     wordCount += msg.text.split(/\s+/).length;
     if (wordCountEl) wordCountEl.textContent = wordCount.toLocaleString();
-    // Auto-scroll
-    scheduleTranscriptScroll();
+    // Auto-scroll — only if the operator was already following along.
+    if (wasAtBottom) scheduleTranscriptScroll();
   } else {
     if (interimSpan) { interimSpan.textContent = msg.text; interimSpan.style.opacity = '0.5'; }
-    scheduleTranscriptScroll();
+    if (wasAtBottom) scheduleTranscriptScroll();
   }
   // Lyric follower (service.js) — every transcript segment, final or interim,
   // feeds the aligner; it only looks at the tail so interim churn is fine.
@@ -675,6 +692,78 @@ function renderLivePreviewOutputSelect() {
   });
   applyLivePreviewAspect();
 }
+
+// ── Monitor grid — one tile per configured output ────────────────────────
+// Owner: "the monitor view will just be a grid based on the number of
+// active outputs, can be triggered with a button in the monitoring section
+// right next to the dropdown." A text/status summary per tile (name,
+// connection dot via buildOutputLayersSummary — reused, not re-built —
+// plus whatever's currently live, gated per that output's own
+// outputLayerMap()) rather than a full pixel-accurate themed clone of each
+// real output, which would need a much larger per-tile visual renderer;
+// worth a real fast-follow if this text-based version proves useful.
+let monitorGridActive = false;
+let _monitorGridRefreshTimer = null;
+function renderMonitorGrid() {
+  const host = document.getElementById('outputs-monitor-grid');
+  if (!host || typeof allConfiguredOutputs !== 'function') return;
+  const outputs = allConfiguredOutputs();
+  host.innerHTML = '';
+  const text = previewVerseText?.textContent || '';
+  const ref  = previewVerseRef?.textContent || '';
+  const hasContent = !!text && text !== 'Nothing on display';
+  // Computed once for the whole grid rather than once per tile.
+  const layersMap = typeof outputLayerMap === 'function' ? outputLayerMap() : {};
+  outputs.forEach(o => {
+    const want = layersMap[o.id] || DEFAULT_OUTPUT_LAYERS;
+    const enabled = typeof isOutputEnabled === 'function' ? isOutputEnabled(o) : true;
+    const tile = document.createElement('div');
+    tile.className = 'monitor-grid-tile' + (enabled ? '' : ' is-disabled');
+    const header = document.createElement('div');
+    header.className = 'monitor-grid-tile-header';
+    header.textContent = o.name;
+    tile.appendChild(header);
+    if (o.type !== 'obs' && typeof buildOutputLayersSummary === 'function') {
+      tile.appendChild(buildOutputLayersSummary(o.id, layersMap));
+    }
+    const body = document.createElement('div');
+    body.className = 'monitor-grid-tile-body';
+    // Owner: "should be whatever goes to the screen of each display" — an
+    // output that's actually OFF shows nothing real, so the tile must say
+    // that plainly rather than showing the same live content every other
+    // enabled output happens to share right now.
+    if (!enabled) {
+      body.textContent = 'Output is off';
+      body.classList.add('is-empty');
+    } else if (hasContent && (want.bible !== false || want.slide !== false)) {
+      body.innerHTML = `<div class="monitor-grid-tile-ref">${escapeHtml(ref)}</div><div class="monitor-grid-tile-text">${escapeHtml(text)}</div>`;
+    } else {
+      body.textContent = 'Nothing on display';
+      body.classList.add('is-empty');
+    }
+    tile.appendChild(body);
+    host.appendChild(tile);
+  });
+}
+document.getElementById('monitor-grid-toggle-btn')?.addEventListener('click', () => {
+  monitorGridActive = !monitorGridActive;
+  const btn = document.getElementById('monitor-grid-toggle-btn');
+  const single = document.getElementById('slide-preview');
+  const grid = document.getElementById('outputs-monitor-grid');
+  btn?.classList.toggle('active', monitorGridActive);
+  btn?.setAttribute('aria-pressed', String(monitorGridActive));
+  single?.classList.toggle('hidden', monitorGridActive);
+  grid?.classList.toggle('hidden', !monitorGridActive);
+  clearInterval(_monitorGridRefreshTimer);
+  if (monitorGridActive) {
+    renderMonitorGrid();
+    // Light polling refresh rather than hooking into every place preview
+    // content can change (sends, clears, range advances, layer toggles) —
+    // simpler and can't silently miss a call site; the grid is cheap to
+    // rebuild (a handful of DOM nodes from data already in memory).
+    _monitorGridRefreshTimer = setInterval(renderMonitorGrid, 2000);
+  }
+});
 
 document.getElementById('live-preview-output-select')?.addEventListener('change', (e) => {
   livePreviewOutputId = e.target.value;
@@ -1078,11 +1167,9 @@ function buildCandidateCard(v, method, isSent = false) {
     <div class="cand-text">${cleanVerseText(v.text)}</div>
     <div class="cand-actions">
       <button class="cand-send">Send to Air</button>
-      <button class="cand-promote">Promote</button>
     </div>
   `;
   const sendBtn = card.querySelector('.cand-send');
-  const promoteBtn = card.querySelector('.cand-promote');
   const sendThis = () => {
     // showInViewer now removes this card outright (Candidates is
     // candidates-only, no sent-item log) — no in-place "mark green" step
@@ -1091,12 +1178,11 @@ function buildCandidateCard(v, method, isSent = false) {
     sendVerseToServer(v);
   };
   sendBtn?.addEventListener('click', sendThis);
-  promoteBtn?.addEventListener('click', () => {
-    // Promote = send to viewer only (no PP), remove from candidates
-    showInViewer([v], method || 'direct', 1.0);
-    card.remove();
-    updateSuggestionCount();
-  });
+  // Promote used to mean "send to viewer only, skip ProPresenter" — a
+  // meaningless distinction now that the ProPresenter message-push
+  // integration is gone entirely (ProPresenter picks Kairo up as an NDI/
+  // Syphon source instead, see Settings → Outputs). Send to Air is the
+  // only real action left.
   // Double-click anywhere on the card → same action as "Send to Air", so
   // Candidates matches the Live Queue/range-card shortcut instead of being
   // the one surface where you have to hit the button precisely.
@@ -1387,6 +1473,9 @@ async function startListening() {
   // timers are reset in handleConnectionState when we actually connect.
   sessionVerses = [];
   sessionTranscriptParts = [];
+  // A previous session's fallback shouldn't carry into this one — always
+  // start a fresh session on whatever Settings actually has configured.
+  capturingFallbackDevice = false;
   confidenceSum   = 0;
   confidenceCount = 0;
   const engine = (settings.speechEngine || 'deepgram').toLowerCase();
@@ -1581,6 +1670,21 @@ function setAudioSilenceWarning(on) {
 
 let _audioHealAt = 0;
 let _audioHealing = false;
+// True while capture is running on the SYSTEM DEFAULT device as a transient
+// stand-in for the operator's own explicitly-configured Audio Input,
+// because that device recently looked silent. Real incident: BlackHole
+// (a loopback device) briefly had nothing playing through it right as the
+// silence checks fired, so the old code below overwrote the Settings
+// dropdown itself to blank — which resolves to the room mic — with no
+// visible sign anything changed, and no way back to BlackHole short of the
+// operator noticing and manually reselecting it. This flag keeps the
+// fallback purely internal to capture: audioSourceSettings.value (what
+// Settings actually shows, and what gets persisted) is never touched, and
+// checkAudioSilence periodically retries the operator's real choice below
+// so a loopback device that starts carrying real audio again is picked
+// back up automatically.
+let capturingFallbackDevice = false;
+let _fallbackRetryAt = 0;
 function _healLog(msg, extra) {
   console.warn('[KAIRO]', msg);
   fetch(`${SERVER}/api/debug-log`, {
@@ -1608,6 +1712,24 @@ function checkAudioSilence() {
       && !_audioHealing && Date.now() - _audioHealAt > 20000) {
     _audioHealAt = Date.now();
     restartAudioCapture('silence-watchdog');
+    return;
+  }
+
+  // Self-recovery: while parked on the fallback device, periodically retry
+  // the operator's actually-configured one — otherwise a loopback device
+  // that only LOOKED silent for a moment (content hadn't started, a brief
+  // pause) stays abandoned for the rest of the service even once it's
+  // carrying real audio again, and the operator has to notice and manually
+  // reselect it. Independent of the 20s heal throttle above (this isn't a
+  // "something's broken" heal, just a routine re-check) but still gated on
+  // !_audioHealing so it can't overlap an unrelated rebuild in progress.
+  const configuredDeviceId = audioSourceSettings?.value || '';
+  if (capturingFallbackDevice && configuredDeviceId && !_audioHealing
+      && Date.now() - _fallbackRetryAt > 30000) {
+    _fallbackRetryAt = Date.now();
+    _healLog('retrying operator-configured device after fallback', { device: configuredDeviceId });
+    capturingFallbackDevice = false;
+    restartAudioCapture('fallback-retry');
   }
 }
 
@@ -1643,7 +1765,13 @@ async function restartAudioCapture(reason, allowDeviceFallback = true) {
     try { await audioContext?.close(); } catch {}
     audioContext = null; mediaStream = null;
 
-    const deviceId = audioSourceSettings?.value || '';
+    // capturingFallbackDevice means a recent attempt on the operator's own
+    // configured device looked silent — use the system default for THIS
+    // capture without touching audioSourceSettings.value itself, so
+    // Settings keeps honestly showing what the operator actually chose
+    // (see the flag's own comment) instead of silently rewriting it.
+    const configuredDeviceId = audioSourceSettings?.value || '';
+    const deviceId = capturingFallbackDevice ? '' : configuredDeviceId;
     mediaStream = await navigator.mediaDevices.getUserMedia({
       audio: {
         ...(deviceId ? { deviceId: { exact: deviceId } } : {}),
@@ -1674,13 +1802,16 @@ async function restartAudioCapture(reason, allowDeviceFallback = true) {
     _healLog('audio capture rebuilt', { reason, device: deviceId || 'default' });
 
     // Verify it's actually producing audio. If the explicitly-selected
-    // device still comes back dead after 3s, retry once on the default.
+    // device still comes back dead after 3s, retry once on the default —
+    // via the internal flag only (see its own comment), never by touching
+    // the Settings dropdown's actual value.
     if (deviceId && allowDeviceFallback) {
       const checkpoint = lastRealAudioAt;
       setTimeout(() => {
         if (isListening && lastRealAudioAt === checkpoint && !_audioHealing) {
           _healLog('selected device still silent after rebuild — falling back to default input');
-          audioSourceSettings.value = '';
+          capturingFallbackDevice = true;
+          _fallbackRetryAt = Date.now();
           _audioHealAt = Date.now();
           restartAudioCapture('device-fallback', false);
         }
@@ -1688,6 +1819,24 @@ async function restartAudioCapture(reason, allowDeviceFallback = true) {
     }
   } catch (err) {
     _healLog('audio capture rebuild FAILED', { reason, error: err.message });
+    // A failed rebuild leaves audioContext/mediaStream both null — without a
+    // fallback here, that's a dead end: checkAudioSilence's own watchdog
+    // requires a non-null audioContext to ever fire again (see its guard),
+    // and there's no track left for watchAudioTrackHealth to listen to
+    // either. Real incident this fixes: "as the audio source changes, it
+    // stops transcribing" — the previously-selected device's id becomes
+    // unsatisfiable (getUserMedia throws instead of returning a stream) the
+    // moment the underlying audio source actually changes, and nothing ever
+    // retried. Same bounded fallback-to-default shape the success-path
+    // silent-device case above already uses; re-reads the select's current
+    // value directly since `deviceId` is scoped to the try block above.
+    const failedDeviceId = audioSourceSettings?.value || '';
+    if (failedDeviceId && allowDeviceFallback && !capturingFallbackDevice) {
+      _healLog('audio capture rebuild failed on selected device — falling back to default input');
+      capturingFallbackDevice = true;
+      _fallbackRetryAt = Date.now();
+      setTimeout(() => { if (isListening) restartAudioCapture('device-fallback-after-error', false); }, 500);
+    }
   } finally {
     _audioHealing = false;
   }
@@ -1859,6 +2008,7 @@ async function loadSettings() {
     }
     if (translationSettings && settings.translation) translationSettings.value = settings.translation;
     if (translationSelect && settings.translation)   translationSelect.value   = settings.translation;
+    if (bibleTranslateToSelect) bibleTranslateToSelect.value = settings.bibleTranslateTo || '';
     if (autoSendSettings)  autoSendSettings.checked  = settings.autoSend  !== false;
     updateAutoDeployBadge();
     if (showConfSettings)  showConfSettings.checked   = settings.showConfidence !== false;
@@ -2316,6 +2466,10 @@ function clearOutputLayer(layer) {
   if (layer === 'slide' || layer === 'all') { clearPreviewScreen(); window.KairoService?.clearLive?.(); }
   if (layer === 'media' || layer === 'all') clearMediaPreview();
 }
+// Clear Bible reuses the exact same 'slide' action Clear Slide triggers —
+// Bible and Slide share one on-screen visual slot (see the button's own
+// comment in index.html), so there's nothing distinct to implement here.
+document.getElementById('clear-bible-layer-btn')?.addEventListener('click', () => clearOutputLayer('slide'));
 document.getElementById('clear-slide-layer-btn')?.addEventListener('click', () => clearOutputLayer('slide'));
 document.getElementById('clear-media-layer-btn')?.addEventListener('click', () => clearOutputLayer('media'));
 // 'timer' has no client-side preview to clear (unlike slide/media, the
@@ -2368,6 +2522,14 @@ async function populateAudioDevices() {
 
 audioSourceSettings?.addEventListener('change', () => {
   localStorage.setItem(AUDIO_INPUT_KEY, audioSourceSettings.value || '');
+  // A fresh explicit choice always wins over a stale fallback from before.
+  capturingFallbackDevice = false;
+  // Picking a different source while a service is already live used to only
+  // persist the choice for the NEXT session — the running capture kept
+  // silently using the OLD device until something else (the silence
+  // watchdog, a track ending) happened to trigger an unrelated rebuild.
+  // Take effect immediately, same as every other live audio-recovery path.
+  if (isListening) restartAudioCapture('operator-changed-source');
 });
 
 refreshDevicesBtn?.addEventListener('click', populateAudioDevices);
@@ -2587,6 +2749,42 @@ const MT_LANGUAGES = [
 ];
 const _mtPollTimers = {};
 
+// ── Bible tab toolbar: Primary + Translation dropdowns ──────────────────
+// Owner: "in bible menu, there should be 2 dropdowns, 1 for primary and
+// translation... let the dropdowns be beside each other." Translation
+// drives the SAME settings.bibleTranslateTo the Multi-Language theme's own
+// "Translate to" popover (service.js) already used — surfaced directly
+// here instead of requiring Theme → Multi-Language → Translate to. Options
+// populated from MT_LANGUAGES so it can't drift from every other
+// translate-language picker in the app.
+if (bibleTranslateToSelect) {
+  MT_LANGUAGES.forEach(({ code, name }) => {
+    const opt = document.createElement('option');
+    opt.value = code;
+    opt.textContent = name;
+    bibleTranslateToSelect.appendChild(opt);
+  });
+  bibleTranslateToSelect.value = settings.bibleTranslateTo || '';
+  bibleTranslateToSelect.addEventListener('change', () => {
+    settings.bibleTranslateTo = bibleTranslateToSelect.value || null;
+    saveSettingsPatch({ bibleTranslateTo: settings.bibleTranslateTo });
+  });
+}
+
+// Primary — real incident found while wiring the new dropdown alongside it:
+// this toolbar select (#translation-select) has existed for a while but
+// never actually had a live change listener of its own; it only ever
+// mirrored settings.translation FROM elsewhere (loadSettings above), so
+// changing it here silently did nothing until a full Settings-modal Save
+// happened to read the SEPARATE #translation-select-settings dropdown
+// instead. Wired for real now, matching every other toolbar control's
+// live-apply behavior.
+translationSelect?.addEventListener('change', () => {
+  settings.translation = translationSelect.value;
+  if (translationSettings) translationSettings.value = translationSelect.value;
+  saveSettingsPatch({ translation: settings.translation });
+});
+
 function renderMtModelList() {
   const host = document.getElementById('mt-model-list');
   if (!host) return;
@@ -2756,10 +2954,23 @@ async function renderInlineTranslateUpsell(container, code) {
     return;
   }
 
+  // Owner: "when a user clicks on french translation, it should
+  // retroactively download the french bible... so the translation can be
+  // correct." Investigated — there was never actually a missing download:
+  // every MT_LANGUAGES entry has a real, already-bundled Bible translation
+  // (databases/i18n/{code}.json — server.js's translate() tries this FIRST,
+  // before ever touching the MT model), so scripture on the Multi-Language
+  // split theme already works the instant a language is picked, zero
+  // setup. This model download is only for translating NON-scripture slide/
+  // announcement text (translate.js's own header comment: "Anything else...
+  // run it through a dedicated translation model"). The copy below used to
+  // just say "isn't downloaded yet", reading as if the language itself
+  // wasn't ready — misleading for exactly the scripture use case this app
+  // is built around.
   container.className = 'osp osp-warn';
   container.innerHTML =
-    _inlineMtTitle(container, '', `${escapeHtml(name)} isn't downloaded yet`) +
-    `<p class="osp-msg">${status.approxMB ? `~${status.approxMB}MB · ` : ''}Runs offline once installed.</p>` +
+    _inlineMtTitle(container, '', `Scripture in ${escapeHtml(name)} is ready — no download needed`) +
+    `<p class="osp-msg">To also translate non-scripture slides/announcements into ${escapeHtml(name)}, install the local model${status.approxMB ? ` (~${status.approxMB}MB)` : ''} — runs offline once installed.</p>` +
     `<div class="osp-actions"><button class="osp-btn osp-btn-primary" id="osp-inline-install">Download ${escapeHtml(name)}</button></div>`;
   container.querySelector('#osp-inline-install')?.addEventListener('click', () => _startInlineTranslateInstall(container, code, name));
 }
@@ -8760,7 +8971,7 @@ function ndiOutputs() {
 }
 function syphonOutputs() {
   if (!Array.isArray(settings.syphonOutputs)) {
-    settings.syphonOutputs = [{ id: genOutputId('syphon'), name: 'Syphon Output', sourceName: 'KAIRO Scripture', width: 1920, height: 1080, enabled: !!settings.syphonEnabled }];
+    settings.syphonOutputs = [{ id: genOutputId('syphon'), name: `${nativeSenderLabel()} Output`, sourceName: 'KAIRO Scripture', width: 1920, height: 1080, enabled: !!settings.syphonEnabled }];
     saveSettingsPatch({ syphonOutputs: settings.syphonOutputs });
   }
   return settings.syphonOutputs;
@@ -9042,8 +9253,20 @@ function allConfiguredOutputs() {
   return list;
 }
 
+// Same "same-machine, zero-copy, bundled-with-Kairo" output concept, just a
+// different native protocol per OS — Syphon on macOS, Spout on Windows (no
+// equivalent shipped for Linux yet). Kept as one internal type ('syphon',
+// matching the syphon_* Tauri commands and settings.syphonOutputs — renaming
+// either would be a real migration for zero benefit, since an operator only
+// ever sees this label, never the internal key) with a platform-aware
+// display name, using the same synchronous pre-paint platform-* class
+// index.html's own inline script sets on <html> for the traffic-light-inset
+// fix, rather than adding a new Tauri command just to ask the OS.
+function nativeSenderLabel() {
+  return document.documentElement.classList.contains('platform-win32') ? 'Spout' : 'Syphon';
+}
 function outputTypeLabel(type) {
-  return type === 'display' ? 'Display' : type === 'ndi' ? 'NDI' : type === 'syphon' ? 'Syphon' : 'OBS';
+  return type === 'display' ? 'Display' : type === 'ndi' ? 'NDI' : type === 'syphon' ? nativeSenderLabel() : 'OBS';
 }
 
 // Entry point — called from loadSettings and from every add/remove/rename
@@ -9053,7 +9276,7 @@ function outputTypeLabel(type) {
 // halves of this one list+detail pair now.
 function renderOutputsPane() {
   if (!selectedOutputId) selectedOutputId = PRIMARY_DISPLAY;
-  renderOutputsList();
+  renderOutputsList(); // also renders the Output Control matrix — see its own comment
   renderOutputsDetail();
   wireOutputsAddMenu();
   autoResumeNativeOutputs();
@@ -9091,6 +9314,8 @@ function renderOutputsList() {
   const outputs = allConfiguredOutputs();
   if (!outputs.some(o => o.id === selectedOutputId)) selectedOutputId = outputs[0]?.id || null;
   host.innerHTML = '';
+  // Computed once for the whole list instead of once per row (buildOutputLayersSummary's own map param).
+  const layersMap = outputLayerMap();
   outputs.forEach(o => {
     // A plain <div> (not <button>) — a real on/off <input> lives inside
     // each row (see below), and a checkbox/label nested inside a <button>
@@ -9123,6 +9348,13 @@ function renderOutputsList() {
     typeEl.textContent = outputTypeLabel(o.type);
     info.appendChild(nameEl);
     info.appendChild(typeEl);
+    // Owner: "the ux isn't great because you cannot see all of the
+    // selected output per display" — which of Slide/Media/Timer are
+    // actually going out was only ever visible by opening each output's
+    // own detail panel. Shown here, at a glance, in the list itself; OBS
+    // has no per-layer config (see buildLayerChecksRow's own comment on
+    // why — a single fixed text-only integration), so it's skipped there.
+    if (o.type !== 'obs') info.appendChild(buildOutputLayersSummary(o.id, layersMap));
 
     row.appendChild(dot);
     row.appendChild(info);
@@ -9143,12 +9375,27 @@ function renderOutputsList() {
     });
     host.appendChild(row);
   });
+  // Folded in here (not called separately at each of this function's many
+  // call sites) so the Output Control matrix — which lists the exact same
+  // outputs this list does — can never drift out of sync with an output
+  // being added/removed/renamed just because some call site forgot it.
+  renderOutputControlMatrix();
 }
 
 // The on/off switch embedded directly in each list row (see its own call
 // site's comment above). Reuses the exact enable/disable logic each detail
 // panel's own toggle/Start-Stop button already has — one real
 // implementation per output type, called from two places, not duplicated.
+// Whether an output is actually ON right now — the same per-type check
+// buildOutputRowToggle's own `input.checked` logic below already
+// determines, factored out so other callers (renderMonitorGrid) don't
+// re-derive it a second way.
+function isOutputEnabled(o) {
+  if (o.type === 'obs') return settings.obsEnabled === true;
+  if (o.type === 'display') return !!outputScreenMap()[o.id];
+  return !!o.raw?.enabled; // ndi/syphon
+}
+
 function buildOutputRowToggle(o) {
   const label = document.createElement('label');
   label.className = 'output-toggle';
@@ -9163,7 +9410,7 @@ function buildOutputRowToggle(o) {
   label.addEventListener('click', (e) => e.stopPropagation());
 
   if (o.type === 'obs') {
-    input.checked = settings.obsEnabled === true;
+    input.checked = isOutputEnabled(o);
     input.addEventListener('change', () => {
       settings.obsEnabled = input.checked;
       saveSettingsPatch({ obsEnabled: input.checked });
@@ -9178,7 +9425,7 @@ function buildOutputRowToggle(o) {
     // "off" mirrors picking "None — don't output here". Reuses the exact
     // assign/open/close sequence buildScreenSelect's own change handler
     // already does, rather than a second parallel implementation.
-    input.checked = !!outputScreenMap()[o.id];
+    input.checked = isOutputEnabled(o);
     input.addEventListener('change', () => {
       if (input.checked) {
         const s = outputScreenMap()[o.id] || cachedScreens[0];
@@ -9199,7 +9446,7 @@ function buildOutputRowToggle(o) {
 
   // ndi/syphon
   const kind = o.type;
-  input.checked = !!o.raw.enabled;
+  input.checked = isOutputEnabled(o);
   input.addEventListener('change', async () => {
     const invokeFn = window.__TAURI__?.core?.invoke || window.__TAURI__?.invoke;
     if (!invokeFn) { input.checked = false; toast(`${outputTypeLabel(kind)} not available (run inside the app)`, 'error'); return; }
@@ -9209,11 +9456,19 @@ function buildOutputRowToggle(o) {
           id: o.id, sourceName: o.raw.sourceName || 'KAIRO Scripture',
           width: o.raw.width || 1920, height: o.raw.height || 1080,
         });
-        updateNativeOutput(kind, o.id, { enabled: true });
+        updateNativeOutput(kind, o.id, { enabled: true, lastError: null });
         window.KairoNativeOutputs?.pushToOne?.(kind, o.id);
       } catch (e) {
         input.checked = false;
-        toast(`${outputTypeLabel(kind)} failed: ` + e, 'error');
+        // toast() is a permanent no-op in this app (by design) — the native
+        // side's actual failure reason (e.g. "NDI runtime not found...") has
+        // to reach the user some other way, or the toggle just silently
+        // reverts with zero explanation. Surfaced in the detail panel's own
+        // status text instead (see renderNativeOutputDetail) — still calling
+        // toast() too in case that ever changes, but not relying on it.
+        const msg = String(e && e.message || e || 'unknown error').replace(/^Error:\s*/, '');
+        updateNativeOutput(kind, o.id, { enabled: false, lastError: msg });
+        toast(`${outputTypeLabel(kind)} failed: ` + msg, 'error');
       }
     } else {
       try { await invokeFn(`${kind}_stop`, { id: o.id }); } catch {}
@@ -9366,9 +9621,7 @@ function renderDisplayDetail(host, o) {
 
   host.appendChild(detailInlineGroup('Theme', buildThemeSelect(o.id)));
 
-  const layerGroup = detailGroup('Show on this output');
-  layerGroup.appendChild(buildLayerChecksRow(o.id));
-  host.appendChild(layerGroup);
+  appendOutputLayersSection(host, o.id);
 
   if (!o.primary) {
     const del = document.createElement('button');
@@ -9487,7 +9740,14 @@ function renderNativeOutputDetail(host, o) {
   const statusDot = document.createElement('span');
   statusDot.className = 'bs-dot' + (raw.enabled ? ' connected' : '');
   const statusText = document.createElement('span');
-  statusText.textContent = raw.enabled ? 'Broadcasting' : 'Off';
+  statusText.textContent = raw.enabled ? 'Broadcasting' : (raw.lastError || 'Off');
+  if (!raw.enabled && raw.lastError) {
+    statusText.classList.add('output-status-error');
+    // Long failure messages ("NDI runtime not found...") don't fit on the
+    // same line as the title+toggle — wrap them onto their own full-width
+    // line instead of overflowing past the panel's edge (see .has-error).
+    statusEl.classList.add('has-error');
+  }
   statusEl.appendChild(statusDot);
   statusEl.appendChild(statusText);
   // On/off toggle now lives in the header (owner: "toggle should be on
@@ -9555,9 +9815,7 @@ function renderNativeOutputDetail(host, o) {
 
   host.appendChild(detailInlineGroup('Theme', buildThemeSelect(o.id)));
 
-  const layerGroup = detailGroup('Show on this output');
-  layerGroup.appendChild(buildLayerChecksRow(o.id));
-  host.appendChild(layerGroup);
+  appendOutputLayersSection(host, o.id);
 
 
   const del = document.createElement('button');
@@ -9595,6 +9853,23 @@ function wireOutputsAddMenu() {
   const menu = document.getElementById('outputs-add-menu');
   if (!btn || !menu || btn.dataset.wired) return;
   btn.dataset.wired = '1';
+  // Same-machine sender option: label/hint follow the OS (Syphon on macOS,
+  // Spout on Windows); neither exists on Linux yet, so the option itself is
+  // hidden there rather than offering something that can't work.
+  const syphonBtn = document.getElementById('add-output-syphon-btn');
+  if (syphonBtn) {
+    const isWin = document.documentElement.classList.contains('platform-win32');
+    const isMac = document.documentElement.classList.contains('platform-darwin');
+    if (!isWin && !isMac) {
+      syphonBtn.remove();
+    } else {
+      const label = nativeSenderLabel();
+      syphonBtn.firstChild.textContent = label;
+      syphonBtn.title = `${label} is ${isWin ? 'Windows' : 'macOS'}-only`;
+      const hint = syphonBtn.querySelector('.svc-popover-item-hint');
+      if (hint) hint.textContent = isWin ? 'Windows only' : 'macOS only';
+    }
+  }
   btn.addEventListener('click', () => {
     if (!menu.classList.contains('hidden')) { menu.classList.add('hidden'); return; }
     const r = btn.getBoundingClientRect();
@@ -9768,27 +10043,96 @@ async function applyOutputThemes() {
   }
 }
 
-// ── Output Looks — per-output Slide/Media/Timer visibility ─────────────────
+// ── Output Looks — per-output Bible/Slide/Media/Timer visibility ───────────
 // "a user can send only media content to a specific screen or only timer"
 // (owner, referencing ProPresenter's own Edit Looks panel). Mirrors
 // outputThemeMap/applyOutputThemes/renderOutputThemePickers exactly — same
 // settings-object shape family, same localStorage+storage-event delivery to
 // display.html, same /api/look/apply broadcast, same per-card UI injection.
-// Any output missing from settings.outputLayers (or missing one of the three
-// keys) defaults to ALL THREE true — a fresh install, or any output nobody
+// Any output missing from settings.outputLayers (or missing one of the four
+// keys) defaults to ALL FOUR true — a fresh install, or any output nobody
 // has touched yet, behaves exactly like today, zero config needed.
+//
+// Bible vs. Slide split (owner: "the output that are just rendered under
+// each display... should be bible, slide, media" — a plain Slides-tab
+// slide and a Bible verse used to share one "slide" layer/checkbox, so
+// there was no way to show scripture on an output while hiding
+// announcement slides, or vice versa). No new plumbing needed for the
+// distinction — display.html already receives real book/chapter/verse
+// fields on actual scripture (see attachBibleTranslations' own
+// `!v.book || !v.chapter || !v.verse` check, the same signal reused here)
+// and never on a plain slide, so classification is free. Bible listed
+// first/takes precedence over Slide when a message could ever be read as
+// either — owner: "by their order, bible supersedes because it's the top."
+// Single source of truth for the four layer keys/labels — was written out
+// as an identical array literal in four separate places (buildOutputLayers
+// Summary/Hint/ChecksRow, plus the Output Control matrix), and the
+// all-true fallback object was a fourth near-duplicate literal on top of
+// that. One name for each, used everywhere, so a fifth layer added later
+// can't be added to three of the four sites and forgotten in the fourth.
+// Owner's own priority order — Bible is the flagship feature and always
+// takes precedence, Slide (which Songs also renders through) sits right
+// under it, then Timer, then Media last: "I can clear timer and not
+// necessarily want to clear my media." Order here drives every checkbox
+// row, the Output Control matrix's row order, and the layers summary —
+// one list, so all three can't drift out of sync with each other again.
+const OUTPUT_LAYER_KEYS = [['bible', 'Bible'], ['slide', 'Slide'], ['timer', 'Timer'], ['media', 'Media']];
+const DEFAULT_OUTPUT_LAYERS = { bible: true, slide: true, media: true, timer: true };
+
 function outputLayerMap() {
   const src = settings.outputLayers && typeof settings.outputLayers === 'object' ? settings.outputLayers : {};
   const map = {};
   for (const key of [...allOutputKeys(), 'ndi', 'syphon']) {
     const entry = src[key] && typeof src[key] === 'object' ? src[key] : {};
     map[key] = {
+      bible: entry.bible !== false,
       slide: entry.slide !== false,
       media: entry.media !== false,
       timer: entry.timer !== false,
     };
   }
   return map;
+}
+
+// Compact "what's actually going out on this output" summary — Bible/Slide/
+// Media/Timer, each dimmed+struck-through when that layer is off. Used
+// both in the outputs list (one per row, so the full picture is visible
+// without opening any detail panel), the monitor grid, and as a helper
+// line at the top of the detail panel itself. A single shared builder so
+// none of them can drift apart. `map` is an optional pre-computed
+// outputLayerMap() result — every hot call site (the outputs list, the
+// Output Control matrix, the monitor grid) now computes it once and
+// passes it to every output's summary/hint instead of each one silently
+// rebuilding the whole map again; a bare call still works standalone.
+function buildOutputLayersSummary(outputId, map) {
+  const want = (map || outputLayerMap())[outputId] || DEFAULT_OUTPUT_LAYERS;
+  const el = document.createElement('span');
+  el.className = 'outputs-layers-summary';
+  el.title = 'What this output is currently showing';
+  OUTPUT_LAYER_KEYS.forEach(([key, label]) => {
+    const item = document.createElement('span');
+    item.className = 'outputs-layers-summary-item' + (want[key] ? '' : ' is-off');
+    item.textContent = label;
+    el.appendChild(item);
+  });
+  return el;
+}
+
+// Plain-language version of the same summary, for the detail panel — owner:
+// "include a helper text to let the user know what is going out to what
+// display." Sits right under the Bible/Slide/Media/Timer checkboxes so the
+// sentence updates the moment a checkbox does (caller re-renders this
+// alongside buildLayerChecksRow, same element tree).
+function buildOutputLayersHint(outputId, map) {
+  const want = (map || outputLayerMap())[outputId] || DEFAULT_OUTPUT_LAYERS;
+  const on  = OUTPUT_LAYER_KEYS.filter(([k]) => want[k]).map(([, l]) => l);
+  const off = OUTPUT_LAYER_KEYS.filter(([k]) => !want[k]).map(([, l]) => l);
+  const hint = document.createElement('p');
+  hint.className = 'setting-hint outputs-layers-hint';
+  if (!off.length) hint.textContent = 'Everything is going out on this output: Bible, Slide, Media, and Timer.';
+  else if (!on.length) hint.textContent = 'Nothing is going out on this output right now — every layer is hidden.';
+  else hint.textContent = `Going out on this output: ${on.join(', ')}. Hidden: ${off.join(', ')}.`;
+  return hint;
 }
 
 // Push the current per-output layer visibility to every display client —
@@ -9814,32 +10158,130 @@ async function applyOutputLayers() {
 }
 
 
-// Builds one reusable Slide/Media/Timer checkbox row for a given output —
-// used by every detail-panel renderer that has one (display/NDI/Syphon;
-// OBS doesn't — see the Outputs master-detail redesign's own Non-goals).
-function buildLayerChecksRow(outputId) {
+// Builds one reusable Bible/Slide/Media/Timer checkbox row for a given
+// output — used by every detail-panel renderer that has one (display/NDI/
+// Syphon; OBS doesn't — see the Outputs master-detail redesign's own
+// Non-goals).
+// Single source of truth for "toggle one output's one layer" — was
+// duplicated inline inside buildLayerChecksRow's own change handler; the
+// Output Control matrix (renderOutputControlMatrix) needs the exact same
+// save+apply+re-render sequence, so it's factored out here instead of a
+// second near-copy of it.
+function setOutputLayer(outputId, layerKey, value) {
+  const current = outputLayerMap();
+  current[outputId] = { ...current[outputId], [layerKey]: value };
+  settings.outputLayers = current;
+  saveSettingsPatch({ outputLayers: current });
+  applyOutputLayers();
+  // Keep the list's own per-row summary (buildOutputLayersSummary) in sync
+  // live — owner: "you cannot see all of the selected output per display"
+  // was as much about staying current after a toggle as about being
+  // visible at all. renderOutputsList also re-renders the Output Control
+  // matrix itself (folded in there — see its own comment) so both stay
+  // consistent from this one call.
+  renderOutputsList();
+  // Update the detail panel's plain-language hint in place, if it's open
+  // on this same output — without rebuilding the checkboxes themselves
+  // (that would interrupt whichever control the click is still bubbling
+  // from).
+  if (selectedOutputId === outputId) {
+    const hint = document.querySelector('.outputs-layers-hint');
+    if (hint) hint.textContent = buildOutputLayersHint(outputId).textContent;
+    const cb = document.querySelector(`.output-layer-checks input[data-layer-key="${layerKey}"]`);
+    if (cb && cb.checked !== value) cb.checked = value;
+  }
+}
+
+function buildLayerChecksRow(outputId, map) {
   const row = document.createElement('div');
   row.className = 'output-layer-checks';
-  const want = outputLayerMap()[outputId];
-  [['slide', 'Slide'], ['media', 'Media'], ['timer', 'Timer']].forEach(([layerKey, label]) => {
+  const want = (map || outputLayerMap())[outputId];
+  OUTPUT_LAYER_KEYS.forEach(([layerKey, label]) => {
     const wrap = document.createElement('label');
     wrap.className = 'output-layer-check';
     const cb = document.createElement('input');
     cb.type = 'checkbox';
     cb.checked = want[layerKey] !== false;
     cb.dataset.layerKey = layerKey;
-    cb.addEventListener('change', () => {
-      const current = outputLayerMap();
-      current[outputId] = { ...current[outputId], [layerKey]: cb.checked };
-      settings.outputLayers = current;
-      saveSettingsPatch({ outputLayers: current });
-      applyOutputLayers();
-    });
+    cb.addEventListener('change', () => setOutputLayer(outputId, layerKey, cb.checked));
     wrap.appendChild(cb);
     wrap.appendChild(document.createTextNode(label));
     row.appendChild(wrap);
   });
   return row;
+}
+
+// Was copy-pasted (identical 4 lines + identical comment) between
+// renderDisplayDetail and renderNativeOutputDetail — one helper instead,
+// called from both.
+function appendOutputLayersSection(host, outputId, map) {
+  const layerGroup = detailGroup('Show on this output');
+  // Owner: "maybe create a separate section for users to customize their
+  // output, don't cluster it with the main output control" — visually set
+  // apart from Name/Physical Screen/Theme above, not just another row in
+  // the same stack.
+  layerGroup.classList.add('output-layers-section');
+  layerGroup.appendChild(buildLayerChecksRow(outputId, map));
+  layerGroup.appendChild(buildOutputLayersHint(outputId, map));
+  host.appendChild(layerGroup);
+}
+
+// "create a new subsection called output control, this will have a
+// vertical list of all things that can be sent to the display" (owner,
+// referencing ProPresenter's own Looks matrix — layers as rows, outputs as
+// columns). Same outputLayerMap()/setOutputLayer data every per-output
+// detail panel already edits — this is just every output's layers laid
+// out together instead of one at a time. OBS excluded (see
+// buildLayerChecksRow's own comment — no per-layer config, single fixed
+// text-only integration).
+function renderOutputControlMatrix() {
+  const host = document.getElementById('output-control-matrix');
+  if (!host) return;
+  const outputs = allConfiguredOutputs().filter(o => o.type !== 'obs');
+  host.innerHTML = '';
+  if (!outputs.length) {
+    host.innerHTML = '<p class="setting-hint">No outputs configured yet.</p>';
+    return;
+  }
+  // Computed once, not once per checkbox (was outputLayerMap()[o.id] inside
+  // the innermost loop — N outputs × 4 layers worth of full-map rebuilds
+  // for what should be a single read).
+  const map = outputLayerMap();
+  const table = document.createElement('table');
+  table.className = 'ocm-table';
+  const thead = document.createElement('thead');
+  const headRow = document.createElement('tr');
+  headRow.appendChild(document.createElement('th'));
+  outputs.forEach(o => {
+    const th = document.createElement('th');
+    th.textContent = o.name;
+    th.title = outputTypeLabel(o.type);
+    headRow.appendChild(th);
+  });
+  thead.appendChild(headRow);
+  table.appendChild(thead);
+
+  const tbody = document.createElement('tbody');
+  OUTPUT_LAYER_KEYS.forEach(([layerKey, label]) => {
+    const tr = document.createElement('tr');
+    const th = document.createElement('th');
+    th.scope = 'row';
+    th.textContent = label;
+    tr.appendChild(th);
+    outputs.forEach(o => {
+      const td = document.createElement('td');
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.checked = map[o.id]?.[layerKey] !== false;
+      cb.title = `${label} on ${o.name}`;
+      cb.addEventListener('change', () => setOutputLayer(o.id, layerKey, cb.checked));
+      td.appendChild(cb);
+      tr.appendChild(td);
+    });
+    tbody.appendChild(tr);
+  });
+  table.appendChild(tbody);
+  host.appendChild(table);
 }
 
 // Persist a partial settings change without clobbering unrelated fields.
