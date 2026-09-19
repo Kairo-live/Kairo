@@ -42,8 +42,17 @@ fn main() {
     // runtime — both inside the bundled .app (where the binary lives at
     // Contents/MacOS/kairo and the framework at Contents/Frameworks/Syphon.framework)
     // and during cargo-run dev builds (where we point at the in-tree Frameworks/).
-    #[cfg(target_os = "macos")]
-    {
+    //
+    // Deliberately checked via CARGO_CFG_TARGET_OS (the env var Cargo sets to
+    // the actual TARGET being built), not #[cfg(target_os = "macos")] — a
+    // build.rs's own #[cfg] attributes reflect the HOST it's compiled and run
+    // on, not the target, since build scripts always execute on the host.
+    // On a real Mac building for itself the two happen to coincide, which
+    // hid this; it surfaces the moment anyone cross-compiles the Windows
+    // build from a macOS/Linux CI runner (confirmed via `cargo xwin check
+    // --target x86_64-pc-windows-msvc`, which failed with "library kind
+    // `framework` is only supported on Apple targets" under the old check).
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
         let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
         println!("cargo:rustc-link-search=framework={}/Frameworks", manifest);
         println!("cargo:rustc-link-lib=framework=Syphon");

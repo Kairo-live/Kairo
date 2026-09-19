@@ -21,7 +21,7 @@ use std::sync::{Arc, Mutex};
 use cosmic_text::{Color as CtColor, FontSystem, SwashCache};
 use tiny_skia::{Color as SkColor, Pixmap, Rect, Transform};
 
-use spout2_rs::dx::Sender;
+use spout2::dx::Sender;
 
 // Same fallback default as ndi.rs/syphon.rs — Output Looks' "add an output"
 // flow asks for a real resolution up front, so this only matters when a
