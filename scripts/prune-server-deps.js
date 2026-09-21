@@ -32,6 +32,18 @@ const path = require('path');
 
 const SERVER_DIR = path.join(__dirname, '..', 'server');
 const NODE_MODULES = path.join(SERVER_DIR, 'node_modules');
+// The offline STT model (sherpa_engine.js/sherpa_installer.js) is meant to
+// be download-on-demand — installSherpaModel() fetches it from our own
+// GitHub release straight into the real per-user app-data directory at
+// runtime, never into server/models/ in a real packaged app (that path is
+// only the dev fallback when KAIRO_APP_DATA_DIR isn't set — see
+// sherpa_engine.js's defaultModelDir()). But server/models/ IS gitignored,
+// not bundle-ignored: if a dev machine happens to have it cached locally
+// from testing (631MB), tauri.conf.json's blanket "../server": "server"
+// resource copy ships it in the DMG anyway, silently defeating the whole
+// point of the installer flow. Real incident: a release build came out at
+// 1.4GB with this model included verbatim.
+const SERVER_MODELS = path.join(SERVER_DIR, 'models');
 
 function rm(p) {
   if (!fs.existsSync(p)) return 0;
@@ -94,6 +106,12 @@ function sweep(dir) {
 }
 
 function main() {
+  // Locally-cached offline model — see SERVER_MODELS's own comment above.
+  // Always ships downloaded fresh via the installer; never belongs in a
+  // release bundle regardless of what a dev machine happens to have cached.
+  const modelSaved = rm(SERVER_MODELS);
+  if (modelSaved) console.log(`[prune] server/models (offline STT model, download-on-demand): ${fmtMB(modelSaved)}`);
+
   if (!fs.existsSync(NODE_MODULES)) {
     console.log('[prune] server/node_modules not found — run npm install first.');
     return;

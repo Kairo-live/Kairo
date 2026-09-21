@@ -9326,8 +9326,6 @@ function renderOutputsList() {
   const outputs = allConfiguredOutputs();
   if (!outputs.some(o => o.id === selectedOutputId)) selectedOutputId = outputs[0]?.id || null;
   host.innerHTML = '';
-  // Computed once for the whole list instead of once per row (buildOutputLayersSummary's own map param).
-  const layersMap = outputLayerMap();
   outputs.forEach(o => {
     // A plain <div> (not <button>) — a real on/off <input> lives inside
     // each row (see below), and a checkbox/label nested inside a <button>
@@ -9360,13 +9358,12 @@ function renderOutputsList() {
     typeEl.textContent = outputTypeLabel(o.type);
     info.appendChild(nameEl);
     info.appendChild(typeEl);
-    // Owner: "the ux isn't great because you cannot see all of the
-    // selected output per display" — which of Slide/Media/Timer are
-    // actually going out was only ever visible by opening each output's
-    // own detail panel. Shown here, at a glance, in the list itself; OBS
-    // has no per-layer config (see buildLayerChecksRow's own comment on
-    // why — a single fixed text-only integration), so it's skipped there.
-    if (o.type !== 'obs') info.appendChild(buildOutputLayersSummary(o.id, layersMap));
+    // A per-row Bible/Slide/Media/Timer summary used to render here too —
+    // owner (2026-09-21): redundant now that the Monitor grid
+    // (renderMonitorGrid, above) is the dedicated place for exactly this
+    // at-a-glance view; duplicating it in this compact list row was just
+    // clutter. Removed here; buildOutputLayersSummary itself stays, still
+    // used by the Monitor grid.
 
     row.appendChild(dot);
     row.appendChild(info);
