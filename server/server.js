@@ -3777,10 +3777,24 @@ async function processStreamText(text) {
         // poisoning; the Jeremiah 17:8/Romans 7:22 range-collision
         // incidents) — an asymmetric "one hot, one stone cold" requirement
         // is a much stronger signal than "one is merely closer."
+        // Real incident (2026-09-21 eval audit): "active book" alone checks
+        // BOOK ONLY, not chapter or forward progress — "Acts 3:18" won this
+        // tie over "Luke 1:70" purely because Acts was the active book,
+        // even though 3:18 sits BEHIND the actually-active Acts 3:21 in the
+        // SAME chapter (a genuine already-passed-content reshow, not
+        // forward continuity). isBackwardWithinActiveChapter excludes that
+        // shape from counting as "active" here, mirroring the same
+        // same-chapter-backward suspicion already established elsewhere
+        // (isBackwardAlreadyShown/isBackwardInSameBook) — a candidate that's
+        // merely in the right BOOK but behind where the reading currently
+        // is gets no special trust from this tie-break.
         const now = Date.now();
         const contextFresh = !!lastOutputVerse && (now - lastSentBookTime) < TIE_BREAK_CONTINUITY_WINDOW_MS;
-        const topActive    = contextFresh && top[0].book === lastOutputVerse.book;
-        const runnerActive = contextFresh && runnerUp.book === lastOutputVerse.book;
+        const isBackwardWithinActiveChapter = (c) => lastOutputVerse
+          && c.book === lastOutputVerse.book && c.chapter === lastOutputVerse.chapter
+          && c.verse < lastOutputVerse.verse;
+        const topActive    = contextFresh && top[0].book === lastOutputVerse.book && !isBackwardWithinActiveChapter(top[0]);
+        const runnerActive = contextFresh && runnerUp.book === lastOutputVerse.book && !isBackwardWithinActiveChapter(runnerUp);
         if (topActive !== runnerActive) {
           const winnerRef = topActive ? top[0].reference : runnerUp.reference;
           const loserRef  = topActive ? runnerUp.reference : top[0].reference;
@@ -3868,7 +3882,13 @@ async function processStreamText(text) {
         // over "Matthew 11:12" and "Zechariah 9:9" over "Matthew 21:5" when
         // given the full context, but the crosscheck missed both live
         // because by the time stream confirmed, the citation text itself
-        // had already scrolled out of a 60-word window).
+        // had already scrolled out of a 60-word window). Tried the FULL
+        // rolling buffer (up to 90s) instead of a fixed word count, hoping
+        // to also catch Matthew 11:12/21:5 — real harness regression,
+        // reverted: it fixed Acts 3:18 but broke Ezekiel 16:14 and Psalms
+        // 7:9, which the 100-word version already had working. A much
+        // larger query dilutes verbatimSearch's own signal rather than
+        // sharpening it — net negative trade, not worth it.
         const bufferText = transcriptBuffer.map(t => t.text).join(' ')
           .split(RE_SPACES).slice(-100).join(' ').trim();
         if (bufferText) {
