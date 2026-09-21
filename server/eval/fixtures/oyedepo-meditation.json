@@ -2213,13 +2213,6 @@
     {
       "book": "Genesis",
       "chapter": 24,
-      "verse": 63,
-      "kind": "citation",
-      "startMs": 242000
-    },
-    {
-      "book": "Genesis",
-      "chapter": 24,
       "verse": 53,
       "kind": "citation",
       "startMs": 264000,
