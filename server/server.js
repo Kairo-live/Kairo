@@ -4342,7 +4342,7 @@ async function processVerbatim(transcript) {
       // real floor is detectionScoring.decideTarget's own 0.50, not
       // SUGGESTION_MIN_SCORE (0.87) — so the old prediction would claim
       // "dropped" for entries that actually reached Candidates just fine.
-      const sent = await broadcastDetection(results.slice(0, 1), 'verbatim', results[0].similarity, 'suggestions');
+      const sent = await broadcastDetection(results.slice(0, 1), 'verbatim', results[0].similarity, 'suggestions', { capAtSuggestions: true });
       console.log(`[Verbatim] "${results[0].reference}" raw=${(results[0].similarity*100).toFixed(0)}% — below ${(VERBATIM_AUTOSEND_MIN*100).toFixed(0)}% auto-send bar, ${sent === 'suggestions' ? '→ candidates' : 'dropped'}`);
     }
     return true;
@@ -4970,7 +4970,23 @@ async function broadcastDetection(verses, method, topScore, target, opts = {}) {
   // had just correctly demoted (Psalms 7:9 for what's really Zechariah
   // 9:11, Ezekiel 16:14 for Exodus 15:26) still reached the viewer anyway,
   // because it also happened to match a stale lastOutputVerse book/chapter.
-  const chapterContinuity = !opts.verbatimDisagreed && tryChapterAdvanceByDetection(verses, topScore, method);
+  // opts.capAtSuggestions: the CALLER has already decided this candidate's
+  // raw evidence is too weak to auto-send on its own (see its own call
+  // site's comment) — chapter continuity or the B+D+A model being
+  // favorable doesn't change that weakness, so neither promotion path
+  // below is allowed to override it. Real incident (2026-09-21 eval
+  // audit): processVerbatim's own "below the auto-send bar, show as a
+  // candidate" pass explicitly broadcasts with target:'suggestions'
+  // (raw=40% similarity) — but the unified-scoring block further down
+  // recomputed its own finalScore/target from the same weak rawResult and
+  // independently promoted it to 'viewer' anyway ("Acts 3:6", raw 40%
+  // repeated as a liturgical refrain — "in the name of Jesus Christ" —
+  // coincidentally cleared 80% once D()/A() continuity bonuses stacked on
+  // top of an already-inflated B()). No console.log line for this exists
+  // at all, since the call site's own logging only prints its OWN
+  // predicted outcome, not the value broadcastDetection quietly replaced
+  // it with — a real, silent policy violation, not just a scoring quirk.
+  const chapterContinuity = !opts.verbatimDisagreed && !opts.capAtSuggestions && tryChapterAdvanceByDetection(verses, topScore, method);
   if (chapterContinuity) target = 'viewer';
 
   // ── Score gate ────────────────────────────────────────────────────────────
@@ -5251,6 +5267,13 @@ async function broadcastDetection(verses, method, topScore, target, opts = {}) {
         // what's actually live). Only overrides down to 'suggestions', never
         // forces a drop — a human should still see it.
         if (opts.verbatimDisagreed && target === 'viewer' && !chapterContinuity) {
+          target = 'suggestions';
+        }
+        // See opts.capAtSuggestions's own comment above (chapterContinuity
+        // block) — the caller already decided this evidence is too weak to
+        // auto-send; the B+D+A model's own finalScore/shadowTarget can't
+        // override that determination either.
+        if (opts.capAtSuggestions && target === 'viewer') {
           target = 'suggestions';
         }
       }
