@@ -220,3 +220,88 @@ test('"Book N and M" with no chapter/verse keyword resolves as chapter N, verse 
   referenceContext.reset();
   assert.deepEqual(parseAllSpokenReferences('mark was born in nineteen and eighty'), []);
 });
+
+// Real incident (2026-09-20 eval audit, enough-is-enough.json): "Psalm 30
+// and verse five, for his anger endured but for a moment... weeping may
+// endure for a night" — the standalone word "for" (from "endure FOR a
+// night") got endpointed by the STT into its own one-word final segment,
+// which the bare-number Pattern 3 then read as "verse 4" via the
+// for->4 STT-homophone mapping, silently overriding the correct
+// just-cited Psalms 30:5.
+test('a standalone STT-homophone number word ("for"/"won"/"too"/"ate") does not trigger a bare-number verse resolution alone', () => {
+  referenceContext.reset();
+  referenceContext.update('Psalms', 30);
+  assert.equal(resolvePartialReference('for'), null);
+  assert.equal(resolvePartialReference('too'), null);
+  assert.equal(resolvePartialReference('won'), null);
+  assert.equal(resolvePartialReference('ate'), null);
+  // A genuine bare number still resolves normally.
+  assert.deepEqual(resolvePartialReference('fifteen'),
+    { book: 'Psalms', chapter: 30, verse: 15, partial: true });
+  // Still works fine next to an explicit "verse" keyword (real context).
+  assert.deepEqual(resolvePartialReference('verse for'),
+    { book: 'Psalms', chapter: 30, verse: 4, partial: true });
+});
+
+// Real incident (2026-09-20 eval audit, shiloh2025-impartation.json): "First
+// things first" — introducing the next part of the service, no citation
+// intent — got endpointed as its own final segment and the trailing "first"
+// misread as "verse 1" against a stale active Romans context.
+test('the ordinal number words ("first".."fifth") do not trigger a bare-number verse resolution alone, same as the STT homophones', () => {
+  referenceContext.reset();
+  referenceContext.update('Romans', 5);
+  assert.equal(resolvePartialReference('First things first'), null);
+  assert.equal(resolvePartialReference('second'), null);
+  // Still works fine next to an explicit "verse" keyword.
+  assert.deepEqual(resolvePartialReference('verse first'),
+    { book: 'Romans', chapter: 5, verse: 1, partial: true });
+});
+
+// Real incident (2026-09-20 eval audit, shiloh2025-impartation.json): a
+// growing interim transcript "Psalm one one" (before "zero" streamed in,
+// completing "one one zero" = Psalm 110) resolved as the WRONG full
+// citation "Psalms 1:1" and auto-sent via 'direct' before the real, final
+// "Psalm one one zero verse one to three" (Psalm 110:1-3) ever arrived.
+test('an ambiguous 2-digit-word "BOOK N M" for a 100+-chapter book (Psalms) does not resolve to a full citation — could be a still-composing 3-digit chapter', () => {
+  assert.deepEqual(parseAllSpokenReferences('Psalm one one'),
+    [{ book: 'Psalms', chapter: 1, verse: null }]);
+  // The completed, unambiguous 3-digit composition still resolves correctly.
+  assert.deepEqual(parseAllSpokenReferences('Psalm one one zero verse one to three'),
+    [{ book: 'Psalms', chapter: 110, verseStart: 1, verseEnd: 3 }]);
+  // A genuine bare "BOOK N M" citation for a <100-chapter book is unaffected.
+  assert.deepEqual(parseAllSpokenReferences('john three sixteen'),
+    [{ book: 'John', chapter: 3, verse: 16 }]);
+  // A Psalms citation whose chapter number isn't ambiguously low is unaffected.
+  assert.deepEqual(parseAllSpokenReferences('psalm twenty three one'),
+    [{ book: 'Psalms', chapter: 23, verse: 1 }]);
+});
+
+// Real incident (2026-09-20 eval audit, enough-is-enough.json): "But this
+// one is 04:10" (an exam-timetable aside, nothing to do with scripture)
+// resolved as "Romans 8:10" — cleanReferenceText's own digit-colon-digit
+// rule turns "04:10" into "04 10" before any parsing happens, and the
+// trailing "10" then matched the bare-number pattern below.
+test('a spoken clock time ("is 04:10", "before he see 01:02") does not resolve as a verse reference', () => {
+  referenceContext.reset();
+  referenceContext.update('Romans', 8);
+  assert.equal(resolvePartialReference('is 04:10'), null);
+  assert.equal(resolvePartialReference('can come before he see 01:02'), null);
+  // A genuine "verse N" citation is unaffected by the clock-time strip.
+  assert.deepEqual(resolvePartialReference('verse 10'),
+    { book: 'Romans', chapter: 8, verse: 10, partial: true });
+  assert.deepEqual(resolvePartialReference('chapter 3 verse 16'),
+    { book: 'Romans', chapter: 3, verse: 16, partial: true });
+});
+
+// Real incident (2026-09-20 eval audit, shiloh2025-impartation.json):
+// "Until one repents and is converted" — "one" used as an indefinite
+// pronoun, not a numeral — got endpointed as "Until one" on its own and
+// wrongly read as "verse 1" against a stale active book/chapter.
+test('the bare pronoun/numeral "one" does not trigger a bare-number verse resolution alone', () => {
+  referenceContext.reset();
+  referenceContext.update('Romans', 5);
+  assert.equal(resolvePartialReference('Until one'), null);
+  // Still works fine next to an explicit "verse" keyword.
+  assert.deepEqual(resolvePartialReference('verse one'),
+    { book: 'Romans', chapter: 5, verse: 1, partial: true });
+});

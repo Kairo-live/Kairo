@@ -2245,6 +2245,14 @@
     {
       "book": "Psalms",
       "chapter": 119,
+      "verse": 98,
+      "kind": "quote",
+      "startMs": 376000,
+      "bootstrapped": true
+    },
+    {
+      "book": "Psalms",
+      "chapter": 119,
       "verse": 99,
       "kind": "quote",
       "startMs": 383000,
@@ -2271,6 +2279,14 @@
       "verse": null,
       "kind": "citation",
       "startMs": 461000
+    },
+    {
+      "book": "John",
+      "chapter": 8,
+      "verse": 8,
+      "kind": "quote",
+      "startMs": 593000,
+      "bootstrapped": true
     },
     {
       "book": "2 Corinthians",
@@ -2350,6 +2366,14 @@
       "similarity": 0.4435874170232798
     },
     {
+      "book": "Matthew",
+      "chapter": 11,
+      "verse": 28,
+      "kind": "quote",
+      "startMs": 1017000,
+      "bootstrapped": true
+    },
+    {
       "book": "Isaiah",
       "chapter": 1,
       "verse": 8,
@@ -2365,6 +2389,30 @@
       "bootstrapped": true
     },
     {
+      "book": "Proverbs",
+      "chapter": 22,
+      "verse": 7,
+      "kind": "quote",
+      "startMs": 1127000,
+      "bootstrapped": true
+    },
+    {
+      "book": "John",
+      "chapter": 3,
+      "verse": 16,
+      "kind": "quote",
+      "startMs": 1374000,
+      "bootstrapped": true
+    },
+    {
+      "book": "John",
+      "chapter": 14,
+      "verse": 6,
+      "kind": "quote",
+      "startMs": 1429000,
+      "bootstrapped": true
+    },
+    {
       "book": "Isaiah",
       "chapter": 66,
       "verse": 3,
@@ -2377,6 +2425,14 @@
       "verse": 4,
       "kind": "citation",
       "startMs": 1655000,
+      "bootstrapped": true
+    },
+    {
+      "book": "Job",
+      "chapter": 6,
+      "verse": 25,
+      "kind": "quote",
+      "startMs": 1841000,
       "bootstrapped": true
     },
     {
@@ -2398,6 +2454,14 @@
       "unverified": true,
       "matchedIdf": 23.983069443802727,
       "similarity": 0.5090626890842535
+    },
+    {
+      "book": "1 Corinthians",
+      "chapter": 10,
+      "verse": 13,
+      "kind": "quote",
+      "startMs": 2132000,
+      "bootstrapped": true
     },
     {
       "book": "Hebrews",
@@ -2422,6 +2486,14 @@
       "verse": 32,
       "kind": "citation",
       "startMs": 2321000
+    },
+    {
+      "book": "Proverbs",
+      "chapter": 4,
+      "verse": 18,
+      "kind": "quote",
+      "startMs": 2653000,
+      "bootstrapped": true
     },
     {
       "book": "Jeremiah",
@@ -2460,6 +2532,14 @@
       "verse": 17,
       "kind": "citation",
       "startMs": 3151000
+    },
+    {
+      "book": "2 Samuel",
+      "chapter": 5,
+      "verse": 19,
+      "kind": "citation",
+      "startMs": 3170000,
+      "bootstrapped": true
     },
     {
       "book": "Isaiah",
@@ -2539,6 +2619,14 @@
       "verse": 32,
       "kind": "citation",
       "startMs": 4268000
+    },
+    {
+      "book": "Mark",
+      "chapter": 7,
+      "verse": 26,
+      "kind": "quote",
+      "startMs": 4277000,
+      "bootstrapped": true
     }
   ]
 }

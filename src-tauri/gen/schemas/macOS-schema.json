@@ -447,6 +447,18 @@
           "markdownDescription": "Enables the ndi_update command without any pre-configured scope."
         },
         {
+          "description": "Enables the ndi_update_media command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-ndi-update-media",
+          "markdownDescription": "Enables the ndi_update_media command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the ndi_update_timer command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-ndi-update-timer",
+          "markdownDescription": "Enables the ndi_update_timer command without any pre-configured scope."
+        },
+        {
           "description": "Enables the signal_main_ready command without any pre-configured scope.",
           "type": "string",
           "const": "allow-signal-main-ready",
@@ -475,6 +487,18 @@
           "type": "string",
           "const": "allow-syphon-update",
           "markdownDescription": "Enables the syphon_update command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the syphon_update_media command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-syphon-update-media",
+          "markdownDescription": "Enables the syphon_update_media command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the syphon_update_timer command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-syphon-update-timer",
+          "markdownDescription": "Enables the syphon_update_timer command without any pre-configured scope."
         },
         {
           "description": "Denies the get_server_config command without any pre-configured scope.",
@@ -537,6 +561,18 @@
           "markdownDescription": "Denies the ndi_update command without any pre-configured scope."
         },
         {
+          "description": "Denies the ndi_update_media command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-ndi-update-media",
+          "markdownDescription": "Denies the ndi_update_media command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the ndi_update_timer command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-ndi-update-timer",
+          "markdownDescription": "Denies the ndi_update_timer command without any pre-configured scope."
+        },
+        {
           "description": "Denies the signal_main_ready command without any pre-configured scope.",
           "type": "string",
           "const": "deny-signal-main-ready",
@@ -565,6 +601,18 @@
           "type": "string",
           "const": "deny-syphon-update",
           "markdownDescription": "Denies the syphon_update command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the syphon_update_media command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-syphon-update-media",
+          "markdownDescription": "Denies the syphon_update_media command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the syphon_update_timer command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-syphon-update-timer",
+          "markdownDescription": "Denies the syphon_update_timer command without any pre-configured scope."
         },
         {
           "description": "No features are enabled by default, as we believe\nthe clipboard can be inherently dangerous and it is \napplication specific if read and/or write access is needed.\n\nClipboard interaction needs to be explicitly enabled.\n",

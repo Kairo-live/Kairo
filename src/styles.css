@@ -898,12 +898,10 @@ input[type="range"]:disabled { opacity: 0.4; cursor: default; }
 /* Dimmed — previously sent, no longer active */
 .locked-verse-card.sent-verse-card:not(.sent-active) { opacity: 0.6; }
 
-/* ── Unified verse card (sent + suggestion) ─────────────────────────────── */
-/* Both share the same base card; modifiers control colour + behaviour.        */
-.locked-verse-card,
-.suggestion-card {
+/* ── Unified verse card (sent) ───────────────────────────────────────────── */
+.locked-verse-card {
   position: relative;
-  background: var(--bg-card);
+  background: rgba(232,64,74,0.025);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   padding: 12px 14px;
@@ -911,18 +909,9 @@ input[type="range"]:disabled { opacity: 0.4; cursor: default; }
   overflow: hidden;
   animation: fade-up 220ms ease-out;
   transition: border-color 0.15s, background 0.15s;
-}
-
-/* Sent card — gold left rule + faint gold bg tint */
-.locked-verse-card {
   border-left: 2px solid rgba(232,64,74,0.4);
-  background: rgba(232,64,74,0.025);
 }
 .locked-verse-card:hover { border-color: rgba(232,64,74,0.5); }
-
-/* Suggestion card — blue hover accent */
-.suggestion-card { border-left: 2px solid var(--border); }
-.suggestion-card:hover { border-left-color: var(--blue); border-color: rgba(255,255,255,0.25); }
 
 /* Inner layout */
 .lvc-ref {
@@ -981,28 +970,6 @@ input[type="range"]:disabled { opacity: 0.4; cursor: default; }
   border: 1px solid var(--border-md);
 }
 .locked-verse-card .lvc-send-btn:hover { background: var(--bg-hover); color: var(--text); }
-
-.suggestion-card .lvc-send-btn {
-  background: var(--selected-solid);
-  color: #fff;
-}
-.suggestion-card .lvc-send-btn:hover { opacity: 0.88; }
-
-.lvc-promote-btn {
-  font-family: var(--font-head);
-  font-size: 10px;
-  font-weight: 500;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
-  padding: 6px 10px;
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--border-md);
-  background: transparent;
-  color: var(--text-2);
-  cursor: pointer;
-  transition: all 0.15s;
-}
-.lvc-promote-btn:hover { background: var(--bg-hover); color: var(--text); }
 
 /* Confidence badge — absolute top-right of card */
 .conf-badge {
@@ -4106,7 +4073,11 @@ select {
   padding: 6px 0;
 }
 
-/* Live queue cards — compact horizontal rows */
+/* Live queue cards — compact horizontal rows. Every row (queued or not)
+   was getting a translucent brand/red wash, which read as muddy and made
+   the truly active verse impossible to pick out from the rest — reserved
+   for .range-active below instead, so only the one verse actually live
+   gets the brand treatment; ordinary rows stay plain/neutral. */
 .cs-live-queue-body .locked-verse-card {
   display: flex;
   flex-direction: row;
@@ -4115,7 +4086,7 @@ select {
   padding: 8px 10px;
   margin-bottom: 0;
   border-left: 3px solid var(--green);
-  background: rgba(232,64,74,0.05);
+  background: var(--bg-card);
   border-radius: var(--radius);
   overflow: hidden;
   cursor: default;
@@ -4157,14 +4128,17 @@ select {
   align-self: center;
 }
 
+/* Border/background now match the button's own green text instead of a
+   red/brand tint fighting it — that clash (green text against a warm red
+   border) was a big part of why this read as muddy. */
 .cs-live-queue-body .locked-verse-card .lvc-send-btn {
   padding: 3px 8px;
   font-size: 9px;
   font-weight: 700;
   white-space: nowrap;
-  background: rgba(232,64,74,0.1);
+  background: var(--green-dim);
   color: var(--green);
-  border: 1px solid rgba(232,64,74,0.3);
+  border: 1px solid rgba(34,197,94,0.3);
   border-radius: var(--radius-sm);
 }
 .cs-live-queue-body .locked-verse-card .lvc-send-btn:hover {
@@ -4172,9 +4146,6 @@ select {
   color: #000;
   border-color: var(--green);
 }
-
-/* Promote button — hide in queue, no need for it there */
-.cs-live-queue-body .locked-verse-card .lvc-promote-btn { display: none; }
 
 /* History section */
 .cs-history-section {
@@ -4910,23 +4881,6 @@ select {
   font-style: italic;
 }
 
-.rs-live-queue-body {
-  overflow-y: auto;
-  padding: 10px 12px;
-  flex: 1;
-  min-height: 0;
-}
-
-/* Sent cards inside the live queue get green highlight */
-.rs-live-queue-body .locked-verse-card {
-  border-color: rgba(232,64,74,0.3);
-  background: rgba(232,64,74,0.04);
-}
-.rs-live-queue-body .locked-verse-card:hover {
-  border-color: rgba(232,64,74,0.5);
-  background: rgba(232,64,74,0.07);
-}
-
 .rs-candidates-body {
   flex: 1;
   overflow-y: auto;
@@ -5041,13 +4995,22 @@ select {
   user-select: none;
 }
 
-/* Active verse in range — bright left accent + subtle glow */
+/* Active verse in range — bright left accent + subtle glow. Was var(--blue),
+   which reads as plain neutral grey now that --blue was deliberately
+   desaturated (see its own comment above: "orange stays the ONLY color in
+   the app, reserved for the brand mark and live/on-air state") — an active
+   range verse IS on-air content, same category as the Live Queue below, so
+   it gets the brand accent instead of blending into every other neutral
+   control. Scoped to ONLY the active verse (not every card in the range) —
+   applying this to the whole queue made every row look the same reddish
+   wash and buried which one was actually live. */
+/* Text and badge stayed neutral deliberately (owner feedback: colored text
+   read poorly) — the left-border stripe alone is the "this is live" signal,
+   same idiom as the LIVE/AUTO-DEPLOY pills elsewhere, not a full recolor. */
 .range-verse-card.range-active {
-  border-left: 3px solid var(--blue);
-  background: rgba(255,255,255,0.08);
+  border-left: 3px solid var(--brand);
   opacity: 1;
 }
-.range-verse-card.range-active .lvc-ref { color: var(--blue); }
 
 /* Queued (not yet spoken) — dimmed */
 .range-verse-card.range-queued {
@@ -5056,10 +5019,12 @@ select {
 }
 .range-verse-card.range-queued:hover { opacity: 0.85; }
 
-/* Range book badge — subtle blue tint to distinguish from normal history */
+/* Range book badge — neutral default; the active verse's badge gets the
+   brand override above instead, so a queued (not-yet-spoken) verse doesn't
+   compete visually with the one actually on screen. */
 .range-book-badge {
   background: rgba(255,255,255,0.15) !important;
-  color: var(--blue) !important;
+  color: var(--text-2) !important;
   border-color: rgba(255,255,255,0.3) !important;
 }
 
@@ -5085,11 +5050,13 @@ select {
   border-left: 2px solid rgba(245,158,11,0.6);
   background: rgba(245,158,11,0.04);
 }
+/* Already sent to air — same brand accent as the Live Queue/range-active
+   cards, not the old --red-literal leftover. */
 .cand-sent {
-  border-left: 2px solid rgba(232,64,74,0.5);
-  background: rgba(232,64,74,0.025);
+  border-left: 2px solid rgba(245,48,26,0.5);
+  background: rgba(245,48,26,0.025);
 }
-.cand-sent.cand-search { border-left-color: rgba(232,64,74,0.5); }
+.cand-sent.cand-search { border-left-color: rgba(245,48,26,0.5); }
 .cand-row {
   display: flex;
   align-items: center;
@@ -5130,6 +5097,10 @@ select {
   display: flex;
   gap: 4px;
 }
+/* Was var(--selected-solid) — the same neutral gray as every other inert
+   control (tabs, chips, layout pickers). This is the one actionable button
+   in the Possible Matches panel (send a candidate to air), so it gets the
+   brand accent instead of disappearing into the surrounding UI. */
 .cand-send {
   flex: 1;
   font-family: var(--font-head);
@@ -5138,7 +5109,7 @@ select {
   letter-spacing: 0.06em;
   text-transform: uppercase;
   padding: 3px 0;
-  background: var(--selected-solid);
+  background: var(--brand);
   color: #fff;
   border: none;
   border-radius: var(--radius);
@@ -5175,56 +5146,6 @@ select {
 }
 .rs-candidates-body .locked-verse-card .lvc-send-btn {
   padding: 3px 0;
-  font-size: 9px;
-}
-
-/* ── Compact candidate cards ─────────────────────────────────────────────── */
-.rs-candidates-body .suggestion-card {
-  padding: 7px 10px 7px 10px;
-  margin-bottom: 5px;
-  position: relative;
-}
-.rs-candidates-body .suggestion-card .lvc-status {
-  display: none;
-}
-.rs-candidates-body .suggestion-card .lvc-ref {
-  font-size: 11px;
-  font-weight: 700;
-  margin-bottom: 2px;
-  padding-right: 46px;
-  line-height: 1.2;
-}
-.rs-candidates-body .suggestion-card .lvc-text {
-  font-size: 10px;
-  font-weight: 400;
-  line-height: 1.4;
-  margin-bottom: 6px;
-  /* Clamp to 2 lines */
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-}
-.rs-candidates-body .suggestion-card .conf-badge {
-  font-size: 8px;
-  padding: 1px 5px;
-  top: 7px;
-  right: 8px;
-}
-.rs-candidates-body .suggestion-card .lvc-actions {
-  display: flex;
-  flex-direction: row;
-  gap: 4px;
-  margin-top: 0;
-}
-.rs-candidates-body .suggestion-card .lvc-send-btn {
-  flex: 1;
-  padding: 3px 0;
-  font-size: 9px;
-  letter-spacing: 0.05em;
-}
-.rs-candidates-body .suggestion-card .lvc-promote-btn {
-  padding: 3px 10px;
   font-size: 9px;
 }
 

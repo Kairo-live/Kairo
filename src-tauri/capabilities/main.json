@@ -2,7 +2,7 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "main-capability",
   "description": "KAIRO main window capabilities",
-  "windows": ["main"],
+  "windows": ["main", "kairo-*"],
   "remote": {
     "urls": ["http://127.0.0.1:*"]
   },
@@ -14,7 +14,12 @@
     "clipboard-manager:allow-read-text",
     "core:window:allow-create",
     "core:window:allow-show",
+    "core:window:allow-hide",
+    "core:window:allow-close",
     "core:window:allow-set-focus",
+    "core:window:allow-set-fullscreen",
+    "core:window:allow-set-size",
+    "core:window:allow-set-position",
     "core:window:allow-start-dragging",
     "core:webview:allow-create-webview-window",
     "allow-get-server-port",
@@ -28,9 +33,13 @@
     "allow-ndi-start",
     "allow-ndi-stop",
     "allow-ndi-update",
+    "allow-ndi-update-media",
+    "allow-ndi-update-timer",
     "allow-syphon-available",
     "allow-syphon-start",
     "allow-syphon-stop",
-    "allow-syphon-update"
+    "allow-syphon-update",
+    "allow-syphon-update-media",
+    "allow-syphon-update-timer"
   ]
 }

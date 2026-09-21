@@ -4346,6 +4346,22 @@
       "bootstrapped": true
     },
     {
+      "book": "John",
+      "chapter": 18,
+      "verse": 5,
+      "kind": "citation",
+      "startMs": 2266325,
+      "bootstrapped": true
+    },
+    {
+      "book": "John",
+      "chapter": 18,
+      "verse": 6,
+      "kind": "citation",
+      "startMs": 2288670,
+      "bootstrapped": true
+    },
+    {
       "book": "Habakkuk",
       "chapter": 3,
       "kind": "citation",
@@ -4372,6 +4388,14 @@
       "unverified": true,
       "matchedIdf": 18.573571775763753,
       "similarity": 0.47670307364535935
+    },
+    {
+      "book": "Galatians",
+      "chapter": 3,
+      "verse": 13,
+      "kind": "quote",
+      "startMs": 2577475,
+      "bootstrapped": true
     },
     {
       "book": "Numbers",
@@ -4431,12 +4455,52 @@
       "verse": 5
     },
     {
+      "book": "Nahum",
+      "chapter": 1,
+      "verse": 9,
+      "kind": "quote",
+      "startMs": 3022315,
+      "bootstrapped": true
+    },
+    {
       "book": "1 John",
       "chapter": 5,
       "kind": "citation",
       "startMs": 3119685,
       "anchorWordIndex": 5826,
       "verse": 4
+    },
+    {
+      "book": "Exodus",
+      "chapter": 4,
+      "verse": 23,
+      "kind": "quote",
+      "startMs": 3445150,
+      "bootstrapped": true
+    },
+    {
+      "book": "Jeremiah",
+      "chapter": 31,
+      "verse": 12,
+      "kind": "quote",
+      "startMs": 3709565,
+      "unverified": true
+    },
+    {
+      "book": "Psalms",
+      "chapter": 23,
+      "verse": 6,
+      "kind": "quote",
+      "startMs": 3716445,
+      "bootstrapped": true
+    },
+    {
+      "book": "Luke",
+      "chapter": 1,
+      "verse": 75,
+      "kind": "quote",
+      "startMs": 3722540,
+      "unverified": true
     }
   ]
 }

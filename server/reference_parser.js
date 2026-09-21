@@ -631,6 +631,26 @@ function parseSpokenReference(text, inBibleMode = false) {
     let vRes = consumeNumber(words, idx);
     let lookAheadRepositioned = false;
 
+    // A single low digit-word chapter ("one") immediately followed by
+    // another single low digit-word with no "verse"/":" keyword between
+    // them is genuinely ambiguous for a 100+-chapter book (only Psalms in
+    // the KJV): it's either a real bare "BOOK N M" citation, or the FIRST
+    // TWO digit-words of a still-composing 3-digit chapter ("one one zero"
+    // = Psalm 110) that just hasn't finished arriving yet — the exact
+    // shape of a growing interim transcript mid-utterance. Real incident:
+    // an interim "Psalm one one" (before "zero" streamed in) resolved as
+    // "Psalms 1:1" and auto-sent via 'direct' (bypasses every gate) before
+    // the final "Psalm one one zero verse one to three" (the real, correct
+    // Psalm 110:1-3) ever arrived. Once a 3rd word completes the
+    // composition, consumeNumber's own 3-word branch already produces the
+    // correct 3-digit chapter directly (chRes.consumed would be 3, not 1),
+    // so this guard only ever affects the ambiguous 2-digit-word case —
+    // the genuine final citation is completely unaffected.
+    if (vRes && !hasVerseKeyword && chRes.consumed === 1 && vRes.consumed === 1 &&
+        maxCh >= 100 && chapter < 10 && vRes.value < 10) {
+      vRes = null;
+    }
+
     if (vRes && !hasVerseKeyword) {
       let lookIdx = idx + vRes.consumed;
       while (lookIdx < words.length && ['and','of','from'].includes(words[lookIdx])) lookIdx++;
@@ -1045,11 +1065,35 @@ const referenceContext = new ReferenceContext();
 function resolvePartialReference(text, { allowBareNumber = true } = {}) {
   if (!referenceContext.isValid) return null;
 
+  // Strip clock-time notation (e.g. Deepgram rendering spoken "four ten" as
+  // "4:10") BEFORE the shared cleaner would otherwise turn it into
+  // "4 10" — two bare digit tokens indistinguishable from a genuine spoken
+  // chapter/verse pair once cleaned. Real incident (2026-09-20 eval audit):
+  // "But this one is 04:10" (an exam-timetable aside) resolved as "Romans
+  // 8:10" purely because "10" was left over from the time, then matched
+  // Pattern 3's bare-number check below. \d{1,2}:\d{2} is specifically an
+  // H:MM shape — narrow enough that it can't eat a genuine spoken "3:16"
+  // written notation (which cleanReferenceText's own digit-colon-digit
+  // rule already converts to spaced digits with no length constraint at
+  // all, so this being slightly narrower only removes clock times, not
+  // legitimate references).
+  const clockStripped = text.replace(/\b\d{1,2}:\d{2}\b/g, ' ');
+
   // Tokenize through the same cleaner the full parser uses, then resolve
   // numbers with consumeNumber so compound spoken numbers ("seventy seven",
   // "one hundred nineteen") survive — a plain \w+ capture truncates them.
-  const words = cleanReferenceText(text).split(/\s+/).filter(Boolean);
+  const words = cleanReferenceText(clockStripped).split(/\s+/).filter(Boolean);
 
+  // NOTE: unlike the main citation scan above (parseSpokenReference), a bare
+  // ':' is NOT accepted as a verse marker anywhere in this function. This
+  // function only ever serves the LIVE, SPOKEN transcript path (never typed
+  // search, where "John 3:16" is real, expected written notation) — nobody
+  // speaks a colon aloud, so one showing up in a transcript here is almost
+  // always Deepgram's own smart-formatting of a spoken TIME OF DAY ("four
+  // ten" -> "4:10"), not a verse reference. Real incident (2026-09-20 eval
+  // audit): "But this one is 04:10" (an exam-timetable aside, nothing to do
+  // with scripture) resolved as "Romans 8:10" purely because of the colon.
+  //
   // Pattern 1 (MORE SPECIFIC, try first): "chapter N verse M" with no book.
   // Resolves when the preacher said a bare book ("Exodus") earlier, then
   // followed up later with "chapter 3 verse 13".
@@ -1058,7 +1102,7 @@ function resolvePartialReference(text, { allowBareNumber = true } = {}) {
     const chRes = consumeNumber(words, i + 1);
     if (!chRes) continue;
     const j = i + 1 + chRes.consumed;
-    if (!['verse','verses','vers',':'].includes(words[j])) continue;
+    if (!['verse','verses','vers'].includes(words[j])) continue;
     const vRes = consumeNumber(words, j + 1);
     if (!vRes || !referenceContext.book) continue;
     const maxCh = MAX_CHAPTERS[referenceContext.book];
@@ -1068,7 +1112,7 @@ function resolvePartialReference(text, { allowBareNumber = true } = {}) {
 
   // Pattern 2: bare "verse N" or "verses N to M" — needs a chapter in context.
   for (let i = 0; i < words.length; i++) {
-    if (!['verse','verses','vers',':'].includes(words[i])) continue;
+    if (!['verse','verses','vers'].includes(words[i])) continue;
     const vRes = consumeNumber(words, i + 1);
     if (!vRes) continue;
     const verseStart = vRes.value;
@@ -1123,10 +1167,42 @@ function resolvePartialReference(text, { allowBareNumber = true } = {}) {
   // stays enabled on interim either way, since the word "verse" itself is
   // strong enough signal that a transient interim catch of it isn't the
   // same risk.
+  // "for"/"won"/"too"/"ate" are real, extremely common English words as well
+  // as deliberate STT-homophone number mappings (needed for e.g. "john for
+  // verse one") — safe next to a "verse"/"chapter" keyword (Pattern 1/2,
+  // strong context) or inside a multi-word number, but NOT safe as the
+  // entire content of a standalone bare segment: real incident, confirmed
+  // against a real sermon — "weeping may endure for a night" got endpointed
+  // by the STT into its own one-word final segment, just "for", which this
+  // pattern then read as "verse 4" and wrongly overrode an already-correct
+  // "verse five" citation moments earlier. The ordinal number words
+  // ('first'..'fifth') are the same shape of problem — genuinely common
+  // standalone English words/phrases ("first things first," "second
+  // nature") — confirmed by a second real incident the same night: "First
+  // things first" (introducing the next part of the service, no citation
+  // intent at all) got endpointed as its own final segment and the
+  // trailing "first" read as "verse 1" against a stale active book/chapter.
+  // "one" itself belongs in this same set for the same reason — arguably
+  // the most common English word that's also a number, used constantly as
+  // an indefinite pronoun ("until ONE repents," "someone," "no one") rather
+  // than a numeral. Real incident: "Until one" (a genuine sentence, "until
+  // a person repents...") got endpointed as its own final segment and
+  // wrongly read as "verse 1" against a stale active book/chapter. Unlike
+  // the rest of this set, "one" is only excluded when it's NOT the entire
+  // segment — a bare, standalone "One." said alone is an already-validated,
+  // deliberate citation shape (see reference_parser.test.js's own 2026-09-07
+  // regression) and must keep working; it's specifically "one" embedded
+  // alongside other words that's the ambiguous, pronoun-shaped case.
+  const AMBIGUOUS_HOMOPHONES = new Set([
+    'for', 'won', 'too', 'ate',
+    'first', 'second', 'third', 'fourth', 'fifth',
+  ]);
   if (allowBareNumber && referenceContext.chapter) {
     for (let i = 0; i < words.length && i <= 2; i++) {
       const nRes = consumeNumber(words, i);
       if (!nRes || i + nRes.consumed !== words.length) continue;
+      if (nRes.consumed === 1 && AMBIGUOUS_HOMOPHONES.has(words[i])) continue;
+      if (nRes.consumed === 1 && words[i] === 'one' && words.length > 1) continue;
       const verseStart = nRes.value;
       if (verseStart < 1 || verseStart > 176) continue;
       return { book: referenceContext.book, chapter: referenceContext.chapter, verse: verseStart, partial: true };

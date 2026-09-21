@@ -16,6 +16,7 @@ databases/bibles/verses.bin
 databases/bibles/verse_embeddings.f32
 databases/bibles/verse_embeddings.json
 databases/bibles/model/
+databases/bibles/reranker_model/
 # map.json and kjv.json are required by the Tauri bundle — committed.
 
 # Operator runtime state — regenerated on first run (segments.js seeds

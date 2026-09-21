@@ -94,6 +94,55 @@ const LEDGER_WINDOW_MS = 20000;
 // every other coefficient.
 const NAMED_ENTITY_BOOST = 0.15;
 
+// Owner's explicit product decision: "When they are high confident matches,
+// they should auto send, but ideally 95% upward." Semantic and fingerprint
+// were POLICY-CAPPED to suggestions-only regardless of score (see each
+// case's own comment below) — deliberately, since neither has an absolute-
+// evidence signal the way verbatim/stream's matchedIdf does. This is a real,
+// scoped exception to that policy, not a removal of it: when the method's
+// own RAW score (rawResult.similarity/.confidence — what the UI badge
+// actually shows, NOT the calibrated/capped B this file computes) clears
+// this bar, it's trusted enough to auto-send alone. Exactly what "the
+// metric" is, per method (see isVeryHighRawConfidence):
+//   - semantic: rawResult.similarity (cosine similarity) alone.
+//   - fingerprint: rawResult.similarity (coverage ratio) AND
+//     rawResult.confidence === 'high' — coverage alone isn't enough without
+//     the qualitative confidence tier also agreeing; a "high coverage, low
+//     confidence" result is exactly the shape a coincidental match takes.
+const VERY_HIGH_RAW_CONFIDENCE = 0.95;
+
+// Cross-encoder reranker score (reranker_engine.js) — DISABLED as an
+// auto-send exemption after real live testing, same night it shipped.
+// Built and validated against hand-picked near-exact paraphrases (Genesis
+// 24:63/Isaac: true match 0.999 vs. closest false-positive 0.0002 — looked
+// like a huge, safe margin) — but real, unscripted sermon speech produced a
+// flood of confirmed wrong auto-sends at 88-100% rerank confidence
+// (Deuteronomy 17:5, Acts 9:6, John 8:7/8, Proverbs 22:3, and more, all
+// unrelated to what was actually being said, all reaching the live screen
+// within minutes of shipping). This cross-encoder (MS-MARCO-trained, i.e.
+// "is this passage relevant to this query" web-search relevance) isn't
+// calibrated for "is this an actual quote/citation," and ordinary
+// unscripted speech is far looser than the clean test phrases that
+// validated it. Same pattern this codebase has hit before (see the
+// backward-extension anchor-trie experiment in the plan log — looked safe
+// isolated, unsafe on real audio) — kept in code, scoring still computed
+// and logged, but no longer trusted to promote anything to viewer alone
+// until it's properly re-validated against the eval harness on real
+// transcripts, not hand-picked phrases.
+const RERANK_AUTOSEND_MIN = 2; // impossible to clear (scores are 0-1) — disabled, see comment above
+
+function isVeryHighRawConfidence(method, rawResult) {
+  const r = rawResult || {};
+  if (typeof r.rerankScore === 'number' && r.rerankScore >= RERANK_AUTOSEND_MIN) return true;
+  if (method === 'semantic') {
+    return typeof r.similarity === 'number' && r.similarity >= VERY_HIGH_RAW_CONFIDENCE;
+  }
+  if (method === 'fingerprint') {
+    return typeof r.similarity === 'number' && r.similarity >= VERY_HIGH_RAW_CONFIDENCE && r.confidence === 'high';
+  }
+  return false;
+}
+
 // ── B(method, rawResult) — per-method calibration ───────────────────────────
 
 function clamp01(x) { return Math.max(0, Math.min(1, x)); }
@@ -237,6 +286,12 @@ function calibrateMethodScore(method, rawResult) {
       // suspenders so the number itself never implies otherwise). Still
       // feeds A() as corroboration for a verbatim/stream candidate on the
       // same verse.
+      //
+      // EXCEPTION: isVeryHighRawConfidence (own comment above) — a genuine
+      // 95%+ raw match, at 'high' confidence, earns 0.85, clearing
+      // VIEWER_MIN_SCORE on its own via the existing self-sufficient
+      // mechanism in scoreCandidate (no change needed there).
+      if (isVeryHighRawConfidence('fingerprint', r)) return 0.85;
       const coverage = typeof r.similarity === 'number' ? r.similarity : 0;
       const confMult = { high: 1.0, medium: 0.85, low: 0.65, none: 0 }[r.confidence] ?? 0.65;
       return Math.min(0.75, 0.35 + coverage * 0.5) * confMult;
@@ -248,6 +303,13 @@ function calibrateMethodScore(method, rawResult) {
       // decideTarget enforces this as a real ceiling, not an accident of
       // threshold arithmetic; this calibration intentionally returns
       // something that can never clear VIEWER_MIN_SCORE on its own.
+      //
+      // EXCEPTION: isVeryHighRawConfidence (own comment above) — a genuine
+      // 95%+ cosine similarity earns 0.85. decideTarget still has its own
+      // explicit gate for semantic (this B alone isn't sufficient there —
+      // see decideTarget's own comment for why it checks the flag directly
+      // rather than trusting B implicitly).
+      if (isVeryHighRawConfidence('semantic', r)) return 0.85;
       return Math.min(0.60, clamp01(typeof r.similarity === 'number' ? r.similarity : 0) * 0.7);
 
     default:
@@ -502,7 +564,14 @@ function scoreCandidate(candidate, method, rawResult, ctx) {
   if (inDifferentBookDuringRange && method !== 'direct') {
     finalScore = Math.min(finalScore, VIEWER_MIN_SCORE - 0.05);
   }
-  return { finalScore, breakdown: { B, D, A, method, namedEntityCorroborated: !!ctx.namedEntityCorroborated } };
+  return {
+    finalScore,
+    breakdown: {
+      B, D, A, method,
+      namedEntityCorroborated: !!ctx.namedEntityCorroborated,
+      veryHighConfidence: isVeryHighRawConfidence(method, rawResult),
+    },
+  };
 }
 
 /**
@@ -511,24 +580,36 @@ function scoreCandidate(candidate, method, rawResult, ctx) {
  * arithmetic alone would clear VIEWER_MIN_SCORE, matching today's explicit
  * "these two are suggestions-only" design.
  *
- * ONE exemption: semantic + genuine cross-method corroboration. B(semantic)
- * alone is hard-capped at 0.60 (calibrateMethodScore's own comment: "no
- * absolute-evidence analogue to matchedIdf exists yet for cosine
- * similarity") — that's still true, cosine similarity alone is never
- * trusted. But a semantic hit that's ALSO independently caught by a
- * different method on the exact same verse (even if that other hit was
- * itself too weak to auto-send alone) is a different, stronger kind of
- * evidence: two independent signals agreeing is real corroboration, not a
- * coincidental cosine-similarity collision. `opts.corroborated` (from
- * EvidenceLedger.hasCorroboration — 2+ distinct methods on this exact verse
- * within the ledger window) gates this; fingerprint gets no such exemption,
- * since its own B ceiling (0.75) plus agreementBonus alone could already
- * clear VIEWER_MIN_SCORE without semantic's help, which is exactly the
- * "suggestions-only, no exceptions" policy fingerprint keeps.
+ * TWO exemptions to that, both requiring finalScore to also actually clear
+ * VIEWER_MIN_SCORE (an exemption only removes the EXTRA semantic-specific
+ * gate below, it never substitutes for the score bar itself):
+ *
+ * 1. Cross-method corroboration. B(semantic) alone is hard-capped at 0.60 —
+ *    cosine similarity alone is never trusted. But a semantic hit that's
+ *    ALSO independently caught by a different method on the exact same
+ *    verse (even if that other hit was itself too weak to auto-send alone)
+ *    is a different, stronger kind of evidence: two independent signals
+ *    agreeing is real corroboration, not a coincidental cosine-similarity
+ *    collision. `opts.corroborated` (EvidenceLedger.hasCorroboration) gates
+ *    this.
+ * 2. Very high raw confidence (owner's explicit request: "when they are
+ *    high confident matches, they should auto send... ideally 95% upward").
+ *    `opts.veryHighConfidence` — sourced from scoreCandidate's own
+ *    breakdown.veryHighConfidence (isVeryHighRawConfidence, see its own
+ *    comment for exactly what's checked per method) — is a genuine, single-
+ *    method 95%+ raw match, trusted on its own without needing a second
+ *    method to agree.
+ *
+ * Fingerprint gets no explicit branch here at all: calibrateMethodScore's
+ * own isVeryHighRawConfidence exception is the ONLY way its B can reach
+ * VIEWER_MIN_SCORE (ordinary fingerprint B is hard-capped at 0.75), so the
+ * generic finalScore >= VIEWER_MIN_SCORE check below already enforces the
+ * exact same "95%+ raw, or stay suggestions-only" policy without needing
+ * its own opts flag.
  */
 function decideTarget(finalScore, method, opts) {
   if (method === 'semantic') {
-    if (opts && opts.corroborated && finalScore >= VIEWER_MIN_SCORE) return 'viewer';
+    if (finalScore >= VIEWER_MIN_SCORE && (opts?.corroborated || opts?.veryHighConfidence)) return 'viewer';
     return finalScore >= 0.50 ? 'suggestions' : 'drop';
   }
   if (finalScore >= VIEWER_MIN_SCORE) return 'viewer';
@@ -585,6 +666,9 @@ function evaluateCorrection(activeCitation, candidate, ctx, opts = {}) {
 
 module.exports = {
   VIEWER_MIN_SCORE,
+  VERY_HIGH_RAW_CONFIDENCE,
+  RERANK_AUTOSEND_MIN,
+  isVeryHighRawConfidence,
   calibrateMethodScore,
   distanceTerm,
   EvidenceLedger,

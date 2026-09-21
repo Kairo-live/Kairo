@@ -10,12 +10,22 @@ fn main() {
     // command that fetches it was never a grantable permission in the first
     // place. See capabilities/main.json, which references the resulting
     // `allow-<command>` permissions.
+    //
+    // This list must match src/lib.rs's own `invoke_handler(generate_handler![...])`
+    // exactly — 5 real commands (list_monitors, ndi_update_media/timer,
+    // syphon_update_media/timer) had been registered there and called from
+    // the frontend for a while without ever being added here, so every call
+    // to them was silently hard-denied by the ACL regardless of the matching
+    // `allow-*` entry already sitting in capabilities/main.json. list_monitors
+    // backs the entire display/output picker; the update_media/update_timer
+    // pair is what makes NDI/Syphon outputs show media and the timer at all.
     tauri_build::try_build(
         tauri_build::Attributes::new().app_manifest(
             tauri_build::AppManifest::new().commands(&[
                 "get_server_port",
                 "get_server_token",
                 "get_server_config",
+                "list_monitors",
                 "list_system_fonts",
                 "signal_main_ready",
                 "install_update",
@@ -23,10 +33,14 @@ fn main() {
                 "ndi_start",
                 "ndi_stop",
                 "ndi_update",
+                "ndi_update_media",
+                "ndi_update_timer",
                 "syphon_available",
                 "syphon_start",
                 "syphon_stop",
                 "syphon_update",
+                "syphon_update_media",
+                "syphon_update_timer",
             ]),
         ),
     )

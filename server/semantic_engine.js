@@ -175,8 +175,39 @@ async function search(text, limit = 5) {
   return top;
 }
 
+// Same scoring as search() above, but restricted to a caller-provided set of
+// verse indices instead of scanning all ~31k — for when a named person was
+// just spoken aloud (see server.js's named-entity index) and the caller
+// wants to know "does this paraphrase match ANY verse in the chapters that
+// mention them", not "what's the single closest verse Bible-wide". Real
+// case this exists for: "he went to the field to meditate there" (Isaac,
+// Genesis 24:63) doesn't even place in the Bible-wide top 5 — other "in the
+// field" verses (Mark 13:16, Luke 5:16, ...) rank closer in the full
+// embedding space — but restricted to just Genesis 24's ~67 verses, the
+// real match wins easily.
+async function searchWithin(text, indices, limit = 5) {
+  if (!isReady() || !indices || !indices.length) return [];
+  const q = await embed(text);
+  const dims = _dims;
+
+  const top = [];
+  for (const i of indices) {
+    if (i < 0 || i >= _count) continue;
+    const base = i * dims;
+    let dot = 0;
+    for (let d = 0; d < dims; d++) dot += q[d] * _corpus[base + d];
+    if (top.length < limit || dot > top[top.length - 1].score) {
+      let pos = top.length;
+      while (pos > 0 && top[pos - 1].score < dot) pos--;
+      top.splice(pos, 0, { idx: i, score: dot });
+      if (top.length > limit) top.pop();
+    }
+  }
+  return top;
+}
+
 module.exports = {
-  ensureLoaded, retryLoaded, isReady, embed, search,
+  ensureLoaded, retryLoaded, isReady, embed, search, searchWithin,
   isModelPresent, embeddingsPresent, installModel,
   MODEL_DIR, MODEL_WEIGHTS_FILE, EMB_BIN, EMB_META,
 };

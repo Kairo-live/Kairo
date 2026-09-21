@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-ndi-update-timer"
+description = "Enables the ndi_update_timer command without any pre-configured scope."
+commands.allow = ["ndi_update_timer"]
+
+[[permission]]
+identifier = "deny-ndi-update-timer"
+description = "Denies the ndi_update_timer command without any pre-configured scope."
+commands.deny = ["ndi_update_timer"]

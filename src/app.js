@@ -1087,12 +1087,24 @@ function showInViewer(verses, method, topScore, correctedFrom = null, look = nul
   }
 }
 
+// Owner, live, looking at the real panel: "hide anything less than 80" —
+// Possible Matches was showing real but weak entries (Proverbs 4:7 75%,
+// 1 John 4:5 79%) cluttering the panel. Deliberately a client-side display
+// filter, not a server-side score-floor change: several server-side
+// mechanisms (VERBATIM_MODERATE_IDF, the named-entity/contextual-scoped
+// semantic floor, etc.) exist specifically to surface a weak-but-real match
+// for a human to glance at — raising the SERVER floor to 80 would silently
+// undo those tonight's earlier fixes were built for. This only hides them
+// from the list; they're still detected and still logged.
+const SUGGESTION_DISPLAY_MIN = 0.80;
+
 function showInSuggestions(verses, method) {
   if (!queueList) return;
   queueList.querySelector('.display-empty')?.remove();
 
   const frag = document.createDocumentFragment();
   for (const v of verses) {
+    if (v.similarity != null && v.similarity < SUGGESTION_DISPLAY_MIN) continue;
     if (queueList.querySelector(`[data-ref="${CSS.escape(v.reference)}"]`)) continue;
     // Already live in the Live Queue (showInViewer's own dedup, lines above,
     // only removes an EXISTING candidate card when something NEW goes live —

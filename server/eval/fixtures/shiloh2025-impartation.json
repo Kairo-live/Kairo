@@ -4326,10 +4326,34 @@
     {
       "book": "Joel",
       "chapter": 2,
+      "verse": 2,
+      "kind": "citation",
+      "startMs": 189030,
+      "bootstrapped": true
+    },
+    {
+      "book": "Joel",
+      "chapter": 2,
       "kind": "citation",
       "startMs": 232395,
       "anchorWordIndex": 309,
       "verse": null
+    },
+    {
+      "book": "Daniel",
+      "chapter": 11,
+      "verse": 32,
+      "kind": "quote",
+      "startMs": 490945,
+      "bootstrapped": true
+    },
+    {
+      "book": "Isaiah",
+      "chapter": 40,
+      "verse": 28,
+      "kind": "quote",
+      "startMs": 507670,
+      "bootstrapped": true
     },
     {
       "book": "Joel",
@@ -4338,6 +4362,14 @@
       "kind": "quote",
       "startMs": 606855,
       "unverified": true
+    },
+    {
+      "book": "Zechariah",
+      "chapter": 8,
+      "verse": 23,
+      "kind": "quote",
+      "startMs": 812540,
+      "bootstrapped": true
     },
     {
       "book": "Joel",
@@ -4350,6 +4382,14 @@
       "similarity": 0.5111405215283351
     },
     {
+      "book": "Acts",
+      "chapter": 2,
+      "verse": 16,
+      "kind": "quote",
+      "startMs": 891910,
+      "bootstrapped": true
+    },
+    {
       "book": "Habakkuk",
       "chapter": 2,
       "verse": 14,
@@ -4358,6 +4398,14 @@
       "unverified": true,
       "matchedIdf": 20.960848064060748,
       "similarity": 0.6374179014573244
+    },
+    {
+      "book": "Isaiah",
+      "chapter": 11,
+      "verse": 9,
+      "kind": "quote",
+      "startMs": 1098280,
+      "bootstrapped": true
     },
     {
       "book": "Jeremiah",
@@ -4386,6 +4434,14 @@
       "unverified": true,
       "matchedIdf": 27.439141974573563,
       "similarity": 0.7323053633278411
+    },
+    {
+      "book": "Isaiah",
+      "chapter": 60,
+      "verse": 3,
+      "kind": "quote",
+      "startMs": 1201800,
+      "bootstrapped": true
     },
     {
       "book": "Isaiah",
@@ -4556,13 +4612,37 @@
     {
       "book": "1 Corinthians",
       "chapter": 2,
+      "verse": 10,
+      "kind": "quote",
+      "startMs": 2319110,
+      "bootstrapped": true
+    },
+    {
+      "book": "1 Corinthians",
+      "chapter": 2,
       "kind": "citation",
       "startMs": 2325175,
       "anchorWordIndex": 3477,
       "verse": 9
     },
     {
+      "book": "Matthew",
+      "chapter": 24,
+      "verse": 12,
+      "kind": "quote",
+      "startMs": 2409525,
+      "bootstrapped": true
+    },
+    {
       "book": "1 Timothy",
+      "chapter": 3,
+      "verse": 1,
+      "kind": "citation",
+      "startMs": 2480910,
+      "bootstrapped": true
+    },
+    {
+      "book": "2 Timothy",
       "chapter": 3,
       "verse": 1,
       "kind": "citation",
@@ -4598,6 +4678,14 @@
       "similarity": 0.6263899725626257
     },
     {
+      "book": "2 Thessalonians",
+      "chapter": 2,
+      "verse": 7,
+      "kind": "quote",
+      "startMs": 2593800,
+      "bootstrapped": true
+    },
+    {
       "book": "3 John",
       "chapter": 1,
       "verse": 2,
@@ -4623,6 +4711,46 @@
       "verseEnd": 35
     },
     {
+      "book": "Matthew",
+      "chapter": 26,
+      "verse": 31,
+      "kind": "citation",
+      "startMs": 3140085,
+      "unverified": true
+    },
+    {
+      "book": "Matthew",
+      "chapter": 26,
+      "verse": 32,
+      "kind": "citation",
+      "startMs": 3140085,
+      "unverified": true
+    },
+    {
+      "book": "Matthew",
+      "chapter": 26,
+      "verse": 33,
+      "kind": "citation",
+      "startMs": 3140085,
+      "unverified": true
+    },
+    {
+      "book": "Matthew",
+      "chapter": 26,
+      "verse": 34,
+      "kind": "citation",
+      "startMs": 3140085,
+      "unverified": true
+    },
+    {
+      "book": "Matthew",
+      "chapter": 26,
+      "verse": 35,
+      "kind": "citation",
+      "startMs": 3140085,
+      "unverified": true
+    },
+    {
       "book": "Romans",
       "chapter": 5,
       "kind": "citation",
@@ -4639,6 +4767,22 @@
       "unverified": true,
       "matchedIdf": 18.070491154102672,
       "similarity": 0.41244434129368734
+    },
+    {
+      "book": "2 Corinthians",
+      "chapter": 5,
+      "verse": 17,
+      "kind": "quote",
+      "startMs": 3454760,
+      "bootstrapped": true
+    },
+    {
+      "book": "Romans",
+      "chapter": 10,
+      "verse": 13,
+      "kind": "quote",
+      "startMs": 3777600,
+      "unverified": true
     }
   ]
 }

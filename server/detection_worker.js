@@ -18,6 +18,7 @@ const { workerData, parentPort } = require('worker_threads');
 const path = require('path');
 const fs   = require('fs');
 const semanticEngine = require('./semantic_engine');
+const rerankerEngine = require('./reranker_engine');
 
 const DATA_DIR = workerData?.dataDir || path.join(__dirname, '..', 'databases', 'bibles');
 const MAP_PATH = path.join(DATA_DIR, 'map.json');
@@ -569,6 +570,13 @@ async function init() {
   semanticEngine.ensureLoaded()
     .then(() => parentPort.postMessage({ type: 'semanticReady' }))
     .catch(err => console.warn('[DetectionWorker] Semantic layer unavailable:', err.message));
+
+  // Reranker loads in the background too, same non-fatal-failure shape —
+  // missing/not-yet-installed model just means rerank() calls no-op via
+  // isReady() until a fresh install runs (see reranker_installer.js).
+  rerankerEngine.ensureLoaded()
+    .then(() => parentPort.postMessage({ type: 'rerankerReady' }))
+    .catch(err => console.warn('[DetectionWorker] Reranker unavailable:', err.message));
 }
 
 // ── Anchor trie build ─────────────────────────────────────────────────────
@@ -1507,6 +1515,39 @@ function fingerprintSearchInLibrary(transcript, limit = 5, contextHint = null) {
   return scoreFingerprint(matchedWeight, matchedWordCount, contextHint, limit, true);
 }
 
+// Named-entity/active-chapter-scoped variant — mirrors fingerprintSearchInLibrary
+// exactly (same accumulate/score reuse, same reasoning: sharing the scoring
+// code keeps every fingerprint path from ever disagreeing on the same input),
+// just scoped to server.js's own contextualSemanticScopeChapters() set
+// instead of the topic library. Deliberately does NOT lower
+// COVERAGE_THRESHOLD/MIN_ABS_WEIGHT inside scoreFingerprint itself — those
+// stay the one shared bar every fingerprint path is calibrated against;
+// restricting the candidate pool to a real person's chapters (or the
+// chapter currently being read) already does the actual work of making a
+// genuine match stand out, the same way it did for semanticSearchScoped.
+// `chapters` is an array of "book|chapter" strings, the same shape
+// server.js's nameChapterIndex/contextualSemanticScopeChapters already use.
+function fingerprintSearchScoped(transcript, chapters, limit = 5, contextHint = null) {
+  if (!chapters || !chapters.length) return { results: [], confidence: 'none' };
+  const wanted = new Set(chapters);
+  const restrict = new Set();
+  for (let i = 0; i < verseMetadata.length; i++) {
+    if (wanted.has(`${verseMetadata[i].book}|${verseMetadata[i].chapter}`)) restrict.add(i);
+  }
+  if (!restrict.size) return { results: [], confidence: 'none' };
+
+  const speechWords = [...new Set(
+    norm(transcript).split(' ')
+      .filter(w => w.length >= 4 && !STOP_WORDS.has(w))
+  )];
+  if (!speechWords.length) return { results: [], confidence: 'none' };
+
+  const { matchedWeight, matchedWordCount } = accumulateFingerprint(speechWords, restrict);
+  if (!matchedWeight.size) return { results: [], confidence: 'none' };
+
+  return scoreFingerprint(matchedWeight, matchedWordCount, contextHint, limit, true);
+}
+
 // ── Semantic search (meaning, not words) ───────────────────────────────────
 // Thin wrapper: delegates the actual embedding + nearest-neighbor work to
 // semantic_engine.js and maps its {idx, score} results onto the same verse
@@ -1514,6 +1555,22 @@ function fingerprintSearchInLibrary(transcript, limit = 5, contextHint = null) {
 async function semanticSearch(transcript, limit = 5) {
   if (!semanticEngine.isReady()) return [];
   const hits = await semanticEngine.search(transcript, limit);
+  return hits.map(({ idx, score }) => formatVerse(verseMetadata[idx], score, 'semantic'));
+}
+
+// Named-entity-scoped variant — see semantic_engine.js's searchWithin for
+// why this exists (a real spoken name narrows the search to just the
+// chapters that mention them, instead of competing against all ~31k verses
+// Bible-wide). `chapters` is an array of "book|chapter" strings, the same
+// shape server.js's nameChapterIndex already stores.
+async function semanticSearchScoped(transcript, chapters, limit = 5) {
+  if (!semanticEngine.isReady() || !chapters || !chapters.length) return [];
+  const wanted = new Set(chapters);
+  const indices = [];
+  for (let i = 0; i < verseMetadata.length; i++) {
+    if (wanted.has(`${verseMetadata[i].book}|${verseMetadata[i].chapter}`)) indices.push(i);
+  }
+  const hits = await semanticEngine.searchWithin(transcript, indices, limit);
   return hits.map(({ idx, score }) => formatVerse(verseMetadata[idx], score, 'semantic'));
 }
 
@@ -1582,6 +1639,11 @@ parentPort.on('message', async (msg) => {
           merged = fullResult;
         }
         parentPort.postMessage({ type: 'fingerprintResults', id: msg.id, ...merged });
+        break;
+      }
+      case 'fingerprintSearchScoped': {
+        const result = fingerprintSearchScoped(msg.text, msg.chapters, msg.limit || 5, msg.contextHint || null);
+        parentPort.postMessage({ type: 'fingerprintResults', id: msg.id, ...result });
         break;
       }
       // Batch variants — accept multiple texts, return the single best result.
@@ -1715,6 +1777,11 @@ parentPort.on('message', async (msg) => {
         parentPort.postMessage({ type: 'semanticResults', id: msg.id, results });
         break;
       }
+      case 'semanticSearchScoped': {
+        const results = await semanticSearchScoped(msg.text, msg.chapters, msg.limit || 5);
+        parentPort.postMessage({ type: 'semanticResults', id: msg.id, results });
+        break;
+      }
       // Sent by server.js right after /api/semantic-model/install finishes —
       // that route runs in the MAIN process, which never loads
       // semantic_engine.js at all (only this worker does), so it can't just
@@ -1737,6 +1804,38 @@ parentPort.on('message', async (msg) => {
           parentPort.postMessage({ type: 'reloadSemanticAck', id: msg.id, ok: semanticEngine.isReady() });
         } catch (err) {
           parentPort.postMessage({ type: 'reloadSemanticAck', id: msg.id, ok: false, error: err.message });
+        }
+        break;
+      }
+      // Scores `text` against a short list of already-shortlisted candidate
+      // verses (from verbatim/fingerprint/semantic) — see reranker_engine.js's
+      // own header comment for why this is a genuinely different, more
+      // trustworthy signal than any of those methods' own raw scores.
+      // `candidates` is an array of verse objects (must carry .text); returns
+      // them back with a `.rerankScore` field added, sorted descending.
+      case 'rerank': {
+        if (!rerankerEngine.isReady() || !msg.candidates?.length) {
+          parentPort.postMessage({ type: 'rerankResults', id: msg.id, results: [] });
+          break;
+        }
+        const passages = msg.candidates.map(c => c.text || c.kjv_text || '');
+        const scores = await rerankerEngine.score(msg.text, passages);
+        const results = msg.candidates
+          .map((c, i) => ({ ...c, rerankScore: scores[i] ?? 0 }))
+          .sort((a, b) => b.rerankScore - a.rerankScore);
+        parentPort.postMessage({ type: 'rerankResults', id: msg.id, results });
+        break;
+      }
+      // Mirrors 'reloadSemantic' exactly — same reasoning (main process
+      // can't call ensureLoaded itself, retryLoaded clears a cached
+      // rejected promise from before install), same single-ack contract.
+      case 'reloadReranker': {
+        try {
+          await rerankerEngine.retryLoaded();
+          parentPort.postMessage({ type: 'rerankerReady' });
+          parentPort.postMessage({ type: 'reloadRerankerAck', id: msg.id, ok: rerankerEngine.isReady() });
+        } catch (err) {
+          parentPort.postMessage({ type: 'reloadRerankerAck', id: msg.id, ok: false, error: err.message });
         }
         break;
       }

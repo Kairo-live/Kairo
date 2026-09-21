@@ -545,20 +545,83 @@ test('A verse reached for the FIRST time (never shown before), behind the active
   assert.equal(breakdown.D, 0, 'a not-yet-shown verse must still get the self-sufficient exemption — only an ALREADY-shown reshow is excluded');
 });
 
-test('Semantic method never reaches viewer regardless of score (suggestions-only policy ceiling)', () => {
+// Owner's explicit product decision: "When they are high confident matches,
+// they should auto send... ideally 95% upward." Below VERY_HIGH_RAW_CONFIDENCE
+// (0.95), semantic/fingerprint stay suggestions-only exactly as before; at or
+// above it, a single method's own raw score is now trusted alone. The metric
+// checked is the RAW score (rawResult.similarity/.confidence — what the UI
+// badge shows), not the calibrated/capped B.
+test('Semantic below VERY_HIGH_RAW_CONFIDENCE (0.95) still never reaches viewer alone (suggestions-only policy ceiling)', () => {
+  const ledger = new EvidenceLedger();
+  const candidate = { book: 'Romans', chapter: 8, verse: 28 };
+  const hit = { method: 'semantic', rawResult: { similarity: 0.90 } };
+  const { finalScore, breakdown } = scoreCandidate(candidate, hit.method, hit.rawResult, { activeContext: null, ledger, now: T0 });
+  assert.equal(breakdown.veryHighConfidence, false);
+  assert.notEqual(decideTarget(finalScore, 'semantic', { veryHighConfidence: breakdown.veryHighConfidence }), 'viewer');
+});
+
+test('Semantic at or above VERY_HIGH_RAW_CONFIDENCE (0.95) reaches viewer alone, no corroboration needed', () => {
   const ledger = new EvidenceLedger();
   const candidate = { book: 'Romans', chapter: 8, verse: 28 };
   const hit = { method: 'semantic', rawResult: { similarity: 0.99 } };
-  const { finalScore } = scoreCandidate(candidate, hit.method, hit.rawResult, { activeContext: null, ledger, now: T0 });
-  assert.notEqual(decideTarget(finalScore, 'semantic'), 'viewer');
+  const { finalScore, breakdown } = scoreCandidate(candidate, hit.method, hit.rawResult, { activeContext: null, ledger, now: T0 });
+  assert.equal(breakdown.veryHighConfidence, true);
+  assert.equal(decideTarget(finalScore, 'semantic', { veryHighConfidence: breakdown.veryHighConfidence }), 'viewer');
 });
 
-test('Fingerprint alone never reaches viewer regardless of coverage (suggestions-only policy ceiling)', () => {
+test('Fingerprint below VERY_HIGH_RAW_CONFIDENCE (0.95) still never reaches viewer alone (suggestions-only policy ceiling)', () => {
+  const ledger = new EvidenceLedger();
+  const candidate = { book: 'Romans', chapter: 8, verse: 28 };
+  const hit = { method: 'fingerprint', rawResult: { similarity: 0.90, confidence: 'high' } };
+  const { finalScore, breakdown } = scoreCandidate(candidate, hit.method, hit.rawResult, { activeContext: null, ledger, now: T0 });
+  assert.equal(breakdown.veryHighConfidence, false);
+  assert.ok(finalScore < VIEWER_MIN_SCORE, `fingerprint must stay under the ceiling, got ${finalScore}`);
+});
+
+test('Fingerprint at or above VERY_HIGH_RAW_CONFIDENCE (0.95) with high confidence reaches viewer alone', () => {
   const ledger = new EvidenceLedger();
   const candidate = { book: 'Romans', chapter: 8, verse: 28 };
   const hit = { method: 'fingerprint', rawResult: { similarity: 0.97, confidence: 'high' } };
-  const { finalScore } = scoreCandidate(candidate, hit.method, hit.rawResult, { activeContext: null, ledger, now: T0 });
-  assert.ok(finalScore < VIEWER_MIN_SCORE, `fingerprint must stay under the ceiling, got ${finalScore}`);
+  const { finalScore, breakdown } = scoreCandidate(candidate, hit.method, hit.rawResult, { activeContext: null, ledger, now: T0 });
+  assert.equal(breakdown.veryHighConfidence, true);
+  assert.equal(decideTarget(finalScore, 'fingerprint'), 'viewer');
+});
+
+test('Fingerprint at 95%+ coverage but NOT high confidence still stays capped — coverage number alone is not the metric', () => {
+  const ledger = new EvidenceLedger();
+  const candidate = { book: 'Romans', chapter: 8, verse: 28 };
+  const hit = { method: 'fingerprint', rawResult: { similarity: 0.97, confidence: 'medium' } };
+  const { finalScore, breakdown } = scoreCandidate(candidate, hit.method, hit.rawResult, { activeContext: null, ledger, now: T0 });
+  assert.equal(breakdown.veryHighConfidence, false);
+  assert.ok(finalScore < VIEWER_MIN_SCORE, `fingerprint must stay under the ceiling without 'high' confidence, got ${finalScore}`);
+});
+
+// ── Cross-encoder reranker exemption — DISABLED ─────────────────────────────
+// Built and shipped, then disabled the same night after real live testing:
+// hand-picked near-exact paraphrases validated it cleanly (true match 0.999
+// vs. closest false-positive 0.0002), but real unscripted sermon speech
+// produced a flood of confirmed wrong auto-sends at 88-100% rerank
+// confidence (Deuteronomy 17:5, Acts 9:6, John 8:7/8, and more — see
+// RERANK_AUTOSEND_MIN's own comment). These tests now confirm the DISABLED
+// state — a rerank score, however high, must never promote to viewer alone
+// until this is properly re-validated against the eval harness on real
+// transcripts, not clean test phrases.
+test('A high rerank score no longer promotes a semantic candidate to viewer alone (disabled after real false positives)', () => {
+  const ledger = new EvidenceLedger();
+  const candidate = { book: 'Genesis', chapter: 24, verse: 63 };
+  const hit = { method: 'semantic', rawResult: { similarity: 0.55, rerankScore: 0.999 } };
+  const { finalScore, breakdown } = scoreCandidate(candidate, hit.method, hit.rawResult, { activeContext: null, ledger, now: T0 });
+  assert.equal(breakdown.veryHighConfidence, false);
+  assert.notEqual(decideTarget(finalScore, 'semantic', { veryHighConfidence: breakdown.veryHighConfidence }), 'viewer');
+});
+
+test('A high rerank score no longer promotes a fingerprint candidate to viewer alone (disabled after real false positives)', () => {
+  const ledger = new EvidenceLedger();
+  const candidate = { book: 'Genesis', chapter: 24, verse: 63 };
+  const hit = { method: 'fingerprint', rawResult: { similarity: 0.60, confidence: 'medium', rerankScore: 0.97 } };
+  const { finalScore, breakdown } = scoreCandidate(candidate, hit.method, hit.rawResult, { activeContext: null, ledger, now: T0 });
+  assert.equal(breakdown.veryHighConfidence, false);
+  assert.notEqual(decideTarget(finalScore, 'fingerprint'), 'viewer');
 });
 
 // ── Semantic + cross-method corroboration exemption ────────────────────────

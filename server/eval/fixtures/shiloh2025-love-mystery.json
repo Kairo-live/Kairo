@@ -3717,6 +3717,14 @@
       "unverified": true
     },
     {
+      "book": "Ephesians",
+      "chapter": 5,
+      "verse": 31,
+      "kind": "quote",
+      "startMs": 714330,
+      "bootstrapped": true
+    },
+    {
       "book": "Deuteronomy",
       "chapter": 11,
       "kind": "citation",
@@ -3873,6 +3881,14 @@
       "kind": "quote",
       "startMs": 2640290,
       "unverified": true
+    },
+    {
+      "book": "John",
+      "chapter": 3,
+      "verse": 8,
+      "kind": "quote",
+      "startMs": 2650545,
+      "bootstrapped": true
     }
   ]
 }

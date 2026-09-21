@@ -4189,6 +4189,22 @@
       "bootstrapped": true
     },
     {
+      "book": "Hebrews",
+      "chapter": 12,
+      "verse": 2,
+      "kind": "quote",
+      "startMs": 596000,
+      "bootstrapped": true
+    },
+    {
+      "book": "Acts",
+      "chapter": 2,
+      "verse": 47,
+      "kind": "quote",
+      "startMs": 620000,
+      "bootstrapped": true
+    },
+    {
       "book": "Psalms",
       "chapter": 105,
       "verseStart": 17,
@@ -4205,6 +4221,14 @@
       "unverified": true,
       "matchedIdf": 29.25468405900642,
       "similarity": 0.8288691751068723
+    },
+    {
+      "book": "Psalms",
+      "chapter": 126,
+      "verse": 1,
+      "kind": "quote",
+      "startMs": 936000,
+      "bootstrapped": true
     },
     {
       "book": "Psalms",
@@ -4235,6 +4259,14 @@
       "similarity": 0.694254008612287
     },
     {
+      "book": "Psalms",
+      "chapter": 126,
+      "verse": 3,
+      "kind": "quote",
+      "startMs": 978000,
+      "bootstrapped": true
+    },
+    {
       "book": "Amos",
       "chapter": 5,
       "verse": 23,
@@ -4261,6 +4293,22 @@
       "verse": 17,
       "kind": "citation",
       "startMs": 1034000
+    },
+    {
+      "book": "Deuteronomy",
+      "chapter": 28,
+      "verse": 48,
+      "kind": "citation",
+      "startMs": 1091000,
+      "bootstrapped": true
+    },
+    {
+      "book": "2 Corinthians",
+      "chapter": 9,
+      "verse": 7,
+      "kind": "quote",
+      "startMs": 1104000,
+      "bootstrapped": true
     },
     {
       "book": "1 Kings",
@@ -4330,6 +4378,14 @@
       "verse": 6,
       "kind": "citation",
       "startMs": 1449000,
+      "bootstrapped": true
+    },
+    {
+      "book": "1 Samuel",
+      "chapter": 16,
+      "verse": 22,
+      "kind": "citation",
+      "startMs": 1467000,
       "bootstrapped": true
     },
     {
@@ -4423,11 +4479,35 @@
       "similarity": 0.8017490729934075
     },
     {
+      "book": "Malachi",
+      "chapter": 3,
+      "verse": 18,
+      "kind": "quote",
+      "startMs": 2266000,
+      "bootstrapped": true
+    },
+    {
+      "book": "Malachi",
+      "chapter": 4,
+      "verse": 1,
+      "kind": "quote",
+      "startMs": 2275000,
+      "bootstrapped": true
+    },
+    {
       "book": "Proverbs",
       "chapter": 28,
       "verse": 27,
       "kind": "citation",
       "startMs": 2449000
+    },
+    {
+      "book": "Galatians",
+      "chapter": 6,
+      "verse": 10,
+      "kind": "citation",
+      "startMs": 2458000,
+      "bootstrapped": true
     },
     {
       "book": "Psalms",
@@ -4436,6 +4516,22 @@
       "verseEnd": 3,
       "kind": "citation",
       "startMs": 2468000
+    },
+    {
+      "book": "Psalms",
+      "chapter": 41,
+      "verse": 1,
+      "kind": "quote",
+      "startMs": 2468000,
+      "bootstrapped": true
+    },
+    {
+      "book": "Psalms",
+      "chapter": 41,
+      "verse": 2,
+      "kind": "quote",
+      "startMs": 2485000,
+      "bootstrapped": true
     },
     {
       "book": "Psalms",
@@ -4519,6 +4615,14 @@
       "startMs": 3150000
     },
     {
+      "book": "Numbers",
+      "chapter": 26,
+      "verse": 65,
+      "kind": "quote",
+      "startMs": 3199000,
+      "bootstrapped": true
+    },
+    {
       "book": "Hebrews",
       "chapter": 3,
       "verse": 12,
@@ -4541,6 +4645,22 @@
       "verse": 13,
       "kind": "citation",
       "startMs": 3511000,
+      "bootstrapped": true
+    },
+    {
+      "book": "Hebrews",
+      "chapter": 3,
+      "verse": 15,
+      "kind": "citation",
+      "startMs": 3520000,
+      "bootstrapped": true
+    },
+    {
+      "book": "Hebrews",
+      "chapter": 3,
+      "verse": 8,
+      "kind": "quote",
+      "startMs": 3529000,
       "bootstrapped": true
     },
     {
@@ -4738,11 +4858,35 @@
       "startMs": 4642000
     },
     {
+      "book": "Genesis",
+      "chapter": 26,
+      "verse": 1,
+      "kind": "citation",
+      "startMs": 5169000,
+      "bootstrapped": true
+    },
+    {
       "book": "Psalms",
       "chapter": 50,
       "verse": 12,
       "kind": "citation",
       "startMs": 5219000,
+      "bootstrapped": true
+    },
+    {
+      "book": "Genesis",
+      "chapter": 26,
+      "verse": 12,
+      "kind": "citation",
+      "startMs": 5219000,
+      "bootstrapped": true
+    },
+    {
+      "book": "Genesis",
+      "chapter": 26,
+      "verse": 14,
+      "kind": "quote",
+      "startMs": 5235000,
       "bootstrapped": true
     },
     {
@@ -4764,6 +4908,14 @@
     },
     {
       "book": "Genesis",
+      "chapter": 26,
+      "verse": 16,
+      "kind": "quote",
+      "startMs": 5413000,
+      "bootstrapped": true
+    },
+    {
+      "book": "Genesis",
       "chapter": 12,
       "verse": 1,
       "kind": "citation",
@@ -4772,9 +4924,25 @@
     {
       "book": "Genesis",
       "chapter": 12,
+      "verse": 2,
+      "kind": "quote",
+      "startMs": 5540000,
+      "bootstrapped": true
+    },
+    {
+      "book": "Genesis",
+      "chapter": 12,
       "verse": 3,
       "kind": "quote",
       "startMs": 5547000,
+      "bootstrapped": true
+    },
+    {
+      "book": "Genesis",
+      "chapter": 28,
+      "verse": 14,
+      "kind": "quote",
+      "startMs": 5564000,
       "bootstrapped": true
     },
     {
@@ -4802,6 +4970,14 @@
       "similarity": 0.5022675113894908
     },
     {
+      "book": "Psalms",
+      "chapter": 105,
+      "verse": 41,
+      "kind": "quote",
+      "startMs": 5863000,
+      "bootstrapped": true
+    },
+    {
       "book": "Deuteronomy",
       "chapter": 12,
       "verse": 13,
@@ -4817,6 +4993,14 @@
       "verse": 1,
       "kind": "citation",
       "startMs": 6032000
+    },
+    {
+      "book": "Jeremiah",
+      "chapter": 29,
+      "verse": 11,
+      "kind": "citation",
+      "startMs": 6053000,
+      "bootstrapped": true
     },
     {
       "book": "Isaiah",
@@ -5065,6 +5249,14 @@
       "startMs": 7831000
     },
     {
+      "book": "Hebrews",
+      "chapter": 9,
+      "verse": 20,
+      "kind": "citation",
+      "startMs": 7878000,
+      "bootstrapped": true
+    },
+    {
       "book": "1 Corinthians",
       "chapter": 3,
       "ranges": [
@@ -5122,6 +5314,14 @@
     {
       "book": "Zechariah",
       "chapter": 9,
+      "verse": 11,
+      "kind": "citation",
+      "startMs": 8034000,
+      "bootstrapped": true
+    },
+    {
+      "book": "Zechariah",
+      "chapter": 9,
       "verse": 9,
       "kind": "quote",
       "startMs": 8057000,
@@ -5156,10 +5356,34 @@
     },
     {
       "book": "Exodus",
+      "chapter": 12,
+      "verse": 32,
+      "kind": "citation",
+      "startMs": 8195000,
+      "bootstrapped": true
+    },
+    {
+      "book": "Exodus",
       "chapter": 15,
       "verse": 26,
       "kind": "citation",
       "startMs": 8251000
+    },
+    {
+      "book": "Jeremiah",
+      "chapter": 30,
+      "verse": 17,
+      "kind": "quote",
+      "startMs": 8251000,
+      "bootstrapped": true
+    },
+    {
+      "book": "Romans",
+      "chapter": 1,
+      "verse": 16,
+      "kind": "quote",
+      "startMs": 8365000,
+      "bootstrapped": true
     }
   ]
 }

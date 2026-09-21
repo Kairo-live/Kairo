@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-ndi-update-media"
+description = "Enables the ndi_update_media command without any pre-configured scope."
+commands.allow = ["ndi_update_media"]
+
+[[permission]]
+identifier = "deny-ndi-update-media"
+description = "Denies the ndi_update_media command without any pre-configured scope."
+commands.deny = ["ndi_update_media"]

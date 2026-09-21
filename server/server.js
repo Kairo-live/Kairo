@@ -311,6 +311,7 @@ setInterval(() => {
 let detectionWorker  = null;
 let workerBasicReady = false;   // all three layers ready after init
 let workerSemanticReady = false; // embedding model + corpus loaded (background, arrives seconds after workerBasicReady)
+let workerRerankerReady = false; // cross-encoder reranker loaded (background, same timing as semantic)
 const pendingCallbacks = new Map();
 let workerMsgId = 0;
 
@@ -381,6 +382,11 @@ function spawnDetectionWorker() {
       console.log('[Server] Semantic layer ready (embeddinggemma + verse corpus loaded).');
       return;
     }
+    if (msg.type === 'rerankerReady') {
+      workerRerankerReady = true;
+      console.log('[Server] Reranker ready (cross-encoder loaded).');
+      return;
+    }
     const cb = pendingCallbacks.get(msg.id);
     if (cb) {
       clearTimeout(cb.timeout);
@@ -397,6 +403,7 @@ function spawnDetectionWorker() {
     console.error('[Server] Worker error:', err.message);
     workerBasicReady = false;
     workerSemanticReady = false;
+    workerRerankerReady = false;
     for (const [id, cb] of pendingCallbacks) {
       clearTimeout(cb.timeout);
       cb.reject(err);
@@ -412,6 +419,7 @@ function spawnDetectionWorker() {
     console.warn(`[Server] Detection worker exited (code=${code}) — respawning`);
     workerBasicReady = false;
     workerSemanticReady = false;
+    workerRerankerReady = false;
     for (const [id, cb] of pendingCallbacks) {
       clearTimeout(cb.timeout);
       cb.reject(new Error('Worker exited'));
@@ -757,6 +765,22 @@ let lastSentBook = null;
 let lastSentBookTime = 0;
 const SAME_BOOK_WINDOW_MS = 60000;
 
+// processStreamText's duplicate-content tie guard (Psalms 14/53, Psalm 18/
+// 2 Samuel 22, etc.) uses this much tighter window than SAME_BOOK_WINDOW_MS —
+// deliberately: this only ever resolves a tie when one side is completely
+// cold, not just "less recently active than the other," so an 8s window
+// (genuinely still mid-verse) is the right bar, not the general 60s
+// continuity window built for a very different, looser question ("is this
+// book plausibly still the topic").
+const TIE_BREAK_CONTINUITY_WINDOW_MS = 8000;
+
+// processStreamText's cross-method verbatim sanity check (see its own call
+// site comment) — matches detection_scoring.js's VERBATIM_MODERATE_IDF: real,
+// non-trivial identifying weight, not just noise, but deliberately below
+// VERBATIM_CERTAIN_IDF (18) since this only needs to be strong enough to
+// out-vote a 4-gram coincidence, not strong enough to auto-send on its own.
+const STREAM_CROSSCHECK_MIN_IDF = 10;
+
 // Real incident this exists for: a garbled STT citation ("Psalm one one one
 // one zero one to three") got mis-parsed as Psalm 111 instead of the
 // intended 110. Every subsequent genuine, correct detection of the ACTUAL
@@ -809,6 +833,20 @@ let bookMomentumCandidate = null;   // { book, chapter, verses: Set<number>, las
 // see its use in broadcastDetection's viewer-dedup block.
 let recentlyCorrectedAway = null;   // { key, replacedByKey, at }
 const RECENTLY_CORRECTED_WINDOW_MS = 15000;
+
+// processStreamText's cross-method verbatim sanity check (own comment at its
+// call site) only sees the CURRENT recent-60-word buffer — but the anchor-
+// trie's alignment candidate is sticky and keeps re-confirming the SAME
+// wrong verse as more words stream in, and by then the buffer has scrolled
+// past the distinctive words that let the check catch it the first time
+// (confirmed live: "Psalms 7:9" demoted once, then reached viewer anyway
+// moments later on a follow-up confirmation the shifted buffer could no
+// longer see through). This remembers a verseKey the crosscheck just
+// rejected so a repeat 'stream' confirmation of that SAME verse stays
+// rejected for a short cooldown, without needing the buffer to still prove
+// it fresh every single time.
+const streamCrosscheckRejected = new Map();   // verseKey -> timestamp
+const STREAM_CROSSCHECK_COOLDOWN_MS = 20000;
 
 // ── Consolidated scoring — shadow mode (see server/detection_scoring.js) ──
 // Runs the new B+D+A model in PARALLEL with the logic above purely for
@@ -945,9 +983,25 @@ setInterval(() => {
   runFingerprintSearch(stale, true).catch(() => {});
 }, 1000);
 
-// Suppress fingerprint search from routing to viewer for N ms after a direct reference
+// Suppress fingerprint/semantic search entirely for N ms after a direct
+// reference — avoids an immediate redundant "context" suggestion for the
+// exact verse the operator just saw cited.
+//
+// Real incident this cost (oyedepo-meditation eval fixture, real sermon):
+// "Genesis 24 and verse 53" (garbled, real is 24:63) landed as a citation —
+// wrong, but a VALID verse number (Genesis 24 has 67 verses), so the
+// invalid-verse-context correction never had a reason to fire. The actual
+// quote ("Isaac went to the field to meditate there") was spoken in the
+// SAME breath, and scoped semantic search (built earlier this session
+// specifically for this shape of paraphrase) COULD have caught and
+// corrected it — but couldn't get a single pass in for 12 real seconds
+// after the wrong citation landed, by which point the moment had passed.
+// Lowered to 4s: still comfortably suppresses the immediate "obviously
+// redundant" case (SEMANTIC_INTERVAL_MS is 2000ms, so this still skips at
+// least one throttled pass), while giving a real, fast chance for
+// independent evidence to challenge a citation that turns out to be wrong.
 let lastDirectRefTime = 0;
-const DIRECT_REF_SUPPRESS_MS = 12000;
+const DIRECT_REF_SUPPRESS_MS = 4000;
 
 // Rolling one-segment buffer so a citation split across an STT pause still
 // parses as one phrase. processForReferences only ever sees the CURRENT
@@ -1270,20 +1324,6 @@ let rangeAdvancing      = false;
 let rangeLastAdvanceAt  = 0;   // timestamp of last advance — prevents rapid re-fires
 const RANGE_ADVANCE_COOLDOWN_MS = 1200;  // min gap between advances (fast readers)
 
-// Owner's spec (2026-09-07): "after a scripture is read, we can wait for
-// the last word in that verse, the last word is the trigger to listen for
-// the next 4 words in the coming verse. if they match, it sends." Sets
-// when the CURRENT range verse's own last word is heard; the next-verse-
-// prefix check (maybeAdvanceRangeOnNextVersePrefix) now requires this to
-// be armed before it's allowed to fire at all — see both functions' own
-// comments for the full redesign. 0 = not armed.
-let rangeVerseEndArmedAt = 0;
-// How long the arm stays valid before requiring the last-word trigger
-// again — generous enough for a natural pause between verses, tight
-// enough that an arm from one verse transition can't wrongly carry into
-// an unrelated later moment.
-const RANGE_ARM_WINDOW_MS = 20000;
-
 // ── Last-2-words end-of-verse detection ──────────────────────────────────────
 // Much more reliable than similarity search: we know exactly which words end
 // the current verse, so we just watch for them in the rolling transcript.
@@ -1332,7 +1372,6 @@ async function setRangeQueue(verses) {
   rangeQueue          = verses.slice(1);
   rangeQueueTotal     = verses.length;
   rangeAdvancing      = false;
-  rangeVerseEndArmedAt = 0; // a fresh range starts unarmed
   broadcastRangeState();
   // Send all verses to UI so the full range is visible in history
   broadcast({ type: 'range-verses', verses: rangeAllVerses, activeRef: rangeCurrentVerse?.reference || null });
@@ -1358,12 +1397,6 @@ function requestRangeAdvance(reason) {
   if (rangeAdvancing || !rangeQueue.length) return false;
   rangeAdvancing     = true;
   rangeLastAdvanceAt = Date.now();
-  // Every advance path funnels through here (voice "next verse", explicit
-  // ref match, the arm→confirm sequence above, manual "Next" click) — reset
-  // the arm centrally so a trigger OTHER than the arm→confirm sequence
-  // (e.g. an explicit citation for the range's next verse) doesn't leave a
-  // stale arm sitting around to wrongly authorize a later, unrelated match.
-  rangeVerseEndArmedAt = 0;
   if (reason) console.log(`[Range] ${reason} → advancing`);
   advanceRangeQueue().finally(() => { rangeAdvancing = false; });
   return true;
@@ -1375,7 +1408,6 @@ function clearRangeQueue() {
   rangeAllVerses    = [];
   rangeCurrentVerse = null;
   rangeAdvancing    = false;
-  rangeVerseEndArmedAt = 0;
   broadcastRangeState();
 }
 
@@ -1397,6 +1429,7 @@ function broadcastRangeState() {
 let lastNextVerseAt = 0;
 const NEXT_VERSE_COOLDOWN_MS = 4000;
 let lastOutputVerse = null;   // last verse actually pushed to outputs
+let lastOutputVerseAt = 0;    // when lastOutputVerse was last actually set
 // Every verse key actually sent while the current book has been active —
 // NOT every verse number below the current one. See isBackwardInSameBook's
 // comment below for why this distinction matters: a preacher citing a
@@ -1450,6 +1483,12 @@ async function maybeHandleNextVerseTrigger(transcript) {
 const BARE_NUMBER_FILLER      = new Set(['and', 'so', 'now', 'okay', 'ok', 'verse', 'verses', 'next']);
 const BARE_NUMBER_COOLDOWN_MS = 2000;
 const BARE_NUMBER_TAIL_WORDS  = 4;   // how far back to look for a trailing number
+// Outside a formal range, this trick has no citation evidence beyond
+// coincidence — see maybeHandleBareVerseNumber's own comment for the real
+// incident this bounds. Generous enough for real back-to-back verse
+// reading (each usually lands within a few seconds), tight enough to
+// reject an unrelated later sentence.
+const BARE_NUMBER_MAX_GAP_MS  = 15000;
 let lastBareNumberAt = 0;
 
 function maybeHandleBareVerseNumber(transcript) {
@@ -1483,6 +1522,20 @@ function maybeHandleBareVerseNumber(transcript) {
   const base = rangeCurrentVerse || lastOutputVerse;
   if (!base?.book || !base.chapter || base.verse == null) return false;
   if (num.value !== base.verse + 1) return false;
+
+  // Real incident (2026-09-20 eval audit): "the fruit of the spirit has
+  // nine seeds" — Deepgram happened to endpoint a final segment right after
+  // "...the nine", leaving "seeds" for the next segment — coincidentally
+  // landed on exactly lastOutputVerse.verse+1 (John 3:8 → 9) a full 37s
+  // after that verse was shown, in completely unrelated commentary. This
+  // path (outside a formal range, see the rangeQueue branch below) has no
+  // structural citation evidence at all — just "the last verse shown,
+  // however long ago, plus a coincidentally-matching trailing number" — so
+  // it's only trustworthy while genuinely still mid-passage: real
+  // consecutive bare-numbered verses ("...fifty... fifty-one...
+  // fifty-two...") land within a few seconds of each other, not tens of
+  // seconds apart with unrelated sentences in between.
+  if (!rangeQueue.length && now - lastOutputVerseAt > BARE_NUMBER_MAX_GAP_MS) return false;
 
   lastBareNumberAt = now;
 
@@ -1551,31 +1604,55 @@ function markVerseEndIfJustFinished(transcript) {
 // range-advance was measurably slower to react than a fresh citation despite
 // being the simpler case. Now called from both interim and final so it
 // reacts the moment the words are heard, same as everything else.
-// REDESIGNED per the owner's refined spec (2026-09-07): "after a scripture
-// is read, we can wait for the last word in that verse, the last word is
-// the trigger to listen for the next 4 words in the coming verse. if they
-// match, it sends." This function used to advance the range directly on a
-// 3-word tail match (an earlier fix, itself a response to "moved on too
-// quickly" reports) — it now only ARMS the sequential confirm check in
-// maybeAdvanceRangeOnNextVersePrefix below, which requires this arm before
-// it's allowed to fire at all. Narrowed back to the single last meaningful
-// word (matching the owner's own wording exactly) because the real
-// safeguard against a premature advance is now the SEQUENCE itself — last
-// word heard, THEN next verse's own opening heard — not how many words the
-// first half alone requires.
+// Fuzzy tolerance shared by both range-transition checks below — verse
+// endings/openings are the most heavily ASR-garbled part of a verse
+// (documented repeatedly this session: "seat of the scornful" -> "seat of
+// his comfort", "hast made" -> "that came alive", etc.), so requiring an
+// EXACT contiguous substring match — even after several rounds of tuning
+// how many words it required (2 -> 3 -> 1) — kept failing the same way:
+// one wrong or missing word in the target phrase and the whole check
+// silently never fires. Real incident, owner's own live test: Psalm 1:1's
+// ending ("seat of the scornful") never armed at all; the range only
+// advanced once the separately-existing scored fallback
+// (tryRangeAdvanceByDetection) caught up much later, well into verse 2 —
+// "it only moved to verse 2 when it got [the LAST words of verse 2]."
+// Switched both checks from an exact substring match to "most of the
+// target's meaningful words are present" — order-and-gap tolerant, same
+// spirit as the anchor trie's own mismatch budget elsewhere in this file.
+function mostMeaningfulWordsPresent(targetPhrase, transcript, minCount) {
+  const target = meaningfulWords(targetPhrase);
+  if (target.length < minCount) return false;
+  const present = new Set(meaningfulWords(transcript));
+  let hits = 0;
+  for (const w of target) if (present.has(w)) hits++;
+  return hits >= minCount;
+}
+
+// REDESIGNED again, owner's direct correction (2026-09-20): "it should be
+// the last words of the current verse" — not a signal that only ARMS a
+// separate wait for the NEXT verse's own opening words. A human operator
+// advances the instant the preacher finishes reading the current verse;
+// waiting to ALSO hear a word or two of the next verse (the arm→confirm
+// design this replaces) is structurally always at least that much slower
+// than a human would be. This now advances DIRECTLY on a fuzzy match of the
+// current verse's own last 3 meaningful words (owner: "last 3 words"),
+// requiring 2 of 3 present rather than an exact match — see
+// mostMeaningfulWordsPresent's own comment for why fuzzy, not exact
+// (verse ENDINGS are the most heavily ASR-garbled part of a verse).
+// maybeAdvanceRangeOnNextVersePrefix below is UNCHANGED and stays fully
+// independent — a real, separate safety net for when the current verse's
+// ending is paraphrased or too garbled for even a fuzzy match to catch, not
+// something this path depends on or waits for.
 function maybeAdvanceRangeOnLastWords(transcript) {
   const now = Date.now();
   if (!(rangeCurrentVerse && rangeQueue.length && !rangeAdvancing
       && now - rangeLastAdvanceAt >= RANGE_ADVANCE_COOLDOWN_MS)) return;
-  if (rangeVerseEndArmedAt) return; // already armed for this transition
-  const lastWord = getLastMeaningfulWords(
-    rangeCurrentVerse.text || rangeCurrentVerse.kjv_text || '', 1
+  const last3 = getLastMeaningfulWords(
+    rangeCurrentVerse.text || rangeCurrentVerse.kjv_text || '', 3
   );
-  if (!lastWord) return;
-  const transcriptMeaningful = meaningfulWords(transcript).join(' ');
-  if (transcriptMeaningful.includes(lastWord)) {
-    rangeVerseEndArmedAt = now;
-    console.log(`[Range] Armed on last word "${lastWord}" — listening for next verse's opening`);
+  if (!last3) return;
+  if (mostMeaningfulWordsPresent(last3, transcript, Math.min(2, meaningfulWords(last3).length))) {
+    requestRangeAdvance(`Last-words advance: "${last3}" (fuzzy match) detected`);
   }
 }
 
@@ -1618,11 +1695,20 @@ function maybeAdvanceRangeOnNextVersePrefix(transcript) {
       && now - rangeLastAdvanceAt >= RANGE_ADVANCE_COOLDOWN_MS)) return;
   const nextVerse = rangeQueue[0];
   const prefix4 = getFirstMeaningfulWords(nextVerse.text || nextVerse.kjv_text || '', 4);
-  if (meaningfulWords(prefix4).length < 2) return;
-  const transcriptMeaningful = meaningfulWords(transcript).join(' ');
-  if (transcriptMeaningful.includes(prefix4)) {
-    rangeVerseEndArmedAt = 0; // consumed — must re-arm for the NEXT verse transition
-    requestRangeAdvance(`Next-verse-prefix advance: "${prefix4}" detected`);
+  if (meaningfulWords(prefix4).length < 1) return;
+  // Owner, live: "if a human was behind the PC, after the first verse is
+  // read, they automatically move to the next... ours has several [seconds]
+  // of delay." Requiring 2 of 4 words meant structurally waiting for a
+  // meaningful chunk of the NEXT verse to already have been spoken before
+  // advancing — always behind where a human operator would click. Lowered
+  // to 1: this check is already scoped to the range's own specific,
+  // structurally-known next-expected verse (a much stronger prior than an
+  // open-ended match), so a single distinctive opening word is enough
+  // corroboration for what's really just a TIMING signal, not an identity
+  // decision — the verse itself was already established when the range was
+  // set up.
+  if (mostMeaningfulWordsPresent(prefix4, transcript, 1)) {
+    requestRangeAdvance(`Next-verse-prefix advance: "${prefix4}" (fuzzy match) detected`);
   }
 }
 
@@ -2382,7 +2468,6 @@ function jumpRangeTo(book, chapter, verse) {
   rangeCurrentVerse = rangeAllVerses[idx];
   rangeQueue        = rangeAllVerses.slice(idx + 1);
   rangeAdvancing     = false;
-  rangeVerseEndArmedAt = 0; // repositioning invalidates any pending arm
   broadcastRangeState();
   broadcast({ type: 'range-active', activeRef: rangeCurrentVerse.reference });
   return true;
@@ -2717,6 +2802,50 @@ app.post('/api/semantic-model/install', async (_req, res) => {
     send({ phase: 'complete', ok: false, error: err.message || String(err) });
   } finally {
     semanticInstallInProgress = false;
+    res.end();
+  }
+});
+
+// ── Reranker installer ────────────────────────────────────────────────────
+// Same shape/reasoning as the semantic-layer installer above — neither the
+// model nor an index ships in the bundle, so a fresh install needs this
+// route to ever get the reranker working. Simpler than semantic's: no
+// verse-corpus index to build, just the ~34MB cross-encoder model itself.
+const rerankerInstaller = require('./reranker_installer');
+let rerankerInstallInProgress = false;
+
+app.get('/api/reranker-model/status', (_req, res) => {
+  res.json({
+    installed: rerankerInstaller.isFullyInstalled(),
+    installing: rerankerInstallInProgress,
+  });
+});
+
+app.post('/api/reranker-model/install', async (_req, res) => {
+  if (rerankerInstallInProgress) {
+    return res.status(409).json({ error: 'install already in progress' });
+  }
+  rerankerInstallInProgress = true;
+
+  const send = startNdjsonStream(res);
+
+  try {
+    await rerankerInstaller.installReranker({ onProgress: send });
+    send({ phase: 'complete', ok: true });
+    // Same reasoning as the semantic install route above — the install ran
+    // in this (main) process; detection_worker.js's own copy of
+    // reranker_engine.js needs to be told to reload to bring reranking
+    // online this session without a full server restart.
+    workerCall('reloadReranker', {}, 120_000)
+      .then(msg => {
+        if (msg.ok) console.log('[Server] Reranker ready after install.');
+        else console.warn('[Server] Reranker failed to load post-install:', msg.error || 'unknown error');
+      })
+      .catch(err => console.warn('[Server] Reranker failed to load post-install:', err.message));
+  } catch (err) {
+    send({ phase: 'complete', ok: false, error: err.message || String(err) });
+  } finally {
+    rerankerInstallInProgress = false;
     res.end();
   }
 });
@@ -3149,6 +3278,7 @@ function resetDetectionSession() {
   recentSuggestions.clear();
   recentDetections.clear();
   recentlyCorrectedAway = null;
+  streamCrosscheckRejected.clear();
   audioRingBuffer = [];
   audioRingBytes  = 0;
 
@@ -3519,6 +3649,56 @@ function tryRangeAdvanceByDetection(verses, topScore) {
   return requestRangeAdvance(`Detected "${hit.reference}" (${(topScore*100).toFixed(0)}%) matches range's next verse`);
 }
 
+// ── Chapter continuity: any detected candidate for the SAME chapter as the
+// last verse actually sent, not just a formally-cited range ───────────────
+// Owner: "when a verse is sent and a preacher is speaking we should
+// probably find a way to raise the verses from that chapter... just by
+// listening. But I don't know how to auto send this in confidence."
+// tryRangeAdvanceByDetection above already answers exactly that question,
+// just for a FORMALLY-CITED multi-verse range ("read verses 1 to 9") — it's
+// been firing correctly and safely all session (RANGE_ADVANCE_MIN_SCORE,
+// 0.50, deliberately lower than VIEWER_MIN_SCORE because being the range's
+// own known next verse is much stronger prior evidence than a context-free
+// match). This reuses that exact same trusted bar rather than inventing a
+// new confidence mechanism — no new number to get wrong — for the far more
+// common case: a single verse was sent (auto or manual), no formal range
+// was ever cited, and the preacher just keeps reading — forward, backward,
+// or jumping to a different verse — within that same chapter.
+//
+// Deliberately narrower than a formal range in two ways: skipped entirely
+// while a formal range IS active (that has its own, more specific "known
+// next verse" signal above — this would just add noise alongside it), and
+// requires the candidate to be a DIFFERENT verse than what's already on
+// screen (no-op resend). Both keep this additive, not a replacement for the
+// existing continuity/self-sufficient scoring already protecting against
+// false positives elsewhere.
+function tryChapterAdvanceByDetection(verses, topScore, method) {
+  if (rangeCurrentVerse) return false; // formal range owns this while active
+  if (!lastOutputVerse || verses.length !== 1) return false;
+  if (Date.now() - lastSentBookTime >= SAME_BOOK_WINDOW_MS) return false;
+  // Real incident (2026-09-21 eval audit): RANGE_ADVANCE_MIN_SCORE (0.50) is
+  // calibrated for verbatim/stream, whose evidence is IDF-weighted word
+  // matching against the actual spoken text — real incidents this function
+  // exists for. semantic/fingerprint's own scores are noisier bi-encoder
+  // cosine similarity, deliberately kept suggestions-only everywhere else
+  // (isVeryHighRawConfidence's 0.95 bar, or corroboration) — but this
+  // function had no method awareness at all, so a semantic candidate as
+  // weak as 61% (Nahum 1:13, Romans 8:25, 1 John 5:21 — all real, confirmed
+  // false positives) sailed straight to the viewer just for landing in the
+  // active chapter, silently bypassing that whole policy. Chapter
+  // continuity is real signal, but not strong enough on its own to promote
+  // evidence this weak — require the same 0.95 bar semantic/fingerprint
+  // already need for any other unassisted auto-send.
+  const minScore = (method === 'semantic' || method === 'fingerprint')
+    ? detectionScoring.VERY_HIGH_RAW_CONFIDENCE : RANGE_ADVANCE_MIN_SCORE;
+  if (topScore < minScore) return false;
+  const v = verses[0];
+  if (v.book !== lastOutputVerse.book || v.chapter !== lastOutputVerse.chapter) return false;
+  if (v.verse === lastOutputVerse.verse) return false; // already on screen
+  console.log(`[Chapter] Detected "${v.reference}" (${(topScore*100).toFixed(0)}%) matches the active chapter (${lastOutputVerse.book} ${lastOutputVerse.chapter}) → sending`);
+  return true;
+}
+
 // ── Streaming anchor detection ────────────────────────────────────────────
 // Every word — interim and final — is fed into the worker's 4-gram anchor
 // trie + alignment tracker (Layer 1 + Layer 2). No sentence buffer, no throttle.
@@ -3564,7 +3744,7 @@ async function processStreamText(text) {
     const anchors   = ranked.filter(r => !r.confirmed);
 
     if (confirmed.length) {
-      const top = confirmed.slice(0, 5);
+      let top = confirmed.slice(0, 5);
 
       // ── Duplicate-content tie guard ───────────────────────────────────────
       // Several verses share near-identical wording (Psalms 14 & 53, 40:13-17
@@ -3581,16 +3761,40 @@ async function processStreamText(text) {
       // hold both back rather than confidently show a coin-flip as if it
       // were a citation. verbatim (which checks the full, divergent tail —
       // not just the shared opening) resolves these correctly moments
-      // later once the wording actually diverges.
+      // later once the wording actually diverges — this is exactly the
+      // "moments later" gap this tie-break closes for the specific
+      // sub-case where continuity evidence already unambiguously points at
+      // one side.
       const runnerUp = top.find(r => r.reference !== top[0].reference);
       if (runnerUp && Math.abs((top[0].matched || 0) - (runnerUp.matched || 0)) < 2) {
-        console.log(`[Stream] Ambiguous — "${top[0].reference}" and "${runnerUp.reference}" tied at matched=${top[0].matched} (near-duplicate wording), holding both back`);
-        return;
+        // Before giving up entirely: if EXACTLY ONE side's book was just
+        // actively read (tight window — not the general 60s
+        // SAME_BOOK_WINDOW_MS — and the OTHER side must be completely
+        // cold, not just "less recently active"), prefer it instead of
+        // dropping both. Deliberately narrower than the ordinary
+        // continuity gate: this codebase has already been burned twice
+        // trusting continuity too eagerly on thin margins (Psalm 110/111
+        // poisoning; the Jeremiah 17:8/Romans 7:22 range-collision
+        // incidents) — an asymmetric "one hot, one stone cold" requirement
+        // is a much stronger signal than "one is merely closer."
+        const now = Date.now();
+        const contextFresh = !!lastOutputVerse && (now - lastSentBookTime) < TIE_BREAK_CONTINUITY_WINDOW_MS;
+        const topActive    = contextFresh && top[0].book === lastOutputVerse.book;
+        const runnerActive = contextFresh && runnerUp.book === lastOutputVerse.book;
+        if (topActive !== runnerActive) {
+          const winnerRef = topActive ? top[0].reference : runnerUp.reference;
+          const loserRef  = topActive ? runnerUp.reference : top[0].reference;
+          console.log(`[Stream] Tie broken by active-book continuity: "${winnerRef}" (${lastOutputVerse.book} active) over "${loserRef}"`);
+          top = top.filter(r => r.reference === winnerRef);
+        } else {
+          console.log(`[Stream] Ambiguous — "${top[0].reference}" and "${runnerUp.reference}" tied at matched=${top[0].matched} (near-duplicate wording), holding both back`);
+          return;
+        }
       }
 
       // Give the mis-citation corrector first look — see maybeCorrectMiscitation
       // for why this now applies to stream hits too, not just verbatim.
-      const corrected = maybeCorrectMiscitation(top[0], text);
+      const corrected = callWithCorrectionShadow(top[0], text);
       if (corrected) return;
 
       // Backward-extension corroboration gate — see detection_worker.js's
@@ -3610,7 +3814,79 @@ async function processStreamText(text) {
           && !shadowLedger.hasCorroboration({ book: top[0].book, chapter: top[0].chapter, verse: top[0].verse })) {
         streamTarget = 'suggestions';
       }
-      const sent = await broadcastDetection(top, 'stream', top[0].similarity || 0.90, streamTarget);
+
+      // ── Cross-method verbatim sanity check ───────────────────────────────
+      // Real incident, 2026-09-20 eval audit: the anchor-trie confirms a
+      // candidate purely on 4-gram word-overlap, which can't distinguish
+      // "this really is the verse" from "this verse happens to share some
+      // of the same common words" — confirmed against real sermon audio,
+      // stream confidently confirmed Psalms 7:9 for a passage that's
+      // actually Zechariah 9:11, Ezekiel 16:14 for what's actually Exodus
+      // 15:26, Isaiah 60:8 for Haggai 2:8-9, Acts 3:18 for Acts 3:21,
+      // Joshua 10:26 for Galatians 3:13, Matthew 21:5 for Zechariah 9:9 —
+      // in every one of those cases, verbatimSearch (a full inverted-index
+      // match over the whole recent buffer, not just a 4-gram) picked the
+      // CORRECT verse as its clear top result. Rather than trying to patch
+      // each individual collision (the same whack-a-mole this codebase has
+      // already been through), cross-check stream's pick against a quick
+      // verbatim search of the same recent text before trusting it alone:
+      // if verbatim disagrees and has real, non-trivial identifying weight
+      // of its own, stream's pick is demoted to Candidates instead of
+      // auto-sent — exactly the same "text is ground truth" principle
+      // already used for citation vs. quoted-text conflicts elsewhere.
+      // Skipped for ordinary forward-sequential reading within the SAME
+      // book+chapter already active — real incident caught while validating
+      // this fix: the 60-word rolling buffer naturally mixes the CURRENT
+      // verse's words together with the PREVIOUS one or two (they were both
+      // just read seconds apart), so verbatim's bag-of-words score over that
+      // mixed buffer routinely favors whichever adjacent verse has denser
+      // matched words — not necessarily the one actually being read right
+      // now. That wrongly demoted a run of perfectly correct forward reads
+      // (Genesis 24:13→19, one after another) to Candidates. This exact
+      // "same book+chapter, verse >= active" shape is the established
+      // definition of safe forward continuity used everywhere else in this
+      // file (see isSequential below) — every one of the REAL collisions
+      // this check exists for (Psalms 7:9, Ezekiel 16:14, Isaiah 60:8, Acts
+      // 3:18, Joshua 10:26, Matthew 21:5) was a jump to a DIFFERENT book or
+      // chapter than whatever was active, never a same-chapter continuation.
+      const crosscheckBookActiveRecently = !!lastSentBook && Date.now() - lastSentBookTime < SAME_BOOK_WINDOW_MS;
+      const crosscheckIsSequential = crosscheckBookActiveRecently && lastOutputVerse
+        && top[0].book    === lastOutputVerse.book
+        && top[0].chapter === lastOutputVerse.chapter
+        && top[0].verse   >= lastOutputVerse.verse;
+      let verbatimDisagreed = false;
+      const streamTopKey = `${top[0].book}|${top[0].chapter}|${top[0].verse}`;
+      const rejectedAt = streamCrosscheckRejected.get(streamTopKey);
+      if (streamTarget === 'viewer' && rejectedAt && Date.now() - rejectedAt < STREAM_CROSSCHECK_COOLDOWN_MS) {
+        console.log(`[Stream] "${top[0].reference}" — still within cooldown of an earlier verbatim-disagreement rejection — demoted to Candidates`);
+        streamTarget = 'suggestions';
+        verbatimDisagreed = true;
+      } else if (streamTarget === 'viewer' && workerBasicReady && !crosscheckIsSequential) {
+        // 100, not the usual 60 — the anchor-trie can take extra words to
+        // reach 'confirmed' status after the actual distinctive text was
+        // spoken (confirmed live: verbatim correctly picked "Luke 16:16"
+        // over "Matthew 11:12" and "Zechariah 9:9" over "Matthew 21:5" when
+        // given the full context, but the crosscheck missed both live
+        // because by the time stream confirmed, the citation text itself
+        // had already scrolled out of a 60-word window).
+        const bufferText = transcriptBuffer.map(t => t.text).join(' ')
+          .split(RE_SPACES).slice(-100).join(' ').trim();
+        if (bufferText) {
+          try {
+            const vMsg = await workerCall('verbatimSearch', { text: bufferText, minWords: 4, limit: 3 }, 1500, true);
+            const vTop = (vMsg.results || [])[0];
+            if (vTop && vTop.reference !== top[0].reference &&
+                typeof vTop.matchedIdf === 'number' && vTop.matchedIdf >= STREAM_CROSSCHECK_MIN_IDF) {
+              console.log(`[Stream] "${top[0].reference}" confirmed-alignment disagrees with verbatim's own top pick "${vTop.reference}" (matchedIdf=${vTop.matchedIdf.toFixed(1)}) — demoted to Candidates`);
+              streamTarget = 'suggestions';
+              streamCrosscheckRejected.set(streamTopKey, Date.now());
+              verbatimDisagreed = true;
+            }
+          } catch { /* cross-check is best-effort — never block a real send on it */ }
+        }
+      }
+
+      const sent = await broadcastDetection(top, 'stream', top[0].similarity || 0.90, streamTarget, { verbatimDisagreed });
       if (sent === 'viewer') console.log(`[Stream] "${top[0].reference}" confirmed-alignment (matchedIdf=${(top[0].matchedIdf ?? 0).toFixed(1)}) → viewer`);
       else if (streamTarget === 'suggestions' && top[0].viaBackwardExtension) console.log(`[Stream] "${top[0].reference}" confirmed only via backward-extension credit, no independent corroboration yet — demoted to Candidates`);
     }
@@ -3633,7 +3909,7 @@ async function processStreamText(text) {
         // df=1 anchors carry their weight as `.idf`, not `.matchedIdf` —
         // alias it so maybeCorrectMiscitation's check (shared with the
         // confirmed-alignment path above) applies here too.
-        const corrected = maybeCorrectMiscitation({ ...unique[0], matchedIdf: unique[0].idf }, text);
+        const corrected = callWithCorrectionShadow({ ...unique[0], matchedIdf: unique[0].idf }, text);
         if (!corrected) {
           const sent = await broadcastDetection(unique.slice(0, 1), 'stream', Math.max(0.90, unique[0].similarity || 0.90), 'viewer');
           if (sent === 'viewer') console.log(`[Stream] "${unique[0].reference}" df=1 unique-phrase (idf=${unique[0].idf.toFixed(1)}) → viewer`);
@@ -3988,7 +4264,7 @@ async function processVerbatim(transcript) {
     if (viewer.length) {
       const top    = viewer[0];
       const vKey   = `${top.book}|${top.chapter}|${top.verse}`;
-      const corrected = maybeCorrectMiscitation(top, transcript);
+      const corrected = callWithCorrectionShadow(top, transcript);
       if (corrected) return true;   // replaced on-air, skip the normal viewer broadcast
       const viaIdf = top.similarity < VERBATIM_AUTOSEND_MIN;
       // top.similarity itself stays coverage-diluted (76% is an honest
@@ -4000,7 +4276,20 @@ async function processVerbatim(transcript) {
       // would just demote it straight back to Candidates and undo this.
       const effectiveScore = viaIdf ? Math.max(top.similarity, 0.90) : top.similarity;
       const boosted = ensembleScore(vKey, 'verbatim', effectiveScore, viewer);
-      const sent = await broadcastDetection(viewer, 'verbatim', boosted, 'viewer');
+      // Corroboration gate for the coverage-diluted (viaIdf) path only —
+      // same principle already applied to stream's backward-extension
+      // confirmations. Real incident (2026-09-21 eval audit): "Mark 11:23"
+      // reached viewer at matchedIdf=19.0 despite only 37-41% raw coverage,
+      // on a passage ("faith... heart... word of God") that doesn't
+      // genuinely quote Mark 11:23 — a real IDF-weighted vocabulary
+      // collision, the same class of false positive already fought all
+      // session for stream's anchor-trie. When top.similarity itself
+      // already clears VERBATIM_AUTOSEND_MIN (real, high coverage), this
+      // never applies — only the "certain purely by IDF despite hearing
+      // just part of it" path needs a second opinion.
+      const viaIdfTarget = (viaIdf && !shadowLedger.hasCorroboration({ book: top.book, chapter: top.chapter, verse: top.verse }))
+        ? 'suggestions' : 'viewer';
+      const sent = await broadcastDetection(viewer, 'verbatim', boosted, viaIdfTarget);
       // Logged after the call, gated on the ACTUAL landing target —
       // broadcastDetection returns 'viewer'/'suggestions'/false now, not a
       // plain boolean. It used to be a boolean, and `if (sent)` was true
@@ -4056,6 +4345,54 @@ async function processVerbatim(transcript) {
 // 6:14, actually reading Luke 4:14) scored matchedIdf=16.7 and got wrongly
 // left uncorrected until this was lowered.
 const CORRECTION_MIN_IDF = 15;
+
+// Shadow-mode comparison for detectionScoring.evaluateCorrection — that
+// function was written as this codebase's own consolidated replacement for
+// maybeCorrectMiscitation (one shared distanceTerm instead of an
+// independently-tuned MISCITATION_FORWARD_EXEMPT_VERSES constant that
+// "could drift from whatever forward reading meant elsewhere" — its own
+// module comment), but unlike scoreCandidate/decideTarget (which get real
+// shadow-log comparison on every single detection, via the scoring-shadow-
+// divergence event below) it had never actually been called anywhere in
+// this file — fully unit-tested in isolation, zero real-traffic validation.
+// This wrapper is a pure black-box comparison around maybeCorrectMiscitation
+// (never touches its internals, never changes what it returns) so real
+// divergence data can accumulate before evaluateCorrection is ever
+// considered for a real cutover the way scoreCandidate/decideTarget already
+// went through. Snapshot taken BEFORE calling the real function, since a
+// real correction mutates lastDirectSentVerse/lastDirectSentTime as a side
+// effect — reading them after would compare against already-cleared state.
+function callWithCorrectionShadow(topMatch, sourceText) {
+  const snapshot = lastDirectSentVerse
+    ? { book: lastDirectSentVerse.book, chapter: lastDirectSentVerse.chapter, verse: lastDirectSentVerse.verse, t: lastDirectSentTime }
+    : null;
+  const actualCorrected = maybeCorrectMiscitation(topMatch, sourceText);
+  if (snapshot) {
+    try {
+      const candidate = {
+        book: topMatch.book, chapter: topMatch.chapter, verse: topMatch.verse,
+        method: topMatch.method || 'verbatim',
+        rawResult: topMatch,
+      };
+      const withinEstablishedRange = (c) => rangeAllVerses.some(v => v.book === c.book && v.chapter === c.chapter);
+      const alreadyShown = (c) => sentVerseKeysThisBook.has(`${c.book}|${c.chapter}|${c.verse}`);
+      const shadowCorrected = detectionScoring.evaluateCorrection(
+        snapshot, candidate, { now: Date.now(), alreadyShown }, { withinEstablishedRange }
+      );
+      if (!!shadowCorrected !== !!actualCorrected) {
+        logDebug('correction-shadow-divergence', {
+          candidateRef: `${topMatch.book} ${topMatch.chapter}:${topMatch.verse}`,
+          activeCitationRef: `${snapshot.book} ${snapshot.chapter}:${snapshot.verse}`,
+          actualCorrected: !!actualCorrected,
+          shadowCorrected: !!shadowCorrected,
+        });
+      }
+    } catch (err) {
+      console.warn('[CorrectionShadow] error (non-fatal, real decision unaffected):', err.message);
+    }
+  }
+  return actualCorrected;
+}
 
 function maybeCorrectMiscitation(topMatch, sourceText) {
   if (settings.autoCorrect === false) return false;
@@ -4347,6 +4684,34 @@ async function runFingerprintSearch(currentSegment, skipNewTranscriptCheck = fal
         }
       }
     }
+
+    // Contextually-scoped pass — same mechanism runSemanticSearch's own
+    // scoped pass uses (contextualSemanticScopeChapters, NAMED_ENTITY_SEMANTIC_MIN_SCORE,
+    // SCOPED_SEMANTIC_MARGIN), extended to fingerprint: fingerprint catches
+    // literal-vocabulary-but-reworded paraphrases (word overlap, not
+    // meaning), a different blind spot than semantic's meaning-only match —
+    // it never got the owner's "scoped, contextual intelligence" treatment
+    // semantic did. Deliberately reuses the SAME margin/floor constants
+    // rather than inventing fingerprint-specific ones: the actual precision
+    // work is done by restricting the candidate pool (a real person's
+    // chapters, or the chapter currently being read), not by a separately-
+    // tuned number, exactly the same reasoning semantic's own version uses.
+    const scopeChapters = contextualSemanticScopeChapters();
+    if (scopeChapters && texts.length) {
+      const scopedMsg = await workerCall('fingerprintSearchScoped', { text: texts[0], chapters: [...scopeChapters], limit: 5, contextHint }, 3000);
+      const rawScoped = scopedMsg.results || [];
+      const top = rawScoped[0];
+      const runnerUp = rawScoped[1];
+      const margin = top ? (runnerUp ? top.similarity - runnerUp.similarity : 1) : 0;
+      const qualifies = top
+        && top.similarity >= NAMED_ENTITY_SEMANTIC_MIN_SCORE
+        && margin >= SCOPED_SEMANTIC_MARGIN
+        && !(!recentDirectRef && results.some(r => r.book === top.book && r.chapter === top.chapter && r.verse === top.verse));
+      if (qualifies) {
+        const sentScoped = await broadcastDetection([top], 'fingerprint', top.similarity, 'suggestions');
+        if (sentScoped) console.log(`[Fingerprint] Contextually-scoped: "${top.reference}" ${(top.similarity*100).toFixed(0)}% (margin ${(margin*100).toFixed(0)}pt) → candidates`);
+      }
+    }
   } catch (err) {
     if (!err.message?.includes('timeout')) {
       console.warn('[Server] Fingerprint search error:', err.message);
@@ -4363,17 +4728,83 @@ async function runFingerprintSearch(currentSegment, skipNewTranscriptCheck = fal
 //
 // Started at 0.78 (the gap between 0.83-0.95 genuine-match and 0.65-0.73
 // unrelated-pair scores on held-out test phrases). Raised to match
-// SUGGESTION_MIN_SCORE (0.87) at the operator's request after real services
-// showed too much noise getting through — this does mean some genuine
-// paraphrase matches in the 0.78-0.87 range (a real, correct verse, just
-// not phrased close enough to score higher) now get filtered out too.
-// That's a deliberate precision-over-recall tradeoff, not an oversight: a
-// human always sees the transcript and can act on their own knowledge — a
-// suggestion panel that's wrong often enough to ignore helps no one, even
-// if raising the bar costs a few correct-but-lower-confidence calls.
+// SUGGESTION_MIN_SCORE (0.87) at the owner's own request, after real
+// services showed too much Candidates-panel noise — briefly decoupled back
+// to 0.78, then the owner explicitly reverted that ("lets leave the bar as
+// it was because we get less noise") in favor of improving the underlying
+// matching quality instead of widening the net: contextualSemanticScopeChapters'
+// scoped pass below stays the actual answer to "natural language, not Bible-
+// specific citations" — it's scoped to real corroborating context (a named
+// person or the passage already being read), so it can safely run at a much
+// lower bar (NAMED_ENTITY_SEMANTIC_MIN_SCORE, 0.60) without reopening the
+// Bible-wide noise problem this constant exists to prevent.
 const SEMANTIC_MIN_SCORE      = SUGGESTION_MIN_SCORE;
 let lastSemanticSearch        = 0;
 const SEMANTIC_INTERVAL_MS    = 2000;   // heavier than fingerprint (embedding + 31k-vector scan) — don't run more than once per 2s
+
+// Real incident: "he went to the field to meditate there" (a paraphrase of
+// Genesis 24:63, "Isaac went out to meditate in the field") never reached
+// Candidates at all — verbatim's minWords floor (6) can't clear on 3
+// overlapping words, and Bible-wide semantic search doesn't even place
+// Genesis 24:63 in its own top 5 (other "in the field" verses rank closer
+// across all ~31k verses). But "Isaac" was said by name minutes earlier in
+// the same sermon — scoped to just the ~52 chapters that mention Isaac
+// (via nameChapterIndex, already built for the named-entity corroboration
+// signal), Genesis 24:63 is the clear top match (0.75, next-closest 0.71).
+//
+// Second real incident, same mechanism, different scope source: "That's why
+// commandments made me smarter. Wiser than my enemies." (Psalms 119:98,
+// "Thou through thy commandments hast made me wiser than mine enemies")
+// scored 0.8735 Bible-wide — technically above SUGGESTION_MIN_SCORE (0.87),
+// but that's shared with fingerprint/other methods and was deliberately
+// raised there specifically to cut noise (see SEMANTIC_MIN_SCORE's own
+// comment) — a margin of 0.0035 means ordinary segment-boundary variance in
+// production will miss it as often as not. Psalms 119 was already the
+// active passage (lastSentBook), so this gets the SAME scoped treatment as
+// the named-entity case — restricted to the active chapter ± 1, not
+// Bible-wide, so a lower bar doesn't reopen the noise problem the owner
+// raised the global bar to fix.
+//
+// Lower bar than ordinary semantic's SUGGESTION_MIN_SCORE (0.87) is safe in
+// both cases specifically because the search space is scoped to real
+// corroborating context (a named person or the passage already being
+// read), AND semantic is policy-capped to 'suggestions' regardless of score
+// (see detection_scoring.js) — this can surface a candidate, never
+// auto-send one.
+const NAMED_ENTITY_SEMANTIC_MIN_SCORE = 0.60;
+
+// Owner: "there are very few verses that have the same word sequence or mean
+// the same thing" — the actual argument for why a scoped semantic match can
+// be trusted at a lower score floor: a GENUINE match should stand out
+// clearly from whatever's next-closest, not just barely clear a fixed
+// number. Set below both real motivating cases' own observed margins
+// (Genesis 24:63 vs its runner-up: 0.7496-0.7070=0.043; Psalms 119:98 vs
+// its runner-up: 0.8735-0.7957=0.078) so neither regresses, while still
+// rejecting a genuinely ambiguous tie (two similarly-worded verses both
+// scoring close together — exactly the false-positive shape a raw-score-
+// only floor can't tell apart from a real, distinctive match).
+const SCOPED_SEMANTIC_MARGIN = 0.03;
+
+// Chapters to scope a "contextual" semantic pass to: every chapter a
+// recently-mentioned person appears in, plus the currently active
+// book/chapter (±1, for a preacher who's drifted slightly) if one was sent
+// within SAME_BOOK_WINDOW_MS. Returns null when neither source has anything
+// current, so the caller can skip the scoped pass entirely.
+function contextualSemanticScopeChapters() {
+  const chapters = new Set();
+  const now = Date.now();
+  if (recentlyMentionedName && now - recentlyMentionedNameAt < NAMED_ENTITY_WINDOW_MS) {
+    const named = nameChapterIndex.get(recentlyMentionedName);
+    if (named) for (const key of named) chapters.add(key);
+  }
+  if (lastOutputVerse?.book && lastSentBook && now - lastSentBookTime < SAME_BOOK_WINDOW_MS) {
+    const ch = lastOutputVerse.chapter;
+    for (const c of [ch - 1, ch, ch + 1]) {
+      if (c >= 1) chapters.add(`${lastOutputVerse.book}|${c}`);
+    }
+  }
+  return chapters.size ? chapters : null;
+}
 
 async function runSemanticSearch(text) {
   if (!workerSemanticReady) return;
@@ -4385,18 +4816,75 @@ async function runSemanticSearch(text) {
     if (recentDirectRef) return;   // same suppression fingerprint uses — don't second-guess a citation just made
 
     const msg     = await workerCall('semanticSearch', { text, limit: 5 }, 3000);
-    const results = msg.results || [];
-    if (!results.length) return;
+    let results = msg.results || [];
+
+    // Cross-encoder rerank pass — see reranker_engine.js's and
+    // detection_scoring.js's isVeryHighRawConfidence's own comments. Only
+    // ever runs over the already-short-listed top-5 cosine-similarity
+    // candidates (never the full corpus), attaching a real, trustworthy
+    // .rerankScore to each — this is the actual mechanism that can let a
+    // cold-start natural-language paraphrase (no citation, no active
+    // chapter, no name spoken) clear the auto-send bar, which nothing else
+    // in this file can do for semantic matches.
+    if (workerRerankerReady && results.length) {
+      const rerankMsg = await workerCall('rerank', { text, candidates: results }, 3000);
+      if (rerankMsg.results?.length) results = rerankMsg.results;
+    }
 
     // Same reasoning as fingerprint above — show everything that clears the
     // bar (bounded to 3), not just the single top hit.
     const qualifying = results.filter(r => r.similarity >= SEMANTIC_MIN_SCORE).slice(0, 3)
       .map(r => ({ ...r, similarity: ensembleScore(`${r.book}|${r.chapter}|${r.verse}`, 'semantic', r.similarity, results) }));
-    if (!qualifying.length) return;
-    // See the matching comment in runFingerprintSearch — logged after the
-    // call, gated on whether anything actually reached the UI.
-    const sent = await broadcastDetection(qualifying, 'semantic', qualifying[0].similarity, 'suggestions');
-    if (sent) console.log(`[Semantic] ${qualifying.map(r => `"${r.reference}" ${(r.similarity*100).toFixed(0)}%`).join(', ')} → candidates`);
+    if (qualifying.length) {
+      // See the matching comment in runFingerprintSearch — logged after the
+      // call, gated on whether anything actually reached the UI.
+      const sent = await broadcastDetection(qualifying, 'semantic', qualifying[0].similarity, 'suggestions');
+      if (sent) console.log(`[Semantic] ${qualifying.map(r => `"${r.reference}" ${(r.similarity*100).toFixed(0)}%`).join(', ')} → candidates`);
+    }
+
+    // Rerank-only promotion — a candidate whose CROSS-ENCODER score alone is
+    // strong, even when its raw cosine similarity never cleared
+    // SEMANTIC_MIN_SCORE (so `qualifying` above never included it at all).
+    // This is exactly the shape a genuine but unusually-phrased cold-start
+    // paraphrase takes — bi-encoder cosine similarity is a cruder signal
+    // than the reranker's joint scoring, so a real match can sit in the
+    // top-5 without also clearing the stricter cosine-only Candidates bar.
+    // 0.5 here is only "worth broadcasting at all" — decideTarget's own
+    // finalScore floor (0.50) and isVeryHighRawConfidence's rerank bar
+    // (0.90) are what actually decide Candidates vs. viewer downstream.
+    const topReranked = results[0];
+    if (workerRerankerReady && typeof topReranked?.rerankScore === 'number' && topReranked.rerankScore >= 0.5
+        && !qualifying.some(q => q.book === topReranked.book && q.chapter === topReranked.chapter && q.verse === topReranked.verse)) {
+      const sentReranked = await broadcastDetection([topReranked], 'semantic', topReranked.similarity, 'suggestions');
+      // Was hardcoded "→ candidates" regardless of the real outcome — a
+      // real bug that masked the rerank-auto-send false positives found
+      // live tonight (sentReranked can legitimately be 'viewer', and this
+      // line said "candidates" every time regardless).
+      if (sentReranked) console.log(`[Semantic] Reranked: "${topReranked.reference}" cross-encoder=${(topReranked.rerankScore*100).toFixed(0)}% (raw cosine ${(topReranked.similarity*100).toFixed(0)}%) → ${sentReranked}`);
+    }
+
+    // Contextually-scoped pass — see contextualSemanticScopeChapters',
+    // NAMED_ENTITY_SEMANTIC_MIN_SCORE's, and SCOPED_SEMANTIC_MARGIN's own
+    // comments. Independent of the Bible-wide pass above (runs even if it
+    // found nothing). Only ever surfaces the single top result, not a list —
+    // the whole point of the margin check is "this one genuinely stands
+    // out," which doesn't extend to whatever's second-best.
+    const scopeChapters = contextualSemanticScopeChapters();
+    if (scopeChapters) {
+      const scopedMsg = await workerCall('semanticSearchScoped', { text, chapters: [...scopeChapters], limit: 5 }, 3000);
+      const rawScoped = scopedMsg.results || [];
+      const top = rawScoped[0];
+      const runnerUp = rawScoped[1];
+      const margin = top ? (runnerUp ? top.similarity - runnerUp.similarity : 1) : 0;
+      const qualifies = top
+        && top.similarity >= NAMED_ENTITY_SEMANTIC_MIN_SCORE
+        && margin >= SCOPED_SEMANTIC_MARGIN
+        && !qualifying.some(q => q.book === top.book && q.chapter === top.chapter && q.verse === top.verse);
+      if (qualifies) {
+        const sentScoped = await broadcastDetection([top], 'semantic', top.similarity, 'suggestions');
+        if (sentScoped) console.log(`[Semantic] Contextually-scoped: "${top.reference}" ${(top.similarity*100).toFixed(0)}% (margin ${(margin*100).toFixed(0)}pt) → candidates`);
+      }
+    }
   } catch (err) {
     if (!err.message?.includes('timeout')) {
       console.warn('[Server] Semantic search error:', err.message);
@@ -4434,7 +4922,7 @@ function ensembleScore(verseKey, method, score, verses) {
   return score;
 }
 
-async function broadcastDetection(verses, method, topScore, target) {
+async function broadcastDetection(verses, method, topScore, target, opts = {}) {
   const now    = Date.now();
   const topKey = verses[0] ? `${verses[0].book}|${verses[0].chapter}|${verses[0].verse}` : null;
 
@@ -4448,10 +4936,30 @@ async function broadcastDetection(verses, method, topScore, target) {
   // any of those generic heuristics can see.
   if (tryRangeAdvanceByDetection(verses, topScore)) return 'viewer';
 
+  // Computed once, used twice below — this needs to both PROMOTE a
+  // fingerprint/semantic hit (which arrives with target already fixed at
+  // 'suggestions' by its own caller, never 'viewer') and PROTECT a
+  // verbatim/stream hit (which arrives at 'viewer' and would otherwise be
+  // demoted by the score gate right below) from the exact same score gate.
+  // See tryChapterAdvanceByDetection's own comment for what this checks.
+  // opts.verbatimDisagreed (processStreamText's cross-method sanity check —
+  // see its own comment) is a STRONGER, specific "this exact candidate is
+  // probably wrong" signal than the generic continuity heuristics below can
+  // see, so it blocks this promotion path too — real incident that
+  // motivated this: without the exclusion, a stream candidate the crosscheck
+  // had just correctly demoted (Psalms 7:9 for what's really Zechariah
+  // 9:11, Ezekiel 16:14 for Exodus 15:26) still reached the viewer anyway,
+  // because it also happened to match a stale lastOutputVerse book/chapter.
+  const chapterContinuity = !opts.verbatimDisagreed && tryChapterAdvanceByDetection(verses, topScore, method);
+  if (chapterContinuity) target = 'viewer';
+
   // ── Score gate ────────────────────────────────────────────────────────────
   // Low-confidence detections must never auto-send to the live display.
-  // Demote to suggestions so the operator can still see and promote manually.
-  if (target === 'viewer' && topScore < VIEWER_MIN_SCORE) {
+  // Demote to suggestions so the operator can still see and promote manually
+  // — UNLESS this is the same-chapter continuity match computed above, which
+  // earns the same lower bar a formal range's own next-verse match already
+  // gets.
+  if (target === 'viewer' && topScore < VIEWER_MIN_SCORE && !chapterContinuity) {
     target = 'suggestions';
   }
 
@@ -4584,7 +5092,7 @@ async function broadcastDetection(verses, method, topScore, target) {
       }
       const bookMomentumConfirmed = bookMomentumCandidate.verses.size >= 2;
 
-      if ((staleOverrideCandidate.count >= STALE_OVERRIDE_COUNT || crossMethodConfirmed || bookMomentumConfirmed) && !isBackwardInSameBook) {
+      if ((staleOverrideCandidate.count >= STALE_OVERRIDE_COUNT || crossMethodConfirmed || bookMomentumConfirmed) && !isBackwardInSameBook && !opts.verbatimDisagreed) {
         const via = staleOverrideCandidate.count >= STALE_OVERRIDE_COUNT
           ? `independently re-detected ${staleOverrideCandidate.count}x`
           : crossMethodConfirmed
@@ -4640,6 +5148,11 @@ async function broadcastDetection(verses, method, topScore, target) {
         // processStreamText's own "Unique-phrase fast-share" policy below.
         df: verses[0].df,
         idf: verses[0].idf,
+        // Cross-encoder reranker score (reranker_engine.js), when this
+        // candidate went through runSemanticSearch's rerank pass — see
+        // isVeryHighRawConfidence's own comment for why this is trusted at
+        // a real, method-independent auto-send bar.
+        rerankScore: verses[0].rerankScore,
       };
       // Named-entity corroboration: a real biblical person name spoken
       // recently (recentlyMentionedName, set in handleTranscriptSegment),
@@ -4677,7 +5190,7 @@ async function broadcastDetection(verses, method, topScore, target) {
       // shouldn't corroborate itself; matches staleOverrideCandidate's
       // real ordering (checked, then updated) above.
       shadowLedger.record(candidate, method, now);
-      const shadowTarget = detectionScoring.decideTarget(finalScore, method, { corroborated });
+      const shadowTarget = detectionScoring.decideTarget(finalScore, method, { corroborated, veryHighConfidence: breakdown.veryHighConfidence });
       if (shadowTarget !== target) {
         logDebug('scoring-shadow-divergence', {
           reference: verses[0].reference, method,
@@ -4695,9 +5208,31 @@ async function broadcastDetection(verses, method, topScore, target) {
       // object mutations. topScore is also replaced so downstream logging
       // (and the suggestion-floor check just below) reflects the score
       // that actually drove the decision, not the old system's.
+      //
+      // chapterContinuity is a real, independent signal detectionScoring's
+      // own B+D+A model doesn't know about at all (it has no concept of
+      // "this verse's reference exactly matches a chapter that's actively
+      // being read" the way tryRangeAdvanceByDetection's formal-range
+      // check does) — without this, shadowTarget would silently overwrite
+      // the promotion computed above (chapterContinuity && target ===
+      // 'viewer'), exactly the way it would for tryRangeAdvanceByDetection
+      // too if that mechanism didn't early-return before reaching here.
       if (settings.useUnifiedScoring === true) {
-        target = shadowTarget;
-        topScore = finalScore;
+        target = chapterContinuity ? 'viewer' : shadowTarget;
+        topScore = chapterContinuity ? Math.max(topScore, finalScore) : finalScore;
+        // Same exclusion as the legacy path just above (opts.verbatimDisagreed
+        // — see processStreamText's own cross-method sanity check comment):
+        // the B+D+A model has no visibility into "a full inverted-index
+        // search of the same text picked a different verse," so without this
+        // it silently overwrote the demotion computed above with its own,
+        // unrelated finalScore — confirmed live, this is the actual reason
+        // the crosscheck alone never stopped Psalms 7:9/Ezekiel 16:14/etc.
+        // from still reaching the viewer under useUnifiedScoring (which is
+        // what's actually live). Only overrides down to 'suggestions', never
+        // forces a drop — a human should still see it.
+        if (opts.verbatimDisagreed && target === 'viewer' && !chapterContinuity) {
+          target = 'suggestions';
+        }
       }
     }
   } catch (err) {
@@ -4789,10 +5324,23 @@ async function broadcastDetection(verses, method, topScore, target) {
   // away, only while its replacement is still the currently active one, and
   // only for a short window — a preacher genuinely re-citing the same verse
   // later is untouched.
+  //
+  // Real incident (2026-09-21 eval audit): this used to check
+  // `lastDetectedRef === recentlyCorrectedAway.replacedByKey` —
+  // lastDetectedRef updates on EVERY detection attempt, including ones
+  // demoted to Candidates or dropped entirely, so any unrelated candidate
+  // landing in between (extremely common — multiple methods run
+  // concurrently on real sermon audio) silently broke this guard even
+  // though the correction was still genuinely on screen. Checking
+  // lastOutputVerse instead — what's ACTUALLY currently displayed — matches
+  // what this comment already says the intent is, and isn't disturbed by
+  // unrelated Candidates-only noise.
+  const replacedByStillActive = lastOutputVerse &&
+    `${lastOutputVerse.book}|${lastOutputVerse.chapter}|${lastOutputVerse.verse}` === recentlyCorrectedAway?.replacedByKey;
   const reassertingCorrectedAwayRef = target === 'viewer' && method === 'direct' && recentlyCorrectedAway
     && topKey === recentlyCorrectedAway.key
     && now - recentlyCorrectedAway.at < RECENTLY_CORRECTED_WINDOW_MS
-    && lastDetectedRef === recentlyCorrectedAway.replacedByKey;
+    && replacedByStillActive;
   if (reassertingCorrectedAwayRef) {
     console.log(`[Guard] Blocked 'direct' re-send of "${verses[0].reference}" — already corrected to "${recentlyCorrectedAway.replacedByReference}" moments ago, that correction is still active — demoted to Candidates`);
     target = 'suggestions';
@@ -4911,6 +5459,7 @@ async function sendToOutputs(verse) {
   }
   sentVerseKeysThisBook.add(`${verse.book}|${verse.chapter}|${verse.verse}`);
   lastOutputVerse = verse;
+  lastOutputVerseAt = Date.now();
   // Use the in-memory settings object (kept in sync by POST /api/settings)
   // rather than re-reading settings.json from disk on every single verse —
   // this runs on the detection hot path and disk I/O here adds latency
