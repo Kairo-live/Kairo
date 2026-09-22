@@ -1360,6 +1360,7 @@
                 <div class="settings-section">
                     <div class="settings-section-label">Help &amp; Guide</div>
                     <p class="setting-hint" style="margin:-4px 0 4px;">How Kairo works, start to finish. Click a section to expand it.</p>
+                    <button id="replay-onboarding-btn" class="modal-btn secondary" style="margin-bottom:14px;">Take the tour again</button>
 
                     <div class="help-groups">
                         <details class="help-group" open>
@@ -1612,75 +1613,161 @@
         </div>
     </div>
 
-    <!-- ═══ FIRST-RUN DEEPGRAM MODAL ═══ -->
+    <!-- ═══ FIRST-RUN ONBOARDING WIZARD ═══
+         Multi-step tour for first-time users — one step per major area of
+         the app (speech setup, Playlist, Slides, Timer, Themes, Outputs),
+         plus a final "Get Started" step. Step 0 (speech engine) is the only
+         functional step; the rest are short explainer panels with a
+         "Next"/"Back" flow. Whole thing is skippable at any point (owner:
+         onboarding must never block someone who already knows the app). -->
     <div id="first-run-modal" class="modal hidden">
         <div class="modal-overlay"></div>
-        <div class="modal-content" style="max-width:460px;">
+        <div class="modal-content" style="max-width:520px;">
             <div class="modal-header">
-                <h2>Welcome to KAIRO</h2>
+                <h2 id="onboarding-step-title">Welcome to KAIRO</h2>
                 <button id="close-first-run" class="modal-close-btn" aria-label="Dismiss"><span>✕</span><span>Close</span></button>
             </div>
             <!-- .modal-body defaults to a 2-column grid (260px / 1fr — built
-                 for Settings-style label+value rows); every other plain
-                 content modal in this file opts out with an inline
-                 display:block (see the "Downloads"/etc. modals above), which
-                 this one was missing. Without it, its 4 flat children
-                 (p/label/input/a) auto-flowed into a 2x2 grid instead of one
-                 stacked column — p top-left, label top-right, input
-                 bottom-left, link bottom-right. -->
-            <!-- min-height: owner: "consistent size so it doesn't shift" — the
-                 Offline tab's own content grows/shrinks in stages (the status
-                 line's async /api/offline/status check briefly shows no
-                 install button while "Checking…", then the button appears;
-                 "already installed" is shorter than "not installed" + button
-                 + hint), and it's naturally a bit taller than the Deepgram
-                 tab besides. Pinned to comfortably fit the tallest real state
-                 measured live so neither the tab switch nor the status
-                 check's own resolution visibly resizes the modal. -->
+                 for Settings-style label+value rows); every plain content
+                 modal in this file opts out with an inline display:block. -->
+            <!-- min-height: owner: "consistent size so it doesn't shift" —
+                 several steps' content differs in length (the speech-engine
+                 step's Offline tab grows as its async status check
+                 resolves), and each step swapping in/out shouldn't visibly
+                 resize the modal. Pinned to comfortably fit the tallest
+                 real step. -->
             <div class="modal-body" style="display:block;padding:20px;min-height:380px;">
-                <p style="margin:0 0 16px;line-height:1.5;color:var(--text-dim,#aaa);font-size:13px;">
-                    KAIRO listens to spoken scripture and detects verses in real time. Pick how it
-                    transcribes live audio — Deepgram (cloud, most accurate) or fully offline on this
-                    Mac. You can change this later under Settings.
-                </p>
+                <div id="onboarding-progress" style="display:flex;gap:6px;margin-bottom:18px;"></div>
 
-                <div class="toggle-group" id="first-run-engine-toggle" style="margin-bottom:12px;">
-                    <button class="toggle-btn active" data-engine="deepgram">Deepgram</button>
-                    <button class="toggle-btn" data-engine="browser">Offline</button>
-                </div>
+                <!-- Step 0 — Speech engine (functional; unchanged from the
+                     original single-screen first-run modal). -->
+                <div class="onboarding-step" data-step="0">
+                    <p style="margin:0 0 16px;line-height:1.5;color:var(--text-dim,#aaa);font-size:13px;">
+                        KAIRO listens to spoken scripture and detects verses in real time. Pick how it
+                        transcribes live audio — Deepgram (cloud, most accurate) or fully offline on this
+                        Mac. You can change this later under Settings.
+                    </p>
 
-                <div id="first-run-deepgram-group">
-                    <label for="first-run-deepgram-key" style="display:block;margin-bottom:6px;font-size:12px;font-weight:600;">Deepgram API Key</label>
-                    <input id="first-run-deepgram-key" type="password" class="setting-input" autocomplete="off" spellcheck="false"
-                           placeholder="Paste your Deepgram API key" style="width:100%;" />
-                    <a href="https://console.deepgram.com/signup" target="_blank" rel="noopener"
-                       style="display:inline-block;margin-top:10px;font-size:12px;color:var(--accent,#6aa6ff);text-decoration:none;">
-                        Get a free Deepgram key →
-                    </a>
-                </div>
-
-                <!-- Mirrors the Settings > Audio pane's offline installer widget
-                     (#offline-installer-group) exactly — same ids-as-a-set
-                     pattern, wired by the same reusable wireOfflineModelInstaller()
-                     in app.js, just a second instance for this modal. -->
-                <div id="first-run-offline-group" style="display:none;">
-                    <label style="display:block;margin-bottom:6px;font-size:12px;font-weight:600;">Offline Model</label>
-                    <div id="first-run-offline-status-line" style="font-size:12px;color:var(--text-3);margin-bottom:8px;">Checking…</div>
-                    <button id="first-run-offline-install-btn" class="setting-input" style="cursor:pointer;display:none;width:100%;text-align:left;">Download offline model</button>
-                    <div id="first-run-offline-progress-wrap" style="display:none;margin-top:6px;">
-                        <div style="background:var(--surface-2);height:6px;border-radius:3px;overflow:hidden;">
-                            <div id="first-run-offline-progress-bar" style="background:var(--accent);height:100%;width:0%;transition:width .2s;"></div>
-                        </div>
-                        <div id="first-run-offline-progress-text" style="font-size:11px;color:var(--text-3);margin-top:4px;">Starting…</div>
+                    <div class="toggle-group" id="first-run-engine-toggle" style="margin-bottom:12px;">
+                        <button class="toggle-btn active" data-engine="deepgram">Deepgram</button>
+                        <button class="toggle-btn" data-engine="browser">Offline</button>
                     </div>
-                    <p style="margin:10px 0 0;font-size:12px;line-height:1.5;color:var(--text-dim,#aaa);">
-                        Runs entirely on this Mac — no internet, no API key. Lower accuracy than Deepgram.
+
+                    <div id="first-run-deepgram-group">
+                        <label for="first-run-deepgram-key" style="display:block;margin-bottom:6px;font-size:12px;font-weight:600;">Deepgram API Key</label>
+                        <input id="first-run-deepgram-key" type="password" class="setting-input" autocomplete="off" spellcheck="false"
+                               placeholder="Paste your Deepgram API key" style="width:100%;" />
+                        <a href="https://console.deepgram.com/signup" target="_blank" rel="noopener"
+                           style="display:inline-block;margin-top:10px;font-size:12px;color:var(--accent,#6aa6ff);text-decoration:none;">
+                            Get a free Deepgram key →
+                        </a>
+                    </div>
+
+                    <!-- Mirrors the Settings > Audio pane's offline installer widget
+                         (#offline-installer-group) exactly — same ids-as-a-set
+                         pattern, wired by the same reusable wireOfflineModelInstaller()
+                         in app.js, just a second instance for this modal. -->
+                    <div id="first-run-offline-group" style="display:none;">
+                        <label style="display:block;margin-bottom:6px;font-size:12px;font-weight:600;">Offline Model</label>
+                        <div id="first-run-offline-status-line" style="font-size:12px;color:var(--text-3);margin-bottom:8px;">Checking…</div>
+                        <button id="first-run-offline-install-btn" class="setting-input" style="cursor:pointer;display:none;width:100%;text-align:left;">Download offline model</button>
+                        <div id="first-run-offline-progress-wrap" style="display:none;margin-top:6px;">
+                            <div style="background:var(--surface-2);height:6px;border-radius:3px;overflow:hidden;">
+                                <div id="first-run-offline-progress-bar" style="background:var(--accent);height:100%;width:0%;transition:width .2s;"></div>
+                            </div>
+                            <div id="first-run-offline-progress-text" style="font-size:11px;color:var(--text-3);margin-top:4px;">Starting…</div>
+                        </div>
+                        <p style="margin:10px 0 0;font-size:12px;line-height:1.5;color:var(--text-dim,#aaa);">
+                            Runs entirely on this Mac — no internet, no API key. Lower accuracy than Deepgram.
+                        </p>
+                    </div>
+                    <!-- Shown only when leaving this step with NEITHER a
+                         Deepgram key nor the offline model set up — a
+                         proactive nudge, not a hard block (owner: neither
+                         speech engine may be ready yet, still fine to keep
+                         touring). The same condition is checked again,
+                         reactively, the first time "Start Listening" is
+                         clicked (see startListening's own missingKey/
+                         missingModel handling) — this is the earlier,
+                         gentler version of that same check. -->
+                    <p id="onboarding-speech-warning" class="hidden" style="margin:12px 0 0;padding:8px 10px;background:rgba(255,180,60,0.1);border:1px solid rgba(255,180,60,0.3);border-radius:6px;font-size:12px;line-height:1.5;color:var(--text-2);">
+                        You haven't set up a Deepgram key or downloaded the offline model yet —
+                        you can finish this anytime in Settings → Audio before starting a session.
+                    </p>
+                </div>
+
+                <!-- Step 1 — Playlist -->
+                <div class="onboarding-step hidden" data-step="1">
+                    <h3 style="margin:0 0 8px;font-size:15px;">Playlist</h3>
+                    <p style="margin:0;line-height:1.6;color:var(--text-dim,#aaa);font-size:13px;">
+                        The <strong>Bible</strong> tab's left panel is your service's running order —
+                        songs, scripture readings, slides, all in one list, in the order you'll actually
+                        go through them. Click <strong>+ New</strong> to add an item, drag to reorder, and
+                        click any item to load it. Whatever's live is always highlighted so you never lose
+                        your place mid-service.
+                    </p>
+                </div>
+
+                <!-- Step 2 — Slides -->
+                <div class="onboarding-step hidden" data-step="2">
+                    <h3 style="margin:0 0 8px;font-size:15px;">Slides</h3>
+                    <p style="margin:0;line-height:1.6;color:var(--text-dim,#aaa);font-size:13px;">
+                        Need something besides scripture on screen — an announcement, a welcome slide,
+                        song lyrics? The <strong>Slides</strong> tab is a full text/background editor.
+                        Build a slide, pick a theme for it, and send it live with one click — it uses the
+                        exact same output pipeline as everything else, so it shows up wherever you've
+                        configured Bible content to appear.
+                    </p>
+                </div>
+
+                <!-- Step 3 — Timer -->
+                <div class="onboarding-step hidden" data-step="3">
+                    <h3 style="margin:0 0 8px;font-size:15px;">Timer</h3>
+                    <p style="margin:0;line-height:1.6;color:var(--text-dim,#aaa);font-size:13px;">
+                        The <strong>Timer</strong> tab tracks your service's segments — Preservice,
+                        Worship, Sermon, whatever you name them — each with its own countdown. Only one
+                        runs at a time, and it displays live on any output you've enabled the Timer layer
+                        for, so your team always knows exactly how much time is left.
+                    </p>
+                </div>
+
+                <!-- Step 4 — Themes -->
+                <div class="onboarding-step hidden" data-step="4">
+                    <h3 style="margin:0 0 8px;font-size:15px;">Themes</h3>
+                    <p style="margin:0;line-height:1.6;color:var(--text-dim,#aaa);font-size:13px;">
+                        <strong>Theme Studio</strong> controls how everything looks — fonts, colors,
+                        backgrounds, animations. Build as many themes as you want, then assign a different
+                        one to each output (a subtle look for the stage confidence monitor, a bold one for
+                        the main screen) under Settings → Outputs.
+                    </p>
+                </div>
+
+                <!-- Step 5 — Outputs -->
+                <div class="onboarding-step hidden" data-step="5">
+                    <h3 style="margin:0 0 8px;font-size:15px;">Outputs</h3>
+                    <p style="margin:0;line-height:1.6;color:var(--text-dim,#aaa);font-size:13px;">
+                        Send your service to a projector or monitor (Display), a network feed (NDI), a
+                        same-Mac compositor (Syphon), or OBS. Add as many as you need under
+                        Settings → Outputs — each one gets its own theme and its own choice of which
+                        layers (Bible/Slide/Media/Timer) it actually shows.
+                    </p>
+                </div>
+
+                <!-- Step 6 — Done -->
+                <div class="onboarding-step hidden" data-step="6">
+                    <h3 style="margin:0 0 8px;font-size:15px;">You're all set</h3>
+                    <p style="margin:0;line-height:1.6;color:var(--text-dim,#aaa);font-size:13px;">
+                        That's the whole app. Everything you just saw is always reachable from the tabs at
+                        the top and from Settings — nothing here was a one-time setup step. Jump in, and
+                        revisit this tour anytime from Settings → Help.
                     </p>
                 </div>
             </div>
             <div class="modal-footer">
-                <button id="first-run-skip" class="modal-btn secondary">Skip for now</button>
-                <button id="first-run-save" class="modal-btn primary">Save &amp; Continue</button>
+                <button id="first-run-skip" class="modal-btn secondary" style="margin-right:auto;">Skip tour</button>
+                <button id="onboarding-back" class="modal-btn secondary hidden">Back</button>
+                <button id="onboarding-next" class="modal-btn primary">Next</button>
+                <button id="first-run-save" class="modal-btn primary hidden">Get Started</button>
             </div>
         </div>
     </div>

@@ -2059,37 +2059,111 @@ async function loadSettings() {
   }
 }
 
-// ── First-run onboarding modal ─────────────────────────────────────────────
-// Dismissible centered overlay prompting for a speech-engine choice —
-// Deepgram (paste a key) or fully offline (download the local model, no key
-// needed). Dismissed (Skip or close) it stays hidden for the session;
-// reappears next launch until a real choice has been made either way.
+// ── First-run onboarding wizard ─────────────────────────────────────────────
+// Multi-step tour (speech engine, Playlist, Slides, Timer, Themes, Outputs,
+// done) — see index.html's own "FIRST-RUN ONBOARDING WIZARD" comment for the
+// step markup. Shown once per install (settings.onboardingCompleted),
+// independent of whether speech-engine setup happens to already be done —
+// a returning user who configured Deepgram via some other path still gets
+// the tour once, since the tour is about the whole app, not just that one
+// step. Re-openable anytime from Settings → Help ("Take the tour again").
 let firstRunDismissed = false;
+const ONBOARDING_STEP_COUNT = 7; // steps 0..6, see the step panels' data-step
+let onboardingStep = 0;
+
 function showFirstRunBannerIfNeeded(s) {
   const modal = document.getElementById('first-run-modal');
   if (!modal) return;
-  // "Configured" means either a Deepgram key is saved, OR the operator has
-  // deliberately chosen Offline (the toggle here, same 'browser' value
-  // Settings itself uses) — owner: "this should be deepgram and local if no
-  // model is downloaded for offline". Offline doesn't NEED a key, so
-  // requiring one here would leave a genuinely-offline setup nagged forever.
-  const configured = !!(s && (s.deepgramApiKey || s.speechEngine === 'browser' || s.speechEngine === 'offline'));
-  if (configured) {
+  if (s?.onboardingCompleted) {
     modal.classList.add('hidden');
     return;
   }
   if (firstRunDismissed || !modal.classList.contains('hidden')) return; // dismissed or already showing
+  openOnboardingWizard();
+}
+
+function openOnboardingWizard() {
+  const modal = document.getElementById('first-run-modal');
+  if (!modal) return;
   modal.classList.remove('hidden');
   const input = document.getElementById('first-run-deepgram-key');
   if (input) input.value = '';
   syncToggleGroup('first-run-engine-toggle', 'engine', 'deepgram'); // always starts on the Deepgram tab
+  goToOnboardingStep(0);
   // Defer focus so the overlay has laid out before we focus inside it.
   setTimeout(() => input?.focus(), 50);
+}
+
+const ONBOARDING_STEP_TITLES = [
+  'Welcome to KAIRO', 'Playlist', 'Slides', 'Timer', 'Themes', 'Outputs', "You're all set",
+];
+
+function renderOnboardingProgress() {
+  const host = document.getElementById('onboarding-progress');
+  if (!host) return;
+  host.innerHTML = '';
+  for (let i = 0; i < ONBOARDING_STEP_COUNT; i++) {
+    const dot = document.createElement('span');
+    dot.style.cssText = `height:4px;flex:1;border-radius:2px;background:${i <= onboardingStep ? 'var(--accent,#6aa6ff)' : 'var(--surface-2)'};`;
+    host.appendChild(dot);
+  }
+}
+
+function goToOnboardingStep(n) {
+  onboardingStep = Math.max(0, Math.min(ONBOARDING_STEP_COUNT - 1, n));
+  document.querySelectorAll('.onboarding-step').forEach(el => {
+    el.classList.toggle('hidden', Number(el.dataset.step) !== onboardingStep);
+  });
+  const title = document.getElementById('onboarding-step-title');
+  if (title) title.textContent = ONBOARDING_STEP_TITLES[onboardingStep] || 'Welcome to KAIRO';
+  renderOnboardingProgress();
+  document.getElementById('onboarding-back')?.classList.toggle('hidden', onboardingStep === 0);
+  const isLast = onboardingStep === ONBOARDING_STEP_COUNT - 1;
+  document.getElementById('onboarding-next')?.classList.toggle('hidden', isLast);
+  document.getElementById('first-run-save')?.classList.toggle('hidden', !isLast);
+}
+
+// Real, non-blocking validation on the way OUT of the speech-engine step —
+// owner: "if no deepgram key exist and no offline model is found, prompt
+// the user to download the model in settings or add a deepgram key." This
+// is the proactive, tour-time version; startListening's own missingKey/
+// missingModel handling is the reactive one that fires later if this got
+// skipped. Async because "is the offline model actually installed" is a
+// real filesystem check on the server, not something the client already
+// knows — checked fresh each time so downloading it mid-tour clears the
+// warning without needing to leave and re-enter this step.
+async function checkOnboardingSpeechSetup() {
+  const warning = document.getElementById('onboarding-speech-warning');
+  if (!warning) return;
+  const engine = readToggleGroup('first-run-engine-toggle', 'engine') || 'deepgram';
+  if (engine === 'browser') {
+    let installed = false;
+    try {
+      const r = await fetch(`${SERVER}/api/offline/status`);
+      installed = !!(await r.json())?.installed;
+    } catch { /* treat as not installed — same fail-safe the reactive check uses */ }
+    warning.classList.toggle('hidden', installed);
+  } else {
+    const key = (document.getElementById('first-run-deepgram-key')?.value || '').trim();
+    warning.classList.toggle('hidden', !!(key || settings.deepgramApiKey));
+  }
+}
+
+async function markOnboardingComplete() {
+  try {
+    await fetch(`${SERVER}/api/settings`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...settings, onboardingCompleted: true }),
+    });
+    settings = { ...settings, onboardingCompleted: true };
+  } catch { /* best-effort — worst case the tour just reappears next launch */ }
 }
 
 function closeFirstRunModal() {
   firstRunDismissed = true;
   document.getElementById('first-run-modal')?.classList.add('hidden');
+  markOnboardingComplete();
 }
 
 async function saveFirstRunChoice() {
@@ -2190,13 +2264,24 @@ cancelSettingsBtn?.addEventListener('click', closeModal);
 saveSettingsBtn?.addEventListener('click',  saveCurrentSettings);
 document.querySelector('.modal-overlay')?.addEventListener('click', closeModal);
 
-// First-run onboarding modal wiring
+// First-run onboarding wizard wiring
 document.getElementById('first-run-save')?.addEventListener('click', saveFirstRunChoice);
 document.getElementById('first-run-skip')?.addEventListener('click', closeFirstRunModal);
 document.getElementById('close-first-run')?.addEventListener('click', closeFirstRunModal);
 document.querySelector('#first-run-modal .modal-overlay')?.addEventListener('click', closeFirstRunModal);
 document.getElementById('first-run-deepgram-key')?.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') saveFirstRunChoice();
+  if (e.key === 'Enter') document.getElementById('onboarding-next')?.click();
+});
+document.getElementById('onboarding-next')?.addEventListener('click', async () => {
+  if (onboardingStep === 0) await checkOnboardingSpeechSetup();
+  goToOnboardingStep(onboardingStep + 1);
+});
+document.getElementById('onboarding-back')?.addEventListener('click', () => goToOnboardingStep(onboardingStep - 1));
+// Settings → Help's "Take the tour again" — re-runs the exact same wizard,
+// not a separate/lesser version of it.
+document.getElementById('replay-onboarding-btn')?.addEventListener('click', () => {
+  closeModal(); // Settings itself is open when this is clicked — close it first, same as any modal handoff
+  openOnboardingWizard();
 });
 
 // Called from the OBS detail panel's own Test button (renderObsDetail,
