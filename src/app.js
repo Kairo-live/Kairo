@@ -3101,136 +3101,14 @@ function _startInlineTranslateInstall(container, code, name) {
 
 renderMtModelList();
 
-// ── Semantic layer ("meaning-based Candidates") installer ────────────────
-// Same state-aware .osp card the Ollama status panel used to use (that
-// feature's gone — see Content Studio removal — but the card shape fit
-// this just as well): idle/checking → not-installed-with-a-download-button
-// → downloading (two phases, model then verse index) → ready. Backed by
-// /api/semantic-model/status + /install (server.js), which install into
-// server/semantic_installer.js.
-let _semanticPollTimer = null;
-
-function _semRow(dotClass, text) {
-  return `<div class="osp-row"><span class="osp-dot${dotClass ? ' ' + dotClass : ''}"></span><span class="osp-title">${text}</span></div>`;
-}
-
-async function refreshSemanticStatus() {
-  const panel = document.getElementById('semantic-status-panel');
-  if (!panel) return;
-  let s;
-  try {
-    s = await fetch(`${SERVER}/api/semantic-model/status`).then(r => r.json());
-  } catch {
-    panel.className = 'osp osp-err';
-    panel.innerHTML = _semRow('', 'Could not reach server');
-    return;
-  }
-
-  if (s.installed) {
-    clearInterval(_semanticPollTimer); _semanticPollTimer = null;
-    panel.className = 'osp osp-ok';
-    panel.innerHTML = _semRow('', 'Ready — meaning-based Candidates are active');
-    return;
-  }
-
-  if (s.installing) {
-    if (!_semanticPollTimer) _semanticPollTimer = setInterval(refreshSemanticStatus, 2000);
-    panel.className = 'osp osp-progress';
-    panel.innerHTML = _semRow('pulse', 'Installing — see progress below') +
-      '<div class="osp-progress-bar"><div class="osp-progress-fill" style="width:50%"></div></div>';
-    return;
-  }
-
-  clearInterval(_semanticPollTimer); _semanticPollTimer = null;
-  panel.className = 'osp osp-warn';
-  panel.innerHTML = _semRow('', 'Not installed (~300MB, one-time)') +
-    '<div class="osp-actions"><button class="osp-btn osp-btn-primary" id="semantic-install-btn">Download</button></div>';
-  document.getElementById('semantic-install-btn')?.addEventListener('click', installSemanticLayer);
-}
-
-async function installSemanticLayer() {
-  const panel = document.getElementById('semantic-status-panel');
-  if (!panel) return;
-  panel.className = 'osp osp-progress';
-  panel.innerHTML = _semRow('pulse', 'Connecting…') +
-    '<div class="osp-progress-bar"><div class="osp-progress-fill" id="semantic-progress-fill" style="width:0%"></div></div>' +
-    '<div class="osp-progress-meta" id="semantic-progress-meta"></div>';
-  const fillEl = document.getElementById('semantic-progress-fill');
-  const metaEl = document.getElementById('semantic-progress-meta');
-
-  let res;
-  try {
-    res = await fetch(`${SERVER}/api/semantic-model/install`, { method: 'POST' });
-  } catch (err) {
-    panel.className = 'osp osp-err';
-    panel.innerHTML = _semRow('', `Failed: ${escapeHtml(err.message)}`);
-    return;
-  }
-  if (res.status === 409) {
-    // Another install is already running (e.g. a previous attempt whose
-    // stream got dropped, still going server-side) — that's not a failure,
-    // refreshSemanticStatus's own 'installing' branch already knows how to
-    // show real progress and poll, so defer to it instead of a scary error.
-    await refreshSemanticStatus();
-    return;
-  }
-  if (!res.ok || !res.body) {
-    panel.className = 'osp osp-err';
-    panel.innerHTML = _semRow('', `Failed: HTTP ${res.status}`);
-    return;
-  }
-
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder();
-  let buf = '';
-  let failed = null;
-  // This stream can run 30-90 minutes (see the 'embed' phase note below) —
-  // long enough for a real network drop or laptop sleep. Unhandled, that's
-  // a rejected reader.read() with no on-screen recovery short of reloading
-  // the whole app window.
-  try {
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      buf += decoder.decode(value, { stream: true });
-      const lines = buf.split('\n');
-      buf = lines.pop();
-      for (const line of lines) {
-        if (!line.trim()) continue;
-        let evt;
-        try { evt = JSON.parse(line); } catch { continue; }
-        if (evt.phase === 'download' && typeof evt.pct === 'number') {
-          if (fillEl) fillEl.style.width = evt.pct + '%';
-          if (metaEl) metaEl.textContent = `Downloading model… ${evt.pct}%`;
-        } else if (evt.phase === 'embed' && typeof evt.pct === 'number') {
-          if (fillEl) fillEl.style.width = evt.pct + '%';
-          // Measured against a real run: ~10% in 9 minutes of wall time on
-          // this dev machine, i.e. on the order of an hour total, not the
-          // "a couple minutes" a first guess (based on a single short-query
-          // benchmark, not this actual 31k-verse batched workload) suggested.
-          // Give a real range rather than repeat that mistake in the UI.
-          if (metaEl) metaEl.textContent = `Indexing every verse… ${evt.pct}% (can take 30-90 min depending on your machine, one time only)`;
-        } else if (evt.phase === 'complete' && !evt.ok) {
-          failed = evt.error || 'unknown error';
-        }
-      }
-    }
-  } catch (err) {
-    panel.className = 'osp osp-err';
-    panel.innerHTML = _semRow('', `Connection lost: ${escapeHtml(err.message)}`) +
-      '<div class="osp-actions"><button class="osp-btn osp-btn-primary" id="semantic-retry-btn">Retry</button></div>';
-    document.getElementById('semantic-retry-btn')?.addEventListener('click', installSemanticLayer);
-    return;
-  }
-  if (failed) {
-    panel.className = 'osp osp-err';
-    panel.innerHTML = _semRow('', `Failed: ${escapeHtml(failed)}`);
-  } else {
-    await refreshSemanticStatus();
-  }
-}
-
-refreshSemanticStatus();
+// The semantic layer ("meaning-based Candidates") used to have its own
+// install/download UI+polling here — owner, 2026-09-22: "this is part of
+// our engine, it should be bundled up with the app... users should not
+// know it's there." The model is already a bundled resource
+// (tauri.conf.json) and loads automatically on startup — there was never
+// really anything for a user to install. Removed; see index.html's own
+// comment at the former "Meaning-Based Candidates" settings section for
+// the full explanation.
 
 // Auto-refresh the mic list when a USB headset / interface is plugged in or
 // out. The OS fires a single `devicechange` for the event but Chromium often

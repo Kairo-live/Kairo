@@ -340,18 +340,12 @@
                     <option value="ESV">ESV</option>
                     <option value="NASB">NASB</option>
                 </select>
-                <!-- Owner: "there should be 2 dropdowns, 1 for primary and
-                     translation" — this is the SAME settings.bibleTranslateTo
-                     the Multi-Language theme's "Translate to" popover
-                     already drives (service.js), just surfaced directly
-                     here instead of requiring Theme → Multi-Language →
-                     Translate to just to change it. Options are populated
-                     in app.js from MT_LANGUAGES (the same fr/es/pt list
-                     every other translate-language picker in the app uses)
-                     so this can't silently drift out of sync with them. -->
-                <select id="bible-translate-to-select" class="cs-select cs-translate-to-select" title="Translation — a second language shown alongside Primary on the Multi-Language theme">
-                    <option value="">Off</option>
-                </select>
+                <!-- The second-language ("Translate to") dropdown used to
+                     live here — owner, 2026-09-22: moved into Settings →
+                     Bible instead (same element id, same JS wiring), next
+                     to Translation, with helper text — this toolbar was
+                     never the right home for a setting an operator sets
+                     once and rarely touches. -->
                 <button id="bible-theme-btn" class="ls-icon-btn ls-icon-btn-labeled svc-card-theme-btn cs-theme-btn" title="Theme for auto-detected &amp; searched scripture">
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
                         <circle cx="13.5" cy="6.5" r="2.5"/><circle cx="17.5" cy="13.5" r="2.5"/><circle cx="8.5" cy="13.5" r="2.5"/>
@@ -1292,6 +1286,22 @@
                         </select>
                     </div>
 
+                    <!-- Moved here from the Bible tab's own search-bar
+                         toolbar (owner, 2026-09-22: "the language option...
+                         is supposed to live in this same page in settings,
+                         with helper text"). Same element id, same JS wiring
+                         (app.js's MT_LANGUAGES population + change listener)
+                         — only the markup's location changed. -->
+                    <div class="setting-group">
+                        <label class="setting-label">Second Language</label>
+                        <select id="bible-translate-to-select" class="setting-input">
+                            <option value="">Off</option>
+                        </select>
+                        <p class="setting-hint">
+                            Shows a translated version alongside the primary verse text on the Multi-Language theme — e.g. English on one side, Spanish on the other. Leave Off if you're not using that theme.
+                        </p>
+                    </div>
+
                     <div class="setting-group">
                         <label class="bs-check-label">
                             <input type="checkbox" id="auto-send-settings" checked>
@@ -1304,27 +1314,23 @@
                     </div>
                 </div>
 
-                <!-- ── MEANING-BASED CANDIDATES (semantic layer) ──────
-                     A quoted/paraphrased verse with no "book chapter verse"
-                     ever said out loud only ever gets caught by comparing
-                     MEANING, not shared words — this installs the model
-                     that powers it. Not bundled with the app (adds ~300MB
-                     to every install for a suggestions-only layer the
-                     lexical detectors above don't need at all) — downloads
-                     once, here, same pattern as the offline/translation
-                     model installs elsewhere in Settings. -->
-                <div class="settings-section">
-                    <div class="settings-section-label">Meaning-Based Candidates</div>
-                    <p class="setting-hint" style="font-size:11px;color:var(--text-3);margin-bottom:10px;">
-                        Catches a quoted or paraphrased verse even when no reference is ever spoken — e.g. "God made the heavens and the earth in the beginning" surfacing Genesis 1:1. Suggestions only; never auto-sends. One-time download, ~300MB, runs fully offline afterward.
-                    </p>
-                    <div id="semantic-status-panel" class="osp osp-loading">
-                        <div class="osp-row">
-                            <span class="osp-dot"></span>
-                            <span class="osp-title">Checking…</span>
-                        </div>
-                    </div>
-                </div>
+                <!-- Meaning-Based Candidates (semantic layer) used to have
+                     its own install/download UI here — owner, 2026-09-22:
+                     "this is part of our engine, it should be bundled up
+                     with the app, and quite frankly, users should not know
+                     it's there." The model files (databases/bibles/model +
+                     verse_embeddings.*) are already listed in
+                     tauri.conf.json's bundle resources and load
+                     automatically on startup (confirmed live: "[Semantic]
+                     Ready — 31008 verse embeddings (768d) + model loaded"),
+                     so there was never actually anything for a user to
+                     install — this panel's "Not installed / Download"
+                     state was stale UI left over from when the model was
+                     genuinely download-on-demand, not a real current
+                     requirement. Removed entirely, along with its now-dead
+                     JS (refreshSemanticStatus/installSemanticLayer, see
+                     app.js) — semantic Candidates just work, silently,
+                     like every other lexical detection layer. -->
 
             </section>
 
