@@ -68,7 +68,7 @@ const offered = ({ sem, rr }) => {
 
 async function run() {
   const t0 = Date.now();
-  const groups = { written: cases.positives, real: realCases() };
+  const groups = { written: cases.positives, gapped: cases.gapped || [], real: realCases() };
   const report = {};
   for (const [name, list] of Object.entries(groups)) {
     const s = { n: list.length, semTop1: 0, semTop3: 0, semTop10: 0, rrTop1: 0, rrTop3: 0, offeredRight: 0, offeredWrong: 0, newTop1: 0, newOffered: 0, newOfferedWrong: 0, newSent: 0, newSentWrong: 0 };

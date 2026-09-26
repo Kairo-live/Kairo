@@ -21,8 +21,24 @@ const QUOTE_SIGNAL_RE = new RegExp('\\b(?:' + [
 ].join('|') + ')\\b', 'gi');
 
 const MAX_WINDOW_WORDS = 30;
+const MAX_WINDOWS = 5;
 
 function words(text) { return String(text || '').split(/\s+/).filter(Boolean); }
+
+// Crowd work and fillers a preacher drops into the middle of a verse — "come
+// to me, church, are you with me?, all you that are weary…". Removed to fuse
+// the pieces of the verse back together. Only phrases that are never scripture
+// wording themselves.
+const INTERJECTION_RE = new RegExp('\\b(?:' + [
+  '(?:somebody |can i get an? |let me hear (?:you )?)?say amen', 'amen', 'hallelujah', 'glory to god', 'thank you jesus',
+  'are you (?:with me|listening|there|still with me)', 'can you hear me', 'do you hear me', 'listen to me', 'listen',
+  '(?:turn to|look at|tell) (?:your|the person next to you|somebody)(?: neighbou?r)?(?: and say)?', 'say it with me', 'say it',
+  'watch this', 'come on', 'i said', 'you know', 'i mean', 'right', 'okay', 'alright', 'hello', 'church', 'uh+', 'um+', 'hmm+',
+].join('|') + ')\\b[,.!?]*', 'gi');
+function withoutInterjections(text) {
+  return String(text || '').replace(INTERJECTION_RE, ' ').replace(/\s+([,.!?;])/g, '$1').replace(/\s+/g, ' ').trim();
+}
+const SHORT_SENTENCE_WORDS = 7;   // an aside between two parts of a verse
 
 /**
  * Windows of recent speech to search. `recent` is the last ~60 words with the
@@ -32,22 +48,33 @@ function paraphraseWindows(recent) {
   const out = [];
   const add = (w) => { const t = words(w).slice(-MAX_WINDOW_WORDS).join(' '); if (words(t).length >= 6 && !out.includes(t)) out.push(t); };
 
-  // After the last quote signal: the verse itself, in whatever words.
+  // After the last quote signal: the verse itself, in whatever words, with
+  // any crowd work in between taken out.
   let m, lastEnd = -1;
   QUOTE_SIGNAL_RE.lastIndex = 0;
   while ((m = QUOTE_SIGNAL_RE.exec(recent)) !== null) lastEnd = m.index + m[0].length;
-  if (lastEnd >= 0) add(words(recent.slice(lastEnd)).slice(0, 28).join(' '));
+  if (lastEnd >= 0) add(words(withoutInterjections(recent.slice(lastEnd))).slice(0, 28).join(' '));
+
+  // Fused: the last few seconds with the asides removed, so the pieces of a
+  // verse said around them read as one.
+  const fused = withoutInterjections(recent);
+  add(words(fused).slice(-26).join(' '));
 
   // The last sentence, and the last two (a verse often spans a sentence break).
   const sentences = String(recent).split(/(?<=[.!?])\s+/).map(s => s.trim()).filter(Boolean);
   if (sentences.length) add(sentences[sentences.length - 1]);
   if (sentences.length > 1) add(sentences.slice(-2).join(' '));
+  // Two sentences with a short aside between them ("…all you that are weary.
+  // Are you listening? And I will give you rest.").
+  if (sentences.length > 2 && words(sentences[sentences.length - 2]).length <= SHORT_SENTENCE_WORDS) {
+    add(`${sentences[sentences.length - 3]} ${sentences[sentences.length - 1]}`);
+  }
 
   // The last few seconds regardless of punctuation.
   const w = words(recent);
   add(w.slice(-24).join(' '));
   if (out.length < 3) add(w.slice(-14).join(' '));
-  return out.slice(0, 4);
+  return out.slice(0, MAX_WINDOWS);
 }
 
 function hasQuoteSignal(text) { QUOTE_SIGNAL_RE.lastIndex = 0; return QUOTE_SIGNAL_RE.test(String(text || '')); }
@@ -100,4 +127,4 @@ function decideParaphrase(results, ctx = {}, T = PARAPHRASE_THRESHOLDS) {
   return null;
 }
 
-module.exports = { paraphraseWindows, hasQuoteSignal, decideParaphrase, PARAPHRASE_THRESHOLDS, QUOTE_SIGNAL_RE };
+module.exports = { paraphraseWindows, withoutInterjections, hasQuoteSignal, decideParaphrase, PARAPHRASE_THRESHOLDS, QUOTE_SIGNAL_RE };

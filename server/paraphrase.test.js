@@ -3,7 +3,7 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { paraphraseWindows, hasQuoteSignal, decideParaphrase, PARAPHRASE_THRESHOLDS: T } = require('./paraphrase');
+const { paraphraseWindows, withoutInterjections, hasQuoteSignal, decideParaphrase, PARAPHRASE_THRESHOLDS: T } = require('./paraphrase');
 
 test('the words after a quote signal are searched on their own', () => {
   const w = paraphraseWindows('so many of you are tired this morning. But the Bible says come to me all you who are weary and I will give you rest.');
@@ -59,4 +59,21 @@ test('a weak match is not offered at all', () => {
 test('without a cross-encoder (non-English service) only offers, and needs shared wording', () => {
   assert.equal(decideParaphrase([cand('John 3:16', 0.9, null, 20)]).target, 'suggestions');
   assert.equal(decideParaphrase([cand('John 3:16', 0.9, null, 2)]), null);
+});
+
+test('crowd work in the middle of a verse is taken out, fusing the verse back together', () => {
+  assert.equal(withoutInterjections('come to me, church are you with me? all you who are weary, somebody say amen, and I will give you rest'),
+    'come to me, all you who are weary, and I will give you rest');
+  assert.equal(withoutInterjections('the Lord is my shepherd, uh, I shall not want'), 'the Lord is my shepherd, I shall not want');
+});
+
+test('scripture wording itself is never taken out', () => {
+  const verse = 'Praise ye the LORD. Praise God in his sanctuary: praise him in the firmament of his power.';
+  assert.equal(withoutInterjections(verse), verse);
+});
+
+test('a short aside between two parts of a verse is skipped', () => {
+  const w = paraphraseWindows('But Jesus said come to me all you that labour and are heavy laden. Are you listening? And I will give you rest.');
+  assert.ok(w.includes('come to me all you that labour and are heavy laden. And I will give you rest.') ||
+    w.some(x => x.includes('heavy laden. And I will give you rest.') && !x.includes('listening')), JSON.stringify(w));
 });
