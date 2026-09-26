@@ -4342,12 +4342,12 @@
       "similarity": 0.588948851721893
     },
     {
-      "book": "Romans",
-      "chapter": 8,
+      "book": "1 Corinthians",
+      "chapter": 2,
       "verse": 11,
-      "kind": "citation",
+      "kind": "quote",
       "startMs": 1371000,
-      "bootstrapped": true
+      "note": "2026-09-26 audit: was a bootstrapped \"Romans 8:11\" (a past wrong send); the words read are 1 Corinthians 2:11"
     },
     {
       "book": "1 Samuel",
@@ -4363,22 +4363,6 @@
       "verseEnd": 24,
       "kind": "citation",
       "startMs": 1423000
-    },
-    {
-      "book": "Psalms",
-      "chapter": 20,
-      "verse": 5,
-      "kind": "citation",
-      "startMs": 1441000,
-      "bootstrapped": true
-    },
-    {
-      "book": "Psalms",
-      "chapter": 20,
-      "verse": 6,
-      "kind": "citation",
-      "startMs": 1449000,
-      "bootstrapped": true
     },
     {
       "book": "1 Samuel",
@@ -5249,14 +5233,6 @@
       "startMs": 7831000
     },
     {
-      "book": "Hebrews",
-      "chapter": 9,
-      "verse": 20,
-      "kind": "citation",
-      "startMs": 7878000,
-      "bootstrapped": true
-    },
-    {
       "book": "1 Corinthians",
       "chapter": 3,
       "ranges": [
@@ -5384,6 +5360,38 @@
       "kind": "quote",
       "startMs": 8365000,
       "bootstrapped": true
+    },
+    {
+      "book": "Isaiah",
+      "chapter": 51,
+      "verse": 2,
+      "kind": "quote",
+      "startMs": 2772000,
+      "note": "2026-09-26 audit: real quote read aloud, verified against the transcript by hand"
+    },
+    {
+      "book": "Habakkuk",
+      "chapter": 2,
+      "verse": 2,
+      "kind": "quote",
+      "startMs": 4360000,
+      "note": "2026-09-26 audit: real quote read aloud, verified against the transcript by hand"
+    },
+    {
+      "book": "Proverbs",
+      "chapter": 13,
+      "verse": 11,
+      "kind": "quote",
+      "startMs": 4399000,
+      "note": "2026-09-26 audit: real quote read aloud, verified against the transcript by hand"
+    },
+    {
+      "book": "Proverbs",
+      "chapter": 3,
+      "verse": 5,
+      "kind": "quote",
+      "startMs": 6169000,
+      "note": "2026-09-26 audit: real quote read aloud, verified against the transcript by hand"
     }
   ]
 }

@@ -4501,6 +4501,14 @@
       "kind": "quote",
       "startMs": 3722540,
       "unverified": true
+    },
+    {
+      "book": "Hosea",
+      "chapter": 12,
+      "verse": 13,
+      "kind": "quote",
+      "startMs": 2663745,
+      "note": "2026-09-26 audit: real quote read aloud, verified against the transcript by hand"
     }
   ]
 }
