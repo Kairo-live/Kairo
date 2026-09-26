@@ -40,10 +40,21 @@ let started = false;
 function maybeStart() { if (!started && ready.has('ready') && ready.has('semanticReady') && ready.has('rerankerReady')) { started = true; run().catch(e => { console.error(e); process.exit(1); }); } }
 setTimeout(() => { if (!started) { console.error('worker not ready (semantic/reranker installed?)', [...ready]); process.exit(1); } }, 240000);
 
+const { paraphraseWindows, decideParaphrase } = require('../paraphrase');
+
+// Before (whole text, one query) — kept for comparison.
 async function evaluate(said) {
   const sem = (await call('semanticSearch', { text: said, limit: 10 })).results || [];
   const rr = sem.length ? ((await call('rerank', { text: said, candidates: sem })).results || []) : [];
   return { sem, rr };
+}
+// Now: the live paraphrase detector (windows + combined signals + decision).
+async function detect(said) {
+  const windows = paraphraseWindows(said);
+  if (!windows.length) return { ranked: [], decision: null };
+  const res = (await call('paraphraseSearch', { windows, limit: 8 })).results || [];
+  const ranked = res.slice().sort((a, b) => ((b.rerankScore ?? -1) - (a.rerankScore ?? -1)) || (b.cos - a.cos));
+  return { ranked, decision: decideParaphrase(res, { quoteSignal: false }) };
 }
 
 const rankOf = (list, refs) => { const i = list.findIndex(r => refs.includes(r.reference)); return i < 0 ? Infinity : i + 1; };
@@ -60,8 +71,15 @@ async function run() {
   const groups = { written: cases.positives, real: realCases() };
   const report = {};
   for (const [name, list] of Object.entries(groups)) {
-    const s = { n: list.length, semTop1: 0, semTop3: 0, semTop10: 0, rrTop1: 0, rrTop3: 0, offeredRight: 0, offeredWrong: 0 };
+    const s = { n: list.length, semTop1: 0, semTop3: 0, semTop10: 0, rrTop1: 0, rrTop3: 0, offeredRight: 0, offeredWrong: 0, newTop1: 0, newOffered: 0, newOfferedWrong: 0, newSent: 0, newSentWrong: 0 };
     for (const c of list) {
+      const d = await detect(c.said);
+      if (d.ranked[0] && c.refs.includes(d.ranked[0].reference)) s.newTop1++;
+      if (d.decision) {
+        const ok = c.refs.includes(d.decision.verse.reference);
+        if (ok) s.newOffered++; else s.newOfferedWrong++;
+        if (d.decision.target === 'viewer') { if (ok) s.newSent++; else s.newSentWrong++; }
+      }
       const r = await evaluate(c.said);
       const semRank = rankOf(r.sem, c.refs), rrRank = rankOf(r.rr, c.refs);
       if (semRank <= 1) s.semTop1++; if (semRank <= 3) s.semTop3++; if (semRank <= 10) s.semTop10++;
@@ -72,18 +90,22 @@ async function run() {
     }
     report[name] = s;
   }
-  const neg = { n: cases.negatives.length, offered: 0, topCos: [], topRr: [] };
+  const neg = { n: cases.negatives.length, offered: 0, topCos: [], topRr: [], newOffered: 0, newSent: 0 };
   for (const said of cases.negatives) {
+    const d = await detect(said);
+    if (d.decision) { neg.newOffered++; if (d.decision.target === 'viewer') neg.newSent++; if (LIST) console.log(`  [negative, new detector] ${d.decision.target} ${d.decision.verse.reference} | "${said}"`); }
     const r = await evaluate(said);
     neg.topCos.push(r.sem[0]?.similarity || 0); neg.topRr.push(r.rr[0]?.rerankScore || 0);
     if (offered(r).length) { neg.offered++; if (LIST) console.log(`  [negative offered] ${offered(r).join(', ')} | "${said}"`); }
   }
   const pct = (a, b) => `${(100 * a / b).toFixed(0)}%`;
   for (const [name, s] of Object.entries(report)) {
-    console.log(`${name} paraphrases (${s.n}): found #1 ${pct(s.semTop1, s.n)} / top-3 ${pct(s.semTop3, s.n)} / top-10 ${pct(s.semTop10, s.n)}; after rerank #1 ${pct(s.rrTop1, s.n)} / top-3 ${pct(s.rrTop3, s.n)}; offered today: right ${pct(s.offeredRight, s.n)}, wrong ${pct(s.offeredWrong, s.n)}`);
+    console.log(`${name} paraphrases (${s.n}):`);
+    console.log(`  before: found #1 ${pct(s.rrTop1, s.n)} (top-3 ${pct(s.rrTop3, s.n)}); offered right ${pct(s.offeredRight, s.n)}, wrong ${pct(s.offeredWrong, s.n)}`);
+    console.log(`  now:    found #1 ${pct(s.newTop1, s.n)}; offered right ${pct(s.newOffered, s.n)}, wrong ${pct(s.newOfferedWrong, s.n)}; on screen right ${pct(s.newSent, s.n)}, wrong ${pct(s.newSentWrong, s.n)}`);
   }
   const q = (a, p) => a.slice().sort((x, y) => x - y)[Math.floor(p * (a.length - 1))].toFixed(2);
-  console.log(`negatives (${neg.n}): offered a verse ${pct(neg.offered, neg.n)}; top cosine median ${q(neg.topCos, 0.5)} / max ${q(neg.topCos, 1)}; top rerank median ${q(neg.topRr, 0.5)} / max ${q(neg.topRr, 1)}`);
+  console.log(`negatives (${neg.n}): before offered a verse ${pct(neg.offered, neg.n)}; now offered ${pct(neg.newOffered, neg.n)}, on screen ${pct(neg.newSent, neg.n)}`);
   console.log(`(${((Date.now() - t0) / 1000).toFixed(0)}s)`);
   process.exit(0);
 }

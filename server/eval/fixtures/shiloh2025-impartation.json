@@ -4460,6 +4460,14 @@
       "verseEnd": 3
     },
     {
+      "book": "1 Corinthians",
+      "chapter": 2,
+      "verse": 7,
+      "kind": "quote",
+      "startMs": 1943000,
+      "note": "2026-09-26 audit round 3: \"which God has ordained before the world unto his glory\" — verified against the transcript and KJV by hand"
+    },
+    {
       "book": "Ephesians",
       "chapter": 3,
       "kind": "citation",
