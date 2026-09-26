@@ -2696,6 +2696,25 @@ app.post('/api/search', async (req, res) => {
   }
 });
 
+// Search-box suggestions while the operator types (3+ words): the verse a
+// typed reference names, or verses containing / meaning the typed phrase (see
+// the worker's suggestPhrase). Suggests only — the operator's click sends.
+app.post('/api/search/suggest', async (req, res) => {
+  const query = String(req.body?.query || '').trim();
+  if (!workerBasicReady || query.split(/\s+/).filter(Boolean).length < 3) return res.json({ results: [] });
+  try {
+    const ref = parseSpokenReference(query.toLowerCase().replace(/[.,!?;]/g, ' '), true);
+    if (ref?.book && ref.verse != null) {
+      const msg = await workerCall('directLookup', { book: ref.book, chapter: ref.chapter, verse: ref.verse }, 3000);
+      if (msg.result) return res.json({ results: applyScriptureLanguage(applyTranslation([{ ...msg.result, match: 'reference' }])) });
+    }
+    const msg = await workerCall('suggestPhrase', { query, limit: 6 }, 3000);
+    res.json({ results: applyScriptureLanguage(applyTranslation(msg.results || [])) });
+  } catch {
+    res.json({ results: [] });
+  }
+});
+
 // Routes straight through the SAME pipeline a live mic segment hits
 // (handleTranscriptSegment) rather than replaying a hand-picked subset of
 // it — a prior version only called processForReferences/processVerbatim/
@@ -5317,8 +5336,6 @@ async function runParaphrase() {
     if (process.env.KAIRO_DEBUG_PARAPHRASE) console.log('[DEBUG-PARAPHRASE]', JSON.stringify({ windows, top: results[0] && { ref: results[0].reference, cos: results[0].cos, rr: results[0].rerankScore, lex: results[0].lexIdf }, decision: decision && { ref: decision.verse.reference, target: decision.target }, prev: paraphrasePrevKey }));
     const repeated = decision && paraphrasePrevKey === decision.key;
     paraphrasePrevKey = decision ? decision.key : null;
-    // Careful sensitivity: a paraphrase is only ever offered, never sent.
-    if (repeated && decision.target === 'viewer' && settings.detectionSensitivity === 'careful') decision.target = 'suggestions';
     if (repeated) {
       const v = decision.verse;
       const sent = await broadcastDetection([v], 'paraphrase', decision.score, decision.target, decision.target === 'suggestions' ? { capAtSuggestions: true } : {});
@@ -5685,7 +5702,7 @@ async function broadcastDetection(verses, method, topScore, target, opts = {}) {
           setImmediate(() => broadcastDetection(held.verses, 'stream', held.score, 'viewer').catch(() => {}));
         }
       }
-      const decided = detectionScoring.decideTarget(finalScore, method, { corroborated, veryHighConfidence: breakdown.veryHighConfidence, viewerBar: detectionScoring.viewerBarFor(settings.detectionSensitivity) });
+      const decided = detectionScoring.decideTarget(finalScore, method, { corroborated, veryHighConfidence: breakdown.veryHighConfidence });
       target = chapterContinuity ? 'viewer' : decided;
       topScore = chapterContinuity ? Math.max(topScore, finalScore) : finalScore;
       // opts.verbatimDisagreed (processStreamText's full inverted-index
