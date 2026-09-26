@@ -113,8 +113,14 @@ function main() {
   if (modelSaved) console.log(`[prune] server/models (offline STT model, download-on-demand): ${fmtMB(modelSaved)}`);
 
   if (!fs.existsSync(NODE_MODULES)) {
-    console.log('[prune] server/node_modules not found — run npm install first.');
-    return;
+    // Not a warning-and-continue case: a DMG built without this would launch
+    // to a permanently blank window (real incident — express itself missing
+    // at runtime, so the Node sidecar dies before ever binding its port,
+    // and the webview's initial localhost:7777 navigation just never
+    // resolves). beforeBuildCommand now always runs `npm install` first, but
+    // fail loudly here too in case this script is ever invoked standalone.
+    console.error('[prune] server/node_modules not found — the bundle would ship with no server dependencies. Run npm install in server/ first.');
+    process.exit(1);
   }
   const before = duBytes(NODE_MODULES);
   const deadPackageSaved = pruneDeadPackages();
