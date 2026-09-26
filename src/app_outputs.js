@@ -98,6 +98,8 @@ function setOutputScreen(outputId, screen) {
   if (screen) map[outputId] = screen; else delete map[outputId];
   settings.outputScreens = map;
   saveSettingsPatch({ outputScreens: map });
+  // A display is "on" when it has a screen — the monitor lists only outputs that are on.
+  if (typeof renderLivePreviewOutputSelect === 'function') renderLivePreviewOutputSelect();
 }
 
 function populateScreenOptions(sel, outputId) {
@@ -314,10 +316,6 @@ function renderLangPacks() {
 document.getElementById('stt-language')?.addEventListener('change', (e) => {
   settings.sttLanguage = e.target.value;
   saveSettingsPatch({ sttLanguage: e.target.value });
-});
-document.getElementById('detection-sensitivity')?.addEventListener('change', (e) => {
-  settings.detectionSensitivity = e.target.value;
-  saveSettingsPatch({ detectionSensitivity: e.target.value });
 });
 document.getElementById('custom-keyterms')?.addEventListener('change', (e) => {
   settings.customKeyterms = e.target.value;
@@ -940,6 +938,7 @@ function updateNativeOutput(kind, id, patch) {
   const list = outputsFn().map(x => x.id === id ? { ...x, ...patch } : x);
   settings[`${kind}Outputs`] = list;
   saveSettingsPatch({ [`${kind}Outputs`]: list });
+  if ('enabled' in patch && typeof renderLivePreviewOutputSelect === 'function') renderLivePreviewOutputSelect();
 }
 
 // "+ Add Output" — a small type-chooser popover (mirrors the existing

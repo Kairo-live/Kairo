@@ -15,7 +15,21 @@ let AUTH_TOKEN = '';
 // permanent failure here means EVERY authenticated request 401s for the rest
 // of the session — Start Listening surfaces it, but so would verse search,
 // settings, everything else, just without an obvious toast.
+// Same-origin pages embedded in the operator window (the monitor's live
+// copies of each output, display.html?monitor=1) have no Tauri bridge of
+// their own — they borrow the token the operator window already holds.
+window.kairoAuthToken = () => AUTH_TOKEN;
+
 async function loadAuthToken(attempts = 5, delayMs = 200) {
+  if (window.parent !== window) {
+    for (let i = 0; i < attempts; i++) {
+      try {
+        const t = window.parent.kairoAuthToken?.();
+        if (typeof t === 'string' && t) { AUTH_TOKEN = t; return; }
+      } catch { break; }   // not same-origin — fall through to the bridge
+      await new Promise(r => setTimeout(r, delayMs * (i + 1)));
+    }
+  }
   for (let i = 0; i < attempts; i++) {
     // `window.__TAURI__` missing here does NOT mean "plain-browser dev, give
     // up forever" — on a fresh navigation the IPC bridge can attach a tick or

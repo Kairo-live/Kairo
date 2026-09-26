@@ -1065,11 +1065,36 @@ input[type="range"]:disabled { opacity: 0.4; cursor: default; }
   border-radius: var(--radius);
   background: var(--bg-panel);
   padding: 8px 10px;
-  min-height: 90px;
   display: flex;
   flex-direction: column;
   gap: 4px;
+  /* a <button>: click opens that output alone */
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color var(--trans);
 }
+.monitor-grid-tile:hover { border-color: var(--selected-border); }
+.monitor-grid-tile.is-selected { border-color: var(--brand); }
+
+/* A live copy of one output (display.html?monitor=1), laid out at the
+   output's real resolution and scaled down to fit — see buildMonitorFrame. */
+.monitor-frame {
+  position: relative;
+  width: 100%;
+  overflow: hidden;
+  border-radius: var(--radius-sm);
+  background: #000;
+}
+.monitor-frame iframe {
+  position: absolute;
+  top: 0; left: 0;
+  border: 0;
+  transform-origin: 0 0;
+  pointer-events: none;
+}
+.monitor-single .monitor-frame { border-radius: var(--radius); }
 .monitor-grid-tile-header {
   font-size: 11px;
   font-weight: 700;
@@ -3817,6 +3842,47 @@ select {
   transition: border-color var(--trans);
 }
 .cs-search-input:focus { border-color: var(--blue); }
+
+/* Verses suggested as the operator types — one click sends to the screen. */
+.cs-suggest {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0; right: 0;
+  z-index: 60;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-md);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-lg, 0 8px 24px rgba(0,0,0,0.45));
+  padding: 4px;
+  max-height: 320px;
+  overflow-y: auto;
+}
+.cs-suggest[hidden] { display: none; }
+.cs-suggest-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  padding: 7px 9px;
+  cursor: pointer;
+  color: var(--text);
+  font-family: var(--font);
+}
+.cs-suggest-item:hover, .cs-suggest-item.active { background: var(--bg-hover); }
+.cs-suggest-head { display: flex; align-items: baseline; gap: 8px; }
+.cs-suggest-ref { font-size: 12px; font-weight: 700; }
+.cs-suggest-why { font-size: 10px; color: var(--text-3); }
+.cs-suggest-text {
+  font-size: 11px;
+  color: var(--text-2);
+  margin-top: 2px;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
 .cs-search-input::placeholder { color: var(--text-3); }
 
 .cs-search-clear {

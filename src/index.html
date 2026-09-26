@@ -324,6 +324,9 @@
                     <button id="scripture-search-clear" class="cs-search-clear" title="Clear" style="display:none;">
                         <svg width="10" height="10" viewBox="0 0 12 12" fill="none"><path d="M1 1l10 10M11 1L1 11" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
                     </button>
+                    <!-- Verses suggested as you type (3+ words, any order or
+                         wording) — one click sends to the screen. -->
+                    <div id="scripture-suggest" class="cs-suggest" role="listbox" hidden></div>
                 </div>
                 <!-- All 6 are now real, distinct text — databases/bibles/
                      translations/*.json (NKJV/NIV/ESV/NASB) plus map.json's
@@ -597,14 +600,16 @@
                 <div class="rs-preview-output-row">
                     <span class="rs-preview-output-label">Monitoring</span>
                     <select id="live-preview-output-select" class="rs-preview-output-select" title="Which output this preview is monitoring"></select>
-                    <!-- Owner: "the monitor view will just be a grid based on
-                         the number of active outputs, can be triggered with
-                         a button in the monitoring section right next to
-                         the dropdown." Toggles between the single preview
-                         below and a grid of one compact tile per configured
-                         output (renderMonitorGrid in app.js). -->
+                    <!-- Toggles between the single view below and a grid of
+                         live copies of Main and every output that's on
+                         (renderMonitorGrid in app.js). -->
                     <button id="monitor-grid-toggle-btn" class="ls-icon-btn" title="Show all outputs at once" aria-pressed="false">
                         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+                    </button>
+                    <!-- Pops what the monitor shows (Main or the selected
+                         output) out into its own resizable window. -->
+                    <button id="monitor-popout-btn" class="ls-icon-btn" title="Open the monitor in its own window">
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 4h6v6"/><path d="M20 4l-9 9"/><path d="M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></svg>
                     </button>
                 </div>
                 <div class="live-screen" id="slide-preview">
@@ -638,15 +643,13 @@
                     <div class="live-screen-timer hidden" id="slide-preview-timer"></div>
                     <div class="live-screen-badge">LIVE</div>
                 </div>
-                <!-- Grid mode — one compact tile per configured output,
-                     shown instead of the single #slide-preview above.
-                     Built by renderMonitorGrid (app.js): each tile is a
-                     text/status summary (name, connection dot, what's on
-                     that output's own Bible/Slide/Media/Timer layers right
-                     now, per that output's own outputLayerMap()) — not a
-                     full pixel-accurate visual clone of the real themed
-                     output, which would need a much larger per-tile
-                     renderer. -->
+                <!-- One output shown alone: a live copy of that output's
+                     real page (display.html?monitor=1), so its own theme and
+                     layers are exactly what's seen — see showMonitorSelection
+                     in app.js. Main uses #slide-preview above instead. -->
+                <div class="monitor-single hidden" id="monitor-single"></div>
+                <!-- Grid mode — Main plus one live copy per output that's on;
+                     click a tile to show that output alone (renderMonitorGrid). -->
                 <div class="outputs-monitor-grid hidden" id="outputs-monitor-grid"></div>
                 <!-- Range navigation -->
                 <div id="range-nav-bar" class="range-nav-bar" style="display:none">
@@ -1313,15 +1316,6 @@
                         </label>
                     </div>
 
-                    <div class="setting-group">
-                        <label class="setting-label" for="detection-sensitivity">Detection sensitivity</label>
-                        <select id="detection-sensitivity" class="setting-input">
-                            <option value="careful">Careful — only the surest matches go up on their own</option>
-                            <option value="balanced" selected>Balanced (recommended)</option>
-                            <option value="responsive">Responsive — more goes up on its own</option>
-                        </select>
-                        <p class="setting-hint">How sure Kairo must be before a verse goes to the screen without you. A spoken citation ("John 3:16") always goes up. Anything below the bar waits in Possible Matches. Careful also keeps paraphrases in Possible Matches; Responsive will occasionally put up a wrong verse.</p>
-                    </div>
                 </div>
 
                 <!-- Meaning-Based Candidates (semantic layer) used to have
@@ -1387,7 +1381,7 @@
                                     <li>Open <strong>Settings → Audio</strong> and pick the microphone (or audio-routing device, e.g. BlackHole) capturing the preacher.</li>
                                     <li>Open <strong>Settings → Outputs</strong> and turn on at least one destination — usually External Display for the projector/screen.</li>
                                     <li>Set the spoken language under <strong>Settings → Language</strong> if it isn't English.</li>
-                                    <li>Press <strong>Start</strong> in the Bible tab. Live Status switches from Idle to Listening, and the Live Transcript Log starts filling in as words are heard.</li>
+                                    <li>Press <strong>Start Listening</strong>. Live Status switches from Idle to Listening, and the Live Transcript Log starts filling in as words are heard. <strong>Stop</strong> ends the session — nothing else does: if the internet drops, the status shows <em>Reconnecting…</em> and Kairo keeps listening; the words said meanwhile are caught up when it's back.</li>
                                 </ol>
                                 <p>Everything else — playlists, slides, songs, themes — can be prepared before or during the service; detection runs independently in the background the whole time.</p>
                             </div>
@@ -1396,14 +1390,27 @@
                         <details class="help-group">
                             <summary>Live scripture detection</summary>
                             <div class="help-body">
-                                <p>A verse can reach the screen two ways, and both are meant to just work without anyone pressing a button:</p>
+                                <p>A verse reaches the screen on its own in three ways — nobody needs to press a button:</p>
                                 <ul>
-                                    <li><strong>A citation is spoken</strong> — "turn to Romans chapter 8, verse 28" — sends that verse immediately.</li>
-                                    <li><strong>Scripture is read aloud</strong>, cited or not — Kairo matches the actual words against the Bible text itself, so a passage read without ever naming chapter/verse still reaches the screen.</li>
+                                    <li><strong>A citation is spoken</strong> — "Romans 8:28", "Romans chapter eight verse twenty-eight", "the 23rd Psalm", "first Corinthians 13 verses 4 to 7", "verse 28 of Romans 8", "verses 4, 5 and 6". A citation corrected in the same breath ("John 3:17 — sorry, 16") ends on the corrected verse.</li>
+                                    <li><strong>A book and chapter are named without a verse</strong> ("turn to Matthew 6") — the words that follow are matched against that chapter's verses to find the one being read.</li>
+                                    <li><strong>Scripture is read aloud</strong>, cited or not — the spoken words are matched against the Bible text, in the KJV or the church's translation (Settings → Bible translation). Verses that read almost the same (Matthew 6:33 / Luke 12:31) are told apart by the words only one of them has.</li>
                                 </ul>
-                                <p>A confident match auto-sends straight to Live Status/the output. A weaker or ambiguous match shows up under <strong>Possible Matches</strong> instead — click one there to send it manually. This two-tier behavior is deliberate: a wrong verse on screen is worse than a missed one, so anything Kairo isn't confident about waits for a human glance rather than guessing.</p>
-                                <p>Kairo also follows a verse put in the preacher's <strong>own words</strong> ("the Bible says don't worry about anything, pray about everything…"). A paraphrase appears in Possible Matches; it goes to the screen on its own only when the meaning, the wording and a second check all agree. Well-known passages named in passing ("the prodigal son", "the Lord's Prayer") are offered in Possible Matches too. <strong>Detection sensitivity</strong> in Settings sets how sure Kairo must be before anything goes up without you.</p>
-                                <p>Reading forward through a passage (verse 1, then 2, then 3…) is tracked automatically, including a spoken "range" citation ("verses 1 to 9") — the display advances verse-by-verse as the reading continues, without needing each one re-cited.</p>
+                                <p>Once a passage is up, the preacher can move within it: "verse 5", a number said on its own, "next verse" / "the following verse", "previous verse", "go back to verse 3", "the last verse". A spoken range ("verses 1 to 9", "from verse 4 to the end") advances verse by verse as the reading continues.</p>
+                                <p>Kairo also follows a verse put in the preacher's <strong>own words</strong> ("the Bible says don't worry about anything, pray about everything…"). A paraphrase goes to the screen on its own only when every check agrees; otherwise it waits in Possible Matches. Well-known passages named in passing ("the prodigal son", "the Lord's Prayer") are offered in Possible Matches too.</p>
+                                <p><strong>Possible Matches</strong> holds what Kairo found but isn't certain enough to put up on its own — click one to send it. This is deliberate: a wrong verse on screen is worse than a missed one. While a song or slide is live, only a spoken citation goes up on its own; lyrics that quote scripture are offered in Possible Matches instead.</p>
+                            </div>
+                        </details>
+
+                        <details class="help-group">
+                            <summary>Finding a verse yourself</summary>
+                            <div class="help-body">
+                                <p>Use the search field at the top of the Bible tab:</p>
+                                <ul>
+                                    <li>Type a reference — "Jn 3:16", "Ps 23:1-3", "Romans 8" — and press <strong>Enter</strong> to send it (a range or chapter goes up verse by verse).</li>
+                                    <li>Type a few words of a verse — from the third word, matching verses appear right under the field, even if the words are out of order or in your own words ("renew strength eagles", "cast your cares on him"). <strong>One click sends it to the screen</strong>; the arrow keys and Enter work too, Escape closes the list.</li>
+                                </ul>
+                                <p>The list only shows verses the words actually identify, so a phrase every other verse contains ("the Lord is") shows nothing until you type a little more.</p>
                             </div>
                         </details>
 
@@ -1465,6 +1472,8 @@
                             <summary>Multi-language</summary>
                             <div class="help-body">
                                 <p>Under <strong>Settings → Language</strong>: <em>Spoken language</em> is what the preacher is actually speaking (drives transcription). <em>Scripture language</em> is what a matched verse displays in — install additional <strong>Scripture packs</strong> to add languages, downloaded once for offline use.</p>
+                                <p>For a service preached in <strong>Spanish, Portuguese, French or German</strong>, set the spoken language and Kairo understands citations in that language ("Juan capítulo tres versículo dieciséis", "siguiente versículo") and matches verses read aloud against that language's Bible. Other spoken languages are transcribed, but detection follows English citations and readings.</p>
+                                <p><strong>Church vocabulary</strong> (same page) — names and words your services use that transcription may mishear: the pastor, the church, local places. One per line; used from the next Start Listening (English and auto-detect services).</p>
                                 <p><strong>Slide Translation Models</strong> are separate — they translate ordinary (non-scripture) slide/sermon text for the Multi-Language split theme, using a small bundled local model with no setup, API key, or internet connection required once downloaded.</p>
                             </div>
                         </details>
@@ -1485,6 +1494,9 @@
                                     <li><strong>The output window is blank or on the wrong screen</strong> — reselect it under Settings → Outputs → External Display.</li>
                                     <li><strong>An NDI output won't turn on</strong> — install the free NDI Tools runtime (ndi.video/tools) and try the toggle again; Kairo doesn't bundle it. The output's own status line shows the exact reason when it fails.</li>
                                     <li><strong>An imported file lost its look</strong> — only ProPresenter files preserve their own design automatically; a plain text/Word import always uses a Kairo theme instead, by design.</li>
+                                    <li><strong>A slide disappeared when the preacher cited a verse</strong> — the verse covers the slide; the slide is still live underneath. Press <strong>Clear Bible</strong> (lit while this is the case) to bring it back.</li>
+                                    <li><strong>Live Status says Reconnecting…</strong> — the internet connection dropped. Kairo keeps listening and reconnects by itself; words said in the meantime are caught up. Nothing to do.</li>
+                                    <li><strong>A name keeps being misheard</strong> (the pastor, the church) — add it under Settings → Language → Church vocabulary.</li>
                                 </ul>
                             </div>
                         </details>

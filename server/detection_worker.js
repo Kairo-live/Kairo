@@ -1689,6 +1689,121 @@ async function paraphraseSearch(windows, limit = 8) {
   }));
 }
 
+// Search-box suggestions while the operator types (3+ words). Three sources,
+// merged and ranked by the cross-encoder:
+//   exact    — the phrase in order (the last word may be half-typed: a prefix)
+//   keywords — every distinctive typed word, in any order, stem-aware, in the
+//              KJV or the second translation ("renew strength eagles wings")
+//   meaning  — the paraphrase engine, for different wording altogether
+// Noise limits: a phrase of only common words ("the lord is") suggests nothing
+// until something identifying is typed; meaning-only hits are capped.
+const SUGGEST_EXACT_SCAN_CAP = 40;
+const SUGGEST_MIN_PHRASE_IDF = 5;
+const SUGGEST_MAX_MEANING_ONLY = 3;
+const SUGGEST_CLOSE_TO_BEST = 0.1;
+const SUGGEST_MAX_TIED = 3;
+function versesWithWord(w) {
+  const out = new Set(verbatimIndex.get(w) || []);
+  for (const i of stemIndex.get(healWord(w)) || []) out.add(i);
+  return out;
+}
+async function suggestPhrase(query, limit = 6) {
+  const q = norm(query);
+  const qWords = q.split(' ').filter(Boolean);
+  if (qWords.length < 3) return [];
+  const distinct = [...new Set(qWords.filter(w => w.length >= 3 && !STOP_WORDS.has(w)))];
+  const phraseIdf = distinct.reduce((sum, w) => sum + (idfMap.get(w) || 0), 0);
+  const pool = new Map();   // verse idx -> candidate
+  const get = (i) => { if (!pool.has(i)) pool.set(i, { idx: i }); return pool.get(i); };
+
+  const needle = ' ' + q;
+  let exactCount = 0;
+  for (let i = 0; i < verseMetadata.length && exactCount <= SUGGEST_EXACT_SCAN_CAP; i++) {
+    const a = verseNormText.get(i), b = verseNormNlt.get(i);
+    if ((a && (' ' + a).includes(needle)) || (b && (' ' + b).includes(needle))) { exactCount++; get(i).exact = true; }
+  }
+  // Common words in a rare order ("be still and know") still identify a verse;
+  // common words in a common order ("the lord is") identify nothing yet.
+  const exactDistinctive = exactCount >= 1 && (exactCount <= 6 || phraseIdf >= 8);
+  if (!exactDistinctive && phraseIdf < SUGGEST_MIN_PHRASE_IDF) return [];
+
+  if (distinct.length >= 2) {
+    const tally = new Map();   // idx -> matched distinctive words
+    for (const w of distinct) for (const i of versesWithWord(w)) tally.set(i, (tally.get(i) || 0) + 1);
+    const need = Math.max(2, distinct.length - (distinct.length >= 3 ? 1 : 0));
+    const hits = [...tally].filter(([, n]) => n >= need).map(([i]) => i);
+    if (hits.length <= 200) for (const i of hits) get(i).keywords = true;
+  }
+
+  if (semanticEngine.isReady()) {
+    const [hits] = await semanticEngine.searchMany([query], 8);
+    for (const { idx, score } of hits || []) get(idx).cos = score;
+  }
+
+  const cands = [...pool.values()];
+  for (const c of cands) Object.assign(c, sharedIdentifyingWeight(query, c.idx));
+  // Rerank the most promising: exact and keyword hits by shared identifying
+  // wording (shorter verses first on ties), then the meaning hits.
+  const words = (c) => verseNormWords.get(c.idx)?.length || 99;
+  const exact = cands.filter(c => c.exact && exactDistinctive).sort((x, y) => words(x) - words(y)).slice(0, 6);
+  const keyword = cands.filter(c => c.keywords && !exact.includes(c)).sort((x, y) => y.idfSum - x.idfSum || words(x) - words(y)).slice(0, 10);
+  const meaning = cands.filter(c => !exact.includes(c) && !keyword.includes(c) && c.cos != null).sort((x, y) => y.cos - x.cos).slice(0, 6);
+  const ranked = [...exact, ...keyword, ...meaning];
+  // Judged against both wordings — a phrase typed from the NIV/NLT reads
+  // nothing like the KJV of the same verse.
+  if (rerankerEngine.isReady() && ranked.length) {
+    const texts = ranked.flatMap(c => [verseMetadata[c.idx].kjv_text || '', altTextByIdx?.get(c.idx) || verseMetadata[c.idx].nlt_text || verseMetadata[c.idx].kjv_text || '']);
+    const scores = await rerankerEngine.scorePairs(texts.map(() => query), texts);
+    ranked.forEach((c, i) => { c.rr = Math.max(scores[2 * i] ?? 0, scores[2 * i + 1] ?? 0); });
+  }
+  if (process.env.KAIRO_DEBUG_SUGGEST) console.log('[DEBUG-SUGGEST]', JSON.stringify({ query, exactCount, phraseIdf: +phraseIdf.toFixed(1), cands: ranked.slice(0, 8).map(c => ({ ref: verseMetadata[c.idx].reference, exact: !!c.exact, kw: !!c.keywords, cos: c.cos && +c.cos.toFixed(3), rr: c.rr && +c.rr.toFixed(3), lex: +c.idfSum.toFixed(1) })) }));
+  const keep = ranked.filter(c => {
+    const rr = c.rr ?? 0, cos = c.cos ?? 0;
+    if (c.exact && exactDistinctive) return true;
+    if (c.keywords) return rr >= 0.5;
+    return (rr >= 0.5 && cos >= 0.74) || (rr >= 0.9 && cos >= 0.7);
+  });
+  // How much of what was typed appears in the verse IN ORDER (stem-aware):
+  // "wait upon the lord" inside Isaiah 40:31 beats the same words scattered.
+  const qStems = qWords.map(healWord);
+  for (const c of keep) {
+    let best = 0;
+    for (const vw of [verseNormWords.get(c.idx), verseNormNltWords.get(c.idx)]) {
+      if (!vw) continue;
+      const v = vw.map(healWord);
+      const prev = new Array(v.length + 1).fill(0);
+      for (let i = 1; i <= qStems.length; i++) {
+        let diag = 0;
+        for (let j = 1; j <= v.length; j++) {
+          const up = prev[j];
+          prev[j] = qStems[i - 1] === v[j - 1] ? diag + 1 : 0;
+          if (prev[j] > best) best = prev[j];
+          diag = up;
+        }
+      }
+    }
+    c.inOrder = best / qStems.length;
+  }
+  const score = (c) => (c.rr ?? 0) + (c.exact ? 0.3 : 0) + (c.keywords ? 0.2 : 0) + 0.3 * (c.inOrder || 0) + Math.min(c.idfSum, 30) / 100;
+  keep.sort((x, y) => score(y) - score(x));
+  if (process.env.KAIRO_DEBUG_SUGGEST) console.log('[DEBUG-SUGGEST-SCORES]', query, keep.slice(0, 6).map(c => `${verseMetadata[c.idx].reference} ${score(c).toFixed(2)}`).join(' | '));
+  if (!keep.length) return [];
+  // Only what the engines actually identified: results within a hair of the
+  // best one. Many equally good matches and no exact phrase means the words
+  // typed don't pick out a verse yet ("thank you Jesus") — show nothing.
+  const best = score(keep[0]);
+  const close = keep.filter(c => score(c) >= best - SUGGEST_CLOSE_TO_BEST);
+  if (close.length > SUGGEST_MAX_TIED && !keep[0].exact) return [];
+  let meaningOnly = 0;
+  const out = [];
+  for (const c of close) {
+    if (!c.exact && !c.keywords && ++meaningOnly > SUGGEST_MAX_MEANING_ONLY) continue;
+    out.push({ ...formatVerse(verseMetadata[c.idx], c.rr ?? c.cos ?? 0.9, 'suggest'), match: c.exact ? 'exact' : c.keywords ? 'words' : 'meaning' });
+    if (out.length >= Math.min(limit, SUGGEST_MAX_TIED)) break;
+  }
+  return out;
+}
+
 // Named-entity-scoped variant — see semantic_engine.js's searchWithin for
 // why this exists (a real spoken name narrows the search to just the
 // chapters that mention them, instead of competing against all ~31k verses
@@ -1959,6 +2074,11 @@ parentPort.on('message', async (msg) => {
       case 'semanticSearch': {
         const results = await semanticSearch(msg.text, msg.limit || 5);
         parentPort.postMessage({ type: 'semanticResults', id: msg.id, results });
+        break;
+      }
+      case 'suggestPhrase': {
+        const results = await suggestPhrase(msg.query || '', msg.limit || 6);
+        parentPort.postMessage({ type: 'suggestResults', id: msg.id, results });
         break;
       }
       case 'paraphraseSearch': {

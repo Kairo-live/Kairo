@@ -505,7 +505,9 @@ let previewRenderGen = 0;
 // monitoring — matches ProPresenter's Preview Window, which has its own
 // screen-selector dropdown independent of what's being edited. Defaults to
 // the primary/External Display output.
-let livePreviewOutputId = 'display-1';
+// 'main' is the composite — every layer in order (media, slide, Bible, timer)
+// with the primary display's look; any other value is one real output.
+let livePreviewOutputId = 'main';
 
 function primaryOutputLook() {
   try {
@@ -521,98 +523,168 @@ function primaryOutputLook() {
 function applyLivePreviewAspect() {
   const el = document.getElementById('slide-preview');
   if (!el) return;
-  const s = (typeof outputScreenMap === 'function') ? outputScreenMap()[livePreviewOutputId] : null;
+  const s = (typeof outputScreenMap === 'function') ? outputScreenMap()[livePreviewOutputId === 'main' ? PRIMARY_DISPLAY : livePreviewOutputId] : null;
   el.style.aspectRatio = s ? `${s.width} / ${s.height}` : '';
 }
 
-// Keeps the panel's output dropdown in sync with configured outputs
-// (renamed/added/removed extra displays) — called from renderDisplayOutputs.
-function renderLivePreviewOutputSelect() {
-  const sel = document.getElementById('live-preview-output-select');
-  if (!sel || typeof displayOutputs !== 'function') return;
-  const outputs = displayOutputs();
-  if (!outputs.some(d => d.id === livePreviewOutputId)) livePreviewOutputId = outputs[0]?.id || 'display-1';
-  sel.innerHTML = '';
-  outputs.forEach(d => {
-    const o = document.createElement('option');
-    o.value = d.id; o.textContent = d.name;
-    if (d.id === livePreviewOutputId) o.selected = true;
-    sel.appendChild(o);
-  });
-  applyLivePreviewAspect();
+// ── Monitor: what each output is actually showing ─────────────────────────
+// The dropdown and the grid list Main plus every output that's ON (an output
+// that's off shows nothing, so it isn't monitored). Main is the operator's own
+// composite preview (#slide-preview). A specific output is shown by a live copy
+// of that output's real page — display.html?output=<id>&monitor=1, the exact
+// page its screen runs, so its theme and its own layers (e.g. a screen that
+// only carries the timer) are what you see — rendered at the output's real
+// resolution and scaled down. Picking a tile in the grid, or an entry in the
+// dropdown, shows that one output alone.
+const MONITOR_MAIN = { id: 'main', type: 'main', name: 'Main' };
+
+function monitorTargets() {
+  const outputs = (typeof allConfiguredOutputs === 'function') ? allConfiguredOutputs() : [];
+  const on = outputs.filter(o => o.type !== 'obs' && (typeof isOutputEnabled !== 'function' || isOutputEnabled(o)));
+  return [MONITOR_MAIN, ...on];
 }
 
-// ── Monitor grid — one tile per configured output ────────────────────────
-// Owner: "the monitor view will just be a grid based on the number of
-// active outputs, can be triggered with a button in the monitoring section
-// right next to the dropdown." A text/status summary per tile (name,
-// connection dot via buildOutputLayersSummary — reused, not re-built —
-// plus whatever's currently live, gated per that output's own
-// outputLayerMap()) rather than a full pixel-accurate themed clone of each
-// real output, which would need a much larger per-tile visual renderer;
-// worth a real fast-follow if this text-based version proves useful.
+// The output's real resolution — what its page lays itself out for.
+function monitorResolution(o) {
+  if (o.type === 'display' || o.type === 'main') {
+    const scr = (typeof outputScreenMap === 'function') ? outputScreenMap()[o.type === 'main' ? PRIMARY_DISPLAY : o.id] : null;
+    if (scr?.width && scr?.height) return { w: scr.width, h: scr.height };
+  }
+  if (o.raw?.width && o.raw?.height) return { w: o.raw.width, h: o.raw.height };
+  return { w: 1920, h: 1080 };
+}
+
+// A scaled live copy of one output. Rebuilt only when the output (or its
+// resolution) changes, so it isn't reloaded on every refresh.
+const _monitorScaleObservers = new WeakMap();
+function buildMonitorFrame(o) {
+  const { w, h } = monitorResolution(o);
+  const box = document.createElement('div');
+  box.className = 'monitor-frame';
+  box.style.aspectRatio = `${w} / ${h}`;
+  box.dataset.key = `${o.id}|${w}x${h}`;
+  const frame = document.createElement('iframe');
+  frame.src = `/display.html?output=${encodeURIComponent(o.type === 'main' ? 'main' : o.id)}&monitor=1`;
+  frame.title = `${o.name} — live`;
+  frame.setAttribute('tabindex', '-1');
+  frame.style.width = `${w}px`;
+  frame.style.height = `${h}px`;
+  box.appendChild(frame);
+  const ro = new ResizeObserver(() => { frame.style.transform = `scale(${box.clientWidth / w})`; });
+  ro.observe(box);
+  _monitorScaleObservers.set(box, ro);
+  return box;
+}
+
+function renderLivePreviewOutputSelect() {
+  const sel = document.getElementById('live-preview-output-select');
+  if (!sel) return;
+  const targets = monitorTargets();
+  if (!targets.some(t => t.id === livePreviewOutputId)) livePreviewOutputId = 'main';
+  sel.innerHTML = '';
+  targets.forEach(t => {
+    const opt = document.createElement('option');
+    opt.value = t.id; opt.textContent = t.name;
+    if (t.id === livePreviewOutputId) opt.selected = true;
+    sel.appendChild(opt);
+  });
+  applyLivePreviewAspect();
+  showMonitorSelection();
+  if (monitorGridActive) renderMonitorGrid();
+}
+
+// Single view: Main -> the composite preview; an output -> its live copy.
+function disposeMonitorFrames(container) {
+  container?.querySelectorAll('.monitor-frame').forEach(box => { _monitorScaleObservers.get(box)?.disconnect(); });
+}
+
+function showMonitorSelection() {
+  const single = document.getElementById('slide-preview');
+  const host = document.getElementById('monitor-single');
+  if (!single || !host) return;
+  const target = monitorTargets().find(t => t.id === livePreviewOutputId) || MONITOR_MAIN;
+  const isMain = target.id === 'main';
+  single.classList.toggle('hidden', monitorGridActive || !isMain);
+  host.classList.toggle('hidden', monitorGridActive || isMain);
+  if (isMain) { disposeMonitorFrames(host); host.replaceChildren(); return; }
+  const { w, h } = monitorResolution(target);
+  if (host.firstChild?.dataset.key !== `${target.id}|${w}x${h}`) { disposeMonitorFrames(host); host.replaceChildren(buildMonitorFrame(target)); }
+}
+
+function selectMonitorTarget(id) {
+  livePreviewOutputId = id;
+  const sel = document.getElementById('live-preview-output-select');
+  if (sel) sel.value = id;
+  applyLivePreviewAspect();
+  repaintPreviewWithOutputLook();
+  setMonitorGrid(false);
+}
+
+// Grid: Main plus every output that's on, each a live copy; click to open one.
 let monitorGridActive = false;
-let _monitorGridRefreshTimer = null;
 function renderMonitorGrid() {
   const host = document.getElementById('outputs-monitor-grid');
-  if (!host || typeof allConfiguredOutputs !== 'function') return;
-  const outputs = allConfiguredOutputs();
-  host.innerHTML = '';
-  const text = previewVerseText?.textContent || '';
-  const ref  = previewVerseRef?.textContent || '';
-  const hasContent = !!text && text !== 'Nothing on display';
-  // Computed once for the whole grid rather than once per tile.
+  if (!host) return;
+  const targets = monitorTargets();
+  const existing = new Map([...host.children].map(tile => [tile.dataset.key, tile]));
   const layersMap = typeof outputLayerMap === 'function' ? outputLayerMap() : {};
-  outputs.forEach(o => {
-    const want = layersMap[o.id] || DEFAULT_OUTPUT_LAYERS;
-    const enabled = typeof isOutputEnabled === 'function' ? isOutputEnabled(o) : true;
-    const tile = document.createElement('div');
-    tile.className = 'monitor-grid-tile' + (enabled ? '' : ' is-disabled');
+  const tiles = targets.map(t => {
+    const { w, h } = monitorResolution(t);
+    const key = `${t.id}|${w}x${h}`;
+    if (existing.has(key)) return existing.get(key);
+    const tile = document.createElement('button');
+    tile.type = 'button';
+    tile.className = 'monitor-grid-tile';
+    tile.dataset.key = key;
+    tile.title = `Show ${t.name} alone`;
     const header = document.createElement('div');
     header.className = 'monitor-grid-tile-header';
-    header.textContent = o.name;
+    header.textContent = t.name;
     tile.appendChild(header);
-    if (o.type !== 'obs' && typeof buildOutputLayersSummary === 'function') {
-      tile.appendChild(buildOutputLayersSummary(o.id, layersMap));
-    }
-    const body = document.createElement('div');
-    body.className = 'monitor-grid-tile-body';
-    // Owner: "should be whatever goes to the screen of each display" — an
-    // output that's actually OFF shows nothing real, so the tile must say
-    // that plainly rather than showing the same live content every other
-    // enabled output happens to share right now.
-    if (!enabled) {
-      body.textContent = 'Output is off';
-      body.classList.add('is-empty');
-    } else if (hasContent && (want.bible !== false || want.slide !== false)) {
-      body.innerHTML = `<div class="monitor-grid-tile-ref">${escapeHtml(ref)}</div><div class="monitor-grid-tile-text">${escapeHtml(text)}</div>`;
-    } else {
-      body.textContent = 'Nothing on display';
-      body.classList.add('is-empty');
-    }
-    tile.appendChild(body);
-    host.appendChild(tile);
+    if (t.type !== 'main' && typeof buildOutputLayersSummary === 'function') tile.appendChild(buildOutputLayersSummary(t.id, layersMap));
+    tile.appendChild(buildMonitorFrame(t));
+    tile.addEventListener('click', () => selectMonitorTarget(t.id));
+    return tile;
   });
+  [...host.children].filter(t => !tiles.includes(t)).forEach(disposeMonitorFrames);
+  host.replaceChildren(...tiles);
+  host.querySelectorAll('.monitor-grid-tile').forEach(tile => tile.classList.toggle('is-selected', tile.dataset.key.startsWith(`${livePreviewOutputId}|`)));
 }
-document.getElementById('monitor-grid-toggle-btn')?.addEventListener('click', () => {
-  monitorGridActive = !monitorGridActive;
+
+function setMonitorGrid(on) {
+  monitorGridActive = on;
   const btn = document.getElementById('monitor-grid-toggle-btn');
-  const single = document.getElementById('slide-preview');
-  const grid = document.getElementById('outputs-monitor-grid');
-  btn?.classList.toggle('active', monitorGridActive);
-  btn?.setAttribute('aria-pressed', String(monitorGridActive));
-  single?.classList.toggle('hidden', monitorGridActive);
-  grid?.classList.toggle('hidden', !monitorGridActive);
-  clearInterval(_monitorGridRefreshTimer);
-  if (monitorGridActive) {
-    renderMonitorGrid();
-    // Light polling refresh rather than hooking into every place preview
-    // content can change (sends, clears, range advances, layer toggles) —
-    // simpler and can't silently miss a call site; the grid is cheap to
-    // rebuild (a handful of DOM nodes from data already in memory).
-    _monitorGridRefreshTimer = setInterval(renderMonitorGrid, 2000);
-  }
-});
+  btn?.classList.toggle('active', on);
+  btn?.setAttribute('aria-pressed', String(on));
+  document.getElementById('outputs-monitor-grid')?.classList.toggle('hidden', !on);
+  if (on) renderMonitorGrid();
+  else { const g = document.getElementById('outputs-monitor-grid'); disposeMonitorFrames(g); g?.replaceChildren(); }   // stop the copies while hidden
+  showMonitorSelection();
+}
+document.getElementById('monitor-grid-toggle-btn')?.addEventListener('click', () => setMonitorGrid(!monitorGridActive));
+
+// Pop the monitor out: what it shows now (Main or one output) in its own
+// normal window — title bar, resizable, movable to any screen. Same live copy
+// of the output page the monitor uses; one pop-out at a time.
+const MONITOR_WINDOW_LABEL = 'kairo-monitor';
+async function openMonitorWindow() {
+  const target = monitorTargets().find(t => t.id === livePreviewOutputId) || MONITOR_MAIN;
+  const { w, h } = monitorResolution(target);
+  const width = 960, height = Math.round(width * h / w);
+  const path = `/display.html?output=${encodeURIComponent(target.type === 'main' ? 'main' : target.id)}&monitor=1`;
+  const title = `KAIRO Monitor — ${target.name}`;
+  const WebviewWindow = window.__TAURI__?.webviewWindow?.WebviewWindow;
+  if (!WebviewWindow) { window.open(path, MONITOR_WINDOW_LABEL, `width=${width},height=${height}`); return; }
+  try {
+    const existing = await WebviewWindow.getByLabel(MONITOR_WINDOW_LABEL);
+    if (existing) { await existing.close(); await new Promise(r => setTimeout(r, 150)); }
+    new WebviewWindow(MONITOR_WINDOW_LABEL, {
+      url: location.origin + path, title, width, height,
+      resizable: true, decorations: true, alwaysOnTop: false, fullscreen: false,
+    });
+  } catch (err) { console.warn('[KAIRO] Monitor window failed:', err); }
+}
+document.getElementById('monitor-popout-btn')?.addEventListener('click', openMonitorWindow);
 
 document.getElementById('live-preview-output-select')?.addEventListener('change', (e) => {
   livePreviewOutputId = e.target.value;
@@ -621,6 +693,7 @@ document.getElementById('live-preview-output-select')?.addEventListener('change'
   // switching which output we're monitoring — an item with its own theme
   // stays exactly as sent, same guard applyOutputThemes() already uses.
   repaintPreviewWithOutputLook();
+  if (monitorGridActive) setMonitorGrid(false); else showMonitorSelection();
 });
 
 // ProPresenter-style song section annotation — mirrors slide_import.js's
@@ -1876,8 +1949,6 @@ async function loadSettings() {
     if (autoSendSettings)  autoSendSettings.checked  = settings.autoSend  !== false;
     updateAutoDeployBadge();
     if (showConfSettings)  showConfSettings.checked   = settings.showConfidence !== false;
-    const sensitivitySel = document.getElementById('detection-sensitivity');
-    if (sensitivitySel) sensitivitySel.value = settings.detectionSensitivity || 'balanced';
     // Restore toggle-group state from persisted settings
     syncToggleGroup('speech-engine-toggle', 'engine', settings.speechEngine || 'deepgram');
     initCustomSelects();
@@ -2083,7 +2154,6 @@ async function saveCurrentSettings() {
     translation:       translationSettings?.value || 'KJV',
     autoSend:          autoSendSettings?.checked  !== false,
     showConfidence:    showConfSettings?.checked   !== false,
-    detectionSensitivity: document.getElementById('detection-sensitivity')?.value || settings.detectionSensitivity || 'balanced',
     // obsEnabled/obsUrl/obsPassword/obsTextSource are NOT collected here —
     // the OBS detail panel (Outputs master-detail redesign) self-persists
     // each field immediately on change, the same pattern NDI/Syphon
@@ -2210,13 +2280,95 @@ setInterval(pollOBSStatus, 5000);
 function closeModal() { settingsModal?.classList.add('hidden'); }
 
 // ── Scripture Search ───────────────────────────────────────────────────────
-scriptureSearchInput?.addEventListener('keydown', (e) => { if (e.key === 'Enter') runSearch(); });
-scriptureSearchInput?.addEventListener('input', () => {
-  if (scriptureSearchClear) scriptureSearchClear.style.display = scriptureSearchInput.value ? 'flex' : 'none';
+// From the 3rd word typed, verses that contain or mean the phrase appear in a
+// dropdown under the field (server: /api/search/suggest — exact order, the
+// same words in any order, or the same meaning; only what clearly identifies
+// a verse). One click, or arrows + Enter, sends it to the screen.
+const scriptureSuggest = document.getElementById('scripture-suggest');
+const SUGGEST_MIN_WORDS = 3;
+const SUGGEST_DEBOUNCE_MS = 220;
+const SUGGEST_WHY = { reference: 'reference', exact: 'exact phrase', words: 'same words', meaning: 'same meaning' };
+let suggestSeq = 0, suggestTimer = null, suggestItems = [], suggestActive = -1;
+
+function hideSuggest() {
+  suggestSeq++;                     // any response still in flight is stale now
+  clearTimeout(suggestTimer);
+  suggestItems = []; suggestActive = -1;
+  if (scriptureSuggest) { scriptureSuggest.hidden = true; scriptureSuggest.replaceChildren(); }
+}
+
+function renderSuggest(list) {
+  suggestItems = list; suggestActive = -1;
+  if (!scriptureSuggest) return;
+  scriptureSuggest.replaceChildren(...list.map((v, i) => {
+    const item = document.createElement('button');
+    item.type = 'button';
+    item.className = 'cs-suggest-item';
+    item.setAttribute('role', 'option');
+    const head = document.createElement('div'); head.className = 'cs-suggest-head';
+    const ref = document.createElement('span'); ref.className = 'cs-suggest-ref'; ref.textContent = v.reference;
+    const why = document.createElement('span'); why.className = 'cs-suggest-why'; why.textContent = SUGGEST_WHY[v.match] || '';
+    const text = document.createElement('div'); text.className = 'cs-suggest-text'; text.textContent = cleanVerseText(v.text || '');
+    head.append(ref, why); item.append(head, text);
+    // mousedown, not click: fires before the field's blur hides the list.
+    item.addEventListener('mousedown', (e) => { e.preventDefault(); sendSuggestion(i); });
+    return item;
+  }));
+  scriptureSuggest.hidden = !list.length;
+}
+
+function highlightSuggest(i) {
+  suggestActive = i;
+  scriptureSuggest?.querySelectorAll('.cs-suggest-item').forEach((el, k) => el.classList.toggle('active', k === i));
+  scriptureSuggest?.children[i]?.scrollIntoView({ block: 'nearest' });
+}
+
+function sendSuggestion(i) {
+  const v = suggestItems[i];
+  if (!v) return;
+  hideSuggest();
+  showInViewer([v], 'search', 1.0);
+  sendVerseToServer(v);
+  scriptureSearchInput?.focus();
+  scriptureSearchInput?.select();
+}
+
+async function fetchSuggest(query) {
+  const seq = ++suggestSeq;
+  try {
+    const r = await fetch(`${SERVER}/api/search/suggest`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query }),
+    });
+    const d = await r.json();
+    if (seq !== suggestSeq) return;   // the operator kept typing
+    renderSuggest(d.results || []);
+  } catch { if (seq === suggestSeq) renderSuggest([]); }
+}
+
+scriptureSearchInput?.addEventListener('keydown', (e) => {
+  const open = scriptureSuggest && !scriptureSuggest.hidden && suggestItems.length;
+  if (e.key === 'ArrowDown' && open) { e.preventDefault(); highlightSuggest((suggestActive + 1) % suggestItems.length); return; }
+  if (e.key === 'ArrowUp' && open) { e.preventDefault(); highlightSuggest((suggestActive - 1 + suggestItems.length) % suggestItems.length); return; }
+  if (e.key === 'Escape' && open) { e.preventDefault(); hideSuggest(); return; }
+  if (e.key === 'Enter') {
+    if (open && suggestActive >= 0) { e.preventDefault(); sendSuggestion(suggestActive); return; }
+    hideSuggest();
+    runSearch();
+  }
 });
+scriptureSearchInput?.addEventListener('input', () => {
+  const value = scriptureSearchInput.value;
+  if (scriptureSearchClear) scriptureSearchClear.style.display = value ? 'flex' : 'none';
+  clearTimeout(suggestTimer);
+  if (value.trim().split(/\s+/).filter(Boolean).length < SUGGEST_MIN_WORDS) { hideSuggest(); return; }
+  suggestTimer = setTimeout(() => fetchSuggest(value.trim()), SUGGEST_DEBOUNCE_MS);
+});
+scriptureSearchInput?.addEventListener('blur', () => setTimeout(hideSuggest, 120));
 scriptureSearchClear?.addEventListener('click', () => {
   if (scriptureSearchInput) scriptureSearchInput.value = '';
   if (scriptureSearchClear) scriptureSearchClear.style.display = 'none';
+  hideSuggest();
 });
 
 async function runSearch() {

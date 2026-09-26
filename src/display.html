@@ -123,6 +123,8 @@
         }
 
         #conn-status.visible { opacity: 1; }
+        /* A monitor copy inside the operator window shows only the output itself. */
+        .is-monitor #conn-status { display: none; }
         #conn-status.reconnecting { color: rgba(245, 158, 11, 0.6); }
         #conn-status.connected { color: rgba(255, 255, 255, 0.15); }
 
@@ -199,6 +201,12 @@
 
     // ── URL params (legacy fallback) ───────────────────────────────────────
     const params      = new URLSearchParams(location.search);
+    // A live copy of this output inside the operator's monitor (app.js): it
+    // renders exactly what the real screen shows, but stays silent — no media
+    // status reports, no audio, never touches the app window.
+    const MONITOR     = params.get('monitor') === '1';
+    if (MONITOR) document.documentElement.classList.add('is-monitor');
+    function sendToServer(msg) { if (MONITOR) return; try { ws?.send(JSON.stringify(msg)); } catch {} }
     const legacyLayout  = params.get('layout') || 'fullscreen';
     const legacyOpacity = parseInt(params.get('opacity') || '80', 10) / 100;
 
@@ -1299,7 +1307,7 @@
         // looking broken instead of disappearing. One explicit "here's what
         // the layer holds now" message covers every path (clear, image, or
         // video) instead of only the video side ever speaking up.
-        if (!src) { try { ws?.send(JSON.stringify({ type: 'media-status', kind: 'none' })); } catch {} return; }
+        if (!src) { sendToServer({ type: 'media-status', kind: 'none' }); return; }
         // object-fit accepts the literal 'fill' keyword natively (unlike
         // background-size, which needs the 100%/100% translation elsewhere
         // in this file) — inline style here wins over the CSS default
@@ -1327,10 +1335,10 @@
             v.playsInline = true;
             v.style.objectFit = objectFit;
             if (motion === 'kenburns') v.style.animation = 'kairo-kenburns 18s ease-in-out infinite alternate';
-            if (mediaSinkId && typeof v.setSinkId === 'function') {
+            if (!MONITOR && mediaSinkId && typeof v.setSinkId === 'function') {
                 v.setSinkId(mediaSinkId).catch(() => {});
             }
-            if (!mediaMuted) {
+            if (!mediaMuted && !MONITOR) {
                 v.addEventListener('playing', () => { v.muted = false; }, { once: true });
             }
             // Throttled status reports so the operator's window can drive a
@@ -1357,23 +1365,18 @@
             img.style.objectFit = objectFit;
             if (motion === 'kenburns') img.style.animation = 'kairo-kenburns 18s ease-in-out infinite alternate';
             mediaLayer.appendChild(img);
-            try { ws?.send(JSON.stringify({ type: 'media-status', kind: 'image' })); } catch {}
+            sendToServer({ type: 'media-status', kind: 'image' });
         }
     }
 
     function reportMediaStatus(v) {
-        try {
-            ws?.send(JSON.stringify({
-                type: 'media-status', kind: 'video',
-                currentTime: v.currentTime, duration: v.duration || 0, paused: v.paused,
-            }));
-        } catch {}
+        sendToServer({ type: 'media-status', kind: 'video', currentTime: v.currentTime, duration: v.duration || 0, paused: v.paused });
     }
 
     function applyMediaControl(action, value) {
         const v = currentMediaVideo();
         if (action === 'mute') { mediaMuted = true; if (v) v.muted = true; }
-        else if (action === 'unmute') { mediaMuted = false; if (v) v.muted = false; }
+        else if (action === 'unmute') { mediaMuted = false; if (v && !MONITOR) v.muted = false; }
         else if (action === 'play') { if (v) v.play().catch(() => {}); }
         else if (action === 'pause') { if (v) v.pause(); }
         else if (action === 'seek') { if (v && typeof value === 'number') v.currentTime = value; }
@@ -2003,6 +2006,7 @@
     // gets a compositing pass to synchronize against, so rAF here would
     // simply never fire (confirmed the hard way on the main window).
     setTimeout(() => {
+        if (MONITOR) return;   // a monitor copy lives inside the operator window
         const w = window.__TAURI__?.window?.getCurrentWindow?.();
         if (!w) return;
         w.show().catch(() => {});
