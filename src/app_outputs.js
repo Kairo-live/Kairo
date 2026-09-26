@@ -1127,9 +1127,7 @@ async function applyOutputThemes() {
   // fallback (renderPreviewScreen's primaryOutputLook()) is now stale the
   // instant the assignment changes. Re-paint it immediately instead of
   // leaving the operator staring at yesterday's theme until the next send.
-  if (!lastPreviewHadOwnLook && previewVerseText && previewVerseText.textContent !== 'Nothing on display') {
-    renderPreviewScreen(previewVerseText.textContent, previewVerseRef?.textContent || '', null);
-  }
+  repaintPreviewWithOutputLook();
 }
 
 // ── Output Looks — per-output Bible/Slide/Media/Timer visibility ───────────

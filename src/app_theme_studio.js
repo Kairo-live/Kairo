@@ -882,8 +882,14 @@ function saveLooks() {
     console.warn('[KAIRO] saveLooks failed (storage quota?):', err.message);
     return;
   }
-  // Keep the Settings pickers and every live output in step with the edit.
-  try { renderOutputsPane(); applyOutputThemes(); } catch (err) { console.warn('[KAIRO] outputs refresh after saveLooks failed:', err); }
+  // Keep every live output in step with the edit (by design: an output showing
+  // this theme follows it). The Outputs pane itself is only rebuilt while
+  // Settings is actually open — rebuilding hidden DOM on every autosave burst
+  // was pure waste.
+  try {
+    if (settingsModal && !settingsModal.classList.contains('hidden')) renderOutputsPane();
+    applyOutputThemes();
+  } catch (err) { console.warn('[KAIRO] outputs refresh after saveLooks failed:', err); }
 }
 function deepClone(o) { return JSON.parse(JSON.stringify(o)); }
 

@@ -1,11 +1,11 @@
 // KAIRO — Regression test for the 'drop' target bypass bug.
 //
-// Real incident (live test, 2026-09-07): with useUnifiedScoring=true, the
-// new B+D+A model correctly classifies many weak detections as 'drop' (its
-// OWN, stricter-than-'suggestions' floor) — but server.js's only score gate
-// only ever fired `if (target === 'suggestions' && topScore < ...)`. Once
-// useUnifiedScoring overwrote `target` to 'drop', that check's own
-// condition was simply false, so nothing rejected it — execution fell
+// Real incident (live test, 2026-09-07): the B+D+A model correctly classifies
+// many weak detections as 'drop' (its OWN, stricter-than-'suggestions' floor)
+// — but server.js's only score gate only ever fired
+// `if (target === 'suggestions' && topScore < ...)`. Once the model set
+// `target` to 'drop', that check's own condition was simply false, so
+// nothing rejected it — execution fell
 // straight through to a real broadcast() call regardless of how low the
 // score was. Confirmed directly: the owner's own Candidates panel
 // screenshot showed 33%/39%/40% entries that should never have been
@@ -28,13 +28,11 @@ if (!process.env.KAIRO_EVAL_MODE) {
   process.exit(1);
 }
 
-// Force useUnifiedScoring=true for this test regardless of the real
-// settings.json, via an isolated app-data dir — same pattern the eval
-// harness itself uses, so this test doesn't depend on (or mutate) the
-// owner's actual settings.
+// Isolated app-data dir — same pattern the eval harness itself uses, so this
+// test doesn't depend on (or mutate) the owner's actual settings.
 const appDataDir = path.join(require('os').tmpdir(), `kairo-drop-target-test-${Date.now()}`);
 fs.mkdirSync(appDataDir, { recursive: true });
-fs.writeFileSync(path.join(appDataDir, 'settings.json'), JSON.stringify({ useUnifiedScoring: true }));
+fs.writeFileSync(path.join(appDataDir, 'settings.json'), JSON.stringify({}));
 process.env.KAIRO_APP_DATA_DIR = appDataDir;
 
 const server = require('./server');
@@ -58,7 +56,7 @@ async function main() {
   server.spawnDetectionWorker();
   await server.workerReadyPromise;
 
-  await test('a weak, unrelated verbatim near-miss (well below SUGGESTION_MIN_SCORE) never reaches the Candidates panel under useUnifiedScoring=true', async () => {
+  await test('a weak, unrelated verbatim near-miss (well below SUGGESTION_MIN_SCORE) never reaches the Candidates panel=true', async () => {
     server.resetDetectionSession();
     const broadcasts = [];
     server.onBroadcast((msg) => { if (msg.type === 'detection') broadcasts.push(msg); });

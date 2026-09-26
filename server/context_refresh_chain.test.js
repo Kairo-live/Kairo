@@ -29,7 +29,7 @@ if (!process.env.KAIRO_EVAL_MODE) {
 
 const appDataDir = path.join(require('os').tmpdir(), `kairo-context-refresh-test-${Date.now()}`);
 fs.mkdirSync(appDataDir, { recursive: true });
-fs.writeFileSync(path.join(appDataDir, 'settings.json'), JSON.stringify({ useUnifiedScoring: true }));
+fs.writeFileSync(path.join(appDataDir, 'settings.json'), JSON.stringify({}));
 process.env.KAIRO_APP_DATA_DIR = appDataDir;
 
 const server = require('./server');

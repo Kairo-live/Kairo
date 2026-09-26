@@ -31,7 +31,9 @@ async function loadAuthToken(attempts = 5, delayMs = 200) {
     if (inv) {
       try {
         AUTH_TOKEN = await inv('get_server_token');
-        if (AUTH_TOKEN) return;
+        // The bridge answered. An empty token means the server runs without
+        // auth (dev) — retrying just delayed every window's connect by ~3s.
+        return;
       } catch (err) {
         if (i === attempts - 1) {
           console.error('[KAIRO] Could not load auth token from Tauri after retries:', err?.message || err);

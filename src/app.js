@@ -9,14 +9,11 @@
 const SERVER = `${location.protocol}//${location.host}`;
 const WS_URL = `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}`;
 
-// The id of Kairo's one non-removable output (see outputScreenMap/extraDisplays
-// far below, ~line 6067) — hoisted up here because wireExternalDisplayStatus's
-// IIFE calls refresh() synchronously at load, well before that later const
-// would otherwise execute. A `const` isn't hoisted the way `var`/`function`
-// are, so referencing it before its original declaration line threw a
-// ReferenceError on every single launch (confirmed already broken in the
-// last commit, not something introduced just now) — silently killing the
-// "auto-reopen display on launch" feature's very first run every time.
+// The id of Kairo's one non-removable output. Declared first because boot-time
+// code (app_startup.js's wireExternalDisplayStatus, the outputs code in
+// app_outputs.js) reads it — referencing a `const` before its declaration line
+// has run throws, which once silently killed the "auto-reopen display on
+// launch" feature on every launch.
 const PRIMARY_DISPLAY = 'display-1';
 
 // Auth token shared between Tauri and the Node sidecar. Fetched once at boot
@@ -90,9 +87,9 @@ let settings       = {};
 // server at least once. loadSettings() only runs inside ws.onopen (after
 // auth + the WebSocket connects), so `settings` stays `{}` for a real
 // stretch of app startup — code that reads settings-derived state (like
-// wireExternalDisplayStatus's auto-reopen below) must wait for this, not
-// just for its own script line to run. See that IIFE's own comment for the
-// real incident this flag fixes.
+// wireExternalDisplayStatus's auto-reopen, in app_startup.js) must wait for
+// this, not just for its own script line to run. See that IIFE's own comment
+// for the real incident this flag fixes.
 let settingsLoaded = false;
 let elapsedInterval = null;
 let startTime      = null;
@@ -613,13 +610,7 @@ document.getElementById('live-preview-output-select')?.addEventListener('change'
   // Only the output-default fallback (no item-specific theme) is stale when
   // switching which output we're monitoring — an item with its own theme
   // stays exactly as sent, same guard applyOutputThemes() already uses.
-  if (!lastPreviewHadOwnLook && previewVerseText) {
-    renderPreviewScreen(
-      previewVerseText.textContent === 'Nothing on display' ? '' : previewVerseText.textContent,
-      previewVerseRef?.textContent || '',
-      null
-    );
-  }
+  repaintPreviewWithOutputLook();
 });
 
 // ProPresenter-style song section annotation — mirrors slide_import.js's
@@ -640,6 +631,37 @@ document.getElementById('live-preview-output-select')?.addEventListener('change'
 previewSectionBadge?.addEventListener('click', () => window.KairoService?.cycleSectionLabel?.());
 
 let lastPreviewPaintSig = null;
+// Everything renderPreviewScreen last painted, so an output-look change can
+// repaint it faithfully (translation, image, timer, label) — see
+// repaintPreviewWithOutputLook. Null after a clear.
+let lastPreviewArgs = null;
+
+// Long strings (embedded data-URI images, long translations) enter the paint
+// signature as a full-content hash instead of verbatim: cheap to compare, and
+// memoized per string so an unchanged multi-MB look costs a Map lookup rather
+// than a rescan on every render.
+const previewStrHash = new Map();
+function hashLongString(v) {
+  let h = previewStrHash.get(v);
+  if (h === undefined) {
+    let x = 0x811c9dc5;
+    for (let i = 0; i < v.length; i++) { x ^= v.charCodeAt(i); x = Math.imul(x, 0x01000193); }
+    h = `${v.length}:${(x >>> 0).toString(36)}`;
+    if (previewStrHash.size > 64) previewStrHash.clear();
+    previewStrHash.set(v, h);
+  }
+  return h;
+}
+
+// Re-apply the output's default look to whatever the preview is showing (the
+// operator switched which output it monitors, or that output's theme changed).
+// Content sent with its own theme stays exactly as sent.
+function repaintPreviewWithOutputLook() {
+  if (lastPreviewHadOwnLook || !lastPreviewArgs) return;
+  const a = lastPreviewArgs;
+  renderPreviewScreen(a.text, a.reference, null, a.translatedText, a.image, a.fit, a.styleByLayerId, a.timerText, a.sectionLabel);
+}
+
 function renderPreviewScreen(text, reference, look, translatedText = '', image = null, fit = 'contain', styleByLayerId = {}, timerText = '', sectionLabel = '') {
   const effectiveLook = look || primaryOutputLook();
   const newPreviewKey = `${reference || ''} ${text || ''}`;
@@ -651,11 +673,12 @@ function renderPreviewScreen(text, reference, look, translatedText = '', image =
   // previewRenderGen so an in-flight transition of the same content isn't
   // cancelled. lastPreviewKey is reset to ' ' by the clear path, so a
   // clear-then-resend of the same verse still repaints.
-  // Long strings (embedded data-URI backgrounds) are reduced to length+ends so
-  // the signature stays cheap however large the look is.
   const paintSig = JSON.stringify(
     [translatedText, image, fit, styleByLayerId, timerText, sectionLabel, effectiveLook],
-    (_k, v) => (typeof v === 'string' && v.length > 256 ? `${v.length}:${v.slice(0, 64)}${v.slice(-64)}` : v));
+    (_k, v) => (typeof v === 'string' && v.length > 256 ? hashLongString(v) : v));
+  // Recorded even when the paint is skipped: they describe the latest request.
+  lastPreviewHadOwnLook = !!look;
+  lastPreviewArgs = { text, reference, translatedText, image, fit, styleByLayerId, timerText, sectionLabel };
   if (newPreviewKey === lastPreviewKey && paintSig === lastPreviewPaintSig) return;
   lastPreviewPaintSig = paintSig;
   const myGen = ++previewRenderGen;
@@ -668,7 +691,6 @@ function renderPreviewScreen(text, reference, look, translatedText = '', image =
   // handling display.html's renderStage/showVerse already do.
   const contentChanged = newPreviewKey !== lastPreviewKey;
   lastPreviewKey = newPreviewKey;
-  lastPreviewHadOwnLook = !!look;
   const themed = document.getElementById('slide-preview-themed');
   const plain  = document.querySelector('#slide-preview .live-screen-inner');
   // Keep the plain text nodes current even in themed mode (just hidden) — the
@@ -2315,6 +2337,7 @@ function clearPreviewScreen() {
   if (previewVerseText) previewVerseText.textContent = mediaShowing ? '' : 'Nothing on display';
   if (previewVerseRef)  previewVerseRef.textContent  = '';
   lastPreviewKey = ' ';
+  lastPreviewArgs = null;
   lastPreviewHadOwnLook = false;
 }
 

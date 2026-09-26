@@ -19,6 +19,22 @@ const CHAPTER_KEYWORD_MIN_IDF = 14;
 const CHAPTER_KEYWORD_MIN_MARGIN = 2;
 const RE_SPACES = /\s+/;
 
+// The text after the LAST spoken mention of this book, so a number said before
+// the citation can never be taken as its verse. Matches the singular spoken
+// form too ("Psalm 91" for Psalms). If the book was named through an alias this
+// can't see, anchor on the chapter number instead; with neither, there is no
+// safe anchor and the whole text is used.
+function textAfterBookMention(text, book, chapter) {
+  const last = String(book).toLowerCase().split(' ').pop();
+  const stem = last.replace(/s$/, '');
+  const esc = (w) => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const find = (re) => { let m, end = -1; while ((m = re.exec(text)) !== null) end = m.index + m[0].length; return end; };
+  const afterBook = find(new RegExp(`\\b${esc(stem)}s?\\b`, 'gi'));
+  if (afterBook >= 0) return text.slice(afterBook);
+  const afterChapter = find(new RegExp(`\\b${chapter}\\b`, 'g'));
+  return afterChapter >= 0 ? text.slice(afterChapter) : text;
+}
+
 function createChapterResolver({ workerCall, getRecentText }) {
   // Rank one chapter's verses against spoken text; return the winner only if
   // it is both strong enough and clearly ahead of the runner-up.
@@ -54,9 +70,7 @@ function createChapterResolver({ workerCall, getRecentText }) {
       const chapterVerses = msg.results || [];
       if (!chapterVerses.length) return [];
 
-      const bookWord = String(book).toLowerCase().split(' ').pop();
-      const mentionAt = text.toLowerCase().lastIndexOf(bookWord);
-      const afterMention = mentionAt >= 0 ? text.slice(mentionAt + bookWord.length) : text;
+      const afterMention = textAfterBookMention(text, book, chapter);
       const scanText = afterMention.split(RE_SPACES).filter(Boolean).slice(0, 40).join(' ');
       const callout = /(?:^|[.!?;,]\s+)(\d{1,3})\s*[,.](?=\s|$)/g;
       let cm;
@@ -73,4 +87,4 @@ function createChapterResolver({ workerCall, getRecentText }) {
   return { pickChapterVerseByIdf, resolveInvalidVerseByContext, resolveChapterByKeywords };
 }
 
-module.exports = { createChapterResolver, CHAPTER_KEYWORD_MIN_IDF, CHAPTER_KEYWORD_MIN_MARGIN };
+module.exports = { createChapterResolver, textAfterBookMention, CHAPTER_KEYWORD_MIN_IDF, CHAPTER_KEYWORD_MIN_MARGIN };

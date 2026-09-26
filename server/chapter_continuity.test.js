@@ -29,12 +29,11 @@ if (!process.env.KAIRO_EVAL_MODE) {
 
 const appDataDir = path.join(require('os').tmpdir(), `kairo-chapter-continuity-test-${Date.now()}`);
 fs.mkdirSync(appDataDir, { recursive: true });
-// useUnifiedScoring: true — matches the real app's actual settings.json.
 // With it left off (the default), a legacy pre-unified-scoring gate
 // (`target === 'suggestions' && topScore < SUGGESTION_MIN_SCORE`) rejects a
 // weak candidate outright BEFORE this feature's own check ever runs,
 // which doesn't reflect how the live app actually behaves.
-fs.writeFileSync(path.join(appDataDir, 'settings.json'), JSON.stringify({ useUnifiedScoring: true }));
+fs.writeFileSync(path.join(appDataDir, 'settings.json'), JSON.stringify({}));
 process.env.KAIRO_APP_DATA_DIR = appDataDir;
 
 const server = require('./server');

@@ -678,3 +678,25 @@ test('a fresh chapter-keyword guess for a known-collision pair is not capped (ex
   const { finalScore } = scoreCandidate(candidate, 'chapter-keyword', {}, { activeContext: active, ledger, now: T0 + 100 });
   assert.ok(finalScore >= VIEWER_MIN_SCORE, `"Jeremiah 17" was just named — must not be capped by the collision guard, got ${finalScore}`);
 });
+
+test('the range cap is lifted when the server has found the speech matches the candidate better than the range (a real cross-reference)', () => {
+  const ledger = new EvidenceLedger();
+  const active = { book: 'Joel', chapter: 2, verse: 5, t: T0 };
+  const candidate = { book: 'Daniel', chapter: 11, verse: 32 };
+  const hit = streamHit('Daniel', 11, 32, 7, true);
+  const capped = scoreCandidate(candidate, hit.method, hit.rawResult, { activeContext: active, ledger, now: T0 + 1000, rangeActiveBook: 'Joel' });
+  assert.ok(capped.finalScore < VIEWER_MIN_SCORE, 'book-only rule: capped');
+  const free = scoreCandidate(candidate, hit.method, hit.rawResult, { activeContext: active, ledger, now: T0 + 1000, rangeActiveBook: 'Joel', rangeCollision: false });
+  assert.ok(free.finalScore >= VIEWER_MIN_SCORE, `a cross-reference the speech favours must not be capped, got ${free.finalScore}`);
+});
+
+test('a SAME-book near-duplicate outside the range is capped when the speech favours the range (Exodus 10:16 during a cited Exodus 12:31-33)', () => {
+  const ledger = new EvidenceLedger();
+  const active = { book: 'Exodus', chapter: 12, verse: 31, t: T0 };
+  const candidate = { book: 'Exodus', chapter: 10, verse: 16 };
+  const hit = streamHit('Exodus', 10, 16, 7, true);
+  const r = scoreCandidate(candidate, hit.method, hit.rawResult, { activeContext: active, ledger, now: T0 + 1000, rangeActiveBook: 'Exodus', rangeCollision: true });
+  assert.ok(r.finalScore < VIEWER_MIN_SCORE, `the range's own text matched to a same-book twin must not take the screen, got ${r.finalScore}`);
+  const cont = scoreCandidate({ book: 'Exodus', chapter: 12, verse: 34 }, hit.method, hit.rawResult, { activeContext: active, ledger, now: T0 + 1000, rangeActiveBook: 'Exodus', rangeCollision: false });
+  assert.ok(cont.finalScore >= VIEWER_MIN_SCORE, 'reading on past the range (speech favours the new verse) still goes out');
+});

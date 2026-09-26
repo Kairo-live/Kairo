@@ -10,7 +10,7 @@ const fs = require('fs'), os = require('os'), path = require('path');
 if (!process.env.KAIRO_EVAL_MODE) { console.error('Set KAIRO_EVAL_MODE=1'); process.exit(1); }
 const d = path.join(os.tmpdir(), `kairo-ensemble-test-${Date.now()}`);
 fs.mkdirSync(d, { recursive: true });
-fs.writeFileSync(path.join(d, 'settings.json'), JSON.stringify({ useUnifiedScoring: true }));
+fs.writeFileSync(path.join(d, 'settings.json'), JSON.stringify({}));
 process.env.KAIRO_APP_DATA_DIR = d;
 const server = require('./server');
 const { referenceContext } = require('./reference_parser');
@@ -59,6 +59,16 @@ const wait = ms => new Promise(r => setTimeout(r, ms));
     await server.handleSecondaryFinal('When you understand who you are in Christ the devils become afraid.', 's1');
     await wait(200);
     assert.equal(out.length, 0, JSON.stringify(out));
+  });
+
+  await test('an AMBIGUOUS primary citation the primary never sent does not stop the extra streams from promoting the resolved book', async () => {
+    const out = fresh();
+    await server.handleTranscriptSegment('Timothy three verse sixteen.', true, 0.9, true);   // no context -> held back
+    await wait(200);
+    await server.handleSecondaryFinal('Second Timothy three verse sixteen.', 's1');
+    await server.handleSecondaryFinal('Second Timothy three verse sixteen.', 's2');
+    await wait(300);
+    assert.ok(out.some(o => o.ref === '2 Timothy 3:16' && o.target === 'viewer'), JSON.stringify(out));
   });
 
   console.log(`\n${pass} passed, ${fail} failed`);

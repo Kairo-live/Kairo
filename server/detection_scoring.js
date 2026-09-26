@@ -543,8 +543,17 @@ function scoreCandidate(candidate, method, rawResult, ctx) {
   // a different-book switch, closing the collision window without
   // touching the Genesis 26:14 / Joshua 1:8 cases that motivated the
   // exemption in the first place (both were same-or-no-range situations).
-  const inDifferentBookDuringRange =
-    ctx.rangeActiveBook && candidate.book !== ctx.rangeActiveBook;
+  // ctx.rangeCollision (server.js), set for a candidate OUTSIDE the active
+  // range: true when what was just said matches a range verse at least as
+  // well as this candidate (the range's own text matched to a near-duplicate:
+  // Jeremiah 17:8 during Psalm 1, Exodus 10:16 during a cited Exodus
+  // 12:31-33), false when it matches the candidate better (a real
+  // cross-reference quoted mid-reading: Daniel 11:32 during Joel 2).
+  // Undefined keeps the original book-only rule. (Name kept for history: it
+  // now covers same-book near-duplicates too.)
+  const inDifferentBookDuringRange = !!ctx.rangeActiveBook && (
+    ctx.rangeCollision === true
+    || (ctx.rangeCollision === undefined && candidate.book !== ctx.rangeActiveBook));
   // A genuine re-detection of an already-shown verse (same book+chapter,
   // behind the active verse, alreadyShown true) used to be carved out of
   // this exemption entirely — first as a decaying penalty (bug #12: "Daniel

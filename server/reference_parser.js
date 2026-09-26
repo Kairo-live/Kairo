@@ -484,6 +484,15 @@ function matchBookAt(words, i) {
         const d = cachedLevenshtein(candidate, alias);
         if (d <= maxDist && d < bestDist) { bestDist = d; bestAlias = alias; }
       }
+      // "number" is an everyday word one edit away from "numbers", and sermons
+      // are full of "point number two" / "the number one thing". Only a verse
+      // after the chapter ("number six verse twenty four", "number six twenty
+      // four") makes it the book; an enumeration stays plain English.
+      if (bestAlias === 'numbers' && candidate === 'number') {
+        const after = words[i + 2];
+        const verseFollows = after === 'verse' || after === 'verses' || /^\d+$/.test(after || '') || WORD_TO_NUM[after] !== undefined;
+        if (!verseFollows) bestAlias = null;
+      }
       if (bestAlias) { bookName = BOOK_ALIASES[bestAlias]; consumed = 1; }
     }
   }
@@ -1225,6 +1234,12 @@ function resolvePartialReference(text, { allowBareNumber = true } = {}) {
     for (let i = 0; i < words.length && i <= 2; i++) {
       const nRes = consumeNumber(words, i);
       if (!nRes || i + nRes.consumed !== words.length) continue;
+      // A book name right before the number makes it a CHAPTER of that book,
+      // not a bare verse of the active one: "John fourteen" after 1 John 4:16
+      // is John 14, never 1 John 4:14 (real eval incident, 2026-09-26). Any
+      // alias counts here, including the ambiguous ones ("john", "acts") that
+      // detectBookMentions refuses to trust on their own.
+      if (i > 0 && (BOOK_ALIASES[words[i - 1]] || NUMBERED_BOOK_VARIANTS[words[i - 1]])) continue;
       if (nRes.consumed === 1 && AMBIGUOUS_HOMOPHONES.has(words[i])) continue;
       if (nRes.consumed === 1 && words[i] === 'one' && words.length > 1) continue;
       const verseStart = nRes.value;

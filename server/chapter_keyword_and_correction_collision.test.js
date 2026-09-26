@@ -32,7 +32,7 @@ if (!process.env.KAIRO_EVAL_MODE) {
 
 const appDataDir = path.join(require('os').tmpdir(), `kairo-chapter-keyword-test-${Date.now()}`);
 fs.mkdirSync(appDataDir, { recursive: true });
-fs.writeFileSync(path.join(appDataDir, 'settings.json'), JSON.stringify({ useUnifiedScoring: true }));
+fs.writeFileSync(path.join(appDataDir, 'settings.json'), JSON.stringify({}));
 process.env.KAIRO_APP_DATA_DIR = appDataDir;
 
 const server = require('./server');
@@ -371,6 +371,102 @@ async function main() {
     assert.ok(referenceContext.isValid && referenceContext.book === '1 Kings', 'reconnect must not wipe the active citation context');
     server.resetDetectionSession();
     assert.ok(!referenceContext.isValid, 'a fresh session start must clear it');
+  });
+
+  // ── Code-review fixes (2026-09-25) ──────────────────────────────────────
+  await test('FINAL-only split announcement: "verse eight" after "...the book of Acts" never resolves against the stale Psalm 82', async () => {
+    server.resetDetectionSession(); referenceContext.reset();
+    const broadcasts = [];
+    server.onBroadcast((msg) => { if (msg.type === 'detection') broadcasts.push(msg); });
+    await server.handleTranscriptSegment('In Psalm 82 verse six, heaven say you are a God. In the book of Acts', true, 0.9, true);
+    await new Promise(r => setTimeout(r, 300));
+    // No interim carries the number — only the final path sees it.
+    await server.handleTranscriptSegment('of Apostle one verse eight.', true, 0.9, true);
+    await new Promise(r => setTimeout(r, 300));
+    const sent = broadcasts.filter(b => b.target === 'viewer').map(b => b.verses[0].reference);
+    assert.ok(!sent.includes('Psalms 82:8'), `the final path must see the previous segment's "book of Acts", got ${JSON.stringify(sent)}`);
+  });
+
+  await test('a book name in ordinary narration ("like the Romans did") does not stop a bare "verse N" from resolving', async () => {
+    server.resetDetectionSession(); referenceContext.reset();
+    const broadcasts = [];
+    server.onBroadcast((msg) => { if (msg.type === 'detection') broadcasts.push(msg); });
+    await server.handleTranscriptSegment('Ephesians chapter one and verse three.', true, 0.9, true);
+    await new Promise(r => setTimeout(r, 300));
+    await server.handleTranscriptSegment('They mocked the saints just like the Romans did. Verse nine.', true, 0.9, true);
+    await new Promise(r => setTimeout(r, 300));
+    const sent = broadcasts.filter(b => b.target === 'viewer').map(b => b.verses[0].reference);
+    assert.ok(sent.includes('Ephesians 1:9'), `"Romans" here is narration, not a new book — got ${JSON.stringify(sent)}`);
+  });
+
+  await test('an interim with two citations sends the complete first one at once (only the tail citation can be half-heard)', async () => {
+    server.resetDetectionSession(); referenceContext.reset();
+    const broadcasts = [];
+    server.onBroadcast((msg) => { if (msg.type === 'detection') broadcasts.push(msg); });
+    await server.handleTranscriptSegment('Romans ten verse nine, and Romans ten verse thirteen and', false, 0.9, false);
+    await new Promise(r => setTimeout(r, 300));
+    const sent = broadcasts.filter(b => b.target === 'viewer').map(b => b.verses[0].reference);
+    assert.ok(sent.includes('Romans 10:9'), `the first, finished citation must not wait for the final, got ${JSON.stringify(sent)}`);
+  });
+
+  await test('an ordinary switch to reading another book does not block a later re-citation of the previous verse', async () => {
+    server.resetDetectionSession(); referenceContext.reset();
+    const broadcasts = [];
+    server.onBroadcast((msg) => { if (msg.type === 'detection') broadcasts.push(msg); });
+    const v = (book, chapter, verse, extra = {}) => ({ book, chapter, verse, reference: `${book} ${chapter}:${verse}`, text: `x ${book} ${chapter}:${verse}`, ...extra });
+    await server.broadcastDetection([v('John', 3, 16)], 'direct', 0.93, 'viewer');
+    // Well past the mis-citation word window: this is a new passage, not a correction.
+    for (let i = 0; i < 6; i++) {
+      await server.handleTranscriptSegment('and we keep on talking about the love of the father toward all of us', true, 0.9, true);
+    }
+    await server.broadcastDetection([v('Romans', 5, 8, { similarity: 0.97, matchedIdf: 30, confirmed: true, matched: 9 })], 'verbatim', 0.97, 'viewer');
+    const back = await server.broadcastDetection([v('John', 3, 16)], 'direct', 0.93, 'viewer');
+    assert.equal(back, 'viewer', `a real re-citation must not be demoted as a "corrected-away" reference, got ${back}`);
+  });
+
+  await test('a Deepgram reconnect keeps recent speech: an invalid verse right after it still recovers from context (Genesis 24:83 -> 24:63)', async () => {
+    server.resetDetectionSession(); referenceContext.reset();
+    const broadcasts = [];
+    server.onBroadcast((msg) => { if (msg.type === 'detection') broadcasts.push(msg); });
+    await server.handleTranscriptSegment('And Isaac went out to meditate in the field at the eventide, and he lifted up his eyes and saw the camels coming.', true, 0.9, true);
+    await new Promise(r => setTimeout(r, 200));
+    server.resetDetectionSession({ keepContinuity: true });
+    await server.handleTranscriptSegment('Genesis 24 and verse 83.', true, 0.9, true);
+    await new Promise(r => setTimeout(r, 300));
+    const sent = broadcasts.filter(b => b.target === 'viewer').map(b => b.verses[0].reference);
+    assert.ok(sent.includes('Genesis 24:63'), `recent speech must survive a reconnect, got ${JSON.stringify(sent)}`);
+  });
+
+  await test('during an active range, a near-duplicate collision stays capped but a real cross-reference quote goes out (Jeremiah 17:8 vs Daniel 11:32)', async () => {
+    server.resetDetectionSession(); referenceContext.reset();
+    const broadcasts = [];
+    server.onBroadcast((msg) => { if (msg.type === 'detection') broadcasts.push(msg); });
+    await server.handleTranscriptSegment('Psalm one verses one to three.', true, 0.9, true);
+    await new Promise(r => setTimeout(r, 300));
+    // The preacher reads the range's own verse 3...
+    await server.handleTranscriptSegment('And he shall be like a tree planted by the rivers of water, that bringeth forth his fruit in his season; his leaf also shall not wither.', true, 0.9, true);
+    const jer = { book: 'Jeremiah', chapter: 17, verse: 8, reference: 'Jeremiah 17:8', similarity: 0.9, matched: 7, confirmed: true, matchedIdf: 15,
+      text: 'For he shall be as a tree planted by the waters, and that spreadeth out her roots by the river, and shall not see when heat cometh, but her leaf shall be green; and shall not be careful in the year of drought, neither shall cease from yielding fruit.' };
+    const jerSent = await server.broadcastDetection([jer], 'stream', 0.9, 'viewer');
+    assert.notEqual(jerSent, 'viewer', 'a near-duplicate of the verse being read must not take over the range');
+    // ...then quotes a different book with no wording in common with Psalm 1.
+    await server.handleTranscriptSegment('Those who do know their God shall be strong and do exploits.', true, 0.9, true);
+    const dan = { book: 'Daniel', chapter: 11, verse: 32, reference: 'Daniel 11:32', similarity: 0.9, matched: 7, confirmed: true, matchedIdf: 15,
+      text: 'And such as do wickedly against the covenant shall he corrupt by flatteries: but the people that do know their God shall be strong, and do exploits.' };
+    const danSent = await server.broadcastDetection([dan], 'stream', 0.9, 'viewer');
+    const onScreen = danSent === 'viewer' || broadcasts.some(b => b.target === 'viewer' && b.verses?.[0]?.reference === 'Daniel 11:32');
+    assert.ok(onScreen, 'a real cross-reference quoted mid-range must still reach the screen (via the pipeline or this send)');
+  });
+
+  await test('during a cited range, a SAME-book near-duplicate of the verse being read stays off the screen (Exodus 10:16 vs a cited Exodus 12:31-33, eval 2026-09-26)', async () => {
+    server.resetDetectionSession(); referenceContext.reset();
+    await server.handleTranscriptSegment('Exodus 12 verse 31 to 33.', true, 0.9, true);
+    await new Promise(r => setTimeout(r, 300));
+    await server.handleTranscriptSegment('And he called for Moses and Aaron in the night.', true, 0.9, true);
+    const twin = { book: 'Exodus', chapter: 10, verse: 16, reference: 'Exodus 10:16', similarity: 0.9, matched: 7, confirmed: true, matchedIdf: 15,
+      text: 'Then Pharaoh called for Moses and Aaron in haste; and he said, I have sinned against the LORD your God, and against you.' };
+    const sent = await server.broadcastDetection([twin], 'stream', 0.9, 'viewer');
+    assert.notEqual(sent, 'viewer', 'the range text matched to its same-book twin must not replace the range');
   });
 
   console.log(`\n${pass} passed, ${fail} failed`);

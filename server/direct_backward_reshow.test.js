@@ -38,10 +38,8 @@ if (!process.env.KAIRO_EVAL_MODE) {
 
 const appDataDir = path.join(require('os').tmpdir(), `kairo-direct-backward-test-${Date.now()}`);
 fs.mkdirSync(appDataDir, { recursive: true });
-// Deliberately NOT useUnifiedScoring — see corrected_away_reassert.test.js's
-// own comment for why: this fix operates on the shared dedup/gating state
-// (sentVerseKeysThisBook, lastOutputVerse) regardless of which scoring
-// model decided `target`.
+// This fix operates on the shared dedup/gating state (sentVerseKeysThisBook,
+// lastOutputVerse) that runs after the scoring decision.
 fs.writeFileSync(path.join(appDataDir, 'settings.json'), JSON.stringify({}));
 process.env.KAIRO_APP_DATA_DIR = appDataDir;
 

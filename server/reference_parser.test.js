@@ -339,3 +339,22 @@ test('a homophone number word IS still a verse when announced by "verse" (regres
   assert.equal(r.verse, 4);
   assert.equal(parseAllSpokenReferences('John for verse one', true)[0].chapter, 4);
 });
+
+test('a book name right before a bare number is a chapter of that book, not a verse of the active chapter ("John fourteen" after 1 John 4:16)', () => {
+  const { referenceContext, resolvePartialReference } = require('./reference_parser');
+  referenceContext.update('1 John', 4);
+  assert.equal(resolvePartialReference('John fourteen'), null);
+  assert.equal(resolvePartialReference('Acts two'), null);
+  // a genuinely bare number still resolves against the active chapter
+  assert.equal(resolvePartialReference('fourteen')?.verse, 14);
+  assert.equal(resolvePartialReference('now nineteen')?.verse, 19);
+  referenceContext.reset();
+});
+
+test('an enumeration ("point number two", "the number one thing") is not the book of Numbers; a real Numbers citation still is', () => {
+  for (const t of ['point number two is prayer', 'the number one thing you need', 'that was number three on the list']) {
+    assert.deepEqual(parseAllSpokenReferences(t, true), [], t);
+  }
+  assert.equal(parseAllSpokenReferences('number six verse twenty four', true)[0]?.book, 'Numbers');
+  assert.equal(parseAllSpokenReferences('Numbers 6 24', true)[0]?.verse, 24);
+});

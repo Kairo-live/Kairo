@@ -17,6 +17,9 @@
 'use strict';
 
 const OFFSET_SAMPLES = [333, 700];   // stream 1, stream 2 (relative to the primary)
+const RETRY_BASE_MS = 3000;
+const RETRY_MAX_MS = 60000;
+const MAX_RETRIES = 6;
 
 class SttEnsemble {
   /**
@@ -31,6 +34,7 @@ class SttEnsemble {
   constructor(o) {
     this.o = o;
     this.streams = [];
+    this.failures = [];   // consecutive closes per stream, for retry backoff
     this.stopped = false;
   }
 
@@ -66,6 +70,7 @@ class SttEnsemble {
     conn.on(E.Transcript, (data) => {
       if (this.stopped || this.streams[i] !== st) return;
       const alt = data.channel?.alternatives?.[0];
+      this.failures[i] = 0;                       // a working stream resets the backoff
       if (!data.is_final || !alt?.transcript?.trim()) return;   // finals only — interims are noise here
       try { this.o.onFinal(alt.transcript, id, alt.words); } catch (err) { console.warn('[Ensemble] onFinal error:', err.message); }
     });
@@ -78,8 +83,17 @@ class SttEnsemble {
       st.open = false;
       clearInterval(st.keepAlive);
       if (this.stopped) return;
-      // Never let an extra stream's drop affect the primary — just retry quietly.
-      st.retry = setTimeout(() => this._open(client, i), 3000);
+      // Never let an extra stream's drop affect the primary — retry quietly,
+      // backing off (3s, 6s, 12s ... 60s) so a bad key / quota / rate limit
+      // doesn't open a new billable connection every 3s for the whole service,
+      // and give up after MAX_RETRIES failures in a row.
+      const failures = (this.failures[i] || 0) + 1;
+      this.failures[i] = failures;
+      if (failures > MAX_RETRIES) {
+        console.warn(`[Ensemble] ${id} closed ${failures - 1} times in a row — giving up on this extra stream until listening restarts`);
+        return;
+      }
+      st.retry = setTimeout(() => this._open(client, i), Math.min(RETRY_MAX_MS, RETRY_BASE_MS * 2 ** (failures - 1)));
     });
   }
 
@@ -103,4 +117,4 @@ class SttEnsemble {
   }
 }
 
-module.exports = { SttEnsemble, OFFSET_SAMPLES };
+module.exports = { SttEnsemble, OFFSET_SAMPLES, RETRY_BASE_MS, MAX_RETRIES };
