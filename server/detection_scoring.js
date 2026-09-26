@@ -38,16 +38,13 @@
 
 // ── Shared constants (reused, not reinvented — see each one's source) ──────
 
-// server.js's VIEWER_MIN_SCORE — the auto-send bar. Duplicated as a literal
-// here (not required from server.js, to keep this module dependency-free
-// and independently unit-testable) but MUST stay in sync; both are 0.80.
-const VIEWER_MIN_SCORE = 0.80;
+// Shared thresholds — single definition in detection_constants.js.
+const {
+  VIEWER_MIN_SCORE, IDF_FULL_CONFIDENCE, VERBATIM_CERTAIN_IDF,
+  STREAM_IDF_FULL_CONFIDENCE, SAME_BOOK_WINDOW_MS, ENSEMBLE_BOOST,
+} = require('./detection_constants');
 
-// detection_worker.js's IDF_FULL_CONFIDENCE (verbatim's own length-score
-// denominator) and server.js's VERBATIM_CERTAIN_IDF (the absolute-evidence
-// bar verbatim's "certain despite partial coverage" path uses).
-const IDF_FULL_CONFIDENCE = 8;
-const VERBATIM_CERTAIN_IDF = 18;
+
 
 // Below VERBATIM_CERTAIN_IDF (auto-send trust), but a real, non-trivial
 // amount of matched distinguishing content — enough that a short, genuine
@@ -58,20 +55,9 @@ const VERBATIM_CERTAIN_IDF = 18;
 // calibrateMethodScore's own comment for the full story.
 const VERBATIM_MODERATE_IDF = 10;
 
-// server.js's STREAM_IDF_FULL_CONFIDENCE — the IDF-weight bar a df=1
-// (Bible-wide-unique) anchor needs before its uniqueness-as-a-combination
-// is trusted as real identifying content, not 4 ordinary words that only
-// happen to co-occur once (see processStreamText's own incident comment).
-const STREAM_IDF_FULL_CONFIDENCE = 12;
-
-// server.js's ENSEMBLE_BOOST — reused directly as A()'s per-method
-// agreement bonus.
-const ENSEMBLE_BOOST = 0.08;
-
 // server.js's SAME_BOOK_WINDOW_MS / STALE_OVERRIDE_WINDOW_MS — D()'s decay
 // window and A()'s ledger window, respectively. Same values, continuous
 // decay instead of a step function for the former.
-const SAME_BOOK_WINDOW_MS = 60000;
 const LEDGER_WINDOW_MS = 20000;
 
 // Named-entity corroboration — a real spoken proper name (e.g. "Isaac")
@@ -153,6 +139,27 @@ function clamp01(x) { return Math.max(0, Math.min(1, x)); }
  * for this candidate (similarity, matchedIdf, confidence, etc.) — this
  * function does not re-derive anything from scratch, it recalibrates.
  */
+// 'direct' and 'chapter-keyword' both mean the preacher explicitly named
+// the BOOK (and, for 'direct', the chapter+verse too) — real, deliberate
+// evidence a coincidental text collision never has. Every hard-cap/guard
+// below that exists specifically to catch coincidental collisions
+// (inDifferentBookDuringRange, the rapid-book-switch guard) exempts both
+// methods identically for that reason; only the calibrated B score itself
+// (0.93 vs 0.82) reflects that 'chapter-keyword' still guessed the verse.
+function isExplicitBookCitation(method) {
+  return method === 'direct' || method === 'chapter-keyword';
+}
+
+// The single registry of known near-duplicate passages (server.js's
+// correction guard imports isKnownCollisionPair from here). Chapter-level: these passages share their imagery across several of their
+// own verses, not just one specific pair.
+const KNOWN_COLLISION_CHAPTERS = new Set([
+  ['Jeremiah|17', 'Psalms|1'].sort().join('||'),
+]);
+function isKnownCollisionPair(bookA, chapterA, bookB, chapterB) {
+  return KNOWN_COLLISION_CHAPTERS.has([`${bookA}|${chapterA}`, `${bookB}|${chapterB}`].sort().join('||'));
+}
+
 function calibrateMethodScore(method, rawResult) {
   const r = rawResult || {};
   switch (method) {
@@ -161,7 +168,7 @@ function calibrateMethodScore(method, rawResult) {
       // not unconditional ground truth." Still clears VIEWER_MIN_SCORE on
       // its own (0.93 > 0.80), so a plain citation auto-sends exactly as
       // expected; it just isn't unoverridable by strong contradicting text
-      // evidence anymore (see evaluateCorrection below).
+      // evidence anymore (maybeCorrectMiscitation in server.js).
       return 0.93;
 
     case 'direct-partial':
@@ -173,6 +180,24 @@ function calibrateMethodScore(method, rawResult) {
       // continuity support from a genuinely still-active book, or A()
       // corroboration, to cross the bar.
       return 0.75;
+
+    case 'chapter-keyword':
+      // A book+chapter WAS explicitly, freshly spoken ("Matthew 11...") but
+      // no verse number was given — resolveChapterByKeywords (server.js)
+      // guessed the specific verse from the words that followed. Distinct
+      // from 'direct-partial': the BOOK is not stale/inferred context, it
+      // was just named, exactly like 'direct' — only the VERSE is a guess.
+      // Calibrated just above VIEWER_MIN_SCORE so a reasonably-confident
+      // guess (resolveChapterByKeywords already requires either an exact
+      // leading verse-number match or real word-overlap before returning
+      // anything at all) can clear the bar alone, same as 'direct', while
+      // staying well below 'direct' itself (0.93) since the verse number
+      // was never actually spoken. Real incident this fixes: "In Matthew
+      // 11, say come to me." + "28, all you that are in pain..." (Matthew
+      // 11:28) sat capped by the rapid-book-switch guard when scored as
+      // 'direct-partial' — that guard exists for coincidental TEXT
+      // collisions, not for a book the preacher just explicitly named.
+      return 0.82;
 
     case 'verbatim': {
       // Reuses the existing formula unchanged (already well-tuned per the
@@ -536,7 +561,7 @@ function scoreCandidate(candidate, method, rawResult, ctx) {
   // out of the self-sufficient exemption at all — it's treated exactly
   // like any other candidate whose own B clears the bar on its own.
   const selfSufficient = B >= VIEWER_MIN_SCORE
-    && !(inDifferentBookDuringRange && method !== 'direct');
+    && !(inDifferentBookDuringRange && !isExplicitBookCitation(method));
   const D = selfSufficient
     ? 0
     : distanceTerm({ ...candidate, now: ctx.now }, ctx.activeContext, ctx.alreadyShown);
@@ -561,7 +586,32 @@ function scoreCandidate(candidate, method, rawResult, ctx) {
   // === 'direct') still always wins immediately, unconditionally,
   // untouched — only a same-range-lifetime coincidental collision from a
   // non-citation method is capped.
-  if (inDifferentBookDuringRange && method !== 'direct') {
+  if (inDifferentBookDuringRange && !isExplicitBookCitation(method)) {
+    finalScore = Math.min(finalScore, VIEWER_MIN_SCORE - 0.05);
+  }
+  // NOTE (2026-09-24): a wall-clock "rapid book switch" cap (4s window, A<=0)
+  // used to live here, added for the Jeremiah 17:7 -> Psalms 1:3 collision.
+  // Removed: measured against the 5 real sermons it cost ~17 points of
+  // recall on the meditation sermon alone (95.7% -> 78.3%, wrong sends
+  // unchanged) — the eval harness compresses hours of speech into minutes,
+  // so a wall-clock window swallows legitimate different-book detections,
+  // and real-time behavior could never be validated either way. The
+  // absolute known-collision registry below covers that same incident with
+  // no time window at all.
+  // A small, explicit registry of known near-duplicate PASSAGES — same
+  // precedent as server.js's own duplicate-content tie guard (Psalms 14&53,
+  // 40:13-17&70, 57:7-11+60:5-12&108, Psalm 18&2 Samuel 22). Real, repeated
+  // incident: "Jeremiah 17:7" correctly active, a later "Psalms 1:3" hit
+  // (same "tree planted by water" imagery) still reached viewer — the
+  // rapid-switch guard above only covers a SHORT window with zero
+  // corroboration; this pair kept colliding well outside both those
+  // bounds. Unlike the time/momentum-gated guard above, this is absolute
+  // (method !== 'direct' only) — no amount of elapsed time or repeated
+  // false corroboration should let two verses THIS codebase already knows
+  // are easily confused swap places automatically.
+  if (ctx.activeContext && ctx.activeContext.book && candidate.book !== ctx.activeContext.book
+      && !isExplicitBookCitation(method)
+      && isKnownCollisionPair(ctx.activeContext.book, ctx.activeContext.chapter, candidate.book, candidate.chapter)) {
     finalScore = Math.min(finalScore, VIEWER_MIN_SCORE - 0.05);
   }
   return {
@@ -617,63 +667,16 @@ function decideTarget(finalScore, method, opts) {
   return 'drop';
 }
 
-// ── evaluateCorrection — replaces maybeCorrectMiscitation's core test ──────
-
-/**
- * activeCitation: { book, chapter, verse, t, alreadySentAt } — the citation
- * currently on screen that might need correcting.
- * candidate: the verbatim/stream match under consideration as the "real"
- * verse being read.
- * opts: { withinEstablishedRange, immunityMs = 1000, windowMs = 35 } —
- * withinEstablishedRange is a caller-supplied predicate backed by the
- * EXISTING, UNCHANGED rangeAllVerses membership check (server.js) — a verse
- * that's part of a formally-established range is never distance-limited,
- * regardless of how far into the range it is. This is a separate hard
- * exemption, not folded into distanceTerm, because a formal range is a
- * different kind of evidence than implicit continuation.
- *
- * Returns true if candidate should replace activeCitation on screen.
- */
-function evaluateCorrection(activeCitation, candidate, ctx, opts = {}) {
-  const immunityMs = opts.immunityMs ?? 1000; // down from server.js's CORRECTION_IMMUNITY_MS=3000 —
-                                                // short explicit floor kept deliberately (see plan risk 4),
-                                                // not fully replaced by the emergent ledger alone.
-  if (ctx.now - activeCitation.t < immunityMs) return false;
-
-  const sameVerse = candidate.book === activeCitation.book
-    && candidate.chapter === activeCitation.chapter
-    && candidate.verse === activeCitation.verse;
-  if (sameVerse) return false; // agrees with what's on screen — nothing to correct
-
-  if (opts.withinEstablishedRange && opts.withinEstablishedRange(candidate)) return false;
-
-  // Shares the SAME distance function continuity uses — this is the exact
-  // fix for the Genesis 24:3/24:63 bug, where the old exemption
-  // (MISCITATION_FORWARD_EXEMPT_VERSES) was an independently-tuned constant
-  // that could drift from whatever "forward reading" meant elsewhere. One
-  // number now, can't drift apart again.
-  const activeAsContext = { book: activeCitation.book, chapter: activeCitation.chapter, verse: activeCitation.verse, t: activeCitation.t };
-  const d = distanceTerm({ ...candidate, now: ctx.now }, activeAsContext, ctx.alreadyShown);
-  // A small positive D (genuine nearby forward continuation) means "don't
-  // correct, this is just reading on" — the same forward-decay curve
-  // distanceTerm already computes, so a jump far enough to have decayed to
-  // ~0 credit is treated as suspicious enough to allow correction.
-  if (d > 0.02) return false;
-
-  const B = calibrateMethodScore(candidate.method, candidate.rawResult);
-  return B >= (opts.correctionMinScore ?? 0.90);
-}
-
 module.exports = {
   VIEWER_MIN_SCORE,
   VERY_HIGH_RAW_CONFIDENCE,
   RERANK_AUTOSEND_MIN,
   isVeryHighRawConfidence,
+  isKnownCollisionPair,
   calibrateMethodScore,
   distanceTerm,
   EvidenceLedger,
   scoreCandidate,
   decideTarget,
-  evaluateCorrection,
   clamp01,
 };

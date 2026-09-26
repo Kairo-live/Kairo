@@ -14,6 +14,7 @@
 //      online; signals {type:'semanticReady'} separately once available.
 'use strict';
 
+const { IDF_FULL_CONFIDENCE, STREAM_IDF_FULL_CONFIDENCE } = require('./detection_constants');
 const { workerData, parentPort } = require('worker_threads');
 const path = require('path');
 const fs   = require('fs');
@@ -1076,12 +1077,11 @@ function idfTotal(rawWords) {
 // came into it. Once matched weight clears this bar, length stops being the
 // limiting factor and idfCoverage (how much of the VERSE's identity was
 // captured, not just how many words) takes over as the deciding number.
-const IDF_FULL_CONFIDENCE = 8;
 
 // Gate for the anchor-trie's own "confirmed" auto-send (see the alignment
 // loop below) — kept separate from IDF_FULL_CONFIDENCE above, which also
 // sets the denominator for verbatimSearch's score curve.
-const ANCHOR_CONFIRM_IDF = 12;
+const ANCHOR_CONFIRM_IDF = STREAM_IDF_FULL_CONFIDENCE;
 
 // ── Verbatim search (inverted index + phrase window) ──────────────────────
 function verbatimSearch(transcript, minWords = 6, limit = 3) {
@@ -1597,6 +1597,30 @@ parentPort.on('message', async (msg) => {
           results.push(v);
         }
         parentPort.postMessage({ type: 'rangeResult', id: msg.id, results });
+        break;
+      }
+      case 'scoreChapterText': {
+        // Rank every verse of ONE chapter against a piece of spoken text by
+        // how much IDENTIFYING weight it shares (sum of each shared word's
+        // IDF), not a raw shared-word count. Real incident (2026-09-24):
+        // a bare "Romans 10" guess matched Romans 10:19 — a long verse full
+        // of everyday words ("will", "you", "no") — on raw overlap alone,
+        // from narration that had nothing to do with it. Common words carry
+        // almost no IDF, so they no longer add up to a match.
+        const tStems = new Set(norm(msg.text || '').split(' ').filter(w => w.length >= 3).map(healWord));
+        const rows = [];
+        for (let vs = 1; vs <= 200; vs++) {
+          const v = directLookup(msg.book, msg.chapter, vs);
+          if (!v) break;
+          const words = [...new Set(norm(v.text || '').split(' ').filter(w => w.length >= 3))];
+          let idfSum = 0, hit = 0;
+          for (const w of words) {
+            if (tStems.has(healWord(w))) { hit++; idfSum += idfMap.get(w) || 0; }
+          }
+          rows.push({ ...v, idfSum, hit, total: words.length });
+        }
+        rows.sort((a, b) => b.idfSum - a.idfSum);
+        parentPort.postMessage({ type: 'rangeResult', id: msg.id, results: rows.slice(0, 2) });
         break;
       }
       case 'buildNameIndex': {

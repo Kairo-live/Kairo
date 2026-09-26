@@ -79,6 +79,24 @@ async function main() {
     assert.ok(sent.includes('John 3:16'), `a valid citation must resolve normally without going through the fallback at all, got ${JSON.stringify(sent)}`);
   });
 
+  await test('an invalid verse in a SINGLE-CHAPTER book never falls back to a wide-buffer guess (real incident: "third John five verse 19" -> wrongly "3 John 1:4")', async () => {
+    server.resetDetectionSession();
+    const broadcasts = [];
+    server.onBroadcast((msg) => { if (msg.type === 'detection') broadcasts.push(msg); });
+
+    // "third" recognized as the book (3 John); a single-chapter book has no
+    // "chapter 5" to consume, so "five" is silently dropped and chapter
+    // defaults to 1 — landing on the invalid "3 John 1:19" (only 14 verses).
+    await server.handleTranscriptSegment(
+      'But hear this, third John five verse 19 have said, the world where you are is under power controlled by the evil one.',
+      true, 0.9, true
+    );
+    await new Promise(r => setTimeout(r, 50));
+
+    const sent = broadcasts.filter(b => b.target === 'viewer').flatMap(b => (b.verses || []).map(v => v.reference));
+    assert.ok(!sent.includes('3 John 1:4'), `must never guess a wrong verse from the wide buffer for a single-chapter book, got ${JSON.stringify(sent)}`);
+  });
+
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail === 0 ? 0 : 1);
 }

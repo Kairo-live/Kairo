@@ -44,8 +44,11 @@ const { Worker } = require('worker_threads');
 const axios      = require('axios');
 const OBSWebSocket = require('obs-websocket-js/json').default;
 
-const { parseSpokenReference, parseAllSpokenReferences, resolvePartialReference, detectBookMentions, referenceContext, SINGLE_WORD_BOOKS, consumeNumber } = require('./reference_parser');
+const { createChapterResolver } = require('./chapter_resolver');
+const { createCitationVoting, citationKey } = require('./citation_voting');
+const { parseSpokenReference, parseAllSpokenReferences, resolvePartialReference, detectBookMentions, referenceContext, SINGLE_WORD_BOOKS, consumeNumber, MAX_CHAPTERS, WORD_TO_NUM } = require('./reference_parser');
 const detectionScoring = require('./detection_scoring');
+const { VIEWER_MIN_SCORE, VERBATIM_CERTAIN_IDF, STREAM_IDF_FULL_CONFIDENCE, SAME_BOOK_WINDOW_MS } = require('./detection_constants');   // single definition — see that file
 
 // ── Config ────────────────────────────────────────────────────────────────
 // Tauri picks a free loopback port at launch and passes it via env. In dev
@@ -332,7 +335,7 @@ let nameChapterIndex = new Map();
 // name is a genuine content signal (see detection_scoring.js's
 // NAMED_ENTITY_BOOST), decayed the same way activeContext already is
 // elsewhere in this file. Updated once per transcript segment in
-// handleTranscriptSegment, read by broadcastDetection's shadow-scoring
+// handleTranscriptSegment, read by broadcastDetection's scoring
 // block — module-level state instead of threading it through every call
 // site, same pattern as lastOutputVerse/referenceContext.
 let recentlyMentionedName   = null; // normalized (normName'd)
@@ -646,6 +649,7 @@ wss.on('connection', (ws) => {
     } else if (offlineActive) {
       feedOfflineAudio(chunk);
     }
+    if (deepgramConnection) citationVoting.sendAudio(chunk);
     audioRingBuffer.push({ data: chunk, time: Date.now() });
     audioRingBytes += chunk.length;
     while (audioRingBytes > AUDIO_RING_MAX_BYTES && audioRingBuffer.length) {
@@ -750,20 +754,10 @@ const recentDetections = new Map();   // verseKey -> lastSentTime
 // intentional and must re-display. The 45 s window stays for fuzzy methods.
 const DIRECT_DEDUP_MS = 5000;
 
-// ── Ensemble scoring ───────────────────────────────────────────────────────
-// When verbatim + fingerprint agree on the same verse within ENSEMBLE_WINDOW_MS,
-// boost the combined score and re-broadcast. Direct detection always wins.
-const ENSEMBLE_WINDOW_MS = 6000;
-const ENSEMBLE_BOOST     = 0.08;   // add 8 points to the score when two paths agree
-
-// Map<verseKey, { score, method, verses, time }>
-const ensembleCache = new Map();
-
 // Same-book close-succession: if a new verse from the same book arrives within
 // this window, assume the preacher is correcting/continuing — always let it through.
 let lastSentBook = null;
 let lastSentBookTime = 0;
-const SAME_BOOK_WINDOW_MS = 60000;
 
 // processStreamText's duplicate-content tie guard (Psalms 14/53, Psalm 18/
 // 2 Samuel 22, etc.) uses this much tighter window than SAME_BOOK_WINDOW_MS —
@@ -796,9 +790,6 @@ const STREAM_CROSSCHECK_MIN_IDF = 10;
 // blocked, that's fundamentally different evidence than any single hit, and
 // after enough repeats it's more reasonable to conclude the "active"
 // context is what's actually stale/wrong.
-let staleOverrideCandidate = null;   // { key, count, lastSeenAt, methods: Set }
-const STALE_OVERRIDE_COUNT     = 3;
-const STALE_OVERRIDE_WINDOW_MS = 20000;
 
 // Confirmed real incident: reading forward through the OPENING of a new
 // passage (Psalm 1:1 → 1:2 → 1:3, a different book than whatever was last
@@ -814,7 +805,6 @@ const STALE_OVERRIDE_WINDOW_MS = 20000;
 // within the window is at least as strong evidence of genuine forward
 // reading as 3 repeats of one verse — arguably stronger, since it's real
 // progression, not just noise recurring.
-let bookMomentumCandidate = null;   // { book, chapter, verses: Set<number>, lastSeenAt }
 
 // Real incident (Joshua 1:18/1:8): a garbled interim citation ("Joshua
 // 1:18", really "1:8") sends via 'direct' (which always bypasses every
@@ -848,19 +838,13 @@ const RECENTLY_CORRECTED_WINDOW_MS = 15000;
 const streamCrosscheckRejected = new Map();   // verseKey -> timestamp
 const STREAM_CROSSCHECK_COOLDOWN_MS = 20000;
 
-// ── Consolidated scoring — shadow mode (see server/detection_scoring.js) ──
-// Runs the new B+D+A model in PARALLEL with the logic above purely for
-// comparison — never affects target, verses, or any state mutation below.
-// Logs every divergence to databases/scoring_shadow.log so real service
-// traffic can be reviewed before settings.useUnifiedScoring is ever
-// flipped on. One ledger instance for the life of the process, pruned by
-// its own 20s window on every record() call — same lifetime as the
-// staleOverrideCandidate/bookMomentumCandidate state it shadows.
-const shadowLedger = new detectionScoring.EvidenceLedger();
+// ── Scoring evidence ledger (see server/detection_scoring.js) ──────────────
+// One ledger for the life of the process, pruned by its own 20s window on
+// every record() call.
+const evidenceLedger = new detectionScoring.EvidenceLedger();
 
 // Minimum confidence score to auto-route a detection to the live viewer/SENT.
 // Anything below this is demoted to suggestions regardless of fingerprint confidence level.
-const VIEWER_MIN_SCORE = 0.80;
 
 // Score for a 'direct-partial' send (a bare "verse N" resolved against
 // context — see resolvePartialReference). Deliberately NOT 1.0 like a true
@@ -904,7 +888,6 @@ const VERBATIM_AUTOSEND_MIN = 0.95;
 // quotes at this site. 18 trades a couple of legitimate low-coverage
 // auto-sends (they still land correctly in Candidates for one manual
 // promote) for closing off the confirmed false-positive cases.
-const VERBATIM_CERTAIN_IDF = 18;
 
 // Mirrors detection_worker.js's ANCHOR_CONFIRM_IDF (kept as a separate
 // constant since the worker runs in its own thread/module — no shared JS
@@ -914,7 +897,6 @@ const VERBATIM_CERTAIN_IDF = 18;
 // instead of trusting word-count/uniqueness alone. Raised 8 → 12 alongside
 // the worker-side constant after "praise the Lord" (filler, not a citation)
 // cleared 8 against Psalms 150:6 and auto-sent to the live screen.
-const STREAM_IDF_FULL_CONFIDENCE = 12;
 
 // Minimum score for a detection to appear in the suggestions panel at all.
 // Raised 0.75 → 0.87 at the operator's request: real services showed too
@@ -958,6 +940,10 @@ const recentSuggestions = new Map();   // verseKey → last suggestion broadcast
 // hits only ever appear as Candidates suggestions.
 
 // Track what we already detected from interim so we skip on final
+// Interim citation stability gate — see processForReferences.
+let interimSeenKey = null;
+let interimSeenAt  = 0;
+const INTERIM_STABLE_WINDOW_MS = 3000;
 let interimDetectedRef  = null;
 let interimDetectedTime = 0;
 
@@ -1014,6 +1000,31 @@ const DIRECT_REF_SUPPRESS_MS = 4000;
 // been unambiguous.
 let prevFinalTranscript   = '';
 let prevFinalTranscriptAt = 0;
+
+// A chapter got named with no verse yet ("Jeremiah chapter 17...") — once a
+// verse is successfully resolved for this book+chapter via the preacher's
+// own next few words (resolveChapterByKeywords), this is set so later
+// segments don't keep re-running the same chapter-wide search once normal
+// continuity has taken over. Cleared whenever the active book/chapter
+// context moves on to something else.
+let chapterKeywordResolvedFor = null;
+
+// {book, chapter, text} while the ONLY thing establishing the active
+// reference context is a bare chapter citation with no verse ever given —
+// real incident caught while testing this: without this, the retry path
+// below fired on ORDINARY narration too (any sentence that happened to
+// overlap enough words with some verse in an already-fully-resolved
+// chapter, even though a specific verse had already been cited and was
+// just being read normally). Only set when a verse is genuinely still
+// unknown; cleared the moment any verse — via this mechanism, a normal
+// citation, or a bare "verse N" — gets resolved for that book/chapter.
+// `text` accumulates the words spoken since the chapter was named (capped,
+// see CHAPTER_PENDING_TEXT_MAX_WORDS) — deliberately separate from the
+// global rolling transcriptBuffer, which mixes in unrelated earlier
+// sermon content (see resolveChapterByKeywords's own comment for the real
+// incident this separation fixes).
+let chapterOnlyPending = null;
+const CHAPTER_PENDING_TEXT_MAX_WORDS = 50;
 const PREV_FINAL_JOIN_WINDOW_MS = 8000;
 
 // Auto-correction window: if a direct ref was sent and within this window a
@@ -1707,7 +1718,32 @@ function maybeAdvanceRangeOnNextVersePrefix(transcript) {
   // corroboration for what's really just a TIMING signal, not an identity
   // decision — the verse itself was already established when the range was
   // set up.
-  if (mostMeaningfulWordsPresent(prefix4, transcript, 1)) {
+  // Real incident (2026-09-23, recurring across every test): reading
+  // Genesis 1:26 a second time — "let us make man in our own [image]", the
+  // preacher's own common paraphrase of verse 26 itself — fuzzy-matched
+  // verse 27's prefix ("god created man own") on the single shared word
+  // "own", prematurely advancing to 27 before it was ever actually read.
+  // "man"/"own" are both short, generic words that recur across many
+  // verses (a real IDF-weighted check would recognize this, but idfMap only
+  // exists in the worker thread — an async round-trip here would reverse
+  // the owner's own latency fix this mechanism was built around). Cheap,
+  // synchronous proxy: require the matched word to be at least 4 letters
+  // (a real, if imperfect, correlate of "distinctive enough to trust
+  // alone" — "own"/"man"/"god" all fail this, "created"/"likeness" pass),
+  // AND not also present in the CURRENT verse's own text (the direct,
+  // principled signal — a word the preacher could just as easily be using
+  // to re-describe the verse already on screen isn't real evidence of
+  // having moved to the next one). Falls back to the original words-only
+  // check when the next verse's prefix has no word clearing both bars, so
+  // a verse that genuinely opens on short/shared words isn't left
+  // permanently unable to fast-advance.
+  const currentVerseWords = new Set(meaningfulWords(rangeCurrentVerse.text || rangeCurrentVerse.kjv_text || ''));
+  const distinctivePrefixWords = meaningfulWords(prefix4)
+    .filter(w => w.length >= 4 && !currentVerseWords.has(w));
+  const matched = distinctivePrefixWords.length
+    ? mostMeaningfulWordsPresent(distinctivePrefixWords.join(' '), transcript, 1)
+    : mostMeaningfulWordsPresent(prefix4, transcript, 1);
+  if (matched) {
     requestRangeAdvance(`Next-verse-prefix advance: "${prefix4}" (fuzzy match) detected`);
   }
 }
@@ -2921,7 +2957,7 @@ async function handleTranscriptSegment(transcript, isFinal, confidence, speechFi
         // "One attribute..."/"...number two?", caught a fleeting interim
         // snapshot that was momentarily just a lone number). Pattern 2
         // (explicit "verse N") stays fully enabled on interim.
-        const partial = resolvePartialReference(transcript, { allowBareNumber: false });
+        const partial = announcesDifferentBook(transcript) ? null : resolvePartialReference(transcript, { allowBareNumber: false });
         if (partial && partial.verse) {
           try {
             const msg = await workerCall('directLookup', { book: partial.book, chapter: partial.chapter, verse: partial.verse }, 3000);
@@ -2945,8 +2981,8 @@ async function handleTranscriptSegment(transcript, isFinal, confidence, speechFi
               // the exact combination that let a stale-context misfire reach
               // the live screen with zero trace in the logs).
               const sent = await broadcastDetection([msg.result], 'direct-partial', DIRECT_PARTIAL_SCORE, 'viewer');
-              if (sent === 'viewer') {
-                console.log(`[Context] Interim partial ref "verse ${partial.verse}" → ${msg.result.reference}`);
+              if (partialRefConfirmsContext(sent, partial)) {
+                if (sent === 'viewer') console.log(`[Context] Interim partial ref "verse ${partial.verse}" → ${msg.result.reference}`);
                 // TWENTY-FIFTH bug — refresh the context timer on a
                 // successful resolution, not just the original citation.
                 // Real incident, live (2026-09-07), the SAME sermon this
@@ -2963,6 +2999,7 @@ async function handleTranscriptSegment(transcript, isFinal, confidence, speechFi
                 // context is still genuinely active — it should extend the
                 // window, not just spend down the original citation's.
                 referenceContext.update(partial.book, partial.chapter);
+                chapterOnlyPending = null; // a real verse now exists for this chapter
               }
               foundRef = true;
             }
@@ -3033,7 +3070,7 @@ async function handleTranscriptSegment(transcript, isFinal, confidence, speechFi
   }
 
   if (!foundRef && referenceContext.isValid) {
-    const partial = resolvePartialReference(transcript);
+    const partial = announcesDifferentBook(transcript) ? null : resolvePartialReference(transcript);
     if (!partial && /\bverses?\b/i.test(transcript)) {
       console.log(`[Context] "verse" heard, context valid (${referenceContext.book} ${referenceContext.chapter}) but resolvePartialReference returned null for: "${transcript}"`);
     }
@@ -3068,13 +3105,14 @@ async function handleTranscriptSegment(transcript, isFinal, confidence, speechFi
             if (!jumpRangeTo(verses[0].book, verses[0].chapter, verses[0].verse)) clearRangeQueue();
           }
           const sent = await broadcastDetection(verses, 'direct-partial', DIRECT_PARTIAL_SCORE, 'viewer');
-          if (sent === 'viewer') {
-            console.log(`[Context] Resolved partial ref "verse ${partial.verse || partial.verseStart}" → ${partial.book} ${partial.chapter}:${partial.verse || partial.verseStart}`);
+          if (partialRefConfirmsContext(sent, partial)) {
+            if (sent === 'viewer') console.log(`[Context] Resolved partial ref "verse ${partial.verse || partial.verseStart}" → ${partial.book} ${partial.chapter}:${partial.verse || partial.verseStart}`);
             // See the interim resolvePartialReference call's own comment
             // (bug #25) for the real incident — a chain of bare "verse N"
             // successes must refresh the context timer itself, not just
             // spend down the original citation's.
             referenceContext.update(partial.book, partial.chapter);
+            chapterOnlyPending = null; // a real verse now exists for this chapter
           } else {
             // Diagnostic only — resolvePartialReference DID resolve this,
             // but broadcastDetection demoted/dropped it (a real, silent gap
@@ -3256,7 +3294,7 @@ async function stopOffline() {
 // run_eval.js) can reset detection state between simulated sermons the same
 // way a real new listening session does, without needing an actual Deepgram
 // connection — both call this exact function, no reimplementation to drift.
-function resetDetectionSession() {
+function resetDetectionSession({ keepContinuity = false } = {}) {
   transcriptBuffer      = [];
   lastFingerprintSearch = 0;
   hasNewTranscript      = false;
@@ -3267,6 +3305,7 @@ function resetDetectionSession() {
                                         // inBibleMode off unexpectedly
   bibleModeClearTimer   = null;
   interimDetectedRef    = null;
+  interimSeenKey = null; interimSeenAt = 0;
   lastInterimVerbatim   = 0;
   lastDirectRefTime     = 0;
   streamWatermark       = 0;
@@ -3274,13 +3313,36 @@ function resetDetectionSession() {
   resetTopicAccumulator();
   resetReadingMode();
   sentenceBuffer = new SentenceBuffer(4000);
-  ensembleCache.clear();
   recentSuggestions.clear();
   recentDetections.clear();
   recentlyCorrectedAway = null;
   streamCrosscheckRejected.clear();
   audioRingBuffer = [];
   audioRingBytes  = 0;
+  citationVoting.reset();
+  // A Deepgram auto-reconnect (network blip, silence watchdog) is the SAME
+  // sermon — keepContinuity leaves the active book/chapter and every
+  // continuity tracker below alone so a bare "verse 15" still resolves and
+  // forward reading isn't treated as a cold start. Only a user-initiated
+  // start (a fresh session) clears them.
+  if (!keepContinuity) {
+    referenceContext.reset();
+    chapterOnlyPending = null;
+    chapterKeywordResolvedFor = null;
+    // Real gap found while testing the fixes above: these drive every
+    // continuity/collision decision (the rapid-book-switch guard, the
+    // non-sequential guard, mis-citation correction) but were never cleared
+    // on reset — a fresh session (operator restarts listening, or a new
+    // sermon entirely) could stay silently biased by whatever book was last
+    // active before the reset.
+    lastOutputVerse     = null;
+    lastSentBook        = null;
+    lastSentBookTime    = 0;
+    lastDirectSentVerse = null;
+    lastDetectedRef     = null;
+    lastDetectedTime    = 0;
+    lastDetectedMethod  = null;
+  }
 
   // Clear streaming automaton state so a new session starts fresh.
   if (workerBasicReady) {
@@ -3289,7 +3351,7 @@ function resetDetectionSession() {
 }
 
 // ── Deepgram ──────────────────────────────────────────────────────────────
-async function startDeepgram(config = {}) {
+async function startDeepgram(config = {}, { reconnect = false } = {}) {
   if (connectionState === 'connected' || connectionState === 'connecting') {
     return { error: 'Already listening' };
   }
@@ -3308,7 +3370,8 @@ async function startDeepgram(config = {}) {
     return { error: 'No Deepgram API key' };
   }
 
-  resetDetectionSession();
+  citationVoting.stop();
+  resetDetectionSession({ keepContinuity: reconnect });
 
   try {
     connectionState = 'connecting';
@@ -3403,6 +3466,7 @@ async function startDeepgram(config = {}) {
         connectionState = 'connected';
         broadcast({ type: 'connection-state', state: 'connected' });
         deepgramLastTranscriptAt = Date.now();
+        try { citationVoting.start(dgConfig, LiveTranscriptionEvents); } catch (err) { console.warn('[Ensemble] could not start:', err.message); }
 
         // ── KeepAlive ping every 8 s ─────────────────────────────────────
         // Deepgram silently drops WebSocket connections that go quiet for
@@ -3445,7 +3509,7 @@ async function startDeepgram(config = {}) {
             // and its Close event (still guarded) is now a deliberate,
             // expected no-op rather than something to race against.
             try { myConnection.requestClose(); } catch {}
-            startDeepgram(deepgramLastConfig).catch(err =>
+            startDeepgram(deepgramLastConfig, { reconnect: true }).catch(err =>
               console.error('[Deepgram] Silence-watchdog reconnect failed:', err.message)
             );
           }
@@ -3556,7 +3620,7 @@ async function startDeepgram(config = {}) {
           submitDeepgramRestFallback().catch(err => console.warn('[Deepgram] REST fallback dispatch failed:', err.message));
           setTimeout(() => {
             if (!deepgramUserStopped) {
-              startDeepgram(deepgramLastConfig).catch(err => {
+              startDeepgram(deepgramLastConfig, { reconnect: true }).catch(err => {
                 console.error('[Deepgram] Reconnect failed:', err.message);
               });
             }
@@ -3578,6 +3642,7 @@ async function startDeepgram(config = {}) {
 
 async function stopDeepgram() {
   deepgramUserStopped = true;   // prevent auto-reconnect
+  citationVoting.stop();
   if (deepgramConnection) {
     try { deepgramConnection.requestClose(); } catch {}
     deepgramConnection = null;
@@ -3808,7 +3873,7 @@ async function processStreamText(text) {
 
       // Give the mis-citation corrector first look — see maybeCorrectMiscitation
       // for why this now applies to stream hits too, not just verbatim.
-      const corrected = callWithCorrectionShadow(top[0], text);
+      const corrected = maybeCorrectMiscitation(top[0], text, top.slice(1));
       if (corrected) return;
 
       // Backward-extension corroboration gate — see detection_worker.js's
@@ -3821,11 +3886,11 @@ async function processStreamText(text) {
       // forward confirmation — so it can still reach Candidates on its own,
       // but only auto-sends once a second, INDEPENDENT method has also
       // separately hit this exact verse. Read BEFORE broadcastDetection's
-      // own shadow-ledger record() call for this same candidate, so this
+      // own evidence-ledger record() call for this same candidate, so this
       // candidate's own hit can't corroborate itself.
       let streamTarget = 'viewer';
       if (top[0].viaBackwardExtension
-          && !shadowLedger.hasCorroboration({ book: top[0].book, chapter: top[0].chapter, verse: top[0].verse })) {
+          && !evidenceLedger.hasCorroboration({ book: top[0].book, chapter: top[0].chapter, verse: top[0].verse })) {
         streamTarget = 'suggestions';
       }
 
@@ -3929,7 +3994,8 @@ async function processStreamText(text) {
         // df=1 anchors carry their weight as `.idf`, not `.matchedIdf` —
         // alias it so maybeCorrectMiscitation's check (shared with the
         // confirmed-alignment path above) applies here too.
-        const corrected = callWithCorrectionShadow({ ...unique[0], matchedIdf: unique[0].idf }, text);
+        const otherAnchors = anchors.filter(a => a !== unique[0]).map(a => ({ ...a, matchedIdf: a.idf }));
+        const corrected = maybeCorrectMiscitation({ ...unique[0], matchedIdf: unique[0].idf }, text, otherAnchors);
         if (!corrected) {
           const sent = await broadcastDetection(unique.slice(0, 1), 'stream', Math.max(0.90, unique[0].similarity || 0.90), 'viewer');
           if (sent === 'viewer') console.log(`[Stream] "${unique[0].reference}" df=1 unique-phrase (idf=${unique[0].idf.toFixed(1)}) → viewer`);
@@ -4014,7 +4080,43 @@ const DANGLING_CONTINUATION_WORDS = new Set(['and', 'to', 'through', 'verse', 'v
 // guesses — every variant in the group gets marked `ambiguousUnresolved`
 // so the caller routes them to Candidates instead of auto-sending any of
 // them to viewer.
-function resolveAmbiguousRefs(refs) {
+// "John" alone is a fully valid, non-ambiguous book on its own (the Gospel)
+// — unlike bare "Timothy"/"Peter"/etc., which are NEVER valid without a
+// number, so reference_parser.js never tags it with an ambiguousGroup at
+// all. But real preachers routinely drop the "First/1" once they've already
+// named 1 John and keep reading: "First John four verse four... John five
+// verse nineteen..." — confirmed identical across three separate real
+// transcripts this session, always immediately after a 1 John citation. A
+// bare "John" citation arriving while a numbered John epistle (1/2/3 John)
+// is the recently-active context is treated as continuing that epistle,
+// not switching to the Gospel — but ONLY when the resulting reference is
+// actually VALID there. Chapter-range alone isn't enough: real regression
+// caught while testing this — "John three verse 31" (a genuine, unrelated
+// Gospel citation, cited two sentences after an earlier "1 John 5:19")
+// rewrote to "1 John 3:31", which doesn't exist (1 John chapter 3 only has
+// 24 verses) — timing alone can't tell "still the same epistle" apart from
+// "moved on to a different, equally valid Gospel citation" the way a real
+// existence check can. Async specifically for this: a synchronous
+// chapter-bounds check isn't enough, needs the real verse count.
+async function preferActiveNumberedJohn(ref) {
+  if (ref.book !== 'John' || ref.ambiguousGroup) return ref;
+  const ctxBook = referenceContext.book;
+  if (ctxBook !== '1 John' && ctxBook !== '2 John' && ctxBook !== '3 John') return ref;
+  const maxCh = MAX_CHAPTERS[ctxBook];
+  if (maxCh && ref.chapter > maxCh) return ref;
+  const checkVerse = ref.verse ?? ref.verseStart;
+  if (checkVerse != null) {
+    try {
+      const msg = await workerCall('directLookup', { book: ctxBook, chapter: ref.chapter, verse: checkVerse }, 3000);
+      if (!msg.result) return ref; // e.g. "John 3:31" while 1 John was active — 1 John 3 has no verse 31, stays the Gospel
+    } catch { return ref; }
+  }
+  console.log(`[Direct] Bare "John ${ref.chapter}:${checkVerse ?? ''}" resolved to "${ctxBook}" — continuing the recently-active numbered epistle, not the Gospel`);
+  return { ...ref, book: ctxBook };
+}
+
+async function resolveAmbiguousRefs(refs) {
+  refs = await Promise.all(refs.map(preferActiveNumberedJohn));
   if (!refs.some(r => r.ambiguousGroup)) return refs;
   const seen = new Set();
   const resolved = [];
@@ -4035,42 +4137,72 @@ function resolveAmbiguousRefs(refs) {
   return resolved;
 }
 
-// A citation's chapter parsed fine but its OWN verse number doesn't exist
-// in that chapter (garbled — "verse 83" of a 67-verse chapter). Rather than
-// giving up, pull every verse in that chapter and score it against the
-// recent transcript buffer (same window processVerbatim's own speechFinal
-// re-scan uses) via simple meaningful-word overlap — a chapter is small
-// (usually well under 100 verses), so this is cheap, and it's strictly
-// scoped to the book+chapter the preacher actually named, so it can never
-// jump to an unrelated book the way a wide corpus search could.
-// CONTEXT_CORRECTION_MIN_OVERLAP guards against a coincidental weak overlap
-// (a couple of common words) masquerading as a real match.
-const CONTEXT_CORRECTION_MIN_OVERLAP = 4;
+// Chapter-scoped verse recovery ("Matthew 11" with no verse; a verse number
+// that doesn't exist) — see chapter_resolver.js.
+const { resolveInvalidVerseByContext, resolveChapterByKeywords } = createChapterResolver({
+  workerCall,
+  getRecentText: () => transcriptBuffer.map(t => t.text).join(' ').split(RE_SPACES).slice(-60).join(' '),
+});
 
-async function resolveInvalidVerseByContext(book, chapter, invalidVerse) {
-  try {
-    const msg = await workerCall('chapterLookup', { book, chapter }, 5000);
-    const chapterVerses = msg.results || [];
-    if (!chapterVerses.length) return [];
-    const bufferText = transcriptBuffer.map(t => t.text).join(' ')
-      .split(RE_SPACES).slice(-60).join(' ');
-    const bufferWords = new Set(meaningfulWords(bufferText));
-    if (!bufferWords.size) return [];
-    let best = null, bestScore = 0;
-    for (const v of chapterVerses) {
-      const verseWords = meaningfulWords(v.text || v.kjv_text || '');
-      let overlap = 0;
-      for (const w of verseWords) if (bufferWords.has(w)) overlap++;
-      if (overlap > bestScore) { bestScore = overlap; best = v; }
-    }
-    if (best && bestScore >= CONTEXT_CORRECTION_MIN_OVERLAP) return [best];
-    return [];
-  } catch { return []; }
+// A bare "verse N" resolved against the active context is fresh evidence the
+// context is still live when it reached the screen, OR when that exact verse is
+// already on screen (dedup returns false for it — e.g. another path such as a
+// stream/chapter-keyword hit sent it moments earlier). A resolution that was
+// merely demoted/dropped never refreshes, so a spurious bare number can't keep
+// a stale context alive. recentDetections keeps entries far longer than 'just
+// now' (pruned only past 100 entries), so 'already on screen' is age-checked.
+const PARTIAL_CONFIRM_MAX_AGE_MS = 15000;
+function partialRefConfirmsContext(sent, partial) {
+  if (sent === 'viewer') return true;
+  const v = partial.verse || partial.verseStart;
+  const shownAt = recentDetections.get(`${partial.book}|${partial.chapter}|${v}`);
+  return shownAt !== undefined && Date.now() - shownAt < PARTIAL_CONFIRM_MAX_AGE_MS;
 }
+
+// Real incident (2026-09-24, live app runs): reading "In the book of Acts of
+// Apostle one verse eight" while Psalm 82 was still the active context, the
+// bare "verse eight" resolved against the STALE Psalm 82 and put Psalms 82:8
+// on screen (and "verse twenty" -> Acts 1:20-shaped wrong sends the same
+// way) — the preacher was announcing a NEW book, and the number belongs to
+// it. A bare "verse N" may only lean on the active context when the same text
+// isn't naming a different book.
+//
+// Deepgram routinely splits that announcement across segments — the live
+// runs delivered "...In the book of Acts" and then, as a SEPARATE segment,
+// "of Apostle one verse eight" — so the tail of the previous segment counts
+// too, not just the text at hand.
+function announcesDifferentBook(text) {
+  try {
+    const prevTail = (prevFinalTranscript && Date.now() - prevFinalTranscriptAt < PREV_FINAL_JOIN_WINDOW_MS)
+      ? prevFinalTranscript.split(RE_SPACES).slice(-8).join(' ') : '';
+    return detectBookMentions(`${prevTail} ${text}`, true).some(b => b !== referenceContext.book);
+  } catch { return false; }
+}
+
+// True while an interim transcript still looks mid-citation: its last word is
+// a bare number, or one of the words that always continues a citation. A
+// number followed by punctuation ("verse 10,") counts as finished — Deepgram
+// only punctuates after it has committed to the clause.
+function interimLooksIncomplete(text) {
+  const last = String(text || '').trim().split(RE_SPACES).pop() || '';
+  if (/[,.;!?]$/.test(last)) return false;
+  const w = last.toLowerCase().replace(/[^a-z0-9-]/g, '');
+  if (!w) return false;
+  return /^\d+$/.test(w) || WORD_TO_NUM[w] !== undefined || w === 'hundred' || DANGLING_CONTINUATION_WORDS.has(w);
+}
+
+// ── Multi-stream citation voting (see citation_voting.js) ────────────────
+const citationVoting = createCitationVoting({
+  workerCall, parseAllSpokenReferences, resolveAmbiguousRefs, broadcastDetection,
+  referenceContext, updateSermonContext, setRangeQueue, clearRangeQueue,
+  isReady: () => ({ workerReady: workerBasicReady, inBibleMode }),
+  joinWindowMs: PREV_FINAL_JOIN_WINDOW_MS,
+  getSettings: () => settings,
+});
 
 async function processForReferences(transcript, isFinal) {
   if (!workerBasicReady) return false;
-  let refs = resolveAmbiguousRefs(parseAllSpokenReferences(transcript, inBibleMode));
+  let refs = await resolveAmbiguousRefs(parseAllSpokenReferences(transcript, inBibleMode));
 
   const tailWord = transcript.trim().replace(/[.,!?]+$/, '').split(RE_SPACES).pop()?.toLowerCase();
   if (refs.length && isFinal && DANGLING_CONTINUATION_WORDS.has(tailWord)) {
@@ -4084,15 +4216,22 @@ async function processForReferences(transcript, isFinal) {
   // stable append-only prefix for every offline engine — see streamNewWords above), and
   // only within a short window so an unrelated sentence can't get spliced
   // into a citation by coincidence.
+  // When refs only resolve via the join, the words that identify a bare
+  // chapter's verse (a "28," callout, the first words of the reading) live
+  // in the PREVIOUS segment — searching just the newest one throws them
+  // away (real incident: Matthew 11:28, live, 2026-09-24).
+  let joinedText = null;
   if (!refs.length && isFinal && prevFinalTranscript
       && Date.now() - prevFinalTranscriptAt < PREV_FINAL_JOIN_WINDOW_MS) {
-    const joinedRefs = resolveAmbiguousRefs(parseAllSpokenReferences(`${prevFinalTranscript} ${transcript}`, inBibleMode));
+    const joinedRefs = await resolveAmbiguousRefs(parseAllSpokenReferences(`${prevFinalTranscript} ${transcript}`, inBibleMode));
     if (joinedRefs.length) {
       console.log(`[Direct] Resolved from joined segments: "${prevFinalTranscript}" + "${transcript}"`);
       refs = joinedRefs;
+      joinedText = `${prevFinalTranscript} ${transcript}`;
     }
   }
   if (isFinal) { prevFinalTranscript = transcript; prevFinalTranscriptAt = Date.now(); }
+  for (const r of refs) citationVoting.recordPrimaryCitation(r);
 
   if (!refs.length) {
     // No full refs, but the preacher may have named a bare book ("Exodus…")
@@ -4106,6 +4245,50 @@ async function processForReferences(transcript, isFinal) {
       inBibleMode = true;
       clearTimeout(bibleModeClearTimer);
       bibleModeClearTimer = setTimeout(() => { inBibleMode = false; }, 30000);
+    }
+
+    // A chapter was named a segment or two ago with STILL no verse resolved
+    // (chapterOnlyPending — NOT just "some chapter is contextually active,"
+    // which would also fire on ordinary narration in an already-resolved
+    // chapter — see its own declaration comment for the real incident that
+    // distinction fixes), and this segment's own words didn't parse as a
+    // new citation at all — try the same chapter-scoped keyword match
+    // against the buffer as it now stands (the reading may have continued
+    // across the segment boundary).
+    if (isFinal && chapterOnlyPending && referenceContext.isValid
+        && referenceContext.book === chapterOnlyPending.book
+        && referenceContext.chapter === chapterOnlyPending.chapter) {
+      // Accumulate — don't just re-search this one segment's text alone, the
+      // real verse number or identifying words may have arrived over
+      // several segments (see resolveChapterByKeywords's own comment for
+      // the real Matthew 11:28 incident this accumulation fixes).
+      chapterOnlyPending.text = `${chapterOnlyPending.text} ${transcript}`
+        .split(RE_SPACES).filter(Boolean).slice(-CHAPTER_PENDING_TEXT_MAX_WORDS).join(' ');
+      const keywordVerses = await resolveChapterByKeywords(chapterOnlyPending.book, chapterOnlyPending.chapter, chapterOnlyPending.text);
+      if (keywordVerses.length) {
+        // method: 'chapter-keyword', not 'direct' — this is a GUESS (a
+        // number or word-overlap match against a chapter that was named,
+        // not an unambiguous full citation), so it needs the same D()/A()
+        // corroboration any other partial resolution needs rather than
+        // auto-trusting it outright (real incident: an early, weak guess
+        // reaching 'viewer' at full confidence is exactly what let Matthew
+        // 11:17/11:27 win over the real 11:28). Only treated as genuinely
+        // "resolved" (pending cleared, no more retries) once it actually
+        // reaches the viewer — a demotion to Candidates leaves the pending
+        // state alive so a stronger signal on a later segment gets another
+        // shot, instead of permanently locking onto a weak first guess.
+        const sent = isFinal
+          ? await broadcastDetection(keywordVerses, 'chapter-keyword', DIRECT_PARTIAL_SCORE, 'viewer')
+          : null;
+        if (sent === 'viewer') {
+          console.log(`[Direct] "${chapterOnlyPending.book} ${chapterOnlyPending.chapter}" named earlier with no verse — next words matched "${keywordVerses[0].reference}" → viewer`);
+          chapterKeywordResolvedFor = `${chapterOnlyPending.book}|${chapterOnlyPending.chapter}`;
+          chapterOnlyPending = null;
+          lastDirectRefTime = Date.now();
+          updateSermonContext({ book: referenceContext.book, chapter: referenceContext.chapter, verse: keywordVerses[0].verse });
+          return true;
+        }
+      }
     }
     return false;
   }
@@ -4125,9 +4308,61 @@ async function processForReferences(transcript, isFinal) {
       clearTimeout(bibleModeClearTimer);
       bibleModeClearTimer = setTimeout(() => { inBibleMode = false; }, 30000);
       if (chapter) referenceContext.update(book, chapter);
+      if (chapter && chapterKeywordResolvedFor !== `${book}|${chapter}`) chapterKeywordResolvedFor = null;
     }
 
-    if (!verse && !verseStart && !ranges) continue; // need at least a verse number
+    // Bare "BOOK chapter N", nothing else named — per the owner: "when he
+    // calls a chapter, but no verse, it is our responsibility to look for
+    // the correct verse based on his next few keywords." Try resolving right
+    // away in case the reading followed in the SAME utterance ("Jeremiah
+    // chapter seventeen. Blessed is the man..." all one final segment).
+    // Handled entirely here (NOT falling through to the shared 'direct'-
+    // trust downstream block below, unlike the invalid-verse-context case) —
+    // this is a GUESS, not an unambiguous citation, so it goes out (if at
+    // all) at 'direct-partial' confidence and needs real corroboration to
+    // actually reach the viewer; see resolveChapterByKeywords's own comment
+    // for the real incident (Matthew 11:28 guessed wrong, twice) this
+    // caution fixes. If it only reaches Candidates, chapterOnlyPending stays
+    // alive so processForReferences' no-ref branch above keeps retrying
+    // with more accumulated text on later segments.
+    if (!verse && !verseStart && !ranges) {
+      // Real incident: a joined-segment retry (prevFinalTranscript +
+      // transcript) can re-discover the SAME old bare-chapter mention that
+      // was already successfully resolved a moment ago — "In Romans 10,
+      // whosoever call upon..." (already resolved to Romans 10:13) joined
+      // with the NEXT, unrelated segment ("Proverbate him is said...")
+      // re-parsed as a fresh "Romans 10" bare-chapter ref, triggering a
+      // BRAND NEW resolveChapterByKeywords search against text that was
+      // never actually about Romans at all — landing on "Romans 10:14"
+      // purely by coincidental word overlap. chapterKeywordResolvedFor
+      // already tracks "this exact chapter was just confidently resolved"
+      // for the retry branch above; skip re-attempting here too once it's
+      // set, rather than letting every stale re-parse get a fresh guess.
+      if (chapter && chapterKeywordResolvedFor === `${book}|${chapter}`) { continue; }
+      // Finals only: an interim can't send anything from here, and searching
+      // (two worker round-trips) or recording pending text for every growing
+      // interim prefix is wasted work that also pollutes the pending window.
+      if (chapter && isFinal && !ref.ambiguousUnresolved) {
+        const bareChapterVerses = await resolveChapterByKeywords(book, chapter, joinedText || transcript);
+        if (bareChapterVerses.length) {
+          const sent = await broadcastDetection(bareChapterVerses, 'chapter-keyword', DIRECT_PARTIAL_SCORE, 'viewer');
+          if (sent === 'viewer') {
+            console.log(`[Direct] "${book} ${chapter}" named with no verse — next words matched "${bareChapterVerses[0].reference}" → viewer`);
+            chapterKeywordResolvedFor = `${book}|${chapter}`;
+            chapterOnlyPending = null;
+            lastDirectRefTime = Date.now();
+            updateSermonContext({ book, chapter, verse: bareChapterVerses[0].verse });
+            continue;
+          }
+        }
+        if (chapterKeywordResolvedFor !== `${book}|${chapter}`) chapterOnlyPending = { book, chapter, text: joinedText || transcript };
+      }
+      continue; // nothing confidently resolved yet
+    } else {
+      // A verse WAS named (directly, or as part of a range) — the chapter is
+      // no longer "waiting," regardless of which book/chapter this is for.
+      chapterOnlyPending = null;
+    }
 
     try {
       let verses = [];
@@ -4154,14 +4389,53 @@ async function processForReferences(transcript, isFinal) {
           // paraphrase bracketing the citation ("Isaac went to the field to
           // meditate") is a clear, if inexact, match for the real verse
           // (24:63) the citation's own number failed to reach.
-          verses = await resolveInvalidVerseByContext(book, chapter, verse);
-          if (verses.length) {
-            console.log(`[Direct] "${book} ${chapter}:${verse}" doesn't exist — context match found "${verses[0].reference}" instead`);
+          //
+          // Real incident (2026-09-23): "third John five verse 19" — "third"
+          // recognized as the book (3 John), but a single-chapter book has
+          // no "chapter 5" to consume, so "five" is silently discarded and
+          // chapter defaults to 1 — landing on the invalid "3 John 1:19"
+          // (only 14 verses). Unlike Genesis 24:83 (both book AND chapter
+          // were genuinely, explicitly spoken — only the verse digit was
+          // garbled), the CHAPTER here was never actually said at all; a
+          // whole spoken number getting silently dropped is a much stronger
+          // signal the citation itself is unreliable, not just its verse
+          // digit. Skip the fallback entirely for single-chapter books —
+          // searching the wide rolling buffer for "the best coincidental
+          // match anywhere in this 14-verse book" is exactly the shape of
+          // false positive this produced ("3 John 1:4", unrelated).
+          if (MAX_CHAPTERS[book] !== 1) {
+            verses = await resolveInvalidVerseByContext(book, chapter, verse);
+            if (verses.length) {
+              console.log(`[Direct] "${book} ${chapter}:${verse}" doesn't exist — context match found "${verses[0].reference}" instead`);
+            }
           }
         }
       }
 
       if (!verses.length) continue;
+
+      // Real incident (2026-09-24, live app runs): interim text is a
+      // still-growing prefix, so a citation at its END is often half-heard —
+      // "Genesis one from verse TWENTY" (before "...six to twenty-eight")
+      // put Genesis 1:20 on the live screen, and a half-heard "Psalm one
+      // twenty five FOUR" put Psalms 125:4 there, each a second or so before
+      // the real citation. An interim citation only acts once the IDENTICAL
+      // citation parses on two consecutive interim updates (~100-300ms
+      // later) — a partial number changes between updates, a finished one
+      // doesn't. Applied ONLY while the interim text looks unfinished (it
+      // ends on a bare number or a dangling "verse/and/to") — a citation the
+      // speaker has clearly moved past ("...verse eight, he say, when the")
+      // goes out immediately: gating those too lost real citations whose
+      // interim wording Deepgram later rewrote ("Acts of Apostle" -> "act of
+      // apostle"), measured on live runs. The FINAL segment path is unaffected.
+      if (!isFinal && !ref.ambiguousUnresolved && interimLooksIncomplete(transcript)) {
+        const stableKey = citationKey(ref);
+        const nowStable = Date.now();
+        const confirmed = interimSeenKey === stableKey && nowStable - interimSeenAt < INTERIM_STABLE_WINDOW_MS;
+        interimSeenKey = stableKey;
+        interimSeenAt  = nowStable;
+        if (!confirmed) continue;
+      }
 
       lastDirectRefTime = Date.now();
       // Not for an unresolved ambiguous guess (see the comment above) —
@@ -4283,8 +4557,7 @@ async function processVerbatim(transcript) {
     const viewer = results.filter(r => r.similarity >= VERBATIM_AUTOSEND_MIN || r.matchedIdf >= VERBATIM_CERTAIN_IDF);
     if (viewer.length) {
       const top    = viewer[0];
-      const vKey   = `${top.book}|${top.chapter}|${top.verse}`;
-      const corrected = callWithCorrectionShadow(top, transcript);
+      const corrected = maybeCorrectMiscitation(top, transcript, results.filter(r => r !== top));
       if (corrected) return true;   // replaced on-air, skip the normal viewer broadcast
       const viaIdf = top.similarity < VERBATIM_AUTOSEND_MIN;
       // top.similarity itself stays coverage-diluted (76% is an honest
@@ -4295,7 +4568,6 @@ async function processVerbatim(transcript) {
       // certainty too, or broadcastDetection's own VIEWER_MIN_SCORE check
       // would just demote it straight back to Candidates and undo this.
       const effectiveScore = viaIdf ? Math.max(top.similarity, 0.90) : top.similarity;
-      const boosted = ensembleScore(vKey, 'verbatim', effectiveScore, viewer);
       // Corroboration gate for the coverage-diluted (viaIdf) path only —
       // same principle already applied to stream's backward-extension
       // confirmations. Real incident (2026-09-21 eval audit): "Mark 11:23"
@@ -4307,9 +4579,9 @@ async function processVerbatim(transcript) {
       // already clears VERBATIM_AUTOSEND_MIN (real, high coverage), this
       // never applies — only the "certain purely by IDF despite hearing
       // just part of it" path needs a second opinion.
-      const viaIdfTarget = (viaIdf && !shadowLedger.hasCorroboration({ book: top.book, chapter: top.chapter, verse: top.verse }))
+      const viaIdfTarget = (viaIdf && !evidenceLedger.hasCorroboration({ book: top.book, chapter: top.chapter, verse: top.verse }))
         ? 'suggestions' : 'viewer';
-      const sent = await broadcastDetection(viewer, 'verbatim', boosted, viaIdfTarget);
+      const sent = await broadcastDetection(viewer, 'verbatim', effectiveScore, viaIdfTarget);
       // Logged after the call, gated on the ACTUAL landing target —
       // broadcastDetection returns 'viewer'/'suggestions'/false now, not a
       // plain boolean. It used to be a boolean, and `if (sent)` was true
@@ -4320,7 +4592,7 @@ async function processVerbatim(transcript) {
       // 20:17 logged "boosted=90% → viewer" one line after "[Guard]
       // Blocked non-sequential auto-send ... demoted to Candidates" for
       // the exact same detection.
-      if (sent === 'viewer') console.log(`[Verbatim] "${top.reference}" raw=${(top.similarity*100).toFixed(0)}% boosted=${(boosted*100).toFixed(0)}%${viaIdf ? ` (via matchedIdf=${top.matchedIdf.toFixed(1)}, sequence-certain despite partial coverage)` : ''} → viewer`);
+      if (sent === 'viewer') console.log(`[Verbatim] "${top.reference}" raw=${(top.similarity*100).toFixed(0)}% score=${(effectiveScore*100).toFixed(0)}%${viaIdf ? ` (via matchedIdf=${top.matchedIdf.toFixed(1)}, sequence-certain despite partial coverage)` : ''} → viewer`);
       // Feed high-confidence verbatim hits into sermon context + reading mode tracker
       if (top.similarity >= 0.92) {
         updateSermonContext({ book: top.book, chapter: top.chapter, verse: top.verse });
@@ -4337,11 +4609,9 @@ async function processVerbatim(transcript) {
       //
       // Logged AFTER broadcastDetection now, using its real return value —
       // not predicted beforehand from `similarity >= SUGGESTION_MIN_SCORE`.
-      // That predicted text went stale the moment bug #26's fix made this
-      // gate conditional on useUnifiedScoring: under the new model, the
-      // real floor is detectionScoring.decideTarget's own 0.50, not
-      // SUGGESTION_MIN_SCORE (0.87) — so the old prediction would claim
-      // "dropped" for entries that actually reached Candidates just fine.
+      // (The floor is detectionScoring.decideTarget's own 0.50; predicting it
+      // from SUGGESTION_MIN_SCORE (0.87) claimed "dropped" for entries that
+      // actually reached Candidates.)
       const sent = await broadcastDetection(results.slice(0, 1), 'verbatim', results[0].similarity, 'suggestions', { capAtSuggestions: true });
       console.log(`[Verbatim] "${results[0].reference}" raw=${(results[0].similarity*100).toFixed(0)}% — below ${(VERBATIM_AUTOSEND_MIN*100).toFixed(0)}% auto-send bar, ${sent === 'suggestions' ? '→ candidates' : 'dropped'}`);
     }
@@ -4366,55 +4636,58 @@ async function processVerbatim(transcript) {
 // left uncorrected until this was lowered.
 const CORRECTION_MIN_IDF = 15;
 
-// Shadow-mode comparison for detectionScoring.evaluateCorrection — that
-// function was written as this codebase's own consolidated replacement for
-// maybeCorrectMiscitation (one shared distanceTerm instead of an
-// independently-tuned MISCITATION_FORWARD_EXEMPT_VERSES constant that
-// "could drift from whatever forward reading meant elsewhere" — its own
-// module comment), but unlike scoreCandidate/decideTarget (which get real
-// shadow-log comparison on every single detection, via the scoring-shadow-
-// divergence event below) it had never actually been called anywhere in
-// this file — fully unit-tested in isolation, zero real-traffic validation.
-// This wrapper is a pure black-box comparison around maybeCorrectMiscitation
-// (never touches its internals, never changes what it returns) so real
-// divergence data can accumulate before evaluateCorrection is ever
-// considered for a real cutover the way scoreCandidate/decideTarget already
-// went through. Snapshot taken BEFORE calling the real function, since a
-// real correction mutates lastDirectSentVerse/lastDirectSentTime as a side
-// effect — reading them after would compare against already-cleared state.
-function callWithCorrectionShadow(topMatch, sourceText) {
-  const snapshot = lastDirectSentVerse
-    ? { book: lastDirectSentVerse.book, chapter: lastDirectSentVerse.chapter, verse: lastDirectSentVerse.verse, t: lastDirectSentTime }
-    : null;
-  const actualCorrected = maybeCorrectMiscitation(topMatch, sourceText);
-  if (snapshot) {
-    try {
-      const candidate = {
-        book: topMatch.book, chapter: topMatch.chapter, verse: topMatch.verse,
-        method: topMatch.method || 'verbatim',
-        rawResult: topMatch,
-      };
-      const withinEstablishedRange = (c) => rangeAllVerses.some(v => v.book === c.book && v.chapter === c.chapter);
-      const alreadyShown = (c) => sentVerseKeysThisBook.has(`${c.book}|${c.chapter}|${c.verse}`);
-      const shadowCorrected = detectionScoring.evaluateCorrection(
-        snapshot, candidate, { now: Date.now(), alreadyShown }, { withinEstablishedRange }
-      );
-      if (!!shadowCorrected !== !!actualCorrected) {
-        logDebug('correction-shadow-divergence', {
-          candidateRef: `${topMatch.book} ${topMatch.chapter}:${topMatch.verse}`,
-          activeCitationRef: `${snapshot.book} ${snapshot.chapter}:${snapshot.verse}`,
-          actualCorrected: !!actualCorrected,
-          shadowCorrected: !!shadowCorrected,
-        });
-      }
-    } catch (err) {
-      console.warn('[CorrectionShadow] error (non-fatal, real decision unaffected):', err.message);
-    }
+// Real incident (2026-09-23): "Ephesians 2:10" cited, preacher actually
+// reading Jeremiah 17:7-8 ("tree planted by the...waters, never dries") —
+// correctly recognized as a mis-citation, but the near-duplicate-phrasing
+// collision this codebase has repeatedly hardened against elsewhere
+// (Jeremiah 17:8 vs Psalm 1:3, both describe a tree planted by water) hit
+// again here: the correction landed on Psalm 1:3 instead of the real
+// Jeremiah 17:7-8, and went out live. Every existing collision guard for
+// this family of bug (scoreCandidate's inDifferentBookDuringRange cap,
+// processStreamText's own duplicate-content tie guard) only covers an
+// ACTIVE RANGE or a same-instant tie between two live candidates — a plain
+// citation correction (no range involved) had no equivalent protection.
+// alternates carries whatever OTHER ranked candidates the caller already
+// computed for this same spoken text (verbatimSearchBatch's top-3,
+// processStreamText's confirmed.slice(0,5), etc.) — zero extra search
+// cost, just plumbing what's already on hand. If a different-book
+// alternate carries comparable identifying weight to the one about to win,
+// this is genuine ambiguity (two verses sharing wording), not a confident
+// correction — refuse rather than gamble on whichever happened to rank
+// first internally.
+// Real, repeated incident (2026-09-23, recurred across multiple separate
+// live tests even AFTER hasComparableDifferentBookAlternate shipped):
+// "Jeremiah 17:7" correctly cited and displayed, then "corrected" to
+// "Psalms 1:3" — both describe a tree planted by water, never withering.
+// hasComparableDifferentBookAlternate only catches this when the SAME
+// search call that finds the winning candidate ALSO happens to return the
+// other side as a ranked alternate — real live audio doesn't reliably work
+// that way (the two can be found by different methods, moments apart,
+// each search call only ever seeing its own pick). This codebase already
+// has precedent for a small, explicit registry of known near-duplicate
+// PASSAGES when evidence-based detection alone can't reliably tell them
+// apart (see processStreamText's own duplicate-content tie guard: Psalms
+// 14&53, 40:13-17&70, 57:7-11+60:5-12&108, Psalm 18&2 Samuel 22) — this is
+// the same shape of problem, just surfacing in the correction path instead.
+// Chapter-level (not single-verse) since the whole passage shares the
+// "tree planted by water" imagery across its own several verses.
+const { isKnownCollisionPair } = detectionScoring;   // single registry lives in detection_scoring.js
+
+function hasComparableDifferentBookAlternate(topMatch, alternates) {
+  if (!alternates || !alternates.length) return null;
+  const topIdf = topMatch.matchedIdf;
+  if (typeof topIdf !== 'number') return null;
+  for (const alt of alternates) {
+    if (!alt || alt.book === topMatch.book) continue;
+    if (typeof alt.matchedIdf !== 'number') continue;
+    // 70% of the top pick's own identifying weight = genuinely near-tied,
+    // not "barely registered." A clearly-dominant top pick proceeds normally.
+    if (alt.matchedIdf >= topIdf * 0.7) return alt;
   }
-  return actualCorrected;
+  return null;
 }
 
-function maybeCorrectMiscitation(topMatch, sourceText) {
+function maybeCorrectMiscitation(topMatch, sourceText, alternates) {
   if (settings.autoCorrect === false) return false;
   if (!lastDirectSentVerse) return false;
   const now = Date.now();
@@ -4487,10 +4760,37 @@ function maybeCorrectMiscitation(topMatch, sourceText) {
     || (topMatch.matchedIdf != null && topMatch.matchedIdf >= CORRECTION_MIN_IDF);
   if (!strongEnough) return false;
 
+  const ambiguousAlt = hasComparableDifferentBookAlternate(topMatch, alternates);
+  if (ambiguousAlt) {
+    console.log(`[Correct] Refusing to correct "${lastDirectSentVerse.reference}" to "${topMatch.reference}" — comparably strong alternate "${ambiguousAlt.reference}" exists (matchedIdf ${ambiguousAlt.matchedIdf.toFixed(1)} vs ${topMatch.matchedIdf.toFixed(1)}), too ambiguous to trust`);
+    return false;
+  }
+  if (isKnownCollisionPair(lastDirectSentVerse.book, lastDirectSentVerse.chapter, topMatch.book, topMatch.chapter)) {
+    console.log(`[Correct] Refusing to correct "${lastDirectSentVerse.reference}" to "${topMatch.reference}" — known near-duplicate-wording passage pair, never trusted to auto-correct between each other`);
+    return false;
+  }
+
   const sameVerse = topMatch.book === lastDirectSentVerse.book
                  && topMatch.chapter === lastDirectSentVerse.chapter
                  && topMatch.verse === lastDirectSentVerse.verse;
   if (sameVerse) return false;   // verbatim agrees with what was cited — nothing to correct
+
+  // Real incident (2026-09-24, replaying live run 3): the preacher read
+  // Jeremiah 17:7-8 (shown on screen), then moved on and cited "Psalm 125
+  // verse one and two". The 60-100 word rolling buffer still held the
+  // Jeremiah reading, so a couple of segments later verbatim re-matched
+  // Jeremiah 17:7 and this function "corrected" the brand-new, correct
+  // Psalms 125:1 back to it. A "mis-citation" means the preacher cited X
+  // but is actually reading Y AFTER citing it — evidence for a verse that
+  // was ALREADY on screen before this citation went out predates the
+  // citation, so it can't be a misspoken version of it. (A preacher who
+  // genuinely re-reads an earlier verse is still handled: that arrives as
+  // a fresh detection through the normal path, not as a correction.)
+  const candidateShownAt = recentDetections.get(topKey);
+  if (candidateShownAt !== undefined && candidateShownAt < lastDirectSentTime) {
+    console.log(`[Correct] Refusing to correct "${lastDirectSentVerse.reference}" to "${topMatch.reference}" — that verse was already on screen before this citation, so the matching words are stale reading text, not a mis-citation`);
+    return false;
+  }
 
   // Never "correct" small forward progress within the SAME book+chapter as
   // what was cited — that isn't a mis-citation, it's the preacher continuing
@@ -4688,8 +4988,7 @@ async function runFingerprintSearch(currentSegment, skipNewTranscriptCheck = fal
     // arbitrary count cap). Still bounded (3) so a flood of near-tied
     // results can't overwhelm the panel.
     if (!recentDirectRef) {
-      const qualifying = results.filter(r => r.similarity >= SUGGESTION_MIN_SCORE).slice(0, 3)
-        .map(r => ({ ...r, similarity: ensembleScore(`${r.book}|${r.chapter}|${r.verse}`, 'fingerprint', r.similarity, results) }));
+      const qualifying = results.filter(r => r.similarity >= SUGGESTION_MIN_SCORE).slice(0, 3);
       if (qualifying.length) {
         // Logged AFTER broadcastDetection, gated on its own return value —
         // this used to log unconditionally before the call, which kept
@@ -4853,8 +5152,7 @@ async function runSemanticSearch(text) {
 
     // Same reasoning as fingerprint above — show everything that clears the
     // bar (bounded to 3), not just the single top hit.
-    const qualifying = results.filter(r => r.similarity >= SEMANTIC_MIN_SCORE).slice(0, 3)
-      .map(r => ({ ...r, similarity: ensembleScore(`${r.book}|${r.chapter}|${r.verse}`, 'semantic', r.similarity, results) }));
+    const qualifying = results.filter(r => r.similarity >= SEMANTIC_MIN_SCORE).slice(0, 3);
     if (qualifying.length) {
       // See the matching comment in runFingerprintSearch — logged after the
       // call, gated on whether anything actually reached the UI.
@@ -4912,34 +5210,24 @@ async function runSemanticSearch(text) {
   }
 }
 
-function confidenceRank(c) {
-  return c === 'high' ? 3 : c === 'medium' ? 2 : c === 'low' ? 1 : 0;
-}
-
-// ── Ensemble scorer ────────────────────────────────────────────────────────
-// Called from processVerbatim and runFingerprintSearch before broadcasting.
-// Returns boosted score if another method already detected this verse recently.
-function ensembleScore(verseKey, method, score, verses) {
-  if (!verseKey) return score;
-  const now = Date.now();
-
-  // Clean stale entries
-  for (const [key, entry] of ensembleCache) {
-    if (now - entry.time > ENSEMBLE_WINDOW_MS) ensembleCache.delete(key);
-  }
-
-  const existing = ensembleCache.get(verseKey);
-  if (existing && existing.method !== method && now - existing.time <= ENSEMBLE_WINDOW_MS) {
-    // Two different methods agree — boost
-    const boosted = Math.min(1.0, Math.max(score, existing.score) + ENSEMBLE_BOOST);
-    console.log(`[Ensemble] ${existing.method}+${method} agree on ${verseKey} → ${(boosted*100).toFixed(0)}%`);
-    ensembleCache.delete(verseKey); // consume — don't triple-boost
-    return boosted;
-  }
-
-  // Store for future agreement
-  ensembleCache.set(verseKey, { score, method, verses, time: now });
-  return score;
+// A non-citation detection was let through to the screen while a DIFFERENT
+// verse was active and it is not simple forward reading in that chapter: the
+// active reference was overridden. Remember what it replaced so a fresh
+// 'direct' re-parse of the old (garbled) citation moments later cannot
+// overwrite the correction — see recentlyCorrectedAway.
+function noteStaleOverride(candidate, topKey, now) {
+  if (!lastOutputVerse) return;
+  const forwardInSameChapter = candidate.book === lastOutputVerse.book
+    && candidate.chapter === lastOutputVerse.chapter
+    && candidate.verse >= lastOutputVerse.verse;
+  if (forwardInSameChapter) return;
+  console.log(`[Guard] Overriding stale active reference: "${candidate.reference}" while "${lastOutputVerse.reference || '?'}" sat active — letting it through`);
+  recentlyCorrectedAway = {
+    key: `${lastOutputVerse.book}|${lastOutputVerse.chapter}|${lastOutputVerse.verse}`,
+    replacedByKey: topKey,
+    replacedByReference: candidate.reference,
+    at: now,
+  };
 }
 
 async function broadcastDetection(verses, method, topScore, target, opts = {}) {
@@ -4989,184 +5277,19 @@ async function broadcastDetection(verses, method, topScore, target, opts = {}) {
   const chapterContinuity = !opts.verbatimDisagreed && !opts.capAtSuggestions && tryChapterAdvanceByDetection(verses, topScore, method);
   if (chapterContinuity) target = 'viewer';
 
-  // ── Score gate ────────────────────────────────────────────────────────────
-  // Low-confidence detections must never auto-send to the live display.
-  // Demote to suggestions so the operator can still see and promote manually
-  // — UNLESS this is the same-chapter continuity match computed above, which
-  // earns the same lower bar a formal range's own next-verse match already
-  // gets.
-  if (target === 'viewer' && topScore < VIEWER_MIN_SCORE && !chapterContinuity) {
-    target = 'suggestions';
-  }
-
-  // ── Continuity gate ────────────────────────────────────────────────────────
-  // A fuzzy (verbatim/fingerprint) hit is only trusted to auto-send while a
-  // book is "active" (something was sent in the last SAME_BOOK_WINDOW_MS) if
-  // it is the *immediate next verse* in that same book/chapter — the one
-  // legitimate case this needs to cover automatically is a preacher reading
-  // straight down a passage. Anything else — a different book, a different
-  // chapter, or a verse that isn't simply current+1 — is far more likely to
-  // be an isolated word-overlap false positive than a real, un-cited jump;
-  // a genuine topic/passage change is always cited explicitly (method
-  // 'direct'), never inferred from a phrase match alone. Demote instead of
-  // drop: the operator still sees it and can promote it manually from
-  // Candidates if it's genuinely right.
-  // ANY non-'direct' method must ALWAYS pass through this gate, including on
-  // the very first detection of a session when lastSentBook isn't set yet —
-  // this used to only apply once a book was already "active" (something
-  // sent within SAME_BOOK_WINDOW_MS), on the reasoning that "nothing to be
-  // non-sequential relative to" meant nothing to guard against. Two separate
-  // real incidents proved that wrong: 'direct-partial' auto-sent "Esther
-  // 6:1" at 100% from an STT-hallucinated book context (fixed by special-
-  // casing that one method), then 'stream' independently did the same thing
-  // to "Acts 3:6" (matchedIdf=13.0, a phrase collision on "in the name of
-  // Jesus Christ of Nazareth") as literally the first detection of a later
-  // session — the special-case for 'direct-partial' alone didn't cover it,
-  // because the free pass was never about which method, it was about
-  // whether lastSentBook existed yet. A single ungated hit — of any kind —
-  // becoming "active" then blocks every correct detection that follows
-  // until it independently re-confirms 3x, which is exactly what turned
-  // this into a visible delay on the genuinely correct Psalms 92:13 right
-  // after Acts 3:6 wrongly went out. isSequential below is already false
-  // whenever lastOutputVerse is null, so removing the outer gate here
-  // doesn't change behavior for anything that WAS legitimately sequential —
-  // it just means a cold-start hit needs the same 3x-independent-
-  // reconfirmation (or an actual 'direct' citation) as any other non-
-  // sequential one, instead of a free pass for being first.
-  if (target === 'viewer' && method !== 'direct' && verses[0]) {
-    const bookActiveRecently = !!lastSentBook && now - lastSentBookTime < SAME_BOOK_WINDOW_MS;
-    // "Next verse" (reading forward) OR the SAME verse already on screen —
-    // the latter matters because two independent methods (e.g. the anchor
-    // trie and verbatim) can both correctly land on the verse that's ALREADY
-    // showing within the same moment; without this, the second, entirely
-    // correct confirmation gets treated as "non-sequential" purely because
-    // verse === current, not current+1, and gets needlessly demoted despite
-    // agreeing with what's already right on screen.
-    // Forward-within-the-same-chapter (verse >= current), not just exactly
-    // current+1 — a preacher skipping ahead a few verses while explaining
-    // (Genesis 41:38 → 44, Daniel 10:3 → 12) is completely normal reading,
-    // and a coincidental word-overlap match landing in the SAME chapter
-    // already-being-read is far less likely than one landing in a
-    // different book entirely. Widening this from strictly +1 measurably
-    // speeds up real sends: batch-testing against real sermon audio showed
-    // 7-18% of correct detections per service were only reaching the
-    // screen via the slower 3x-reconfirm override path purely because they
-    // skipped a few verses ahead within a chapter the preacher was already
-    // reading straight through. Backward jumps are still never trusted
-    // here (see isBackwardInSameBook below) — this only widens forward.
-    const isSequential = bookActiveRecently && lastOutputVerse
-      && verses[0].book    === lastOutputVerse.book
-      && verses[0].chapter === lastOutputVerse.chapter
-      && verses[0].verse   >= lastOutputVerse.verse;
-    // A verse BEHIND the one currently active, in the same book/chapter, is
-    // never eligible for the stale-override below — real incident: reading
-    // forward through a range, a phrase echoing an EARLIER verse in that
-    // same range got independently re-detected 3x (the preacher circling
-    // back to a word, or a plain word-overlap collision) and the override
-    // treated that exactly like the Psalm 110/111 case it exists for,
-    // yanking the display backward to a verse already read. The override's
-    // whole premise — "this keeps reasserting itself against a WRONG active
-    // reference, so it's probably the truth trying to get through" — only
-    // holds for catching up or jumping to a different book; going backward
-    // within a passage you're actively reading forward through is never
-    // that, so it just stays a Candidate no matter how many times it repeats.
-    // Only blocks a genuine RE-send of a verse that's actually already been
-    // shown (sentVerseKeysThisBook) — not any verse merely numbered below
-    // whatever's on screen. Real incident this widening fixes: a preacher
-    // citing a passage's LAST verse first (its "reference"), then reading
-    // the whole thing from the top — Matthew 15:23-27 read in full, in
-    // order, at 90-99% confidence each, every single one silently dropped
-    // because verse 28 (the punch line, cited/paraphrased earlier) was
-    // already active. Those earlier verses were legitimately SKIPPED, never
-    // shown, so re-detecting them isn't the stale-backward-jump case at
-    // all — it's exactly the "catching up" case the override exists for.
-    const isBackwardInSameBook = lastOutputVerse
-      && verses[0].book    === lastOutputVerse.book
-      && verses[0].chapter === lastOutputVerse.chapter
-      && verses[0].verse   <  lastOutputVerse.verse
-      && sentVerseKeysThisBook.has(topKey);
-    if (!isSequential) {
-      // Track repeated independent re-detection of this exact non-active
-      // verse — see the comment on staleOverrideCandidate above.
-      if (staleOverrideCandidate && staleOverrideCandidate.key === topKey
-          && now - staleOverrideCandidate.lastSeenAt < STALE_OVERRIDE_WINDOW_MS) {
-        staleOverrideCandidate.count++;
-        staleOverrideCandidate.lastSeenAt = now;
-        staleOverrideCandidate.methods.add(method);
-      } else {
-        staleOverrideCandidate = { key: topKey, count: 1, lastSeenAt: now, methods: new Set([method]) };
-      }
-
-      // Cross-method agreement is stronger evidence than the same method
-      // repeating: two independent detection layers (e.g. the anchor-trie
-      // 'stream' pass and the phrase-alignment 'verbatim' pass) landing on
-      // the same verse from the same transcript rules out one method's own
-      // idiosyncratic false-positive pattern just recurring — which is
-      // exactly the risk STALE_OVERRIDE_COUNT's same-method 3x exists to
-      // catch. Real incident this addresses: a heavily STT-garbled spoken
-      // citation ("January of the thirtieth of the seventeen" for
-      // "Jeremiah 30:17") never resolves to a 'direct' hit, so a genuinely
-      // correct, sequence-certain verbatim match had to sit through 3 full
-      // independent re-detections before reaching the screen — a multi-
-      // second lag on something two different layers already agreed on
-      // within the same breath. Two methods agreeing needs only 2 hits
-      // total, not 3 of the same one.
-      const crossMethodConfirmed = staleOverrideCandidate.methods.size >= 2 && staleOverrideCandidate.count >= 2;
-
-      // Book-momentum: see bookMomentumCandidate's own declaration comment.
-      // Distinct ASCENDING verses (never a scattered/backward hit) in the
-      // same new book+chapter, independent of the exact-key tracking above.
-      if (bookMomentumCandidate && bookMomentumCandidate.book === verses[0].book
-          && bookMomentumCandidate.chapter === verses[0].chapter
-          && now - bookMomentumCandidate.lastSeenAt < STALE_OVERRIDE_WINDOW_MS) {
-        if (verses[0].verse >= Math.max(...bookMomentumCandidate.verses)) {
-          bookMomentumCandidate.verses.add(verses[0].verse);
-          bookMomentumCandidate.lastSeenAt = now;
-        }
-      } else {
-        bookMomentumCandidate = { book: verses[0].book, chapter: verses[0].chapter, verses: new Set([verses[0].verse]), lastSeenAt: now };
-      }
-      const bookMomentumConfirmed = bookMomentumCandidate.verses.size >= 2;
-
-      if ((staleOverrideCandidate.count >= STALE_OVERRIDE_COUNT || crossMethodConfirmed || bookMomentumConfirmed) && !isBackwardInSameBook && !opts.verbatimDisagreed) {
-        const via = staleOverrideCandidate.count >= STALE_OVERRIDE_COUNT
-          ? `independently re-detected ${staleOverrideCandidate.count}x`
-          : crossMethodConfirmed
-            ? `${[...staleOverrideCandidate.methods].join('+')} agree`
-            : `${bookMomentumCandidate.verses.size} ascending verses in ${verses[0].book} ${verses[0].chapter}`;
-        console.log(`[Guard] Overriding stale active reference: "${verses[0].reference}" ${via} while "${lastSentBook || 'nothing'}" (last: ${lastOutputVerse?.reference || '?'}) sat active — letting it through`);
-        // See recentlyCorrectedAway's own declaration comment — remember
-        // that the OLD (stale) active reference was just superseded, so a
-        // fresh 'direct' re-parse of that exact same old reference doesn't
-        // blindly overwrite this correction moments later.
-        if (lastOutputVerse) {
-          recentlyCorrectedAway = {
-            key: `${lastOutputVerse.book}|${lastOutputVerse.chapter}|${lastOutputVerse.verse}`,
-            replacedByKey: topKey,
-            replacedByReference: verses[0].reference,
-            at: now,
-          };
-        }
-        staleOverrideCandidate = null;   // consumed
-        bookMomentumCandidate = null;    // consumed
-      } else {
-        const backwardNote = isBackwardInSameBook && staleOverrideCandidate.count >= STALE_OVERRIDE_COUNT
-          ? ` (override count met but blocked — "${verses[0].reference}" is behind "${lastOutputVerse.reference}", never auto-sent)`
-          : '';
-        console.log(`[Guard] Blocked non-sequential auto-send: "${lastSentBook || 'nothing sent yet this session'}" active (last: ${lastOutputVerse?.reference || '?'}), ${method} hit "${verses[0].reference}" (${(topScore*100).toFixed(0)}%) — demoted to Candidates${backwardNote}`);
-        target = 'suggestions';
-      }
-    } else if (staleOverrideCandidate && staleOverrideCandidate.key === topKey) {
-      staleOverrideCandidate = null;   // it went through normally — stop tracking it
-    }
-  }
-
-  // ── Consolidated scoring — shadow mode ──────────────────────────────────
-  // Wrapped entirely in try/catch, touches no variable the real decision
-  // above already used — a bug here can never affect what actually reaches
-  // the operator's screen, only what gets logged for later review.
-  try {
-    if (verses[0]) {
+  // ── Decision: B+D+A scoring model (detection_scoring.js) ──────────────────
+  // One model decides viewer / suggestions / drop: B (per-method calibrated
+  // evidence) + D (distance from what is already on screen) + A (independent
+  // corroboration). The former parallel continuity gate, stale-override and
+  // book-momentum counters were replaced by it; their one surviving side
+  // effect (remembering what a correction replaced) lives in noteStaleOverride.
+  //
+  // chapterContinuity is a real, independent signal the B+D+A model has no
+  // concept of ("this verse's reference exactly matches a chapter that's
+  // actively being read"), so it wins over the model's target. Failure is
+  // closed: a bug in scoring can demote a send to Candidates, never promote.
+  if (verses[0]) {
+    try {
       const candidate = { book: verses[0].book, chapter: verses[0].chapter, verse: verses[0].verse };
       const activeContext = lastOutputVerse
         ? { book: lastOutputVerse.book, chapter: lastOutputVerse.chapter, verse: lastOutputVerse.verse, t: lastSentBookTime }
@@ -5206,7 +5329,7 @@ async function broadcastDetection(verses, method, topScore, target, opts = {}) {
         nameChapterIndex.get(recentlyMentionedName)?.has(`${candidate.book}|${candidate.chapter}`)
       );
       const { finalScore, breakdown } = detectionScoring.scoreCandidate(candidate, method, rawResult, {
-        activeContext, alreadyShown, ledger: shadowLedger, now,
+        activeContext, alreadyShown, ledger: evidenceLedger, now,
         // A formally-established range ("read verses 1 to 3") is a much
         // stronger "stay here" signal than ordinary continuity — see
         // scoreCandidate's own comment for the real incident (Jeremiah 17:8
@@ -5216,110 +5339,29 @@ async function broadcastDetection(verses, method, topScore, target, opts = {}) {
         namedEntityCorroborated,
       });
       if (process.env.KAIRO_DEBUG_SCORING) console.log('[DEBUG-SCORING]', JSON.stringify({ candidate, method, rawResult, activeContext, rangeActiveBook: rangeCurrentVerse ? rangeCurrentVerse.book : null, namedEntityCorroborated, finalScore, breakdown }));
-      // Read corroboration BEFORE record() — same "don't corroborate
-      // itself" ordering as scoreCandidate's own ledger.total() read above;
-      // decideTarget's semantic exemption needs to know whether a DIFFERENT
-      // method already, independently hit this exact verse, not whether
-      // this candidate's own hit just got logged.
-      const corroborated = shadowLedger.hasCorroboration(candidate);
-      // Record AFTER scoring (not before) — this candidate's own hit
-      // shouldn't corroborate itself; matches staleOverrideCandidate's
-      // real ordering (checked, then updated) above.
-      shadowLedger.record(candidate, method, now);
-      const shadowTarget = detectionScoring.decideTarget(finalScore, method, { corroborated, veryHighConfidence: breakdown.veryHighConfidence });
-      if (shadowTarget !== target) {
-        logDebug('scoring-shadow-divergence', {
-          reference: verses[0].reference, method,
-          oldTarget: target, newTarget: shadowTarget,
-          oldScore: topScore, finalScore, breakdown,
-        });
-      }
-      // Real cutover — default false (see the settings.autoSend/autoCorrect
-      // pattern this mirrors). When on, the new model's decision REPLACES
-      // target for everything below (suggestions dedup, viewer dedup,
-      // broadcast, sendToOutputs) — the old gate logic above still runs
-      // harmlessly alongside (still updating staleOverrideCandidate/
-      // bookMomentumCandidate), which keeps shadow-log comparisons
-      // meaningful in both modes and costs nothing but a few discarded
-      // object mutations. topScore is also replaced so downstream logging
-      // (and the suggestion-floor check just below) reflects the score
-      // that actually drove the decision, not the old system's.
-      //
-      // chapterContinuity is a real, independent signal detectionScoring's
-      // own B+D+A model doesn't know about at all (it has no concept of
-      // "this verse's reference exactly matches a chapter that's actively
-      // being read" the way tryRangeAdvanceByDetection's formal-range
-      // check does) — without this, shadowTarget would silently overwrite
-      // the promotion computed above (chapterContinuity && target ===
-      // 'viewer'), exactly the way it would for tryRangeAdvanceByDetection
-      // too if that mechanism didn't early-return before reaching here.
-      if (settings.useUnifiedScoring === true) {
-        target = chapterContinuity ? 'viewer' : shadowTarget;
-        topScore = chapterContinuity ? Math.max(topScore, finalScore) : finalScore;
-        // Same exclusion as the legacy path just above (opts.verbatimDisagreed
-        // — see processStreamText's own cross-method sanity check comment):
-        // the B+D+A model has no visibility into "a full inverted-index
-        // search of the same text picked a different verse," so without this
-        // it silently overwrote the demotion computed above with its own,
-        // unrelated finalScore — confirmed live, this is the actual reason
-        // the crosscheck alone never stopped Psalms 7:9/Ezekiel 16:14/etc.
-        // from still reaching the viewer under useUnifiedScoring (which is
-        // what's actually live). Only overrides down to 'suggestions', never
-        // forces a drop — a human should still see it.
-        if (opts.verbatimDisagreed && target === 'viewer' && !chapterContinuity) {
-          target = 'suggestions';
-        }
-        // See opts.capAtSuggestions's own comment above (chapterContinuity
-        // block) — the caller already decided this evidence is too weak to
-        // auto-send; the B+D+A model's own finalScore/shadowTarget can't
-        // override that determination either.
-        if (opts.capAtSuggestions && target === 'viewer') {
-          target = 'suggestions';
-        }
-      }
+      // Read corroboration BEFORE record(): a candidate must not corroborate itself.
+      const corroborated = evidenceLedger.hasCorroboration(candidate);
+      evidenceLedger.record(candidate, method, now);
+      const decided = detectionScoring.decideTarget(finalScore, method, { corroborated, veryHighConfidence: breakdown.veryHighConfidence });
+      target = chapterContinuity ? 'viewer' : decided;
+      topScore = chapterContinuity ? Math.max(topScore, finalScore) : finalScore;
+      // opts.verbatimDisagreed (processStreamText's full inverted-index
+      // cross-check picked a different verse) and opts.capAtSuggestions (the
+      // caller already judged the raw evidence too weak to auto-send) are
+      // signals the model cannot see. Both only demote to 'suggestions',
+      // never drop — a human should still see it.
+      if (opts.verbatimDisagreed && target === 'viewer' && !chapterContinuity) target = 'suggestions';
+      if (opts.capAtSuggestions && target === 'viewer') target = 'suggestions';
+      if (target === 'viewer' && method !== 'direct') noteStaleOverride(verses[0], topKey, now);
+    } catch (err) {
+      console.warn('[Scoring] error — demoting to Candidates:', err.message);
+      if (target === 'viewer') target = 'suggestions';
     }
-  } catch (err) {
-    console.warn('[ScoringShadow] error (non-fatal, real decision unaffected):', err.message);
   }
 
-  // Below the suggestions floor → drop entirely. Not useful enough to show anywhere.
-  //
-  // TWENTY-SIXTH bug — this check must NOT apply when useUnifiedScoring is
-  // on. Owner, live: "candidate section never gets populated anymore...
-  // context isn't doing its job." Root cause: decideTarget
-  // (detection_scoring.js) already has its OWN correct floor for
-  // 'suggestions' vs 'drop' — 0.50 on the new model's fused B+D+A scale,
-  // an intentional, documented design choice (see decideTarget's own
-  // comment). But this downstream check re-applies SUGGESTION_MIN_SCORE
-  // (0.87) on top of it regardless — a constant calibrated for the OLD
-  // system's raw per-method scores, on a completely different scale.
-  // Net effect: ANYTHING decideTarget classified 'suggestions' with a
-  // finalScore between 0.50 and 0.87 (the entire range decideTarget's own
-  // floor exists to allow through) was silently re-dropped here, every
-  // time, since the day useUnifiedScoring went live. Only a finalScore
-  // that ALSO happened to clear 0.87 could ever actually reach the
-  // Candidates panel — an accident of two thresholds from two different
-  // eras of this codebase stacking, not a deliberate design. When
-  // useUnifiedScoring is off, this check is exactly as intended (gating
-  // the OLD system's own raw scores against the OLD system's own bar).
-  if (settings.useUnifiedScoring !== true && target === 'suggestions' && topScore < SUGGESTION_MIN_SCORE) return false;
-  // THIRTEENTH real bug found live, same session, via the owner's own
-  // screenshot of the Candidates panel showing 33%/39%/40% entries that
-  // never should have been visible at all. Confirmed via debug.log:
-  // detectionScoring.decideTarget legitimately classifies these as
-  // 'drop' (its OWN, stricter-than-'suggestions' floor) — but this file's
-  // ONLY score gate above only fires `if (target === 'suggestions' ...)`.
-  // Once useUnifiedScoring replaces `target` with the new model's 'drop'
-  // decision, that check's own condition (`target === 'suggestions'`) is
-  // simply false, so it does nothing — nothing downstream ever explicitly
-  // rejects 'drop' at all, and execution falls straight through to a real
-  // broadcast() call regardless of how low the score is. A far more
-  // consequential gap than it looks: every 'drop'-classified detection
-  // since useUnifiedScoring went live tonight was reaching the Candidates
-  // panel unfiltered, not just the 3 entries the owner happened to
-  // screenshot.
+  // Below the model's floor → drop entirely; it is not useful enough to show
+  // anywhere. (Nothing else may let a 'drop' fall through to a broadcast.)
   if (target === 'drop') return false;
-
   // ── Suggestions dedup ─────────────────────────────────────────────────────
   // Drop verses already suggested within the window; if nothing new remains,
   // skip the broadcast entirely. Keeps repeated near-misses from flooding the
@@ -5573,6 +5615,10 @@ if (require.main === module) {
     // 7777), so it calls this directly instead.
     spawnDetectionWorker,
     resolveAmbiguousRefs,
+    maybeCorrectMiscitation,
+    setRangeQueue,
+    handleSecondaryFinal: (...a) => citationVoting.handleSecondaryFinal(...a),
+    recordPrimaryCitation: (...a) => citationVoting.recordPrimaryCitation(...a),
     // Exposed for direct, surgical regression tests (e.g. the Joshua 1:18/
     // 1:8 correction-override fix) that need to drive specific detection
     // candidates through the real gating/dedup logic without needing to

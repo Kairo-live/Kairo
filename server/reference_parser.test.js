@@ -305,3 +305,37 @@ test('the bare pronoun/numeral "one" does not trigger a bare-number verse resolu
   assert.deepEqual(resolvePartialReference('verse one'),
     { book: 'Romans', chapter: 5, verse: 1, partial: true });
 });
+
+// Real incident (2026-09-23, live-test replay): "Psalm one twenty five five
+// verse one and two" (Psalm 125:1-2, with a genuine STT stutter repeating
+// "five") parsed as Psalm 120:5 — the composed-number logic only ever tried
+// "one twenty" (a valid 2-word 120), consumed that, and stranded the first
+// "five" as a bare verse number, leaving "verse one and two" as unparsed
+// trailing text.
+test('"<digit> <tens> <digit>" spoken as three separate words composes the correct 3-digit chapter (Psalm 125, real incident)', () => {
+  const refs = parseAllSpokenReferences('Psalm one twenty five five verse one and two.', true);
+  assert.equal(refs.length, 1);
+  assert.equal(refs[0].book, 'Psalms');
+  assert.equal(refs[0].chapter, 125);
+});
+
+test('regression: "one twenty verse five" (no third digit word) still correctly resolves to chapter 120 verse 5', () => {
+  const refs = parseAllSpokenReferences('Psalm one twenty verse five.', true);
+  assert.equal(refs.length, 1);
+  assert.equal(refs[0].book, 'Psalms');
+  assert.equal(refs[0].chapter, 120);
+  assert.equal(refs[0].verse, 5);
+});
+
+// Real incidents (2026-09-24): Deepgram wrote "Psalm one twenty five FOR | one
+// and two" and the bare "for" became verse 4 (Psalms 125:4 on the live
+// screen); "Psalm 23 for the Lord is my shepherd" hit the same way.
+test('a bare homophone number word ("for") right after a chapter is NOT a verse number', () => {
+  assert.equal(parseAllSpokenReferences('Psalm 23 for the Lord is my shepherd', true)[0]?.verse ?? null, null);
+  assert.equal(parseAllSpokenReferences('Psalm one twenty five for one and two', true)[0]?.verse ?? null, null);
+});
+test('a homophone number word IS still a verse when announced by "verse" (regression check)', () => {
+  const r = parseAllSpokenReferences('John three verse for', true)[0];
+  assert.equal(r.verse, 4);
+  assert.equal(parseAllSpokenReferences('John for verse one', true)[0].chapter, 4);
+});

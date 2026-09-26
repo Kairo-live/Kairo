@@ -9,7 +9,7 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const {
   calibrateMethodScore, distanceTerm, EvidenceLedger,
-  scoreCandidate, decideTarget, evaluateCorrection, VIEWER_MIN_SCORE,
+  scoreCandidate, decideTarget, VIEWER_MIN_SCORE,
 } = require('./detection_scoring');
 
 const T0 = 1_000_000; // arbitrary base timestamp (ms)
@@ -175,33 +175,6 @@ test('Psalm 1:1 alone (no momentum yet), Joshua active: does not yet auto-send o
   // auto send." Assert it does NOT get a momentum bonus it hasn't earned.
   const { breakdown } = scoreCandidate(candidate, hit.method, hit.rawResult, { activeContext: active, ledger, now: now + 50 });
   assert.equal(breakdown.A, 0, 'a single hit must not receive the multi-verse momentum bonus');
-});
-
-// ── 7. Genesis 24:3/24:63 miscitation-distance (today's fix) ───────────────
-test('Genesis 24:3 cited, 24:63 actually read: correction fires (60-verse jump is NOT treated as continued reading)', () => {
-  const activeCitation = { book: 'Genesis', chapter: 24, verse: 3, t: T0 };
-  const candidate = { book: 'Genesis', chapter: 24, verse: 63, method: 'verbatim', rawResult: { similarity: 0.93, matchedIdf: 14 } };
-  const now = T0 + 4000;
-  const fired = evaluateCorrection(activeCitation, candidate, { now, alreadyShown: () => false }, {});
-  assert.equal(fired, true, 'a 60-verse jump within the correction window must still correct');
-});
-
-test('Genesis 24:3 cited, 24:5 actually read (genuine small forward continuation): correction does NOT fire', () => {
-  const activeCitation = { book: 'Genesis', chapter: 24, verse: 3, t: T0 };
-  const candidate = { book: 'Genesis', chapter: 24, verse: 5, method: 'verbatim', rawResult: { similarity: 0.90, matchedIdf: 12 } };
-  const now = T0 + 4000;
-  const fired = evaluateCorrection(activeCitation, candidate, { now, alreadyShown: () => false }, {});
-  assert.equal(fired, false, 'a small forward step is ordinary continued reading, not a mis-citation');
-});
-
-// ── 8. Formally-cited ranges are untouched (separate mechanism) ────────────
-test('A verse far into a formally-established range is exempt from correction regardless of distance', () => {
-  const activeCitation = { book: 'Ezekiel', chapter: 47, verse: 1, t: T0 };
-  const candidate = { book: 'Ezekiel', chapter: 47, verse: 9, method: 'verbatim', rawResult: { similarity: 0.95, matchedIdf: 16 } };
-  const now = T0 + 4000;
-  const withinEstablishedRange = (c) => c.book === 'Ezekiel' && c.chapter === 47 && c.verse <= 9; // range 47:1-9
-  const fired = evaluateCorrection(activeCitation, candidate, { now, alreadyShown: () => false }, { withinEstablishedRange });
-  assert.equal(fired, false, 'a verse inside a formally-cited range must never be "corrected" away');
 });
 
 // ── Sanity: direct citation still auto-sends on its own ─────────────────────
@@ -669,4 +642,39 @@ test('Semantic + corroboration but finalScore still under the viewer bar stays a
   assert.equal(corroborated, true);
   assert.ok(finalScore < VIEWER_MIN_SCORE, `expected a weak similarity to stay under the bar, got ${finalScore}`);
   assert.notEqual(decideTarget(finalScore, 'semantic', { corroborated }), 'viewer');
+});
+
+// Real, repeated incident: a known near-duplicate-wording PASSAGE pair
+// (Jeremiah 17 / Psalms 1) must stay capped regardless of how much time
+// has passed or how much (false) corroboration has accumulated — the
+// earlier version of this exact test asserted the OPPOSITE (that it should
+// clear after 5s), which is precisely the gap that let this collision keep
+// recurring live after the time-based guard alone.
+test('a known-collision passage pair stays capped even after real elapsed time and repeated corroboration (Jeremiah 17 / Psalms 1, real recurring incident)', () => {
+  const ledger = new EvidenceLedger();
+  const active = { book: 'Jeremiah', chapter: 17, verse: 7, t: T0 };
+  const candidate = { book: 'Psalms', chapter: 1, verse: 3 };
+  const hit = streamHit('Psalms', 1, 3, 6, true);
+  ledger.record(candidate, 'stream', T0 + 5000);
+  ledger.record(candidate, 'stream', T0 + 6000);
+  ledger.record(candidate, 'verbatim', T0 + 7000);
+  const { finalScore } = scoreCandidate(candidate, hit.method, hit.rawResult, { activeContext: active, ledger, now: T0 + 30000 });
+  assert.ok(finalScore < VIEWER_MIN_SCORE, `expected the known-collision pair to stay capped regardless of elapsed time/corroboration, got ${finalScore}`);
+});
+
+test('a known-collision passage pair still yields immediately to a genuinely new explicit citation', () => {
+  const ledger = new EvidenceLedger();
+  const active = { book: 'Jeremiah', chapter: 17, verse: 7, t: T0 };
+  const candidate = { book: 'Psalms', chapter: 1, verse: 3 };
+  const hit = directHit('Psalms', 1, 3);
+  const { finalScore } = scoreCandidate(candidate, hit.method, hit.rawResult, { activeContext: active, ledger, now: T0 + 100 });
+  assert.ok(finalScore >= VIEWER_MIN_SCORE, `a fresh direct citation must never be capped by the known-collision guard, got ${finalScore}`);
+});
+
+test('a fresh chapter-keyword guess for a known-collision pair is not capped (explicit book citation, same exemption as direct)', () => {
+  const ledger = new EvidenceLedger();
+  const active = { book: 'Psalms', chapter: 1, verse: 3, t: T0 };
+  const candidate = { book: 'Jeremiah', chapter: 17, verse: 8 };
+  const { finalScore } = scoreCandidate(candidate, 'chapter-keyword', {}, { activeContext: active, ledger, now: T0 + 100 });
+  assert.ok(finalScore >= VIEWER_MIN_SCORE, `"Jeremiah 17" was just named — must not be capped by the collision guard, got ${finalScore}`);
 });

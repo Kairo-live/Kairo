@@ -59,6 +59,20 @@ function spokenToNumber(word) {
         a >= 0 && a <= 9 && b >= 0 && b <= 9 && c >= 0 && c <= 9) {
       return a * 100 + b * 10 + c;
     }
+    // "one twenty five" = 125 — a natural way of reading a 3-digit chapter
+    // number as hundred-digit + a separate tens-word + a separate ones-word
+    // (as opposed to the single hyphenated "twenty-five" token, or the pure
+    // digit-by-digit "one two five" the branch above already covers). Real
+    // incident: "Psalm one twenty five five verse one and two" (Psalm
+    // 125:1-2, with a genuine STT stutter repeating "five") parsed as
+    // Psalm 120:5 instead — the 2-word "one twenty" branch below greedily
+    // claimed 120 and stranded the "five" as a bare verse number, since
+    // nothing upstream ever tried composing all three words together first.
+    if (a !== undefined && a >= 1 && a <= 9
+        && b !== undefined && b >= 20 && b <= 90 && b % 10 === 0
+        && c !== undefined && c >= 1 && c <= 9) {
+      return a * 100 + b + c;
+    }
   }
   return null;
 }
@@ -630,6 +644,16 @@ function parseSpokenReference(text, inBibleMode = false) {
 
     let vRes = consumeNumber(words, idx);
     let lookAheadRepositioned = false;
+
+    // Real incidents (2026-09-24): "Psalm one twenty five FOR | one and two"
+    // (Deepgram's mishearing of "verse") sent Psalms 125:4 to the screen, and
+    // an ordinary "Psalm 23 for the Lord is my shepherd" parses as Psalms
+    // 23:4 the same way. A homophone number word (for/won/too/ate) is only a
+    // verse number when the word "verse" (or ":"/"and") announced it — bare
+    // after a chapter it is far more likely the everyday English word.
+    if (vRes && !hasVerseKeyword && vRes.consumed === 1 && ['for', 'won', 'too', 'ate'].includes(words[idx])) {
+      vRes = null;
+    }
 
     // A single low digit-word chapter ("one") immediately followed by
     // another single low digit-word with no "verse"/":" keyword between
@@ -1222,6 +1246,7 @@ module.exports = {
   SINGLE_WORD_BOOKS,
   AMBIGUOUS_BOOKS,
   NUMBERED_BOOK_VARIANTS,
+  MAX_CHAPTERS,
   WORD_TO_NUM,
   consumeNumber,
 };
