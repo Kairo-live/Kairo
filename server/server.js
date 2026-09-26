@@ -49,6 +49,7 @@ const { createCitationVoting, citationKey } = require('./citation_voting');
 const { setCitationLanguage, BARE_NUMBER_FILLER, AMBIGUOUS_NUMBER_WORDS, parseSpokenReference, parseAllSpokenReferences, resolvePartialReference, detectBookMentions, referenceContext, SINGLE_WORD_BOOKS, consumeNumber, MAX_CHAPTERS, WORD_TO_NUM } = require('./reference_parser');
 const { localizeCitationText, stripAccents } = require('./citation_i18n');
 const { findNamedPassages } = require('./named_passages');
+const { paraphraseWindows, decideParaphrase } = require('./paraphrase');
 const detectionScoring = require('./detection_scoring');
 const { VIEWER_MIN_SCORE, VERBATIM_CERTAIN_IDF, STREAM_IDF_FULL_CONFIDENCE, SAME_BOOK_WINDOW_MS } = require('./detection_constants');   // single definition — see that file
 
@@ -3079,10 +3080,7 @@ async function handleTranscriptSegment(transcript, isFinal, confidence, speechFi
           lastFingerprintSearch = now;
           runFingerprintSearch(transcript, true);
         }
-        if (interimWords >= 6 && now - lastSemanticSearch > SEMANTIC_INTERVAL_MS) {
-          lastSemanticSearch = now;
-          runSemanticSearch(transcript);
-        }
+        maybeRunParaphrase().catch(() => {});
       }
     }
     return;
@@ -3102,6 +3100,7 @@ async function handleTranscriptSegment(transcript, isFinal, confidence, speechFi
   const wordCount = transcript.split(/\s+/).filter(Boolean).length;
   transcriptBuffer.push({ text: transcript, time: now, wordCount });
   while (transcriptBuffer.length && transcriptBuffer[0].time < now - 90000) transcriptBuffer.shift();
+  referenceContext.setPaceFactor(paceFactor());
   hasNewTranscript = true;
 
   streamNewWords(transcript, true);
@@ -3225,16 +3224,12 @@ async function handleTranscriptSegment(transcript, isFinal, confidence, speechFi
     textForExpensive = transcript;
     const canFingerprint = now - lastFingerprintSearch > FINGERPRINT_INTERVAL_MS;
     if (canFingerprint) lastFingerprintSearch = now;
-    const canSemantic = now - lastSemanticSearch > SEMANTIC_INTERVAL_MS;
-    if (canSemantic) lastSemanticSearch = now;
     await Promise.all([
       processVerbatim(textForExpensive),
       canFingerprint
         ? runFingerprintSearch(textForExpensive, true)
         : Promise.resolve(),
-      canSemantic
-        ? runSemanticSearch(textForExpensive)
-        : Promise.resolve(),
+      maybeRunParaphrase({ finished: true }),
     ]);
   } else {
     const sentenceFlushed = speechFinal
@@ -3245,16 +3240,12 @@ async function handleTranscriptSegment(transcript, isFinal, confidence, speechFi
     if (workerBasicReady && textForExpensive) {
       const canFingerprint = now - lastFingerprintSearch > FINGERPRINT_INTERVAL_MS;
       if (canFingerprint) lastFingerprintSearch = now;
-      const canSemantic = now - lastSemanticSearch > SEMANTIC_INTERVAL_MS;
-      if (canSemantic) lastSemanticSearch = now;
       await Promise.all([
         processVerbatim(textForExpensive),
         canFingerprint
           ? runFingerprintSearch(textForExpensive, true)
           : Promise.resolve(),
-        canSemantic
-          ? runSemanticSearch(textForExpensive)
-          : Promise.resolve(),
+        maybeRunParaphrase({ finished: true }),
       ]);
     } else if (workerBasicReady && !textForExpensive) {
       const interimWords = transcript.split(/\s+/).filter(Boolean).length;
@@ -3405,6 +3396,7 @@ function resetDetectionSession({ keepContinuity = false } = {}) {
     streamCrosscheckRejected.clear();
     awaitingCorroboration.clear();
     twinDecisions.clear();
+    paraphrasePrevKey = null;
     referenceContext.reset();
     chapterOnlyPending = null;
     chapterKeywordResolvedFor = null;
@@ -5201,8 +5193,6 @@ async function runFingerprintSearch(currentSegment, skipNewTranscriptCheck = fal
 // lower bar (NAMED_ENTITY_SEMANTIC_MIN_SCORE, 0.60) without reopening the
 // Bible-wide noise problem this constant exists to prevent.
 const SEMANTIC_MIN_SCORE      = SUGGESTION_MIN_SCORE;
-let lastSemanticSearch        = 0;
-const SEMANTIC_INTERVAL_MS    = 2000;   // heavier than fingerprint (embedding + 31k-vector scan) — don't run more than once per 2s
 
 // Real incident: "he went to the field to meditate there" (a paraphrase of
 // Genesis 24:63, "Isaac went out to meditate in the field") never reached
@@ -5268,71 +5258,75 @@ function contextualSemanticScopeChapters() {
   return chapters.size ? chapters : null;
 }
 
-async function runSemanticSearch(text) {
+// Speaking pace over the last ~90s of transcript: 1 at a normal preaching
+// pace (NORMAL_WPM or faster), up to 2 when the words come at half that rate
+// — long pauses, an interpreter. Time windows that wait for the preacher's
+// next words scale by it (referenceContext's "verse N" window).
+const NORMAL_WPM = 120;
+function paceFactor() {
+  if (transcriptBuffer.length < 3) return 1;
+  const minutes = (transcriptBuffer[transcriptBuffer.length - 1].time - transcriptBuffer[0].time) / 60000;
+  if (minutes < 0.75) return 1;
+  const words = transcriptBuffer.reduce((n, t) => n + t.wordCount, 0);
+  return Math.min(2, Math.max(1, NORMAL_WPM / Math.max(1, words / minutes)));
+}
+
+// ── Paraphrase: the preacher's own words for a verse ─────────────────────
+// Searched every few words of speech (not on a timer, so it keeps pace with
+// the preacher and the offline eval can measure it), over short windows of
+// recent speech — see paraphrase.js. The worker returns each candidate with
+// its meaning similarity, the cross-encoder's judgement and the identifying
+// wording it shares; decideParaphrase turns that into Possible Matches or,
+// when the signals agree strongly, the screen.
+const PARAPHRASE_EVERY_WORDS = 6;
+let paraphraseLastCount = 0;
+let paraphraseInFlight = null;  // the running search, if any
+let paraphrasePrevKey = null;   // the previous window's decision
+function paraphraseRecentText() {
+  const finals = transcriptBuffer.slice(-4).map(t => t.text).join(' ');
+  return `${finals} ${currentInterimText}`.split(RE_SPACES).filter(Boolean).slice(-60).join(' ');
+}
+// Interim speech skips a round while a search is still running; a finished
+// sentence waits for it and then gets its own search, so every sentence is
+// searched even when speech arrives faster than the search.
+async function maybeRunParaphrase({ finished = false } = {}) {
   if (!workerSemanticReady) return;
-  const words = text.split(RE_SPACES).filter(Boolean);
-  if (words.length < 5) return;   // too short to embed meaningfully
+  if (paraphraseInFlight) {
+    if (!finished) return;
+    await paraphraseInFlight.catch(() => {});
+    if (paraphraseInFlight) return;
+  }
+  paraphraseInFlight = runParaphrase().finally(() => { paraphraseInFlight = null; });
+  return paraphraseInFlight;
+}
 
+async function runParaphrase() {
+  const interimCount = currentInterimText ? currentInterimText.split(RE_SPACES).filter(Boolean).length : 0;
+  const count = wordsHeard + interimCount;
+  if (count - paraphraseLastCount < PARAPHRASE_EVERY_WORDS) return;
+  paraphraseLastCount = count;
+  // A citation was just made — its own verse is already handled.
+  if (Date.now() - lastDirectRefTime < DIRECT_REF_SUPPRESS_MS) return;
+  const recent = paraphraseRecentText();
+  const windows = paraphraseWindows(recent);
+  if (!windows.length) return;
   try {
-    const recentDirectRef = Date.now() - lastDirectRefTime < DIRECT_REF_SUPPRESS_MS;
-    if (recentDirectRef) return;   // same suppression fingerprint uses — don't second-guess a citation just made
-
-    const msg     = await workerCall('semanticSearch', { text, limit: 5 }, 3000);
-    let results = msg.results || [];
-
-    // Cross-encoder rerank pass — see reranker_engine.js's and
-    // detection_scoring.js's isVeryHighRawConfidence's own comments. Only
-    // ever runs over the already-short-listed top-5 cosine-similarity
-    // candidates (never the full corpus), attaching a real, trustworthy
-    // .rerankScore to each — this is the actual mechanism that can let a
-    // cold-start natural-language paraphrase (no citation, no active
-    // chapter, no name spoken) clear the auto-send bar, which nothing else
-    // in this file can do for semantic matches.
-    if (workerRerankerReady && results.length) {
-      const rerankMsg = await workerCall('rerank', { text, candidates: results }, 3000);
-      if (rerankMsg.results?.length) results = rerankMsg.results;
+    const results = (await workerCall('paraphraseSearch', { windows, limit: 8 }, 4000)).results || [];
+    const decision = decideParaphrase(results, { affinity: (v) => passageAffinity(v.book, v.chapter, v.verse) });
+    // Acted on only when the next window of speech agrees (see paraphrase.js).
+    if (process.env.KAIRO_DEBUG_PARAPHRASE) console.log('[DEBUG-PARAPHRASE]', JSON.stringify({ windows, top: results[0] && { ref: results[0].reference, cos: results[0].cos, rr: results[0].rerankScore, lex: results[0].lexIdf }, decision: decision && { ref: decision.verse.reference, target: decision.target }, prev: paraphrasePrevKey }));
+    const repeated = decision && paraphrasePrevKey === decision.key;
+    paraphrasePrevKey = decision ? decision.key : null;
+    // Careful sensitivity: a paraphrase is only ever offered, never sent.
+    if (repeated && decision.target === 'viewer' && settings.detectionSensitivity === 'careful') decision.target = 'suggestions';
+    if (repeated) {
+      const v = decision.verse;
+      const sent = await broadcastDetection([v], 'paraphrase', decision.score, decision.target, decision.target === 'suggestions' ? { capAtSuggestions: true } : {});
+      if (sent) console.log(`[Paraphrase] "${v.reference}" meaning ${(v.cos * 100).toFixed(0)}%, cross-encoder ${v.rerankScore == null ? 'n/a' : (v.rerankScore * 100).toFixed(0) + '%'}, shared wording ${v.lexIdf.toFixed(1)}${decision.why ? ` (${decision.why})` : ''} → ${sent}`);
     }
-
-    // Same reasoning as fingerprint above — show everything that clears the
-    // bar (bounded to 3), not just the single top hit.
-    const qualifying = results.filter(r => r.similarity >= SEMANTIC_MIN_SCORE).slice(0, 3);
-    if (qualifying.length) {
-      // See the matching comment in runFingerprintSearch — logged after the
-      // call, gated on whether anything actually reached the UI.
-      const sent = await broadcastDetection(qualifying, 'semantic', qualifying[0].similarity, 'suggestions');
-      if (sent) console.log(`[Semantic] ${qualifying.map(r => `"${r.reference}" ${(r.similarity*100).toFixed(0)}%`).join(', ')} → candidates`);
-    }
-
-    // Rerank-only promotion — a candidate whose CROSS-ENCODER score alone is
-    // strong, even when its raw cosine similarity never cleared
-    // SEMANTIC_MIN_SCORE (so `qualifying` above never included it at all).
-    // This is exactly the shape a genuine but unusually-phrased cold-start
-    // paraphrase takes — bi-encoder cosine similarity is a cruder signal
-    // than the reranker's joint scoring, so a real match can sit in the
-    // top-5 without also clearing the stricter cosine-only Candidates bar.
-    // 0.5 here is only "worth broadcasting at all" — decideTarget's own
-    // finalScore floor (0.50) and isVeryHighRawConfidence's rerank bar
-    // (0.90) are what actually decide Candidates vs. viewer downstream.
-    const topReranked = results[0];
-    if (workerRerankerReady && typeof topReranked?.rerankScore === 'number' && topReranked.rerankScore >= 0.5
-        && !qualifying.some(q => q.book === topReranked.book && q.chapter === topReranked.chapter && q.verse === topReranked.verse)) {
-      const sentReranked = await broadcastDetection([topReranked], 'semantic', topReranked.similarity, 'suggestions');
-      // Was hardcoded "→ candidates" regardless of the real outcome — a
-      // real bug that masked the rerank-auto-send false positives found
-      // live tonight (sentReranked can legitimately be 'viewer', and this
-      // line said "candidates" every time regardless).
-      if (sentReranked) console.log(`[Semantic] Reranked: "${topReranked.reference}" cross-encoder=${(topReranked.rerankScore*100).toFixed(0)}% (raw cosine ${(topReranked.similarity*100).toFixed(0)}%) → ${sentReranked}`);
-    }
-
-    // Contextually-scoped pass — see contextualSemanticScopeChapters',
-    // NAMED_ENTITY_SEMANTIC_MIN_SCORE's, and SCOPED_SEMANTIC_MARGIN's own
-    // comments. Independent of the Bible-wide pass above (runs even if it
-    // found nothing). Only ever surfaces the single top result, not a list —
-    // the whole point of the margin check is "this one genuinely stands
-    // out," which doesn't extend to whatever's second-best.
     const scopeChapters = contextualSemanticScopeChapters();
     if (scopeChapters) {
-      const scopedMsg = await workerCall('semanticSearchScoped', { text, chapters: [...scopeChapters], limit: 5 }, 3000);
+      const scopedMsg = await workerCall('semanticSearchScoped', { text: windows[0], chapters: [...scopeChapters], limit: 5 }, 3000);
       const rawScoped = scopedMsg.results || [];
       const top = rawScoped[0];
       const runnerUp = rawScoped[1];
@@ -5340,28 +5334,17 @@ async function runSemanticSearch(text) {
       const qualifies = top
         && top.similarity >= NAMED_ENTITY_SEMANTIC_MIN_SCORE
         && margin >= SCOPED_SEMANTIC_MARGIN
-        && !qualifying.some(q => q.book === top.book && q.chapter === top.chapter && q.verse === top.verse);
+        && !results.some(q => q.book === top.book && q.chapter === top.chapter && q.verse === top.verse);
       if (qualifies) {
         const sentScoped = await broadcastDetection([top], 'semantic', top.similarity, 'suggestions');
         if (sentScoped) console.log(`[Semantic] Contextually-scoped: "${top.reference}" ${(top.similarity*100).toFixed(0)}% (margin ${(margin*100).toFixed(0)}pt) → candidates`);
       }
     }
   } catch (err) {
-    if (!err.message?.includes('timeout')) {
-      console.warn('[Server] Semantic search error:', err.message);
-    }
+    if (!err.message?.includes('timeout')) console.warn('[Server] Paraphrase search error:', err.message);
   }
 }
 
-// A non-citation detection is going out in place of the explicit citation
-// that was just put on screen (within the same word window the mis-citation
-// corrector uses), and it isn't simple forward reading in that chapter: the
-// citation was probably garbled and this is the verse actually being read.
-// Remember what it replaced so a fresh 'direct' re-parse of the same garbled
-// words moments later can't overwrite it — see recentlyCorrectedAway.
-// Called only once the send is really going to the outputs (after dedup), and
-// only when what's on screen IS that citation, so ordinary book changes and
-// deduped repeats can't clobber a real pending record.
 function noteStaleOverride(candidate, topKey, now) {
   const active = lastOutputVerse;
   if (!active || !lastDirectSentVerse) return;
@@ -5522,9 +5505,10 @@ async function resolveTwin(candidate) {
   for (const [k, d] of twinDecisions) if (now - d.at > TWIN_DECISION_TTL_MS) twinDecisions.delete(k);
   const pending = decideTwin(candidate, key, twins).catch(() => null);
   twinDecisions.set(key, { pending, at: now });
-  // "Can't tell yet" stays open — more of the verse may settle it.
-  pending.then(r => { if (r?.kind === 'hold' && twinDecisions.get(key)?.pending === pending) twinDecisions.delete(key); });
-  return pending;
+  // Only a decisive result sticks (a switch, or speech clearly favouring the
+  // candidate); "can't tell yet" stays open — more of the verse may settle it.
+  pending.then(r => { if ((!r || r.kind === 'hold') && twinDecisions.get(key)?.pending === pending) twinDecisions.delete(key); });
+  return pending.then(r => (r?.kind === 'keep' ? null : r));
 }
 
 async function decideTwin(candidate, key, twins) {
@@ -5539,7 +5523,7 @@ async function decideTwin(candidate, key, twins) {
   const words = (text) => new Set(meaningfulWords(text || '').map(stemLite));
   const candWords = words(texts[0]);
   const candAff = passageAffinity(candidate.book, candidate.chapter, candidate.verse);
-  let best = null;
+  let best = null, speechKeeps = false;
   twins.forEach(([twinKey, shared], i) => {
     if (!texts[i + 1]) return;
     const [b, c, v] = twinKey.split('|');
@@ -5547,6 +5531,7 @@ async function decideTwin(candidate, key, twins) {
     let candOnly = 0, twinOnly = 0;
     for (const w of candWords) if (!twinWords.has(w) && speech.has(w)) candOnly++;
     for (const w of twinWords) if (!candWords.has(w) && speech.has(w)) twinOnly++;
+    if (candOnly >= twinOnly + TWIN_SPEECH_MARGIN) speechKeeps = true;
     const aff = passageAffinity(b, +c, +v);
     const other = { ref: { book: b, chapter: +c, verse: +v }, shared, hits: twinOnly, aff };
     if (twinOnly >= candOnly + TWIN_SPEECH_MARGIN) {
@@ -5562,13 +5547,13 @@ async function decideTwin(candidate, key, twins) {
       }
     }
   });
-  if (!best) return null;
+  if (!best) return speechKeeps ? { kind: 'keep' } : null;
   try { best.verse = (await workerCall('directLookup', best.ref, 2000)).result; } catch { return null; }
   return best.verse ? best : null;
 }
 const TWIN_EXEMPT_METHODS = new Set(['direct', 'direct-partial', 'chapter-keyword', 'continuation', 'context-citation', 'named-passage']);
 // Evidence that is a match against the Bible's TEXT — as opposed to anything spoken as a reference or trigger.
-const TEXT_MATCH_METHODS = new Set(['stream', 'verbatim', 'fingerprint', 'semantic']);
+const TEXT_MATCH_METHODS = new Set(['stream', 'verbatim', 'fingerprint', 'semantic', 'paraphrase']);
 
 // Stream matches held back only because no second, independent method had hit
 // the same verse yet. verseKey -> { verses, score, at }.
@@ -5642,6 +5627,7 @@ async function broadcastDetection(verses, method, topScore, target, opts = {}) {
       const alreadyShown = (c) => sentVerseKeysThisBook.has(`${c.book}|${c.chapter}|${c.verse}`);
       const rawResult = {
         similarity: verses[0].similarity ?? topScore,
+        paraphraseScore: verses[0].paraphraseScore,
         matchedIdf: verses[0].matchedIdf,
         confidence: verses[0].confidence,
         confirmed: verses[0].confirmed,
@@ -5699,7 +5685,7 @@ async function broadcastDetection(verses, method, topScore, target, opts = {}) {
           setImmediate(() => broadcastDetection(held.verses, 'stream', held.score, 'viewer').catch(() => {}));
         }
       }
-      const decided = detectionScoring.decideTarget(finalScore, method, { corroborated, veryHighConfidence: breakdown.veryHighConfidence });
+      const decided = detectionScoring.decideTarget(finalScore, method, { corroborated, veryHighConfidence: breakdown.veryHighConfidence, viewerBar: detectionScoring.viewerBarFor(settings.detectionSensitivity) });
       target = chapterContinuity ? 'viewer' : decided;
       topScore = chapterContinuity ? Math.max(topScore, finalScore) : finalScore;
       // opts.verbatimDisagreed (processStreamText's full inverted-index

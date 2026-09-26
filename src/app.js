@@ -1876,6 +1876,8 @@ async function loadSettings() {
     if (autoSendSettings)  autoSendSettings.checked  = settings.autoSend  !== false;
     updateAutoDeployBadge();
     if (showConfSettings)  showConfSettings.checked   = settings.showConfidence !== false;
+    const sensitivitySel = document.getElementById('detection-sensitivity');
+    if (sensitivitySel) sensitivitySel.value = settings.detectionSensitivity || 'balanced';
     // Restore toggle-group state from persisted settings
     syncToggleGroup('speech-engine-toggle', 'engine', settings.speechEngine || 'deepgram');
     initCustomSelects();
@@ -2081,6 +2083,7 @@ async function saveCurrentSettings() {
     translation:       translationSettings?.value || 'KJV',
     autoSend:          autoSendSettings?.checked  !== false,
     showConfidence:    showConfSettings?.checked   !== false,
+    detectionSensitivity: document.getElementById('detection-sensitivity')?.value || settings.detectionSensitivity || 'balanced',
     // obsEnabled/obsUrl/obsPassword/obsTextSource are NOT collected here —
     // the OBS detail panel (Outputs master-detail redesign) self-persists
     // each field immediately on change, the same pattern NDI/Syphon

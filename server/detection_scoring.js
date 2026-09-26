@@ -352,6 +352,13 @@ function calibrateMethodScore(method, rawResult) {
       if (isVeryHighRawConfidence('semantic', r)) return 0.85;
       return Math.min(0.60, clamp01(typeof r.similarity === 'number' ? r.similarity : 0) * 0.7);
 
+    case 'paraphrase':
+      // The preacher's own words for a verse (paraphrase.js). decideParaphrase
+      // already weighed meaning, the cross-encoder and shared identifying
+      // wording into one confidence; it only reaches the viewer bar when those
+      // signals agree strongly.
+      return clamp01(typeof r.paraphraseScore === 'number' ? r.paraphraseScore : 0);
+
     case 'named-passage':
       // "The Lord's Prayer", "the Beatitudes": a passage named, not read.
       // Suggestions-only (the caller caps it too) — a name is usually an allusion.
@@ -687,12 +694,20 @@ function scoreCandidate(candidate, method, rawResult, ctx) {
  * exact same "95%+ raw, or stay suggestions-only" policy without needing
  * its own opts flag.
  */
+// The operator's Detection sensitivity (Settings): how sure a match must be to
+// go to the screen on its own. Every level stays above the 0.75 hard caps
+// (backward reshow, range collision), and spoken citations (0.85-0.93) clear
+// every level. Default 'balanced' is VIEWER_MIN_SCORE.
+const SENSITIVITY_BARS = { careful: 0.85, balanced: VIEWER_MIN_SCORE, responsive: 0.77 };
+function viewerBarFor(sensitivity) { return SENSITIVITY_BARS[sensitivity] ?? VIEWER_MIN_SCORE; }
+
 function decideTarget(finalScore, method, opts) {
+  const bar = opts?.viewerBar ?? VIEWER_MIN_SCORE;
   if (method === 'semantic') {
-    if (finalScore >= VIEWER_MIN_SCORE && (opts?.corroborated || opts?.veryHighConfidence)) return 'viewer';
+    if (finalScore >= bar && (opts?.corroborated || opts?.veryHighConfidence)) return 'viewer';
     return finalScore >= 0.50 ? 'suggestions' : 'drop';
   }
-  if (finalScore >= VIEWER_MIN_SCORE) return 'viewer';
+  if (finalScore >= bar) return 'viewer';
   if (finalScore >= 0.50) return 'suggestions'; // matches today's SUGGESTION_MIN_SCORE-ish floor
   return 'drop';
 }
@@ -708,5 +723,7 @@ module.exports = {
   EvidenceLedger,
   scoreCandidate,
   decideTarget,
+  viewerBarFor,
+  SENSITIVITY_BARS,
   clamp01,
 };

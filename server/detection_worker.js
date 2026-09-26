@@ -1646,6 +1646,49 @@ async function semanticSearch(transcript, limit = 5) {
   return hits.map(({ idx, score }) => formatVerse(verseMetadata[idx], score, 'semantic'));
 }
 
+// Paraphrase search: several windows of recent speech (the last sentence, the
+// last few seconds, the words after "the Bible says…") searched by meaning in
+// one pass, then each candidate verse gets the other evidence the decision
+// needs — the cross-encoder's judgement against the window that found it, and
+// how much IDENTIFYING wording it shares with that window (sum of IDF over
+// shared stems, so "the/and/Lord" add almost nothing and "strongholds" a lot).
+function sharedIdentifyingWeight(text, idx) {
+  const said = new Set(norm(text).split(' ').filter(w => w.length >= 3 && !STOP_WORDS.has(w)).map(healWord));
+  const seen = new Set();
+  let idfSum = 0, hits = 0;
+  for (const words of [verseNormWords.get(idx), verseNormNltWords.get(idx)]) {
+    for (const w of words || []) {
+      if (w.length < 3 || STOP_WORDS.has(w)) continue;
+      const stem = healWord(w);
+      if (seen.has(stem) || !said.has(stem)) continue;
+      seen.add(stem); hits++; idfSum += idfMap.get(w) || 0;
+    }
+  }
+  return { idfSum, hits };
+}
+
+async function paraphraseSearch(windows, limit = 8) {
+  if (!semanticEngine.isReady() || !windows.length) return [];
+  const perWindow = await semanticEngine.searchMany(windows, 6);
+  const pool = new Map();   // verse idx -> { idx, cos, w }
+  perWindow.forEach((hits, w) => hits.forEach(({ idx, score }) => {
+    const p = pool.get(idx);
+    if (!p || score > p.cos) pool.set(idx, { idx, cos: score, w });
+  }));
+  const top = [...pool.values()].sort((a, b) => b.cos - a.cos).slice(0, limit);
+  for (const c of top) Object.assign(c, sharedIdentifyingWeight(windows[c.w], c.idx));
+  // The cross-encoder reads English; for a non-English service it has nothing to add.
+  const englishText = !(workerData?.altTranslation || '').startsWith('pack:');
+  if (englishText && rerankerEngine.isReady() && top.length) {
+    const scores = await rerankerEngine.scorePairs(top.map(c => windows[c.w]), top.map(c => verseMetadata[c.idx].kjv_text || ''));
+    top.forEach((c, i) => { c.rr = scores[i] ?? 0; });
+  }
+  return top.map(c => ({
+    ...formatVerse(verseMetadata[c.idx], c.cos, 'semantic'),
+    cos: c.cos, rerankScore: typeof c.rr === 'number' ? c.rr : null, lexIdf: c.idfSum, lexHits: c.hits, window: c.w,
+  }));
+}
+
 // Named-entity-scoped variant — see semantic_engine.js's searchWithin for
 // why this exists (a real spoken name narrows the search to just the
 // chapters that mention them, instead of competing against all ~31k verses
@@ -1916,6 +1959,11 @@ parentPort.on('message', async (msg) => {
       case 'semanticSearch': {
         const results = await semanticSearch(msg.text, msg.limit || 5);
         parentPort.postMessage({ type: 'semanticResults', id: msg.id, results });
+        break;
+      }
+      case 'paraphraseSearch': {
+        const results = await paraphraseSearch(msg.windows || [], msg.limit || 8);
+        parentPort.postMessage({ type: 'paraphraseResults', id: msg.id, results });
         break;
       }
       case 'semanticSearchScoped': {

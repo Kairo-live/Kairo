@@ -370,3 +370,15 @@ test('ordinal forms: "the twenty third psalm", "the second book of Timothy", "th
   assert.equal(ref('I love the psalms'), null);
   assert.equal(ref('the second time he read a psalm'), null);
 });
+
+test('a slow speaking pace widens the "verse N" window (up to double), never narrows it', () => {
+  referenceContext.update('Romans', 8);
+  referenceContext.setPaceFactor(1);
+  referenceContext._updatedAt = Date.now() - 60000;          // 60s since the citation
+  assert.equal(resolvePartialReference('verse 5'), null, 'normal pace: 45s window has passed');
+  referenceContext.setPaceFactor(1.6);                       // slow preacher / interpreter
+  assert.deepEqual(resolvePartialReference('verse 5'), { book: 'Romans', chapter: 8, verse: 5, partial: true });
+  referenceContext.setPaceFactor(0.5);                       // faster than normal: clamps to 1
+  assert.equal(resolvePartialReference('verse 5'), null);
+  referenceContext.setPaceFactor(1);
+});

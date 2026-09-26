@@ -700,3 +700,17 @@ test('a SAME-book near-duplicate outside the range is capped when the speech fav
   const cont = scoreCandidate({ book: 'Exodus', chapter: 12, verse: 34 }, hit.method, hit.rawResult, { activeContext: active, ledger, now: T0 + 1000, rangeActiveBook: 'Exodus', rangeCollision: false });
   assert.ok(cont.finalScore >= VIEWER_MIN_SCORE, 'reading on past the range (speech favours the new verse) still goes out');
 });
+
+test('detection sensitivity moves only the screen bar: citations clear every level, the hard caps stay below every level', () => {
+  const { decideTarget, viewerBarFor, SENSITIVITY_BARS } = require('./detection_scoring');
+  for (const level of Object.keys(SENSITIVITY_BARS)) {
+    const bar = viewerBarFor(level);
+    assert.ok(bar > 0.75, `${level} bar must stay above the 0.75 hard caps`);
+    assert.equal(decideTarget(0.93, 'direct', { viewerBar: bar }), 'viewer');
+    assert.equal(decideTarget(0.85, 'context-citation', { viewerBar: bar }), 'viewer');
+  }
+  assert.equal(decideTarget(0.82, 'verbatim', { viewerBar: viewerBarFor('careful') }), 'suggestions');
+  assert.equal(decideTarget(0.82, 'verbatim', { viewerBar: viewerBarFor('balanced') }), 'viewer');
+  assert.equal(decideTarget(0.78, 'verbatim', { viewerBar: viewerBarFor('responsive') }), 'viewer');
+  assert.equal(viewerBarFor(undefined), viewerBarFor('balanced'));
+});

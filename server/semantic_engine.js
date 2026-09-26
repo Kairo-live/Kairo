@@ -206,8 +206,61 @@ async function searchWithin(text, indices, limit = 5) {
   return top;
 }
 
+// Several queries at once — one batched embedding call and one pass over the
+// corpus. EmbeddingGemma is trained so the first dimensions of its vectors
+// carry most of the meaning (Matryoshka), so the pass compares only the first
+// PREFILTER_DIMS to shortlist PREFILTER_KEEP verses per query, then scores the
+// shortlist on all dimensions. Returns one top-K list per query, like search().
+const PREFILTER_DIMS = 256;
+const PREFILTER_KEEP = 48;
+let _prefixNorms = null;   // norm of each verse's first PREFILTER_DIMS dims
+function prefixNorms() {
+  if (_prefixNorms) return _prefixNorms;
+  _prefixNorms = new Float32Array(_count);
+  for (let i = 0; i < _count; i++) {
+    const base = i * _dims; let s = 0;
+    for (let d = 0; d < PREFILTER_DIMS; d++) s += _corpus[base + d] * _corpus[base + d];
+    _prefixNorms[i] = Math.sqrt(s) || 1;
+  }
+  return _prefixNorms;
+}
+function pushTop(top, limit, idx, score) {
+  if (top.length >= limit && score <= top[top.length - 1].score) return;
+  let pos = top.length;
+  while (pos > 0 && top[pos - 1].score < score) pos--;
+  top.splice(pos, 0, { idx, score });
+  if (top.length > limit) top.pop();
+}
+async function searchMany(texts, limit = 5) {
+  if (!isReady() || !texts || !texts.length) return [];
+  const out = await _extractor(texts, { pooling: 'mean', normalize: true });
+  const data = out.data instanceof Float32Array ? out.data : Float32Array.from(out.data);
+  const n = texts.length, dims = _dims, corpus = _corpus, norms = prefixNorms();
+  const qNorm = [];
+  for (let q = 0; q < n; q++) { let s = 0; for (let d = 0; d < PREFILTER_DIMS; d++) s += data[q * dims + d] ** 2; qNorm.push(Math.sqrt(s) || 1); }
+  const short = Array.from({ length: n }, () => []);
+  for (let i = 0; i < _count; i++) {
+    const base = i * dims;
+    for (let q = 0; q < n; q++) {
+      const qb = q * dims;
+      let dot = 0;
+      for (let d = 0; d < PREFILTER_DIMS; d++) dot += data[qb + d] * corpus[base + d];
+      pushTop(short[q], PREFILTER_KEEP, i, dot / (norms[i] * qNorm[q]));
+    }
+  }
+  return short.map((list, q) => {
+    const qb = q * dims, top = [];
+    for (const { idx } of list) {
+      const base = idx * dims; let dot = 0;
+      for (let d = 0; d < dims; d++) dot += data[qb + d] * corpus[base + d];
+      pushTop(top, limit, idx, dot);
+    }
+    return top;
+  });
+}
+
 module.exports = {
-  ensureLoaded, retryLoaded, isReady, embed, search, searchWithin,
+  ensureLoaded, retryLoaded, isReady, embed, search, searchWithin, searchMany,
   isModelPresent, embeddingsPresent, installModel,
   MODEL_DIR, MODEL_WEIGHTS_FILE, EMB_BIN, EMB_META,
 };

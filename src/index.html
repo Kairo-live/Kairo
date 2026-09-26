@@ -1312,6 +1312,16 @@
                             Show confidence scores
                         </label>
                     </div>
+
+                    <div class="setting-group">
+                        <label class="setting-label" for="detection-sensitivity">Detection sensitivity</label>
+                        <select id="detection-sensitivity" class="setting-input">
+                            <option value="careful">Careful — only the surest matches go up on their own</option>
+                            <option value="balanced" selected>Balanced (recommended)</option>
+                            <option value="responsive">Responsive — more goes up on its own</option>
+                        </select>
+                        <p class="setting-hint">How sure Kairo must be before a verse goes to the screen without you. A spoken citation ("John 3:16") always goes up. Anything below the bar waits in Possible Matches. Careful also keeps paraphrases in Possible Matches; Responsive will occasionally put up a wrong verse.</p>
+                    </div>
                 </div>
 
                 <!-- Meaning-Based Candidates (semantic layer) used to have
@@ -1392,6 +1402,7 @@
                                     <li><strong>Scripture is read aloud</strong>, cited or not — Kairo matches the actual words against the Bible text itself, so a passage read without ever naming chapter/verse still reaches the screen.</li>
                                 </ul>
                                 <p>A confident match auto-sends straight to Live Status/the output. A weaker or ambiguous match shows up under <strong>Possible Matches</strong> instead — click one there to send it manually. This two-tier behavior is deliberate: a wrong verse on screen is worse than a missed one, so anything Kairo isn't confident about waits for a human glance rather than guessing.</p>
+                                <p>Kairo also follows a verse put in the preacher's <strong>own words</strong> ("the Bible says don't worry about anything, pray about everything…"). A paraphrase appears in Possible Matches; it goes to the screen on its own only when the meaning, the wording and a second check all agree. Well-known passages named in passing ("the prodigal son", "the Lord's Prayer") are offered in Possible Matches too. <strong>Detection sensitivity</strong> in Settings sets how sure Kairo must be before anything goes up without you.</p>
                                 <p>Reading forward through a passage (verse 1, then 2, then 3…) is tracked automatically, including a spoken "range" citation ("verses 1 to 9") — the display advances verse-by-verse as the reading continues, without needing each one re-cited.</p>
                             </div>
                         </details>

@@ -1224,7 +1224,14 @@ class ReferenceContext {
     this._book      = null;
     this._chapter   = null;
     this._updatedAt = 0;
+    this._pace      = 1;
   }
+
+  // A slow preacher (or one pausing for an interpreter) takes longer to get
+  // from a citation to "verse 5". Set from the measured speaking rate: 1 at a
+  // normal pace, up to 2 — the window only ever grows.
+  setPaceFactor(f) { this._pace = Math.min(2, Math.max(1, Number(f) || 1)); }
+  get expireMs() { return CONTEXT_EXPIRE_MS * this._pace; }
 
   // Update with a fully resolved reference.
   // - If `chapter` is provided, store it.
@@ -1243,7 +1250,7 @@ class ReferenceContext {
 
   // Check if context is still valid.
   get isValid() {
-    return !!this._book && (Date.now() - this._updatedAt) < CONTEXT_EXPIRE_MS;
+    return !!this._book && (Date.now() - this._updatedAt) < this.expireMs;
   }
 
   get book()    { return this.isValid ? this._book    : null; }

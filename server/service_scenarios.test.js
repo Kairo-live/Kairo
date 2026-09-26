@@ -28,6 +28,24 @@ const fresh = () => { server.resetDetectionSession(); referenceContext.reset(); 
 (async () => {
   server.spawnDetectionWorker(); await server.workerReadyPromise; await wait(2500);
 
+  // ── Paraphrase: the preacher's own words for a verse ──
+  await test('a paraphrase in the preacher\'s own words is found (Possible Matches or the screen)', async () => {
+    fresh(); server.clearRangeQueue(); await server.clearLayer('all');
+    await say('Church, some of you have been carrying this weight for a very long time.');
+    await say('But the Bible says we should not worry about anything, instead pray about everything and tell God what you need, and thank him for all he has done.');
+    await say('That is how you live free from anxiety every single day of your life.');
+    await wait(1500);
+    assert.ok(sent.some(s => s.ref === 'Philippians 4:6'), JSON.stringify(sent));
+  });
+
+  await test('ordinary preaching produces no paraphrase matches', async () => {
+    fresh(); server.clearRangeQueue();
+    await say('Good morning church, it is so good to be in the house of the Lord today, let us give God a round of applause.');
+    await say('Before we continue, the ushers will come forward and after that the choir will minister to us in song.');
+    await wait(1500);
+    assert.deepEqual(sent.filter(s => s.method === 'paraphrase'), [], JSON.stringify(sent));
+  });
+
   // ── Output layers: media < slide < Bible ──
   await test('a scripture called during slides goes up over the slide; Clear Bible brings the slide back', async () => {
     fresh(); server.clearRangeQueue(); await server.clearLayer('all');

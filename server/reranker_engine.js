@@ -112,7 +112,18 @@ async function score(query, passages) {
   return Array.from(raw).map(x => 1 / (1 + Math.exp(-x)));
 }
 
+// Many (query, passage) pairs in ONE forward pass — for candidates that were
+// each found by a different window of speech.
+async function scorePairs(queries, passages) {
+  if (!isReady() || !passages || !passages.length) return [];
+  const features = _tokenizer(queries, { text_pair: passages, padding: true, truncation: true });
+  const { logits } = await _model(features);
+  const raw = logits.data instanceof Float32Array ? logits.data : Float32Array.from(logits.data);
+  return Array.from(raw).map(x => 1 / (1 + Math.exp(-x)));
+}
+
 module.exports = {
+  scorePairs,
   ensureLoaded, retryLoaded, isReady, score,
   isModelPresent, installModel,
   MODEL_DIR, MODEL_WEIGHTS_FILE,
