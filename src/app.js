@@ -79,7 +79,7 @@ let audioProcessor = null;
 let lastRealAudioAt = 0;
 let audioSilenceWatchdog = null;
 let audioSilenceWarning = false;
-const AUDIO_SILENCE_WARN_MS = 15000;
+const AUDIO_SILENCE_WARN_MS = 45000;   // an ordinary pause must not flash "No audio!"
 const AUDIO_PEAK_NOISE_FLOOR = 50; // int16 units — well above dither/pure-zero, well below real speech (typically 2000-18000 in this app's own logged peaks)
 let workerReady    = false;
 let settings       = {};
@@ -178,6 +178,7 @@ function connectWS() {
     console.log('[WS] Connected');
     clearTimeout(wsReconnectTimer);
     wsReconnectAttempts = 0;
+    flushPendingAudio();   // audio captured while this socket was reconnecting
     loadSettings();
     initCustomSelects();
   };
@@ -255,6 +256,10 @@ function handleServerMessage(msg) {
 
     case 'range-state':
       handleRangeState(msg);
+      break;
+
+    case 'layer-state':
+      handleLayerState(msg);
       break;
 
     case 'range-verses':
@@ -350,8 +355,13 @@ function handleConnectionState(state, error) {
     window.KairoService?.setAutoFollow?.(false);
     if (state === 'error' && error) toast(error, 'error');
   } else if (state === 'connecting') {
-    if (listenText) listenText.textContent = 'Connecting…';
+    if (listenText && !isListening) listenText.textContent = 'Connecting…';
     if (lsBcastLbl) lsBcastLbl.textContent = 'Connecting…';
+  } else if (state === 'reconnecting') {
+    // The server re-establishing Deepgram mid-session. The listening session
+    // is still on: keep the microphone running (the server holds and replays
+    // the audio). Only Stop — or a fatal error — ends it.
+    if (lsBcastLbl) lsBcastLbl.textContent = 'Reconnecting…';
   }
 }
 
@@ -879,18 +889,9 @@ function showInViewer(verses, method, topScore, correctedFrom = null, look = nul
   // playlist". The live preview above still updates either way.
   if (method === 'service') return;
 
-  // A real scripture detection just painted over whatever was on screen —
-  // including a live song/slide item, if content_lookup.js's own auto-swap
-  // had one up. service.js's liveSlideKey never learns about this on its
-  // own (this whole path is scripture-only, service.js has no listener for
-  // 'detection' messages at all), so it kept believing that item was still
-  // live: the Stack/Sidebar showed a stale "live" badge on it, AND
-  // content_lookup's own candidate pool kept excluding it from future
-  // matches — a preacher returning to the SAME song after a scripture
-  // interlude could never get it auto-detected again. Release it the same
-  // way the manual "Clear Slide" button already does (clearLive is a no-op
-  // if nothing was live, safe to call unconditionally here).
-  window.KairoService?.clearLive?.();
+  // A scripture now covers the output; a live song/slide stays live underneath
+  // (the server's output-layer rule — Clear Bible brings it back), so the
+  // playlist keeps showing it as live and the operator's view doesn't change.
 
   // Auto-correction: strip the mis-cited row so it doesn't linger above the fix.
   if (correctedFrom) {
@@ -1345,6 +1346,84 @@ listenBtn?.addEventListener('click', async () => {
 // existing WebSocket. Only the body of /api/start-listening differs —
 // the server uses `engine` to choose between Deepgram (cloud) and the
 // offline (sherpa-onnx, on-device) engine.
+// ── Audio capture ──────────────────────────────────────────────────────────
+// Frames go to the local server over the app socket. While that socket is
+// reconnecting they are held (~20s) and sent the moment it reopens — the
+// server keeps the Deepgram session up the whole time, so a socket hiccup no
+// longer drops what was said.
+const PENDING_AUDIO_MAX_FRAMES = 16 * 20;   // 1024-sample frames at 16 kHz
+let pendingAudioFrames = [];
+function sendAudioFrame(buf) {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    if (pendingAudioFrames.length) flushPendingAudio();
+    ws.send(buf);
+  } else if (isListening) {
+    pendingAudioFrames.push(buf);
+    if (pendingAudioFrames.length > PENDING_AUDIO_MAX_FRAMES) pendingAudioFrames.shift();
+  }
+}
+function flushPendingAudio() {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  const frames = pendingAudioFrames; pendingAudioFrames = [];
+  for (const f of frames) ws.send(f);
+}
+
+// Virtual/loopback inputs (BlackHole and friends) output exact digital
+// silence whenever nothing is playing — for them "all zeros" is normal, not a
+// dead device, and must never trigger a rebuild or a fallback to another mic.
+const VIRTUAL_INPUT_RE = /blackhole|loopback|soundflower|vb-?cable|virtual|aggregate|ishowu/i;
+function captureIsVirtualInput() {
+  return VIRTUAL_INPUT_RE.test(mediaStream?.getAudioTracks?.()[0]?.label || '');
+}
+
+let lastNonZeroAudioAt = 0;   // any non-zero sample at all (a real mic always has some noise)
+let _lastLevelLogAt = 0;
+// One capture graph: getUserMedia stream -> 16 kHz AudioContext -> frames to
+// the server. Shared by Start and every rebuild (they used to be two copies).
+async function buildCaptureGraph(deviceId, existingStream = null) {
+  const stream = existingStream || await navigator.mediaDevices.getUserMedia({
+    audio: {
+      ...(deviceId ? { deviceId: { exact: deviceId } } : {}),
+      echoCancellation: false, noiseSuppression: false, autoGainControl: false, sampleRate: 16000,
+    },
+  });
+  const ctx = new AudioContext({ sampleRate: 16000 });
+  if (ctx.state === 'suspended') await ctx.resume();
+  if (ctx.state !== 'running') console.error('[KAIRO] AudioContext still not running after resume():', ctx.state);
+  const source = ctx.createMediaStreamSource(stream);
+  const proc = ctx.createScriptProcessor(1024, 1, 1);
+  proc.onaudioprocess = (e) => {
+    const float32 = e.inputBuffer.getChannelData(0);
+    const int16 = new Int16Array(float32.length);
+    let peak = 0;
+    for (let i = 0; i < float32.length; i++) {
+      const v = Math.max(-32768, Math.min(32767, float32[i] * 32768));
+      int16[i] = v;
+      const a = v < 0 ? -v : v;
+      if (a > peak) peak = a;
+    }
+    const now = Date.now();
+    if (peak > 0) lastNonZeroAudioAt = now;
+    if (peak > AUDIO_PEAK_NOISE_FLOOR) lastRealAudioAt = now;
+    if (now - _lastLevelLogAt > 3000) {
+      _lastLevelLogAt = now;
+      fetch(`${SERVER}/api/debug-log`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ event: 'audio-peak', data: { peak, bufferLength: float32.length } }),
+      }).catch(() => {});
+    }
+    sendAudioFrame(int16.buffer);
+  };
+  source.connect(proc);
+  proc.connect(ctx.destination);
+  return { stream, ctx, proc };
+}
+function teardownCaptureGraph(g) {
+  try { if (g.proc) { g.proc.disconnect(); g.proc.onaudioprocess = null; } } catch {}
+  try { g.stream?.getTracks().forEach(t => t.stop()); } catch {}
+  try { g.ctx?.close(); } catch {}
+}
+
 async function startListening() {
   if (isListening) return;
   // New session — reset accumulators so Content Studio doesn't bundle the
@@ -1424,74 +1503,11 @@ async function startListening() {
     }
 
     // Stream PCM16 to server via WebSocket — same path for both engines.
-    audioContext  = new AudioContext({ sampleRate: 16000 });
-    // This runs several `await`s deep in an async click handler (getUserMedia,
-    // then a fetch, above) — well outside the synchronous user-gesture window
-    // WebKit requires to auto-start an AudioContext. Without an explicit
-    // resume(), WebKit can silently create it already 'suspended': the audio
-    // graph never actually runs, onaudioprocess below never fires, and ZERO
-    // bytes ever reach the server — no error, nothing to catch, it just looks
-    // like "connected but no audio" forever (confirmed: this is what was
-    // happening — Deepgram genuinely never received a single byte, every
-    // single reconnect attempt).
-    if (audioContext.state === 'suspended') await audioContext.resume();
-    if (audioContext.state !== 'running') console.error('[KAIRO] AudioContext still not running after resume():', audioContext.state);
-    // Diagnostic: WebKit doesn't always honor the requested sampleRate above
-    // (a device's own native rate — BlackHole is 48kHz — can silently win),
-    // and every sample here gets declared to Deepgram as 16kHz regardless of
-    // what it actually is. A mismatch would still send real, non-throwing
-    // bytes (so nothing else here would catch it) but produce a garbled
-    // stream Deepgram can't recognize as valid audio at all. Posted to
-    // /api/debug-log (server/server.js) — same mechanism service.js's own
-    // debugLog uses — so it lands in databases/debug.log, not just this
-    // window's own devtools console, which nobody may have open.
-    const _trackSettings = mediaStream.getAudioTracks()[0]?.getSettings() || {};
-    console.log('[KAIRO] AudioContext.sampleRate:', audioContext.sampleRate, '| track settings:', JSON.stringify(_trackSettings));
-    fetch(`${SERVER}/api/debug-log`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ event: 'audio-context-info', data: { contextSampleRate: audioContext.sampleRate, trackSettings: _trackSettings } }),
-    }).catch(() => {});
-    const source  = audioContext.createMediaStreamSource(mediaStream);
+    const g = await buildCaptureGraph(null, mediaStream);
+    audioContext = g.ctx; audioProcessor = g.proc;
     watchAudioTrackHealth();   // OS-level "track died" → immediate rebuild
-    // 1024 samples @ 16 kHz = 64 ms of buffering latency (down from 256 ms
-    // with the previous 4096 setting). Detection feels noticeably snappier
-    // on direct citations. A future AudioWorklet migration would also move
-    // this off the main UI thread, but 1024 is a safe drop-in.
-    audioProcessor = audioContext.createScriptProcessor(1024, 1, 1);
 
-    let _lastLevelLogAt = 0;
-    audioProcessor.onaudioprocess = (e) => {
-      if (!ws || ws.readyState !== WebSocket.OPEN) return;
-      const float32 = e.inputBuffer.getChannelData(0);
-      const int16   = new Int16Array(float32.length);
-      let peak = 0;
-      for (let i = 0; i < float32.length; i++) {
-        const s = Math.max(-32768, Math.min(32767, float32[i] * 32768));
-        int16[i] = s;
-        peak = Math.max(peak, Math.abs(s));
-      }
-      if (peak > AUDIO_PEAK_NOISE_FLOOR) lastRealAudioAt = Date.now();
-      // Diagnostic — rate-limited: confirms real (non-zero) samples are
-      // actually being read off the captured device, separately from
-      // whether the bytes reach the server/Deepgram correctly. 32767 = max.
-      // Also posted to /api/debug-log — see the sampleRate diagnostic above
-      // for why (nobody may have this window's devtools console open).
-      const now = performance.now();
-      if (now - _lastLevelLogAt > 3000) {
-        _lastLevelLogAt = now;
-        console.log('[KAIRO] audio peak this frame:', peak, '/ 32767');
-        fetch(`${SERVER}/api/debug-log`, {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ event: 'audio-peak', data: { peak, bufferLength: float32.length } }),
-        }).catch(() => {});
-      }
-      ws.send(int16.buffer);
-    };
-
-    source.connect(audioProcessor);
-    audioProcessor.connect(audioContext.destination);
-
-    lastRealAudioAt = Date.now(); // don't warn before real audio has had a chance to arrive at all
+    lastRealAudioAt = lastNonZeroAudioAt = Date.now(); // don't warn before real audio has had a chance to arrive at all
     audioSilenceWarning = false;
     clearInterval(audioSilenceWatchdog);
     audioSilenceWatchdog = setInterval(checkAudioSilence, 5000);
@@ -1515,6 +1531,7 @@ async function stopListening() {
 }
 
 function stopAudioCapture() {
+  pendingAudioFrames = [];
   if (audioProcessor) { try { audioProcessor.disconnect(); } catch {} audioProcessor = null; }
   if (audioContext)   { try { audioContext.close(); }       catch {} audioContext   = null; }
   if (mediaStream)    { mediaStream.getTracks().forEach(t => t.stop()); mediaStream = null; }
@@ -1572,38 +1589,30 @@ function _healLog(msg, extra) {
   }).catch(() => {});
 }
 
+let _lastSilenceCheckAt = 0;
 function checkAudioSilence() {
   if (!isListening) return;
+  const now = Date.now();
+  // This runs every 5s — a much longer gap means the machine was asleep, and
+  // waking from sleep is what leaves a WKWebView capture delivering zeros.
+  const wokeFromSleep = _lastSilenceCheckAt && now - _lastSilenceCheckAt > 20000;
+  _lastSilenceCheckAt = now;
   if (audioContext && audioContext.state !== 'running') {
     audioContext.resume().catch(() => {});
   }
-  const silentMs = Date.now() - lastRealAudioAt;
-  setAudioSilenceWarning(silentMs > AUDIO_SILENCE_WARN_MS);
-
-  // getUserMedia tracks on WKWebView (Tauri's macOS webview) silently go to
-  // exact zero and stay there — no 'ended'/'mute' event — after working for
-  // a few seconds, which is precisely the "it stopped after a few words"
-  // report. The context is still 'running', onaudioprocess still fires,
-  // just with all-zero buffers. Only a full re-acquire recovers it. But
-  // this can't tell "the mic actually died" apart from "the room/preacher
-  // is just quiet" — both look identical (all-zero buffer) from here, and
-  // an ordinary preaching pause (letting a point sink in, between verses,
-  // before the sermon even starts) routinely runs well past 12s. Real
-  // incident: the operator watched the mic indicator visibly reconnect
-  // during completely normal silence, because getUserMedia was being
-  // re-called every ~12s of quiet. Since the actual bug this guards
-  // against is PERMANENT once it happens (never self-recovers), there's no
-  // cost to waiting much longer before healing — 45s comfortably clears
-  // real sermon pauses while still catching a genuinely dead mic well
-  // within a live service. Still throttled to once per 20s so a
-  // genuinely unplugged input doesn't thrash.
-  if (silentMs > 45000 && audioContext && audioContext.state === 'running'
-      && !_audioHealing && Date.now() - _audioHealAt > 20000) {
-    _audioHealAt = Date.now();
-    restartAudioCapture('silence-watchdog');
+  setAudioSilenceWarning(now - lastRealAudioAt > AUDIO_SILENCE_WARN_MS);
+  // Rebuild the capture ONLY when it is actually broken: after sleep, or a
+  // real microphone stuck at exact zeros for 45s (a real mic always has a
+  // noise floor). Quiet audio — a pause, prayer, BlackHole with nothing
+  // playing — is never a reason: silence used to trigger a rebuild, which the
+  // operator saw as the mic "reconnecting". The Deepgram connection is never
+  // touched here either way.
+  const stuckAtZero = !captureIsVirtualInput() && now - lastNonZeroAudioAt > 45000;
+  if ((wokeFromSleep || stuckAtZero) && audioContext && !_audioHealing && now - _audioHealAt > 20000) {
+    _audioHealAt = now;
+    restartAudioCapture(wokeFromSleep ? 'woke-from-sleep' : 'microphone-stuck-at-zero');
     return;
   }
-
   // Self-recovery: while parked on the fallback device, periodically retry
   // the operator's actually-configured one — otherwise a loopback device
   // that only LOOKED silent for a moment (content hadn't started, a brief
@@ -1648,57 +1657,31 @@ async function restartAudioCapture(reason, allowDeviceFallback = true) {
   _audioHealing = true;
   try {
     _healLog('rebuilding audio capture', { reason });
-    try { if (audioProcessor) { audioProcessor.disconnect(); audioProcessor.onaudioprocess = null; } } catch {}
-    audioProcessor = null;
-    try { mediaStream?.getTracks().forEach(t => t.stop()); } catch {}
-    try { await audioContext?.close(); } catch {}
-    audioContext = null; mediaStream = null;
-
-    // capturingFallbackDevice means a recent attempt on the operator's own
-    // configured device looked silent — use the system default for THIS
-    // capture without touching audioSourceSettings.value itself, so
-    // Settings keeps honestly showing what the operator actually chose
-    // (see the flag's own comment) instead of silently rewriting it.
     const configuredDeviceId = audioSourceSettings?.value || '';
     const deviceId = capturingFallbackDevice ? '' : configuredDeviceId;
-    mediaStream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        ...(deviceId ? { deviceId: { exact: deviceId } } : {}),
-        echoCancellation: false, noiseSuppression: false, autoGainControl: false, sampleRate: 16000,
-      },
-    });
-    audioContext = new AudioContext({ sampleRate: 16000 });
-    if (audioContext.state === 'suspended') await audioContext.resume();
-    const source = audioContext.createMediaStreamSource(mediaStream);
+    // Build the NEW capture first and only then retire the old one, so the
+    // swap has no gap and nothing on screen changes. (The old code tore the
+    // capture down first — every rebuild was an audible, visible reconnect.)
+    const next = await buildCaptureGraph(deviceId);
+    const prev = { stream: mediaStream, ctx: audioContext, proc: audioProcessor };
+    mediaStream = next.stream; audioContext = next.ctx; audioProcessor = next.proc;
+    teardownCaptureGraph(prev);
     watchAudioTrackHealth();
-    audioProcessor = audioContext.createScriptProcessor(1024, 1, 1);
-    audioProcessor.onaudioprocess = (e) => {
-      if (!ws || ws.readyState !== WebSocket.OPEN) return;
-      const float32 = e.inputBuffer.getChannelData(0);
-      const int16 = new Int16Array(float32.length);
-      let peak = 0;
-      for (let i = 0; i < float32.length; i++) {
-        const s = Math.max(-32768, Math.min(32767, float32[i] * 32768));
-        int16[i] = s;
-        peak = Math.max(peak, Math.abs(s));
-      }
-      if (peak > AUDIO_PEAK_NOISE_FLOOR) lastRealAudioAt = Date.now();
-      ws.send(int16.buffer);
-    };
-    source.connect(audioProcessor);
-    audioProcessor.connect(audioContext.destination);
-    lastRealAudioAt = Date.now();
+    lastRealAudioAt = lastNonZeroAudioAt = Date.now();
+    if (micDisplay) micDisplay.textContent = mediaStream.getAudioTracks()[0]?.label || 'Microphone';
     _healLog('audio capture rebuilt', { reason, device: deviceId || 'default' });
 
-    // Verify it's actually producing audio. If the explicitly-selected
-    // device still comes back dead after 3s, retry once on the default —
-    // via the internal flag only (see its own comment), never by touching
-    // the Settings dropdown's actual value.
-    if (deviceId && allowDeviceFallback) {
-      const checkpoint = lastRealAudioAt;
+    // A REAL microphone that still delivers exact zeros right after a fresh
+    // capture is dead (a real mic always has a noise floor) — fall back to
+    // the default input. Never for a virtual input like BlackHole: its
+    // digital silence just means nothing is playing, and switching the
+    // service over to the room mic (then back, every 30s) is exactly the
+    // "mic keeps reconnecting" loop this used to cause.
+    if (deviceId && allowDeviceFallback && !captureIsVirtualInput()) {
+      const checkpoint = lastNonZeroAudioAt;
       setTimeout(() => {
-        if (isListening && lastRealAudioAt === checkpoint && !_audioHealing) {
-          _healLog('selected device still silent after rebuild — falling back to default input');
+        if (isListening && lastNonZeroAudioAt === checkpoint && !_audioHealing) {
+          _healLog('selected microphone still outputs exact zeros after rebuild — falling back to default input');
           capturingFallbackDevice = true;
           _fallbackRetryAt = Date.now();
           _audioHealAt = Date.now();
@@ -1707,24 +1690,16 @@ async function restartAudioCapture(reason, allowDeviceFallback = true) {
       }, 3000);
     }
   } catch (err) {
-    _healLog('audio capture rebuild FAILED', { reason, error: err.message });
-    // A failed rebuild leaves audioContext/mediaStream both null — without a
-    // fallback here, that's a dead end: checkAudioSilence's own watchdog
-    // requires a non-null audioContext to ever fire again (see its guard),
-    // and there's no track left for watchAudioTrackHealth to listen to
-    // either. Real incident this fixes: "as the audio source changes, it
-    // stops transcribing" — the previously-selected device's id becomes
-    // unsatisfiable (getUserMedia throws instead of returning a stream) the
-    // moment the underlying audio source actually changes, and nothing ever
-    // retried. Same bounded fallback-to-default shape the success-path
-    // silent-device case above already uses; re-reads the select's current
-    // value directly since `deviceId` is scoped to the try block above.
+    // The old capture is still running (nothing was torn down) — keep it.
+    _healLog('audio capture rebuild FAILED — keeping the current capture', { reason, error: err.message });
+    // The selected device may have gone away (unplugged, renamed): only then
+    // fall back to the default input.
     const failedDeviceId = audioSourceSettings?.value || '';
     if (failedDeviceId && allowDeviceFallback && !capturingFallbackDevice) {
-      _healLog('audio capture rebuild failed on selected device — falling back to default input');
+      _healLog('selected device unavailable — falling back to default input');
       capturingFallbackDevice = true;
       _fallbackRetryAt = Date.now();
-      setTimeout(() => { if (isListening) restartAudioCapture('device-fallback-after-error', false); }, 500);
+      setTimeout(() => { if (isListening) { _audioHealing = false; restartAudioCapture('device-fallback-after-error', false); } }, 500);
     }
   } finally {
     _audioHealing = false;
@@ -1923,6 +1898,8 @@ async function loadSettings() {
     // Language
     const sttLang = document.getElementById('stt-language');
     if (sttLang) sttLang.value = settings.sttLanguage || 'en-US';
+    const vocab = document.getElementById('custom-keyterms');
+    if (vocab) vocab.value = settings.customKeyterms || '';
     const bibleLang = document.getElementById('bible-language');
     if (bibleLang) bibleLang.value = settings.bibleLanguage || 'en';
     renderLangPacks();
@@ -2341,18 +2318,34 @@ function clearPreviewScreen() {
   lastPreviewHadOwnLook = false;
 }
 
-function clearOutputLayer(layer) {
-  fetch(`${SERVER}/api/service/clear-layer`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ layer }),
-  }).catch(err => console.warn('[KAIRO] clear-layer request failed:', err.message));
-  if (layer === 'slide' || layer === 'all') { clearPreviewScreen(); window.KairoService?.clearLive?.(); }
+// Output layers, bottom to top: media, slide, Bible. Clear Bible reveals the
+// slide live underneath (the server re-sends it, which repaints the preview);
+// Clear Slide while a scripture is up removes only the slide underneath.
+async function clearOutputLayer(layer) {
+  let result = {};
+  try {
+    const res = await fetch(`${SERVER}/api/service/clear-layer`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ layer }),
+    });
+    result = await res.json().catch(() => ({}));
+  } catch (err) { console.warn('[KAIRO] clear-layer request failed:', err.message); }
+  if (layer === 'bible') { if (!result.restored) clearPreviewScreen(); return; }
+  if (layer === 'slide' || layer === 'all') {
+    if (!result.keptBible) clearPreviewScreen();
+    window.KairoService?.clearLive?.();
+  }
   if (layer === 'media' || layer === 'all') clearMediaPreview();
 }
-// Clear Bible reuses the exact same 'slide' action Clear Slide triggers —
-// Bible and Slide share one on-screen visual slot (see the button's own
-// comment in index.html), so there's nothing distinct to implement here.
-document.getElementById('clear-bible-layer-btn')?.addEventListener('click', () => clearOutputLayer('slide'));
+document.getElementById('clear-bible-layer-btn')?.addEventListener('click', () => clearOutputLayer('bible'));
+// Lit while a scripture covers a live slide — Clear Bible is the way back to it.
+function handleLayerState(msg) {
+  const btn = document.getElementById('clear-bible-layer-btn');
+  if (!btn) return;
+  const covering = !!(msg.bibleOnTop && msg.slideUnderneath);
+  btn.classList.toggle('is-covering', covering);
+  btn.title = covering ? 'A scripture is covering the live slide — clear it to return to the slide' : 'Clear the Bible layer';
+}
 document.getElementById('clear-slide-layer-btn')?.addEventListener('click', () => clearOutputLayer('slide'));
 document.getElementById('clear-media-layer-btn')?.addEventListener('click', () => clearOutputLayer('media'));
 // 'timer' has no client-side preview to clear (unlike slide/media, the

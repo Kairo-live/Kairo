@@ -799,7 +799,7 @@
           const idx = firstSlideOfBlock(item, e.toBlockIdx);
           if (idx == null || `${item.id}:${idx}` === liveSlideKey) return;
           followerAdvancing = true;
-          Promise.resolve(sendSlide(item, idx)).finally(() => { followerAdvancing = false; });
+          Promise.resolve(sendSlide(item, idx, { auto: true })).finally(() => { followerAdvancing = false; });
         },
         onPosition: (s) => renderFollowHud(s),
       });
@@ -819,7 +819,7 @@
           const idx = firstSlideOfBlock(item, e.toBlockIdx);
           if (idx == null || `${item.id}:${idx}` === liveSlideKey) return;
           followerAdvancing = true;
-          Promise.resolve(sendSlide(item, idx)).finally(() => { followerAdvancing = false; });
+          Promise.resolve(sendSlide(item, idx, { auto: true })).finally(() => { followerAdvancing = false; });
         },
         onPosition: (s) => renderFollowHud(s),
       });
@@ -833,7 +833,7 @@
         onAdvance: (e) => {
           if (e.toIndex == null || `${item.id}:${e.toIndex}` === liveSlideKey) return;
           followerAdvancing = true;
-          Promise.resolve(sendSlide(item, e.toIndex)).finally(() => { followerAdvancing = false; });
+          Promise.resolve(sendSlide(item, e.toIndex, { auto: true })).finally(() => { followerAdvancing = false; });
         },
         onPosition: (s) => renderFollowHud(s),
       });
@@ -859,7 +859,7 @@
       const item = service && service.items.find(i => i.id === id);
       if (item) {
         const eff = itemLookOverride(item) || themeForItem(item);
-        if (themeId == null || (eff && eff.id === themeId)) { sendSlide(item, Number(idxStr)); did = true; }
+        if (themeId == null || (eff && eff.id === themeId)) { sendSlide(item, Number(idxStr), { auto: true }); did = true; }
       }
     }
     const liveSeg = segmentList.find(s => s.status === 'live');
@@ -903,7 +903,7 @@
     if (!liveSlideKey || liveSlideKey !== `${itemId}:${slideIndex}`) return false;
     const item = service && service.items.find(i => i.id === itemId);
     if (!item) return false;
-    sendSlide(item, slideIndex);
+    sendSlide(item, slideIndex, { auto: true });
     return true;
   }
   // Builds a real playlist 'song' item from a Song Bank record — the exact
@@ -997,7 +997,7 @@
             onMatch: ({ item, confidence }) => {
               const target = item._bank ? addHymnToPlaylist(item._bank) : item;
               debugLog('content-lookup-match', { itemId: target.id, itemType: target.type, fromBank: !!item._bank, confidence });
-              sendSlide(target, 0);
+              sendSlide(target, 0, { auto: true });
             },
           });
         }
@@ -1051,7 +1051,11 @@
     el.querySelector('.lfh-toggle').onclick = () => setAutoFollow(!autoFollow);
   }
 
-  async function sendSlide(item, index) {
+  // auto: a change the operator didn't click (auto-follow, auto-lookup, a live
+  // slide refreshed after an edit) — while a scripture covers the output it
+  // updates the slide underneath instead of uncovering it (see the server's
+  // output-layer rule). An operator's click always sends.
+  async function sendSlide(item, index, { auto = false } = {}) {
     const slide = slidesFor(item)[index];
     if (!slide) return;
     liveSlideKey = `${item.id}:${index}`;
@@ -1101,6 +1105,7 @@
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           look,
+          auto,
           verse: {
             reference: slide.reference || '',
             // ProPresenter-style section annotation (Verse/Chorus/Bridge/
@@ -1170,7 +1175,7 @@
     }
     block.label = SECTION_CYCLE[nextIdx];
     renderStack();
-    sendSlide(item, idx);
+    sendSlide(item, idx, { auto: true });
   }
 
   // The operator's Clear Slide/Clear All action (app.js's clearOutputLayer)
@@ -2515,7 +2520,7 @@
         // Refresh the on-air badge too if this exact slide is currently live
         // — otherwise the operator's live output would show a stale label
         // until the next send.
-        if (liveSlideKey === `${item.id}:${i}`) sendSlide(item, i);
+        if (liveSlideKey === `${item.id}:${i}`) sendSlide(item, i, { auto: true });
       },
     }));
     items.push({

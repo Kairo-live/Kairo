@@ -573,12 +573,12 @@
                  still-running countdown silently bring the badge back a
                  second later. -->
             <div class="rs-layer-clear-bar">
-                <!-- Bible and Slide share the same on-screen slide/text
-                     slot (see display.html's showVerse/clearDisplay — one
-                     visual area, not two), so Clear Bible reuses the exact
-                     same clearOutputLayer('slide') action Clear Slide
-                     already triggers rather than a parallel near-duplicate. -->
-                <button id="clear-bible-layer-btn" class="rs-layer-clear-btn" title="Clear the Bible/slide layer">Clear Bible</button>
+                <!-- Output layers, bottom to top: media, slide, Bible. A
+                     scripture covers the live slide without ending it; Clear
+                     Bible brings the slide back (lit while that applies),
+                     Clear Slide removes only the slide. See the server's
+                     output-layer rule by sendServiceSlide. -->
+                <button id="clear-bible-layer-btn" class="rs-layer-clear-btn" title="Clear the Bible layer">Clear Bible</button>
                 <button id="clear-slide-layer-btn" class="rs-layer-clear-btn" title="Clear the slide/text layer only">Clear Slide</button>
                 <button id="clear-timer-layer-btn" class="rs-layer-clear-btn" title="Stop the live segment timer/clock">Clear Timer</button>
                 <button id="clear-media-layer-btn" class="rs-layer-clear-btn" title="Clear the media layer only">Clear Media</button>
@@ -1446,6 +1446,7 @@
                                     <li><strong>ProPresenter</strong> — there's no separate Kairo-side integration for it. Add Kairo as an NDI or Syphon source directly inside ProPresenter, the same way you would in OBS.</li>
                                 </ul>
                                 <p>Each NDI/Syphon output also has its own configurable resolution and network/source name, editable any time under its detail panel.</p>
+                                <p><strong>Output layers</strong>, bottom to top: <strong>Media</strong> (background image or video), <strong>Slide</strong>, <strong>Bible</strong>. When a scripture goes up — called by the preacher or sent by you — it covers the live slide without ending it, and your view stays where it is. Auto-follow and auto-lookup keep the slide underneath up to date. <strong>Clear Bible</strong> (lit while a scripture covers a slide) brings that slide back; <strong>Clear Slide</strong> removes only the slide; clicking a slide yourself sends it straight out.</p>
                             </div>
                         </details>
 
@@ -1518,8 +1519,14 @@
                             <select id="bible-language" class="setting-input">
                                 <option value="en">English</option>
                             </select>
-                            <p class="setting-hint" id="bible-language-hint">Which language a matched verse displays in. Detection itself still listens for English regardless of this setting. Additional languages install as scripture packs below.</p>
+                            <p class="setting-hint" id="bible-language-hint">Which language a matched verse displays in. Detection follows the Spoken language — citations and readings in Spanish, Portuguese, French and German are recognized. Additional languages install as scripture packs below.</p>
                         </div>
+                    </div>
+
+                    <div class="setting-group">
+                        <label class="setting-label" for="custom-keyterms">Church vocabulary</label>
+                        <textarea id="custom-keyterms" class="setting-input" rows="3" placeholder="Pastor Mensah&#10;Grace Chapel&#10;Shiloh"></textarea>
+                        <p class="setting-hint">Names and words your services use that transcription may miss — the pastor, the church, local places. One per line or separated by commas (up to 40). English and auto-detect services; applies from the next Start Listening.</p>
                     </div>
 
                     <div class="setting-group">

@@ -315,6 +315,10 @@ document.getElementById('stt-language')?.addEventListener('change', (e) => {
   settings.sttLanguage = e.target.value;
   saveSettingsPatch({ sttLanguage: e.target.value });
 });
+document.getElementById('custom-keyterms')?.addEventListener('change', (e) => {
+  settings.customKeyterms = e.target.value;
+  saveSettingsPatch({ customKeyterms: e.target.value });
+});
 document.getElementById('bible-language')?.addEventListener('change', (e) => {
   settings.bibleLanguage = e.target.value;
   saveSettingsPatch({ bibleLanguage: e.target.value });

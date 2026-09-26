@@ -4340,6 +4340,8 @@ select {
   transition: var(--trans);
 }
 .rs-layer-clear-btn:hover { color: var(--red); border-color: var(--red); }
+/* A scripture is covering a live slide — Clear Bible is the way back to it. */
+.rs-layer-clear-btn.is-covering { color: var(--brand); border-color: var(--brand); background: var(--brand-dim); }
 .rs-layer-clear-btn.rs-layer-clear-all { color: var(--text-3); }
 /* Icon-only now (was "Clear All" text) — fixed compact width instead of
    flex:1, so it doesn't take as much room as the four text buttons now
