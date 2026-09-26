@@ -189,6 +189,7 @@
     <div id="timer-badge" class="hidden"></div>
     <div id="clock-badge" class="hidden"></div>
 
+    <script src="client_common.js"></script>
     <script src="design_space.js"></script>
     <script src="word_split.js"></script>
     <script src="color_utils.js"></script>
@@ -214,18 +215,7 @@
     // Fetch the auth token from Tauri once at startup, then append it to the
     // WS URL. In a non-Tauri context the call no-ops and we connect unauthed
     // (server also treats auth as optional when its env var is absent).
-    let AUTH_TOKEN = '';
-    async function loadAuthToken() {
-      try {
-        const inv = window.__TAURI__?.core?.invoke || window.__TAURI__?.invoke;
-        if (inv) AUTH_TOKEN = await inv('get_server_token');
-      } catch {}
-    }
-    function authedWsUrl() {
-      return AUTH_TOKEN
-        ? WS_URL + '?token=' + encodeURIComponent(AUTH_TOKEN)
-        : WS_URL;
-    }
+    // AUTH_TOKEN / loadAuthToken / authedWsUrl / loadGoogleFont come from client_common.js.
 
     let ws             = null;
     let reconnectTimer = null;
@@ -273,16 +263,6 @@
     let outputAnimationSpeed = 1;
 
     // ── Font loader ────────────────────────────────────────────────────────
-    const loadedFonts = new Set(['Manrope', 'system-ui']);
-    function loadGoogleFont(family) {
-        if (!family || loadedFonts.has(family)) return;
-        loadedFonts.add(family);
-        const url = `https://fonts.googleapis.com/css2?family=${encodeURIComponent(family)}:wght@100;200;300;400;500;600;700;800;900&display=swap`;
-        const link = document.createElement('link');
-        link.rel = 'stylesheet';
-        link.href = url;
-        document.head.appendChild(link);
-    }
 
     // hexToRgb/hexOpacity now come from color_utils.js, loaded via a <script>
     // tag above this one — shared with app.js/service.js, which had their own
@@ -1604,7 +1584,7 @@
 
         setConnStatus('reconnecting', 'Connecting…');
 
-        try { ws = new WebSocket(authedWsUrl()); }
+        try { ws = new WebSocket(authedWsUrl(WS_URL)); }
         catch { scheduleReconnect(); return; }
 
         ws.onopen = () => {

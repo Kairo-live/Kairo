@@ -427,11 +427,6 @@
     return { song: 'Song', slides: 'Slides', image: 'Image', scripture: 'Scripture' }[item.type] || item.type;
   };
 
-  function escapeHtml(s) {
-    return String(s == null ? '' : s).replace(/[&<>"']/g, c =>
-      ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-  }
-
   // ── Chunking ────────────────────────────────────────────────────────────
   // A song stores its lyrics as labelled stanzas. `linesPerSlide` decides how
   // those stanzas break down for the screen:
@@ -1156,21 +1151,7 @@
   // Library — a real per-song edit still belongs in the editor, this is
   // for "the import guessed wrong, fix it now" during a live service.
   const SECTION_CYCLE = ['Verse', 'Chorus', 'Refrain', 'Solo', 'Pre-Chorus', 'Bridge', 'Tag', 'Intro', 'Outro'];
-  // Mirrors app.js's own SECTION_TYPE_RE/sectionTypeClass exactly (same
-  // class names, so the CSS palette is shared) — duplicated rather than
-  // shared across the app.js/service.js boundary since app.js is a
-  // separate top-level script with no access into this IIFE's scope, and
-  // window.KairoService is a one-way bridge (service.js exposes TO app.js,
-  // not the reverse).
-  const SECTION_TYPE_RE = /^(verse|chorus|refrain|solo|pre-?chorus|bridge|tag|intro|outro|ending)/i;
-  function sectionTypeClass(label) {
-    const m = SECTION_TYPE_RE.exec(String(label || '').trim());
-    if (!m) return null;
-    const t = m[1].toLowerCase().replace(/-/g, '');
-    if (t === 'prechorus') return 'sec-prechorus';
-    if (t === 'ending') return 'sec-outro';
-    return `sec-${t}`;
-  }
+  // sectionTypeClass comes from client_common.js (shared with app.js).
   function cycleSectionLabel() {
     if (!liveSlideKey) return;
     const [itemId, idxStr] = liveSlideKey.split(':');
