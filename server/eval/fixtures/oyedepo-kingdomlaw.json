@@ -4120,14 +4120,6 @@
     {
       "book": "Psalms",
       "chapter": 45,
-      "verse": 5,
-      "kind": "citation",
-      "startMs": 262000,
-      "bootstrapped": true
-    },
-    {
-      "book": "Psalms",
-      "chapter": 45,
       "verse": 12,
       "kind": "citation",
       "startMs": 272000,
@@ -4422,21 +4414,27 @@
       "similarity": 0.3697776648307643
     },
     {
+      "book": "Isaiah",
+      "chapter": 58,
+      "verse": 12,
+      "kind": "citation",
+      "startMs": 1834000,
+      "note": "2026-09-26 audit round 3: verified against the transcript and KJV by hand"
+    },
+    {
+      "book": "Isaiah",
+      "chapter": 58,
+      "verse": 14,
+      "kind": "citation",
+      "startMs": 1843000,
+      "note": "2026-09-26 audit round 3: verified against the transcript and KJV by hand"
+    },
+    {
       "book": "Zechariah",
       "chapter": 7,
       "verse": 5,
       "kind": "citation",
       "startMs": 1868000
-    },
-    {
-      "book": "Luke",
-      "chapter": 11,
-      "verse": 42,
-      "kind": "quote",
-      "startMs": 2182000,
-      "unverified": true,
-      "matchedIdf": 18.11639616682983,
-      "similarity": 0.40513794117720636
     },
     {
       "book": "Matthew",
@@ -4548,6 +4546,14 @@
       "verseEnd": 7,
       "kind": "citation",
       "startMs": 2675000
+    },
+    {
+      "book": "Isaiah",
+      "chapter": 51,
+      "verse": 2,
+      "kind": "quote",
+      "startMs": 2772000,
+      "note": "2026-09-26 audit: real quote read aloud, verified against the transcript by hand"
     },
     {
       "book": "Deuteronomy",
@@ -4680,14 +4686,6 @@
     {
       "book": "Genesis",
       "chapter": 24,
-      "verse": 46,
-      "kind": "quote",
-      "startMs": 3656000,
-      "bootstrapped": true
-    },
-    {
-      "book": "Genesis",
-      "chapter": 24,
       "verse": 16,
       "kind": "quote",
       "startMs": 3679000,
@@ -4722,14 +4720,6 @@
       "unverified": true,
       "matchedIdf": 22.690506190140752,
       "similarity": 0.6182500846818046
-    },
-    {
-      "book": "Genesis",
-      "chapter": 24,
-      "verse": 45,
-      "kind": "quote",
-      "startMs": 3706000,
-      "bootstrapped": true
     },
     {
       "book": "Genesis",
@@ -4777,8 +4767,8 @@
       "chapter": 19,
       "verse": 2,
       "kind": "citation",
-      "startMs": 3852000,
-      "bootstrapped": true
+      "startMs": 3818000,
+      "note": "2026-09-26 audit: bootstrapped entry checked by hand against the transcript and KJV text (cited with 19:1: \"Psalm 19:1 and 2\")"
     },
     {
       "book": "2 Samuel",
@@ -4799,6 +4789,22 @@
       "unverified": true,
       "matchedIdf": 28.80787780218038,
       "similarity": 0.6627607510821629
+    },
+    {
+      "book": "Habakkuk",
+      "chapter": 2,
+      "verse": 2,
+      "kind": "quote",
+      "startMs": 4360000,
+      "note": "2026-09-26 audit: real quote read aloud, verified against the transcript by hand"
+    },
+    {
+      "book": "Proverbs",
+      "chapter": 13,
+      "verse": 11,
+      "kind": "quote",
+      "startMs": 4399000,
+      "note": "2026-09-26 audit: real quote read aloud, verified against the transcript by hand"
     },
     {
       "book": "Romans",
@@ -4847,14 +4853,6 @@
       "verse": 1,
       "kind": "citation",
       "startMs": 5169000,
-      "bootstrapped": true
-    },
-    {
-      "book": "Psalms",
-      "chapter": 50,
-      "verse": 12,
-      "kind": "citation",
-      "startMs": 5219000,
       "bootstrapped": true
     },
     {
@@ -4919,14 +4917,6 @@
       "verse": 3,
       "kind": "quote",
       "startMs": 5547000,
-      "bootstrapped": true
-    },
-    {
-      "book": "Genesis",
-      "chapter": 28,
-      "verse": 14,
-      "kind": "quote",
-      "startMs": 5564000,
       "bootstrapped": true
     },
     {
@@ -5002,6 +4992,22 @@
       "startMs": 6093000
     },
     {
+      "book": "Proverbs",
+      "chapter": 3,
+      "verse": 5,
+      "kind": "quote",
+      "startMs": 6169000,
+      "note": "2026-09-26 audit: real quote read aloud, verified against the transcript by hand"
+    },
+    {
+      "book": "Proverbs",
+      "chapter": 3,
+      "verse": 6,
+      "kind": "quote",
+      "startMs": 6215000,
+      "note": "2026-09-26 audit round 3: verified against the transcript and KJV by hand"
+    },
+    {
       "book": "Isaiah",
       "chapter": 31,
       "verseStart": 1,
@@ -5035,14 +5041,6 @@
       "unverified": true,
       "matchedIdf": 22.394952927513152,
       "similarity": 0.5012974129856989
-    },
-    {
-      "book": "Proverbs",
-      "chapter": 27,
-      "verse": 10,
-      "kind": "citation",
-      "startMs": 6427000,
-      "bootstrapped": true
     },
     {
       "book": "Jude",
@@ -5262,10 +5260,10 @@
     {
       "book": "1 Corinthians",
       "chapter": 3,
-      "verse": 7,
+      "verse": 17,
       "kind": "citation",
       "startMs": 7907000,
-      "bootstrapped": true
+      "note": "2026-09-26 audit: bootstrapped entry checked by hand against the transcript and KJV text — was \"1 Corinthians 3:7\""
     },
     {
       "book": "Revelation",
@@ -5304,14 +5302,6 @@
       "unverified": true,
       "matchedIdf": 40.02177406744841,
       "similarity": 0.5501737804600925
-    },
-    {
-      "book": "2 Corinthians",
-      "chapter": 6,
-      "verse": 9,
-      "kind": "citation",
-      "startMs": 8065000,
-      "bootstrapped": true
     },
     {
       "book": "Exodus",
@@ -5360,38 +5350,6 @@
       "kind": "quote",
       "startMs": 8365000,
       "bootstrapped": true
-    },
-    {
-      "book": "Isaiah",
-      "chapter": 51,
-      "verse": 2,
-      "kind": "quote",
-      "startMs": 2772000,
-      "note": "2026-09-26 audit: real quote read aloud, verified against the transcript by hand"
-    },
-    {
-      "book": "Habakkuk",
-      "chapter": 2,
-      "verse": 2,
-      "kind": "quote",
-      "startMs": 4360000,
-      "note": "2026-09-26 audit: real quote read aloud, verified against the transcript by hand"
-    },
-    {
-      "book": "Proverbs",
-      "chapter": 13,
-      "verse": 11,
-      "kind": "quote",
-      "startMs": 4399000,
-      "note": "2026-09-26 audit: real quote read aloud, verified against the transcript by hand"
-    },
-    {
-      "book": "Proverbs",
-      "chapter": 3,
-      "verse": 5,
-      "kind": "quote",
-      "startMs": 6169000,
-      "note": "2026-09-26 audit: real quote read aloud, verified against the transcript by hand"
     }
   ]
 }

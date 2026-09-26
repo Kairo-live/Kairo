@@ -4306,16 +4306,6 @@
       "verse": 11
     },
     {
-      "book": "Luke",
-      "chapter": 7,
-      "verse": 28,
-      "kind": "quote",
-      "startMs": 107050,
-      "unverified": true,
-      "matchedIdf": 25.677688979402852,
-      "similarity": 0.5577352519713631
-    },
-    {
       "book": "Joel",
       "chapter": 2,
       "verse": 1,
@@ -4400,30 +4390,12 @@
       "similarity": 0.6374179014573244
     },
     {
-      "book": "Isaiah",
-      "chapter": 11,
-      "verse": 9,
-      "kind": "quote",
-      "startMs": 1098280,
-      "bootstrapped": true
-    },
-    {
       "book": "Jeremiah",
       "chapter": 31,
       "kind": "citation",
       "startMs": 1113935,
       "anchorWordIndex": 1520,
       "verse": 34
-    },
-    {
-      "book": "Hebrews",
-      "chapter": 8,
-      "verse": 11,
-      "kind": "quote",
-      "startMs": 1120100,
-      "unverified": true,
-      "matchedIdf": 27.2909482752623,
-      "similarity": 0.6437284847140501
     },
     {
       "book": "Isaiah",
@@ -4631,14 +4603,6 @@
       "verse": 12,
       "kind": "quote",
       "startMs": 2409525,
-      "bootstrapped": true
-    },
-    {
-      "book": "1 Timothy",
-      "chapter": 3,
-      "verse": 1,
-      "kind": "citation",
-      "startMs": 2480910,
       "bootstrapped": true
     },
     {

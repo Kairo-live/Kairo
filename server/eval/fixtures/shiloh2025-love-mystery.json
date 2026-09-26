@@ -3801,16 +3801,6 @@
       "unverified": true
     },
     {
-      "book": "2 Kings",
-      "chapter": 20,
-      "verse": 3,
-      "kind": "quote",
-      "startMs": 1939800,
-      "unverified": true,
-      "matchedIdf": 20.172580580964414,
-      "similarity": 0.43815652654855414
-    },
-    {
       "book": "Isaiah",
       "chapter": 38,
       "verse": 3,

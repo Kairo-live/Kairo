@@ -2211,14 +2211,6 @@
       "startMs": 75000
     },
     {
-      "book": "Genesis",
-      "chapter": 24,
-      "verse": 53,
-      "kind": "citation",
-      "startMs": 264000,
-      "bootstrapped": true
-    },
-    {
       "book": "Psalms",
       "chapter": 119,
       "ranges": [
@@ -2326,14 +2318,6 @@
       "similarity": 0.48012219886994206
     },
     {
-      "book": "2 Corinthians",
-      "chapter": 10,
-      "verse": 6,
-      "kind": "citation",
-      "startMs": 744000,
-      "bootstrapped": true
-    },
-    {
       "book": "1 Timothy",
       "chapter": 4,
       "verse": 13,
@@ -2374,14 +2358,6 @@
       "startMs": 1025000
     },
     {
-      "book": "Isaiah",
-      "chapter": 1,
-      "verse": 1,
-      "kind": "citation",
-      "startMs": 1109000,
-      "bootstrapped": true
-    },
-    {
       "book": "Proverbs",
       "chapter": 22,
       "verse": 7,
@@ -2411,14 +2387,6 @@
       "verse": 3,
       "kind": "citation",
       "startMs": 1543000
-    },
-    {
-      "book": "Isaiah",
-      "chapter": 66,
-      "verse": 4,
-      "kind": "citation",
-      "startMs": 1655000,
-      "bootstrapped": true
     },
     {
       "book": "Job",
@@ -2527,14 +2495,6 @@
       "startMs": 3151000
     },
     {
-      "book": "2 Samuel",
-      "chapter": 5,
-      "verse": 19,
-      "kind": "citation",
-      "startMs": 3170000,
-      "bootstrapped": true
-    },
-    {
       "book": "Isaiah",
       "chapter": 26,
       "verse": 9,
@@ -2560,10 +2520,10 @@
     {
       "book": "Proverbs",
       "chapter": 3,
-      "verse": 2,
+      "verse": 27,
       "kind": "citation",
       "startMs": 3738000,
-      "bootstrapped": true
+      "note": "2026-09-26 audit: bootstrapped entry checked by hand against the transcript and KJV text — was \"Proverbs 3:2\""
     },
     {
       "book": "Proverbs",

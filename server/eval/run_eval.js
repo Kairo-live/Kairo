@@ -81,7 +81,8 @@ async function runFixture(server, fixture) {
   // "which point in the ORIGINAL audio are we currently processing" —
   // this is what both ground truth and detections need to share.
   let currentCueMs = 0;
-  const detections = []; // { verseKey, method, target, atMs }
+  let cueFedAt = 0;      // wall clock when the current cue started being fed
+  const detections = []; // { verseKey, method, target, atMs, pipelineMs }
   const listener = (msg) => {
     if (msg.type !== 'detection' || !msg.verses?.length) return;
     const v = msg.verses[0];
@@ -92,6 +93,10 @@ async function runFixture(server, fixture) {
       target: msg.target,
       corrected: !!msg.corrected,
       atMs: currentCueMs,
+      // Processing delay: from the moment this cue's words started arriving to
+      // the broadcast (harness pacing is compressed, so this is the pipeline's
+      // own cost, not speech time).
+      pipelineMs: Math.round(performance.now() - cueFedAt),
     });
   };
   server.onBroadcast(listener);
@@ -101,6 +106,7 @@ async function runFixture(server, fixture) {
 
   for (const cue of fixture.transcript) {
     currentCueMs = cue.startMs;
+    cueFedAt = performance.now();
     const chunks = chunkUtterance(cue.text);
     for (let i = 0; i < chunks.length; i++) {
       const isLast = i === chunks.length - 1;
@@ -171,7 +177,31 @@ function scoreFixture(fixture, detections) {
   const recall = total ? truePositives.length / total : null;
   const precision = viewerDetections.length ? (viewerDetections.length - wrongAutoSends.length) / viewerDetections.length : null;
 
-  return { truePositives, falseNegatives, wrongAutoSends, viewerDetectionCount: viewerDetections.length, recall, precision };
+  // Possible Matches: a verse missed on screen may still have been offered to
+  // the operator there — the useful kind of miss. Busyness is suggestions per hour.
+  const suggestions = detections.filter(d => d.target === 'suggestions');
+  const offered = falseNegatives.filter(gt => {
+    const keys = new Set(groundTruthVerseKeys(gt));
+    return suggestions.some(d => keys.has(d.verseKey) && Math.abs(d.atMs - gt.startMs) <= MATCH_WINDOW_MS);
+  });
+  const hours = Math.max(1, fixture.transcript.at(-1)?.startMs || 0) / 3600000;
+  const suggestionsPerHour = suggestions.length / hours;
+
+  return { truePositives, falseNegatives, wrongAutoSends, viewerDetectionCount: viewerDetections.length, recall, precision, missedButOffered: offered.length, suggestionCount: suggestions.length, suggestionsPerHour, hours };
+}
+
+// Seconds-to-screen proxies for the matched verses. speechDelay: how much of
+// the sermon had been spoken since the ground-truth moment when the verse went
+// up (cue resolution — cues are ~5-10s long, so read it as "within the same /
+// next cue"). pipeline: processing time after the words arrived.
+function speedStats(results) {
+  const q = (arr, p) => { if (!arr.length) return null; const a = arr.slice().sort((x, y) => x - y); return a[Math.min(a.length - 1, Math.floor(p * a.length))]; };
+  const speech = [], pipe = [];
+  for (const r of results) for (const tp of r.truePositives) {
+    speech.push(Math.max(0, tp.detection.atMs - tp.gt.startMs));
+    if (typeof tp.detection.pipelineMs === 'number') pipe.push(tp.detection.pipelineMs);
+  }
+  return { speechDelayMedianS: q(speech, 0.5) / 1000, speechDelayP90S: q(speech, 0.9) / 1000, pipelineMedianMs: q(pipe, 0.5), pipelineP90Ms: q(pipe, 0.9) };
 }
 
 async function main() {
@@ -185,9 +215,15 @@ async function main() {
   await server.workerReadyPromise;
   console.log('[Eval] Worker ready.');
 
-  const requested = process.argv.slice(2);
+  const args = process.argv.slice(2);
+  const runsIdx = args.indexOf('--runs');
+  const runs = runsIdx >= 0 ? Math.max(1, parseInt(args[runsIdx + 1], 10) || 1) : 1;
+  const requested = args.filter((a, i) => a !== '--runs' && i !== runsIdx + 1);
   const names = requested.length ? requested : fs.readdirSync(FIXTURES_DIR).filter(f => f.endsWith('.json'));
 
+  const perRun = [];
+  for (let run = 1; run <= runs; run++) {
+  if (runs > 1) console.log(`\n[Eval] ######## run ${run} of ${runs} ########`);
   const allResults = [];
   for (const name of names) {
     const fixture = loadFixture(name);
@@ -199,6 +235,7 @@ async function main() {
     console.log(`  recall:    ${score.recall == null ? 'n/a' : (score.recall * 100).toFixed(1) + '%'}  (${score.truePositives.length}/${score.truePositives.length + score.falseNegatives.length})`);
     console.log(`  precision: ${score.precision == null ? 'n/a' : (score.precision * 100).toFixed(1) + '%'}  (${score.viewerDetectionCount - score.wrongAutoSends.length}/${score.viewerDetectionCount} viewer sends correct)`);
     console.log(`  wrong auto-sends: ${score.wrongAutoSends.length}`);
+    console.log(`  missed on screen but offered in Possible Matches: ${score.missedButOffered}/${score.falseNegatives.length}; Possible Matches entries: ${score.suggestionCount} (${score.suggestionsPerHour.toFixed(0)}/hour)`);
     if (score.falseNegatives.length) {
       console.log('  missed:');
       score.falseNegatives.forEach(gt => console.log(`    ${(gt.startMs/1000).toFixed(0)}s  ${gt.book} ${gt.chapter}${gt.verse != null ? ':' + gt.verse : ''}`));
@@ -217,11 +254,38 @@ async function main() {
   console.log(`  recall:    ${totalGT ? ((totalTP / totalGT) * 100).toFixed(1) + '%' : 'n/a'}  (${totalTP}/${totalGT})`);
   console.log(`  precision: ${totalViewer ? (((totalViewer - totalWrong) / totalViewer) * 100).toFixed(1) + '%' : 'n/a'}  (${totalViewer - totalWrong}/${totalViewer})`);
   console.log(`  total wrong auto-sends: ${totalWrong}`);
+  const totalMissed = totalGT - totalTP, offered = allResults.reduce((s, r) => s + r.missedButOffered, 0);
+  const hours = allResults.reduce((s, r) => s + r.hours, 0), sugg = allResults.reduce((s, r) => s + r.suggestionCount, 0);
+  console.log(`  missed on screen but offered in Possible Matches: ${offered}/${totalMissed}; Possible Matches entries: ${(sugg / hours).toFixed(0)}/hour`);
+  const sp = speedStats(allResults);
+  console.log(`  time to screen (speech time since the quote/citation): median ${sp.speechDelayMedianS?.toFixed(1)}s, 90th pct ${sp.speechDelayP90S?.toFixed(1)}s (cue resolution)`);
+  console.log(`  pipeline delay after the words arrived: median ${sp.pipelineMedianMs}ms, 90th pct ${sp.pipelineP90Ms}ms`);
 
   fs.mkdirSync(RESULTS_DIR, { recursive: true });
   const outPath = path.join(RESULTS_DIR, `${new Date().toISOString().replace(/[:.]/g, '-')}.json`);
   fs.writeFileSync(outPath, JSON.stringify(allResults, null, 2));
   console.log(`\n[Eval] Full results -> ${outPath}`);
+  perRun.push({ recall: totalGT ? totalTP / totalGT : 0, precision: totalViewer ? (totalViewer - totalWrong) / totalViewer : 0, wrong: totalWrong, results: allResults });
+  }
+
+  // Several runs: the harness's concurrent async paths make single verses flip
+  // between runs, so one run can't judge a small change. Report the spread and
+  // exactly which verses flipped.
+  if (runs > 1) {
+    const fmt = (xs) => `mean ${(100 * xs.reduce((a, b) => a + b, 0) / xs.length).toFixed(1)}% (min ${(100 * Math.min(...xs)).toFixed(1)}, max ${(100 * Math.max(...xs)).toFixed(1)})`;
+    console.log(`\n[Eval] === ${runs} runs ===`);
+    console.log(`  recall:    ${fmt(perRun.map(r => r.recall))}`);
+    console.log(`  precision: ${fmt(perRun.map(r => r.precision))}`);
+    console.log(`  wrong sends: ${perRun.map(r => r.wrong).join(', ')}`);
+    const caughtIn = new Map();
+    for (const r of perRun) for (const f of r.results) for (const tp of f.truePositives) {
+      const k = `${f.name} | ${tp.gt.book} ${tp.gt.chapter}:${tp.gt.verse ?? tp.gt.verseStart}`;
+      caughtIn.set(k, (caughtIn.get(k) || 0) + 1);
+    }
+    const flaky = [...caughtIn].filter(([, n]) => n < runs);
+    console.log(`  verses caught in some runs but not all (${flaky.length}):`);
+    flaky.forEach(([k, n]) => console.log(`    ${k}  (${n}/${runs})`));
+  }
 
   process.exit(0);
 }
