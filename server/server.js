@@ -4591,13 +4591,29 @@ function buildClauseList(text, minWords) {
   return unique.filter(c => c.split(RE_SPACES).filter(Boolean).length >= minWords);
 }
 
+const VERBATIM_CACHE_MS = 8000;
+const verbatimCache = new Map();   // clause list -> { at, results }
+async function cachedVerbatimSearch(texts) {
+  const key = texts.join('\u0001');
+  const now = Date.now();
+  const hit = verbatimCache.get(key);
+  if (hit && now - hit.at < VERBATIM_CACHE_MS) return hit.results;
+  const msg = await workerCall('verbatimSearchBatch', { texts, minWords: 6, limit: 3 }, 4000);
+  const results = msg.results || [];
+  if (verbatimCache.size > 64) for (const [k, v] of verbatimCache) if (now - v.at >= VERBATIM_CACHE_MS) verbatimCache.delete(k);
+  verbatimCache.set(key, { at: now, results });
+  return results;
+}
+
 async function processVerbatim(transcript) {
   try {
     const texts = buildClauseList(transcript, 6);
     if (!texts.length) return false;
-    // Single round-trip — worker iterates all clauses internally
-    const msg     = await workerCall('verbatimSearchBatch', { texts, minWords: 6, limit: 3 }, 4000);
-    const results = msg.results || [];
+    // Single round-trip — worker iterates all clauses internally. The search
+    // is a pure function of the text, and the same text is routinely searched
+    // more than once (a final segment usually equals the last interim; interims
+    // resend unchanged text), so recent results are reused for a few seconds.
+    const results = await cachedVerbatimSearch(texts);
     if (!results.length) return false;
     const viewer = results.filter(r => r.similarity >= VERBATIM_AUTOSEND_MIN || r.matchedIdf >= VERBATIM_CERTAIN_IDF);
     if (viewer.length) {

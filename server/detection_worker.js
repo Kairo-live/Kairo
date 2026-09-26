@@ -19,6 +19,7 @@ const { workerData, parentPort } = require('worker_threads');
 const path = require('path');
 const fs   = require('fs');
 const semanticEngine = require('./semantic_engine');
+const { longestWindow } = require('./verse_window');
 const rerankerEngine = require('./reranker_engine');
 
 const DATA_DIR = workerData?.dataDir || path.join(__dirname, '..', 'databases', 'bibles');
@@ -1211,19 +1212,15 @@ function verbatimSearch(transcript, minWords = 6, limit = 3) {
       const rawKjv = verseNormWords.get(idx);   // same length/order as verseWordsArr — for IDF lookup
       const rawNlt = nltWordsArr.length ? verseNormNltWords.get(idx) : null;
 
+      // Longest run of this verse's words present in the transcript — one
+      // O(V*T) pass (verse_window.js) instead of building every window as a
+      // string, which was ~96% of this function's time. KJV wins ties; NLT
+      // wins only with a strictly longer run (same order as before).
       let matchedLen = 0, matchedStart = -1, matchedRaw = null;
-      for (let len = searchStart; len >= minWords; len--) {
-        let found = false;
-        for (let i = 0; i <= verseWordsArr.length - len; i++) {
-          if (tStemmedText.includes(verseWordsArr.slice(i, i + len).join(' '))) { found = true; matchedStart = i; matchedRaw = rawKjv; break; }
-        }
-        if (!found && nltWordsArr.length) {
-          for (let i = 0; i <= nltWordsArr.length - len; i++) {
-            if (tStemmedText.includes(nltWordsArr.slice(i, i + len).join(' '))) { found = true; matchedStart = i; matchedRaw = rawNlt; break; }
-          }
-        }
-        if (found) { matchedLen = len; break; }
-      }
+      const kjvHit = longestWindow(verseWordsArr, tWordsStemmed, minWords, searchStart);
+      const nltHit = nltWordsArr.length ? longestWindow(nltWordsArr, tWordsStemmed, minWords, searchStart) : null;   // same length cap as KJV, as before
+      if (kjvHit && (!nltHit || kjvHit.len >= nltHit.len)) { matchedLen = kjvHit.len; matchedStart = kjvHit.start; matchedRaw = rawKjv; }
+      else if (nltHit) { matchedLen = nltHit.len; matchedStart = nltHit.start; matchedRaw = rawNlt; }
 
       if (matchedLen) {
         const v              = verseMetadata[idx];
