@@ -46,7 +46,9 @@ const OBSWebSocket = require('obs-websocket-js/json').default;
 
 const { createChapterResolver } = require('./chapter_resolver');
 const { createCitationVoting, citationKey } = require('./citation_voting');
-const { parseSpokenReference, parseAllSpokenReferences, resolvePartialReference, detectBookMentions, referenceContext, SINGLE_WORD_BOOKS, consumeNumber, MAX_CHAPTERS, WORD_TO_NUM } = require('./reference_parser');
+const { setCitationLanguage, BARE_NUMBER_FILLER, AMBIGUOUS_NUMBER_WORDS, parseSpokenReference, parseAllSpokenReferences, resolvePartialReference, detectBookMentions, referenceContext, SINGLE_WORD_BOOKS, consumeNumber, MAX_CHAPTERS, WORD_TO_NUM } = require('./reference_parser');
+const { localizeCitationText, stripAccents } = require('./citation_i18n');
+const { findNamedPassages } = require('./named_passages');
 const detectionScoring = require('./detection_scoring');
 const { VIEWER_MIN_SCORE, VERBATIM_CERTAIN_IDF, STREAM_IDF_FULL_CONFIDENCE, SAME_BOOK_WINDOW_MS } = require('./detection_constants');   // single definition — see that file
 
@@ -121,6 +123,7 @@ class SentenceBuffer {
 
 // ── Cached regex patterns (hot-path) ─────────────────────────────────────
 const RE_NONALPHA   = /[^a-z\s]/g;
+const RE_NON_ASCII  = /[^\x00-\x7f]/;
 const RE_WHITESPACE = /\s+/g;
 const RE_SPACES     = /\s+/;
 
@@ -159,6 +162,16 @@ async function saveSettings(s) {
   await fs.promises.writeFile(SETTINGS_PATH, JSON.stringify(s, null, 2));
 }
 let settings = loadSettings();
+setCitationLanguage(settings.sttLanguage);
+
+// Settings → Language → Church vocabulary: one term per line or comma-separated.
+// Capped so the whole keyterm prompt stays inside Deepgram's limit.
+const CHURCH_VOCAB_MAX = 40;
+function churchVocabulary() {
+  return [...new Set(String(settings.customKeyterms || '').split(/[\n,]+/)
+    .map(t => t.trim().replace(/\s+/g, ' ')).filter(t => t && t.length <= 40 && t.split(' ').length <= 4))]
+    .slice(0, CHURCH_VOCAB_MAX);
+}
 
 // ── Debug log ─────────────────────────────────────────────────────────────
 // Temporary diagnostic aid, added at the operator's request: a persistent,
@@ -354,6 +367,19 @@ async function buildNameChapterIndex() {
     console.warn('[Server] Named-entity index build failed (non-fatal, corroboration signal just stays off):', err.message);
   }
 }
+// Near-duplicate verse pairs, derived from the whole Bible by the worker
+// (detection_worker.js buildTwinTable). verseKey -> [[twinKey, sharedGrams]].
+let twinMap = new Map();
+async function loadTwinTable() {
+  try {
+    const msg = await workerCall('getTwins', {}, 15000);
+    twinMap = new Map(msg.twins || []);
+    console.log(`[Server] Near-duplicate table loaded — ${twinMap.size} verses have a twin.`);
+  } catch (err) {
+    console.warn('[Server] Near-duplicate table load failed (non-fatal, twin resolution stays off):', err.message);
+  }
+}
+
 // Resolves once the detection worker's 'ready' message arrives — the eval
 // harness (server/eval/run_eval.js) awaits this instead of polling
 // workerBasicReady, since it requires this module directly rather than
@@ -361,9 +387,23 @@ async function buildNameChapterIndex() {
 let _resolveWorkerReady;
 const workerReadyPromise = new Promise((resolve) => { _resolveWorkerReady = resolve; });
 
+// The second text the detection worker matches readings against. For a
+// non-English service, the Bible in the language being spoken (a preacher
+// preaching in Spanish reads Reina-Valera, not the KJV). Otherwise the
+// translation the church reads, when it has its own text file (KJV and NLT
+// are already in the detection corpus itself).
+const MATCHABLE_TRANSLATIONS = new Set(['NKJV', 'NIV', 'ESV', 'NASB']);
+function speechLanguage() { return String(settings.sttLanguage || 'en').slice(0, 2).toLowerCase(); }
+function matchingTranslation() {
+  const lang = speechLanguage();
+  if (lang !== 'en' && lang !== 'mu' && fs.existsSync(path.join(DATA_DIR, 'packs', `${lang}.json`))) return `pack:${lang}`;
+  const t = String(settings.translation || 'KJV').toUpperCase();
+  return MATCHABLE_TRANSLATIONS.has(t) ? t : null;
+}
+
 function spawnDetectionWorker() {
   detectionWorker = new Worker(path.join(__dirname, 'detection_worker.js'), {
-    workerData: { dataDir: DATA_DIR },
+    workerData: { dataDir: DATA_DIR, altTranslation: matchingTranslation() },
   });
 
   detectionWorker.on('message', (msg) => {
@@ -373,6 +413,7 @@ function spawnDetectionWorker() {
       console.log('[Server] Detection worker ready (reference + verbatim + fingerprint).');
       _resolveWorkerReady();
       buildNameChapterIndex(); // fire-and-forget — see its own comment
+      loadTwinTable();         // fire-and-forget — near-duplicate resolution stays off until loaded
       return;
     }
     if (msg.type === 'initError') {
@@ -555,6 +596,7 @@ wss.on('connection', (ws) => {
   // /api/stop-listening, but there was nothing to stop, so nothing
   // happened, and the actual "Start" the user needed had no visible way in.
   ws.send(JSON.stringify({ type: 'connection-state', state: connectionState }));
+  ws.send(JSON.stringify({ type: 'layer-state', bibleOnTop, slideUnderneath: !!slideUnderneath }));
   // Same snapshot-on-connect idea as connection-state just above — a
   // freshly (re)connected display window otherwise had no way to learn
   // the output's current transition setting until the next time an
@@ -580,7 +622,7 @@ wss.on('connection', (ws) => {
   // Forward binary audio frames to whichever engine is active.
   // - Deepgram: streamed straight to the WS connection (Deepgram does endpointing)
   // - Offline:  fed to the local recognizer; partial()/final() drive detection
-  // Either way we keep a short audio ring buffer for the REST fallback path.
+  // While Deepgram reconnects mid-session, frames are held and replayed on reopen.
   ws.on('message', (data, isBinary) => {
     if (!isBinary) {
       // The only text messages a client sends are the display window
@@ -592,69 +634,7 @@ wss.on('connection', (ws) => {
       } catch {}
       return;
     }
-    const chunk = Buffer.isBuffer(data) ? data : Buffer.from(data);
-    if (deepgramConnection) {
-      // CONFIRMED REAL BUG, in the @deepgram/sdk package itself, found live
-      // tonight (owner: "are you going to do something about hymn not
-      // coming through, or will you keep gaslighting me"). The SDK's own
-      // send() (AbstractLiveClient.js): if isConnected() is false at the
-      // exact instant send() is called, it pushes the chunk into an
-      // internal `sendBuffer` array instead of sending — and NOTHING in
-      // that file ever reads, flushes, or drains sendBuffer again. Once
-      // that happens even once, every future chunk queued the same way is
-      // gone forever: no exception, no warning, `.send()` returns
-      // normally. This is exactly what a real, reproduced live incident
-      // showed: real audio confirmed reaching the server (healthy,
-      // continuous peaks in databases/debug.log's own audio-peak
-      // diagnostic) while the server-side connection sat open with ZERO
-      // transcripts for two consecutive 120s windows — no thrown error
-      // anywhere, because the SDK's own `.send()` never throws for this
-      // case, it just silently queues into a dead end.
-      //
-      // Fix: bypass the SDK's own send()/sendBuffer path entirely — send
-      // directly on the underlying WebSocket it wraps (`.conn`, a public,
-      // non-private field), after checking ITS real readyState ourselves.
-      // If it's not OPEN (1), the chunk is skipped here rather than fed
-      // into the SDK's leaky buffer, and it's still preserved in
-      // audioRingBuffer below for the REST fallback either way. Rate-
-      // limited logging on both paths — the skip case (so a real stretch
-      // of "not actually open" is now visible in real time, not just
-      // inferable after the fact from a 120s watchdog firing) and a
-      // confirmation heartbeat (so this working normally is ALSO visible,
-      // not just its absence).
-      const conn = deepgramConnection.conn;
-      const OPEN = 1; // WebSocket.OPEN
-      if (conn && conn.readyState === OPEN) {
-        try {
-          conn.send(chunk);
-          const now = Date.now();
-          if (now - (lastDeepgramSendOkLoggedAt || 0) > 10000) {
-            lastDeepgramSendOkLoggedAt = now;
-            console.log('[Deepgram] Audio flowing (raw conn.send, readyState=OPEN)');
-          }
-        } catch (err) {
-          const now = Date.now();
-          if (now - (lastDeepgramSendErrorLoggedAt || 0) > 3000) {
-            lastDeepgramSendErrorLoggedAt = now;
-            console.error('[Deepgram] conn.send(chunk) failed:', err.name, err.message);
-          }
-        }
-      } else {
-        const now = Date.now();
-        if (now - (lastDeepgramSendSkippedLoggedAt || 0) > 3000) {
-          lastDeepgramSendSkippedLoggedAt = now;
-          console.warn(`[Deepgram] Skipped sending — underlying socket not OPEN (readyState=${conn ? conn.readyState : 'no conn'}). Chunk preserved in ring buffer for REST fallback.`);
-        }
-      }
-    } else if (offlineActive) {
-      feedOfflineAudio(chunk);
-    }
-    if (deepgramConnection) citationVoting.sendAudio(chunk);
-    audioRingBuffer.push({ data: chunk, time: Date.now() });
-    audioRingBytes += chunk.length;
-    while (audioRingBytes > AUDIO_RING_MAX_BYTES && audioRingBuffer.length) {
-      audioRingBytes -= audioRingBuffer.shift().data.length;
-    }
+    ingestAudio(Buffer.isBuffer(data) ? data : Buffer.from(data));
   });
 });
 
@@ -1052,12 +1032,80 @@ const CORRECTION_IMMUNITY_MS = 3000;
 // genuinely reading 60 verses in the next couple of spoken sentences.
 const MISCITATION_FORWARD_EXEMPT_VERSES = 5;
 
-// ── Audio ring buffer (REST fallback on WS drop) ──────────────────────────
-// Keeps last 25s of raw PCM so we can submit to Deepgram REST if the
-// WebSocket drops mid-sermon. 16kHz × 2 bytes × 25s = 800 000 bytes.
-const AUDIO_RING_MAX_BYTES = 16000 * 2 * 25;
-let audioRingBuffer = [];   // [{ data: Buffer, time: number }, ...]
-let audioRingBytes  = 0;
+// ── Deepgram session continuity ──────────────────────────────────────────
+
+// One 16 kHz mono int16 audio frame from the client, to whichever engine is live.
+function ingestAudio(chunk) {
+  if (offlineActive) { feedOfflineAudio(chunk); return; }
+  const conn = deepgramConnection?.conn;
+  if (conn && conn.readyState === 1) {
+    try {
+      conn.send(chunk);
+      const now = Date.now();
+      if (now - (lastDeepgramSendOkLoggedAt || 0) > 10000) {
+        lastDeepgramSendOkLoggedAt = now;
+        console.log('[Deepgram] Audio flowing (raw conn.send, readyState=OPEN)');
+      }
+    } catch (err) {
+      const now = Date.now();
+      if (now - (lastDeepgramSendErrorLoggedAt || 0) > 3000) {
+        lastDeepgramSendErrorLoggedAt = now;
+        console.error('[Deepgram] conn.send(chunk) failed:', err.name, err.message);
+      }
+    }
+    noteSpeechAudio(chunk);
+    citationVoting.sendAudio(chunk);
+  } else if (!deepgramUserStopped && (connectionState === 'reconnecting' || connectionState === 'connecting')) {
+    // The listening session is still on — keep what is said while the
+    // connection is re-established; it is replayed into the new connection
+    // the moment it opens, so nothing spoken during a reconnect is lost.
+    bufferGapAudio(chunk);
+  }
+}
+
+// Audio received while Deepgram is reconnecting (16 kHz mono int16), replayed
+// into the new connection on open. Capped at 30s — oldest dropped first.
+const GAP_AUDIO_MAX_BYTES = 16000 * 2 * 30;
+let gapAudio = [];
+let gapAudioBytes = 0;
+function bufferGapAudio(chunk) {
+  gapAudio.push(chunk);
+  gapAudioBytes += chunk.length;
+  while (gapAudioBytes > GAP_AUDIO_MAX_BYTES && gapAudio.length) gapAudioBytes -= gapAudio.shift().length;
+}
+function clearGapAudio() { gapAudio = []; gapAudioBytes = 0; }
+
+// How much SPEECH-level audio has gone to Deepgram since the last transcript
+// came back. A connection is only "stuck" if people are clearly talking and
+// nothing is being transcribed — quiet audio (a pause, worship, BlackHole's
+// digital silence) never counts, so silence never triggers a reconnect.
+const SPEECH_PEAK_MIN = 1500;                // int16 peak; speech in this app logs 2000-18000
+const DEEPGRAM_STUCK_SPEECH_MS = 30000;
+let speechMsSinceTranscript = 0;
+function noteSpeechAudio(chunk) {
+  const samples = chunk.length >> 1;
+  let peak = 0;
+  for (let i = 0; i < samples; i += 4) {
+    const v = chunk.readInt16LE(i * 2);
+    const a = v < 0 ? -v : v;
+    if (a > peak) peak = a;
+  }
+  if (peak >= SPEECH_PEAK_MIN) speechMsSinceTranscript += (samples / 16000) * 1000;
+}
+
+// The last interim Deepgram sent that no final has confirmed yet — words the
+// operator already SAW. If the connection drops before they're finalized they
+// are locked in locally instead of vanishing.
+let deepgramPendingInterim = null;   // { text, confidence }
+function lockPendingInterim(why) {
+  const p = deepgramPendingInterim;
+  deepgramPendingInterim = null;
+  if (!p?.text) return;
+  console.log(`[Deepgram] ${why} — locking the unfinished words: "${p.text.slice(0, 80)}"`);
+  handleTranscriptSegment(p.text, true, p.confidence || 0.8, true).catch(() => {});
+}
+let deepgramReconnectAttempts = 0;
+let deepgramFinalWaiter = null;       // resolves when the next final arrives (Stop's Finalize)
 let lastDeepgramSendErrorLoggedAt = 0;   // rate-limits the ws.on('message') send() error log above
 let lastDeepgramSendOkLoggedAt = 0;      // rate-limits the "audio flowing" heartbeat log
 let lastDeepgramSendSkippedLoggedAt = 0; // rate-limits the "socket not OPEN, chunk dropped" log
@@ -1104,50 +1152,6 @@ function resetReadingMode() {
   lastReadingModeReset = 0;
 }
 
-// ── Deepgram REST fallback ─────────────────────────────────────────────────
-// Submits buffered audio to Deepgram REST API when the WebSocket drops
-// mid-sermon. Catches the gap that would otherwise be silently lost.
-async function submitDeepgramRestFallback() {
-  if (!audioRingBuffer.length) return;
-  // .trim() — see startDeepgram's own comment: a stray-whitespace key that
-  // slipped into settings before the save-side fix is truthy but useless.
-  const key = (settings.deepgramApiKey || '').trim();
-  if (!key) return;
-
-  // Only submit audio captured in the last 20s (avoid re-processing old audio)
-  const cutoff     = Date.now() - 20000;
-  const recentAudio = audioRingBuffer.filter(c => c.time >= cutoff);
-  if (!recentAudio.length) return;
-
-  console.log(`[Deepgram] REST fallback — submitting ${recentAudio.length} buffered chunks…`);
-  const combined = Buffer.concat(recentAudio.map(c => c.data));
-
-  try {
-    const response = await axios.post(
-      'https://api.deepgram.com/v1/listen?model=nova-3&language=en-US&smart_format=true&punctuate=true',
-      combined,
-      {
-        headers: {
-          'Authorization': `Token ${key}`,
-          'Content-Type': 'audio/raw;encoding=linear16;sample_rate=16000;channels=1',
-        },
-        timeout: 15000,
-      }
-    );
-    const transcript = response.data?.results?.channels?.[0]?.alternatives?.[0]?.transcript || '';
-    if (transcript.trim()) {
-      console.log('[Deepgram] REST fallback transcript:', transcript.slice(0, 100));
-      broadcast({ type: 'transcript', text: transcript, isFinal: true, confidence: 0.9, source: 'rest-fallback' });
-      // Run full detection pipeline on the recovered transcript
-      await processForReferences(transcript, true);
-      if (workerBasicReady) {
-        await Promise.all([processVerbatim(transcript), runFingerprintSearch(transcript, true)]);
-      }
-    }
-  } catch (err) {
-    console.warn('[Deepgram] REST fallback failed:', err.message);
-  }
-}
 
 // ── Range Queue ───────────────────────────────────────────────────────────
 // When a verse range is detected (e.g. Matt 1:10-15), verse 1 auto-sends
@@ -1427,13 +1431,14 @@ let lastOutputVerseAt = 0;    // when lastOutputVerse was last actually set
 let sentVerseKeysThisBook = new Set();
 
 async function maybeHandleNextVerseTrigger(transcript) {
-  const tail = transcript.split(RE_SPACES).slice(-8).join(' ').toLowerCase();
-  if (!tail.includes('next verse')) return;
+  const tail = localizeCitationText(transcript.split(RE_SPACES).slice(-8).join(' '), speechLanguage()).toLowerCase();
+  const back = /\b(previous verse|verse before|preceding verse)\b/.test(tail);
+  if (!/\b(next verse|following verse|verse after (that|this|it))\b/.test(tail) && !back) return;
   const now = Date.now();
   if (now - lastNextVerseAt < NEXT_VERSE_COOLDOWN_MS) return;
   lastNextVerseAt = now;
 
-  if (rangeQueue.length) {
+  if (rangeQueue.length && !back) {
     requestRangeAdvance('"next verse" trigger');
     return;
   }
@@ -1446,12 +1451,15 @@ async function maybeHandleNextVerseTrigger(transcript) {
   // a couple of minutes, then "next verse" is normal and must keep working.
   if (Date.now() - lastOutputVerseAt > NEXT_VERSE_MAX_GAP_MS) return;
   try {
+    const target = back ? base.verse - 1 : base.verse + 1;
+    if (target < 1) return;
     const msg = await workerCall('directLookup', {
-      book: base.book, chapter: base.chapter, verse: base.verse + 1,
+      book: base.book, chapter: base.chapter, verse: target,
     }, 3000);
     if (msg.result) {
-      console.log(`[NextVerse] "next verse" trigger → ${msg.result.reference}`);
-      broadcastDetection([msg.result], 'direct', 1.0, 'viewer');
+      if (back) jumpRangeTo(msg.result.book, msg.result.chapter, msg.result.verse);
+      console.log(`[NextVerse] "${back ? 'previous' : 'next'} verse" trigger → ${msg.result.reference}`);
+      broadcastDetection([msg.result], 'continuation', 1.0, 'viewer');
     }
   } catch {}
 }
@@ -1473,7 +1481,6 @@ async function maybeHandleNextVerseTrigger(transcript) {
 // must be the LAST thing spoken (nothing trails after it — "thirty years"
 // fails because "years" follows), and it must equal the expected next verse
 // exactly — no jumps, no guessing.
-const BARE_NUMBER_FILLER      = new Set(['and', 'so', 'now', 'okay', 'ok', 'verse', 'verses', 'next']);
 const BARE_NUMBER_COOLDOWN_MS = 2000;
 const BARE_NUMBER_TAIL_WORDS  = 4;   // how far back to look for a trailing number
 // Outside a formal range, this trick has no citation evidence beyond
@@ -1511,6 +1518,7 @@ function maybeHandleBareVerseNumber(transcript) {
     if (n && start + n.consumed === tail.length) { num = n; break; }
   }
   if (!num) return false;
+  if (num.consumed === 1 && AMBIGUOUS_NUMBER_WORDS.has(tail[tail.length - 1])) return false;   // "...waiting for" is not verse 4
 
   const base = rangeCurrentVerse || lastOutputVerse;
   if (!base?.book || !base.chapter || base.verse == null) return false;
@@ -1541,7 +1549,7 @@ function maybeHandleBareVerseNumber(transcript) {
     .then(msg => {
       if (msg.result) {
         console.log(`[NextVerse] Bare number "${num.value}" → ${msg.result.reference}`);
-        broadcastDetection([msg.result], 'direct', 1.0, 'viewer');
+        broadcastDetection([msg.result], 'continuation', 1.0, 'viewer');
       }
     })
     .catch(() => {});
@@ -1754,6 +1762,7 @@ async function maybeHandleVerseEndNumberJump(transcript) {
 
   const num = consumeNumber(words, 0);
   if (!num || num.consumed !== words.length) return false;
+  if (num.consumed === 1 && AMBIGUOUS_NUMBER_WORDS.has(words[0])) return false;   // a lone "for" is the word, not 4
   if (num.value === base.verse) return false;   // already the verse on screen — nothing to do
 
   verseEndDetectedAt = 0;   // consume — a second stray number shouldn't jump again off the same finish
@@ -1766,7 +1775,7 @@ async function maybeHandleVerseEndNumberJump(transcript) {
       // Inside the active range: move the range pointer (same as a manual jump).
       // Outside it: the jump breaks the sequential range.
       if (!jumpRangeTo(msg.result.book, msg.result.chapter, msg.result.verse)) clearRangeQueue();
-      broadcastDetection([msg.result], 'direct', 1.0, 'viewer');
+      broadcastDetection([msg.result], 'continuation', 1.0, 'viewer');
       return true;
     }
   } catch {}
@@ -1896,15 +1905,17 @@ function resetTopicAccumulator() {
 const CONTEXT_WINDOW_MS  = 5 * 60 * 1000;   // citations older than 5 min expire
 const CONTEXT_MAX_CITED  = 8;                // keep last 8 cited verses
 
-const recentCitations = [];   // [{ book, chapter, verse, time }, ...]
+const recentCitations = [];   // [{ book, chapter, verse, time, cited }, ...]
 
-function updateSermonContext(ref) {
+// cited: false for a strong text match (a passage read, not named).
+function updateSermonContext(ref, { fromText = false } = {}) {
   const now = Date.now();
   recentCitations.push({
     book:    ref.book,
     chapter: ref.chapter || null,
     verse:   ref.verse   || ref.verseStart || null,
     time:    now,
+    cited:   !fromText,
   });
   // Keep only the last N within the window
   const cutoff = now - CONTEXT_WINDOW_MS;
@@ -1986,7 +1997,15 @@ app.post('/api/settings', async (req, res) => {
   }
   const updated = { ...settings, ...incoming };
   await saveSettings(updated).catch(err => console.warn('[Settings] Save failed:', err.message));
+  const matchingBefore = matchingTranslation();
   settings = updated;
+  setCitationLanguage(settings.sttLanguage);
+  // A different church translation changes what the detection worker matches
+  // against — restart it (the exit handler respawns it with the new setting).
+  if (matchingTranslation() !== matchingBefore && detectionWorker) {
+    console.log(`[Server] Translation changed — reloading detection to match ${matchingTranslation() || 'KJV/NLT'}`);
+    detectionWorker.terminate();
+  }
   const obsChanged = req.body.obsEnabled !== undefined || req.body.obsUrl !== undefined || req.body.obsPassword !== undefined;
   if (obsChanged) connectOBS().catch(err => console.warn('[OBS] Reconnect-on-settings-change failed:', err.message));
   // The output's own slide transition (Fade/Slide/Cut + speed) is a
@@ -2054,17 +2073,42 @@ app.post('/api/theme/import-protheme', (req, res) => {
 // Syphon), and carries an optional per-item `look` so a song can render on
 // the lyrics theme while scripture stays on the output's own theme.
 app.post('/api/service/send', async (req, res) => {
-  const { verse, look } = req.body;
+  const { verse, look, auto } = req.body;
   if (!verse) return res.status(400).json({ error: 'No slide provided' });
-  // Every OTHER path that can put a verse on the viewer (broadcastDetection,
-  // setRangeQueue/advanceRangeQueue) runs it through attachBibleTranslations
-  // first, so the Multi-Language theme's right-hand panel has something to
-  // show. This is the one send path that never did — it's what the Send
-  // button, double-click, and Candidates promote all funnel through (see
-  // sendVerseToServer in app.js), so any of those looked like the theme
-  // "randomly" not working: it genuinely never got a translation attached
-  // for this specific send path, while auto-detected/range verses (which go
-  // through broadcastDetection) always did.
+  const landed = await sendServiceSlide(verse, look, { auto: !!auto });
+  res.json({ ok: true, underBible: landed === 'under-bible' });
+});
+
+// ── Output layers: the Bible sits above slides ────────────────────────────
+// A scripture going up — called by the preacher or sent by the operator —
+// covers the live slide; the slide stays live underneath. Automatic slide
+// changes (auto-follow, auto-lookup, a live slide refreshed after an edit)
+// update underneath without uncovering it; an operator's own click on a slide
+// sends it. Clear Bible reveals the slide again; Clear Slide removes only the
+// slide. The operator's own view never changes.
+let slideUnderneath = null;   // { verse, look } of the live slide, or null
+let bibleOnTop = false;       // a scripture is on the output
+function setBibleOnTop(on) {
+  if (bibleOnTop === on) return;
+  bibleOnTop = on;
+  broadcastLayerState();
+}
+function broadcastLayerState() {
+  broadcast({ type: 'layer-state', bibleOnTop, slideUnderneath: !!slideUnderneath });
+}
+
+// A playlist item (song, announcement, slide) or a manual scripture send.
+// Returns 'under-bible' when an automatic slide change was kept under the Bible.
+async function sendServiceSlide(verse, look, { auto = false } = {}) {
+  if (verse.book) {
+    setBibleOnTop(true);
+  } else {
+    slideUnderneath = { verse, look };
+    if (bibleOnTop && auto) { broadcastLayerState(); return 'under-bible'; }
+    setBibleOnTop(false);
+  }
+  // A song/announcement/slide (no book) is now live — see liveNonScriptureSlideAt.
+  liveNonScriptureSlideAt = verse.book ? 0 : Date.now();
   await attachBibleTranslations([verse]);
   logDebug('service-send', {
     reference: verse.reference || null,
@@ -2084,8 +2128,7 @@ app.post('/api/service/send', async (req, res) => {
   try { await sendToOutputs(verse); } catch (err) {
     console.warn('[Service] sendToOutputs failed:', err.message);
   }
-  res.json({ ok: true });
-});
+}
 
 // Lets the client (service.js) log a diagnostic event into the same
 // debug.log — e.g. sendSlide's theme resolution, or "this button was
@@ -2310,7 +2353,11 @@ app.post('/api/service/send-timer', (req, res) => {
 // whole-stage clear behavior (kept for compatibility with anything still
 // sending bare {type:'clear'}).
 app.post('/api/service/clear-layer', async (req, res) => {
-  const layer = req.body?.layer || 'all';
+  res.json({ ok: true, ...(await clearLayer(req.body?.layer || 'all')) });
+});
+
+// The operator's per-layer Clear buttons.
+async function clearLayer(layer) {
   // Stop the actual thing *before* telling the display to hide it — a
   // still-running segment/clock trigger would otherwise broadcast a
   // fresh update a second later and silently bring the badge right back,
@@ -2321,10 +2368,34 @@ app.post('/api/service/clear-layer', async (req, res) => {
       .filter(t => t.typeId === 'clock-message' && triggers.isActive(t.id))
       .forEach(t => triggers.stopTrigger(t.id));
   }
+  // Clear Bible: the slide live underneath comes back; with none, the screen clears.
+  if (layer === 'bible') {
+    setBibleOnTop(false);
+    if (slideUnderneath) {
+      await sendServiceSlide(slideUnderneath.verse, slideUnderneath.look);
+      return { restored: true };
+    }
+    broadcast({ type: 'clear-layer', target: 'viewer', layer: 'slide' });
+    liveNonScriptureSlideAt = 0;
+    await clearExternalOutputs();
+    return { restored: false };
+  }
+  // Clear Slide while a scripture covers it: only the slide underneath goes.
+  if (layer === 'slide' && bibleOnTop) {
+    slideUnderneath = null;
+    broadcastLayerState();
+    return { keptBible: true };
+  }
   broadcast({ type: 'clear-layer', target: 'viewer', layer });
-  if (layer === 'slide' || layer === 'all') await clearExternalOutputs();
-  res.json({ ok: true });
-});
+  if (layer === 'slide' || layer === 'all') {
+    liveNonScriptureSlideAt = 0;
+    slideUnderneath = null;
+    setBibleOnTop(false);
+    broadcastLayerState();
+    await clearExternalOutputs();
+  }
+  return {};
+}
 
 // Remote-control the media layer's <video> (mute/play/pause/volume/seek) —
 // the output window has no visible native controls (the congregation
@@ -2887,6 +2958,9 @@ app.post('/api/reranker-model/install', async (_req, res) => {
 // Nothing downstream of this function uses it — purely a pass-through.
 async function handleTranscriptSegment(transcript, isFinal, confidence, speechFinal, words) {
   broadcast({ type: 'transcript', text: transcript, isFinal, confidence, ...(words ? { words } : {}) });
+  // Detection sees accent-folded text ("João"→"joao"), the same folding the
+  // worker applies to its Bible text; the operator's transcript above keeps them.
+  if (transcript && RE_NON_ASCII.test(transcript)) transcript = stripAccents(transcript);
 
   // Monotonic "how much has actually been said" counter — final segments
   // only (interim resends a growing, overlapping prefix of the same
@@ -2965,7 +3039,7 @@ async function handleTranscriptSegment(transcript, isFinal, confidence, speechFi
               // it, and is logged (previously this whole path was silent —
               // the exact combination that let a stale-context misfire reach
               // the live screen with zero trace in the logs).
-              const sent = await broadcastDetection([msg.result], 'direct-partial', DIRECT_PARTIAL_SCORE, 'viewer');
+              const sent = await broadcastDetection([msg.result], partial.chapterGiven ? 'context-citation' : 'direct-partial', DIRECT_PARTIAL_SCORE, 'viewer');
               if (partialRefConfirmsContext(sent, partial)) {
                 if (sent === 'viewer') console.log(`[Context] Interim partial ref "verse ${partial.verse}" → ${msg.result.reference}`);
                 // TWENTY-FIFTH bug — refresh the context timer on a
@@ -3044,6 +3118,7 @@ async function handleTranscriptSegment(transcript, isFinal, confidence, speechFi
   // segment — announcesDifferentBook below needs the real previous segment.
   const prevFinalBefore = { text: prevFinalTranscript, at: prevFinalTranscriptAt };
   let foundRef = await processForReferences(transcript, true);
+  if (!foundRef) offerNamedPassages(transcript).catch(() => {});
 
   // Diagnostic only (cheap — one branch, no extra work) for a real,
   // recurring, still-unexplained pattern: a clean, explicit "verse N" in
@@ -3058,9 +3133,12 @@ async function handleTranscriptSegment(transcript, isFinal, confidence, speechFi
   }
 
   if (!foundRef && referenceContext.isValid) {
-    const partial = announcesDifferentBook(transcript, prevFinalBefore) ? null : resolvePartialReference(transcript);
+    const newBook = announcesDifferentBook(transcript, prevFinalBefore);
+    const partial = newBook ? null : resolvePartialReference(transcript);
     if (!partial && /\bverses?\b/i.test(transcript)) {
-      console.log(`[Context] "verse" heard, context valid (${referenceContext.book} ${referenceContext.chapter}) but resolvePartialReference returned null for: "${transcript}"`);
+      console.log(newBook
+        ? `[Context] "verse" heard but a different book is being announced — not resolving against ${referenceContext.book} ${referenceContext.chapter}: "${transcript}"`
+        : `[Context] "verse" heard, context valid (${referenceContext.book} ${referenceContext.chapter}) but resolvePartialReference returned null for: "${transcript}"`);
     }
     if (partial) {
       try {
@@ -3093,7 +3171,7 @@ async function handleTranscriptSegment(transcript, isFinal, confidence, speechFi
             // it genuinely isn't (a real topic change, not a reposition).
             outsideRange = !jumpRangeTo(verses[0].book, verses[0].chapter, verses[0].verse);
           }
-          const sent = await broadcastDetection(verses, 'direct-partial', DIRECT_PARTIAL_SCORE, 'viewer');
+          const sent = await broadcastDetection(verses, partial.chapterGiven ? 'context-citation' : 'direct-partial', DIRECT_PARTIAL_SCORE, 'viewer');
           // A bare number that was demoted or dropped (stray narration) must not
           // destroy the active range — only a verse that really went out does.
           if (outsideRange && sent === 'viewer') clearRangeQueue();
@@ -3299,8 +3377,7 @@ function resetDetectionSession({ keepContinuity = false } = {}) {
   streamWatermark       = 0;
   sentenceBuffer = new SentenceBuffer(4000);
   currentInterimText = '';
-  audioRingBuffer = [];
-  audioRingBytes  = 0;
+  speechMsSinceTranscript = 0;
   citationVoting.reset();
 
   // Sermon-level state. A Deepgram auto-reconnect (network blip, silence
@@ -3309,6 +3386,9 @@ function resetDetectionSession({ keepContinuity = false } = {}) {
   // (invalid-verse recovery), Bible mode, sermon/reading context, dedup and
   // correction memory. Only a user-initiated start clears it.
   if (!keepContinuity) {
+    liveNonScriptureSlideAt = 0;
+    clearGapAudio();                 // session audio: survives a reconnect, not a new session
+    deepgramPendingInterim = null;
     transcriptBuffer      = [];
     inBibleMode           = false;
     clearTimeout(bibleModeClearTimer);   // a leftover timer from the previous
@@ -3323,6 +3403,8 @@ function resetDetectionSession({ keepContinuity = false } = {}) {
     recentDetections.clear();
     recentlyCorrectedAway = null;
     streamCrosscheckRejected.clear();
+    awaitingCorroboration.clear();
+    twinDecisions.clear();
     referenceContext.reset();
     chapterOnlyPending = null;
     chapterKeywordResolvedFor = null;
@@ -3352,6 +3434,7 @@ async function startDeepgram(config = {}, { reconnect = false } = {}) {
 
   deepgramUserStopped = false;
   deepgramLastConfig  = config;   // save for auto-reconnect
+  if (!reconnect) deepgramReconnectAttempts = 0;
 
   // .trim() — a stray-whitespace key (see the /api/settings save-side fix's
   // own comment for the real incident) is truthy but not a real key; without
@@ -3451,6 +3534,10 @@ async function startDeepgram(config = {}, { reconnect = false } = {}) {
         // nameChapterIndex below — one source of truth.
         ...BIBLE_PERSON_NAMES,
       ];
+      // The church's own vocabulary first (Settings → Language): the pastor's
+      // name, the church, local places — words a general model mishears.
+      const own = churchVocabulary();
+      if (own.length) dgConfig.keyterm = [...new Set([...own, ...dgConfig.keyterm])];
     }
     const myConnection = deepgramConnection = dg.listen.live(dgConfig);
 
@@ -3460,16 +3547,22 @@ async function startDeepgram(config = {}, { reconnect = false } = {}) {
         connectionState = 'connected';
         broadcast({ type: 'connection-state', state: 'connected' });
         deepgramLastTranscriptAt = Date.now();
+        speechMsSinceTranscript = 0;
+        deepgramReconnectAttempts = 0;
+        // What was said while reconnecting goes in first — Deepgram accepts
+        // audio faster than real time, so it catches up on its own.
+        if (gapAudio.length) {
+          const secs = (gapAudioBytes / 32000).toFixed(1);
+          for (const chunk of gapAudio) { try { myConnection.conn.send(chunk); } catch {} }
+          console.log(`[Deepgram] Reconnected — replayed ${secs}s of audio heard while reconnecting`);
+          clearGapAudio();
+        }
         try { citationVoting.start(dgConfig, LiveTranscriptionEvents); } catch (err) { console.warn('[Ensemble] could not start:', err.message); }
 
-        // ── KeepAlive ping every 8 s ─────────────────────────────────────
-        // Deepgram silently drops WebSocket connections that go quiet for
-        // ~10-15 minutes. Sending a keepAlive packet every 8 s prevents that.
-        // Bypasses the SDK's own keepAlive()/send() for the same reason the
-        // audio path does now (see the ws.on('message') handler's own
-        // comment) — keepAlive() internally calls the SAME send() that can
-        // silently swallow a message into a never-flushed buffer instead of
-        // actually transmitting it.
+        // KeepAlive every 8s — Deepgram closes a socket that goes ~10s
+        // without audio or a KeepAlive. This (plus the audio itself) is what
+        // keeps the connection up through silence; nothing reconnects on
+        // silence.
         clearInterval(deepgramKeepAliveTimer);
         deepgramKeepAliveTimer = setInterval(() => {
           try {
@@ -3478,36 +3571,19 @@ async function startDeepgram(config = {}, { reconnect = false } = {}) {
           } catch {}
         }, 8000);
 
-        // ── Silence watchdog every 60 s ──────────────────────────────────
-        // If we haven't received ANY transcript for 90 s while "connected",
-        // the connection has silently stalled — force a reconnect.
-        // 90 s gives plenty of room for long prayers, congregational singing,
-        // and worship interludes without triggering a false reconnect.
-        // The keepAlive ping every 8 s keeps the socket warm during silence,
-        // so a 90 s transcript gap is a reliable indicator of a true stall.
+        // Stuck-connection check — the ONLY reason (besides a real drop) to
+        // reconnect: 30s of clearly spoken audio went in and not a single
+        // transcript came back. Quiet audio doesn't count (noteSpeechAudio),
+        // so a long pause, prayer or worship never triggers it — that used to
+        // tear the connection down after 90s of silence.
         clearInterval(deepgramSilenceWatchdog);
         deepgramSilenceWatchdog = setInterval(() => {
-          if (deepgramConnection !== myConnection) return; // superseded — stale connection, ignore
-          if (connectionState !== 'connected' || deepgramUserStopped) return;
-          const silentMs = Date.now() - deepgramLastTranscriptAt;
-          if (silentMs > 90000) {
-            console.warn(`[Deepgram] No transcript for ${(silentMs/1000).toFixed(0)}s — reconnecting…`);
-            clearInterval(deepgramKeepAliveTimer);
-            clearInterval(deepgramSilenceWatchdog);
-            connectionState = 'disconnected';
-            broadcast({ type: 'connection-state', state: 'reconnecting' });
-            // Explicitly close the stale connection BEFORE starting a new
-            // one — belt-and-suspenders alongside the myConnection identity
-            // guards on every handler: this also stops it sitting open
-            // against Deepgram's own connection limits/quota for no reason,
-            // and its Close event (still guarded) is now a deliberate,
-            // expected no-op rather than something to race against.
-            try { myConnection.requestClose(); } catch {}
-            startDeepgram(deepgramLastConfig, { reconnect: true }).catch(err =>
-              console.error('[Deepgram] Silence-watchdog reconnect failed:', err.message)
-            );
+          if (deepgramConnection !== myConnection || connectionState !== 'connected' || deepgramUserStopped) return;
+          if (speechMsSinceTranscript > DEEPGRAM_STUCK_SPEECH_MS) {
+            console.warn(`[Deepgram] ${(speechMsSinceTranscript / 1000).toFixed(0)}s of speech with no transcript back — connection looks stuck, reconnecting`);
+            reconnectDeepgram(myConnection, 'stuck');
           }
-        }, 60000);
+        }, 5000);
 
         resolve({ ok: true });
       });
@@ -3516,23 +3592,16 @@ async function startDeepgram(config = {}, { reconnect = false } = {}) {
         if (deepgramConnection !== myConnection) return; // superseded — stale connection, ignore
         try {
           const alt = data.channel?.alternatives?.[0];
-          // Diagnostic — rate-limited: makes the difference visible between
-          // "Deepgram genuinely isn't returning anything at all" (this line
-          // never fires) and "Deepgram IS responding, just with empty/low-
-          // confidence results" (this fires, transcript is blank) — the
-          // silent `if (!alt?.transcript?.trim()) return;` right after gave
-          // both cases identical zero-trace symptoms before this.
           const now = Date.now();
           if (now - (lastDeepgramEventLoggedAt || 0) > 5000) {
             lastDeepgramEventLoggedAt = now;
             console.log(`[Deepgram] Transcript event received — text="${alt?.transcript || ''}" confidence=${alt?.confidence ?? 'n/a'} is_final=${data.is_final}`);
           }
+          if (data.is_final) { deepgramPendingInterim = null; deepgramFinalWaiter?.(); }
           if (!alt?.transcript?.trim()) return;
-          deepgramLastTranscriptAt = Date.now();  // stamp every received segment
-
-          // Deepgram always includes per-word timestamps (start/end in
-          // seconds relative to the connection start) on `alt.words` — free,
-          // no config flag needed. See handleTranscriptSegment's own comment.
+          deepgramLastTranscriptAt = now;
+          speechMsSinceTranscript = 0;
+          if (!data.is_final) deepgramPendingInterim = { text: alt.transcript, confidence: alt.confidence || 0 };
           await handleTranscriptSegment(
             alt.transcript,
             data.is_final,
@@ -3545,10 +3614,6 @@ async function startDeepgram(config = {}, { reconnect = false } = {}) {
         }
       });
 
-      // utterance_end_ms is configured above but the event was never
-      // subscribed. It fires when Deepgram detects an utterance boundary even
-      // when no speech_final arrives (fast continuous preaching) — the exact
-      // moment to flush the sentence buffer and run quote detection.
       myConnection.on(LiveTranscriptionEvents.UtteranceEnd, () => {
         if (deepgramConnection !== myConnection) return; // superseded — stale connection, ignore
         const flushed = sentenceBuffer.forceFlush();
@@ -3561,13 +3626,10 @@ async function startDeepgram(config = {}, { reconnect = false } = {}) {
 
       myConnection.on(LiveTranscriptionEvents.Error, (err) => {
         if (deepgramConnection !== myConnection) return; // superseded — stale connection, ignore
-        clearInterval(deepgramKeepAliveTimer);
-        clearInterval(deepgramSilenceWatchdog);
         const rawMsg = err?.message || err?.reason || err?.description
           || (typeof err === 'string' ? err : JSON.stringify(err));
         const code = err?.code || err?.statusCode || err?.status;
         const lc   = (rawMsg || '').toLowerCase();
-        // Classify so the UI can surface something actionable.
         let kind = 'unknown';
         let friendly = rawMsg;
         if (code === 401 || code === 403 || lc.includes('unauthorized') || lc.includes('invalid api key') || lc.includes('forbidden')) {
@@ -3581,50 +3643,52 @@ async function startDeepgram(config = {}, { reconnect = false } = {}) {
           friendly = 'Network error reaching Deepgram. Check your internet connection.';
         }
         console.error(`[Deepgram] Error (${kind}):`, rawMsg);
-        connectionState = 'error';
-        broadcast({ type: 'connection-state', state: 'error', error: friendly, errorKind: kind });
-        resolve({ error: friendly, errorKind: kind });
+        // Only a problem retrying can't fix (bad key, no quota), or a failure
+        // on the very first connect of a Start, ends the listening session.
+        // Anything else mid-session is a transient drop: keep the session and
+        // reconnect.
+        const fatal = kind === 'auth' || kind === 'quota' || (connectionState === 'connecting' && !reconnect);
+        if (fatal) {
+          endDeepgramSession(myConnection);
+          connectionState = 'error';
+          broadcast({ type: 'connection-state', state: 'error', error: friendly, errorKind: kind });
+          resolve({ error: friendly, errorKind: kind });
+        } else {
+          reconnectDeepgram(myConnection, `error: ${kind}`);
+          resolve({ error: friendly, errorKind: kind, reconnecting: true });
+        }
       });
 
       myConnection.on(LiveTranscriptionEvents.Close, (evt) => {
-        if (deepgramConnection !== myConnection) return; // superseded — stale connection, ignore; its Close is expected, not a real drop
-        // SDK hands us a CloseEvent — extract the actual numeric code + reason
+        if (deepgramConnection !== myConnection) return; // superseded, or Stop already closed it — expected
         const closeCode   = (evt && typeof evt === 'object' && 'code' in evt) ? evt.code : evt;
         const closeReason = (evt && typeof evt === 'object' && evt.reason) ? evt.reason : '';
         const closeDesc   = closeReason ? `${closeCode} "${closeReason}"` : String(closeCode);
-
-        // Closed before Open fired = connection rejected
-        if (connectionState === 'connecting') {
+        if (connectionState === 'connecting' && !reconnect) {
+          // The first connect of a Start never opened — report it; no session yet.
           const msg = `Deepgram closed before connecting (code ${closeDesc})`;
           console.error('[Deepgram]', msg);
+          endDeepgramSession(myConnection);
           connectionState = 'error';
+          broadcast({ type: 'connection-state', state: 'error', error: msg });
           resolve({ error: msg });
           return;
         }
-        clearInterval(deepgramKeepAliveTimer);
-        clearInterval(deepgramSilenceWatchdog);
-        connectionState = 'disconnected';
-        broadcast({ type: 'connection-state', state: 'disconnected' });
-
-        // Auto-reconnect unless the user explicitly stopped
-        if (!deepgramUserStopped) {
-          console.log(`[Deepgram] Connection closed (code ${closeDesc}) — reconnecting in 1.5s…`);
-          broadcast({ type: 'connection-state', state: 'reconnecting' });
-          // Submit any buffered audio via REST before reconnecting
-          submitDeepgramRestFallback().catch(err => console.warn('[Deepgram] REST fallback dispatch failed:', err.message));
-          setTimeout(() => {
-            if (!deepgramUserStopped) {
-              startDeepgram(deepgramLastConfig, { reconnect: true }).catch(err => {
-                console.error('[Deepgram] Reconnect failed:', err.message);
-              });
-            }
-          }, 1500);
-        }
+        // A drop mid-session (or a reconnect attempt that didn't open):
+        // the session stays on and reconnects.
+        reconnectDeepgram(myConnection, `closed (code ${closeDesc})`);
+        resolve({ error: `Deepgram closed (code ${closeDesc})`, reconnecting: true });
       });
 
       setTimeout(() => {
-        if (connectionState === 'connecting') {
-          resolve({ error: 'Deepgram connection timeout — check your API key' });
+        if (deepgramConnection === myConnection && connectionState === 'connecting') {
+          if (reconnect) { reconnectDeepgram(myConnection, 'connect timeout'); resolve({ error: 'timeout', reconnecting: true }); }
+          else {
+            endDeepgramSession(myConnection);
+            connectionState = 'error';
+            broadcast({ type: 'connection-state', state: 'error', error: 'Deepgram connection timeout — check your API key' });
+            resolve({ error: 'Deepgram connection timeout — check your API key' });
+          }
         }
       }, 10000);
     });
@@ -3634,17 +3698,60 @@ async function startDeepgram(config = {}, { reconnect = false } = {}) {
   }
 }
 
-async function stopDeepgram() {
-  deepgramUserStopped = true;   // prevent auto-reconnect
+// Drop the current Deepgram socket but keep the LISTENING SESSION: the
+// operator pressed Start and nothing but Stop ends that. Locks the words the
+// operator already saw, holds incoming audio (bufferGapAudio) and reconnects
+// with backoff; the held audio is replayed when the new socket opens. The
+// client keeps its microphone running throughout ('reconnecting' is not a stop).
+function reconnectDeepgram(conn, reason) {
+  if (deepgramConnection !== conn || deepgramUserStopped) return;
+  clearInterval(deepgramKeepAliveTimer);
+  clearInterval(deepgramSilenceWatchdog);
+  deepgramConnection = null;             // audio now goes to the gap buffer
+  lockPendingInterim(`connection ${reason}`);
   citationVoting.stop();
-  if (deepgramConnection) {
-    try { deepgramConnection.requestClose(); } catch {}
-    deepgramConnection = null;
+  try { conn.requestClose(); } catch {}
+  connectionState = 'reconnecting';
+  broadcast({ type: 'connection-state', state: 'reconnecting' });
+  const delay = Math.min(1000 * 2 ** deepgramReconnectAttempts, 15000);
+  deepgramReconnectAttempts++;
+  console.log(`[Deepgram] Connection ${reason} — reconnecting in ${(delay / 1000).toFixed(1)}s (session stays on)`);
+  setTimeout(() => {
+    if (deepgramUserStopped || connectionState !== 'reconnecting') return;
+    startDeepgram(deepgramLastConfig, { reconnect: true }).catch(err => {
+      console.error('[Deepgram] Reconnect failed:', err.message);
+    });
+  }, delay);
+}
+
+// End the session without reconnecting (fatal error or first-connect failure).
+function endDeepgramSession(conn) {
+  deepgramUserStopped = true;
+  clearInterval(deepgramKeepAliveTimer);
+  clearInterval(deepgramSilenceWatchdog);
+  citationVoting.stop();
+  if (deepgramConnection === conn) deepgramConnection = null;
+  try { conn.requestClose(); } catch {}
+  clearGapAudio();
+}
+
+async function stopDeepgram() {
+  deepgramUserStopped = true;   // the session ends: no reconnect from here on
+  citationVoting.stop();
+  clearInterval(deepgramKeepAliveTimer); deepgramKeepAliveTimer = null;
+  clearInterval(deepgramSilenceWatchdog); deepgramSilenceWatchdog = null;
+  const conn = deepgramConnection;
+  // Ask Deepgram to finalize what it has already heard, and wait briefly for
+  // it, so the last words before Stop are kept instead of cut off.
+  if (conn?.conn && conn.conn.readyState === 1) {
+    try { conn.conn.send(JSON.stringify({ type: 'Finalize' })); } catch {}
+    await new Promise(r => { const t = setTimeout(r, 1500); deepgramFinalWaiter = () => { clearTimeout(t); r(); }; });
+    deepgramFinalWaiter = null;
   }
-  // Defensive: the ws-close handler clears these too, but stopDeepgram() can
-  // be called from paths where the close event may not fire (or fires late).
-  if (deepgramKeepAliveTimer)  { clearInterval(deepgramKeepAliveTimer);  deepgramKeepAliveTimer  = null; }
-  if (deepgramSilenceWatchdog) { clearInterval(deepgramSilenceWatchdog); deepgramSilenceWatchdog = null; }
+  lockPendingInterim('stopped');
+  deepgramConnection = null;
+  if (conn) { try { conn.requestClose(); } catch {} }
+  clearGapAudio();
   connectionState = 'disconnected';
   broadcast({ type: 'connection-state', state: 'disconnected' });
 }
@@ -3886,6 +3993,11 @@ async function processStreamText(text) {
       if (top[0].viaBackwardExtension
           && !evidenceLedger.hasCorroboration({ book: top[0].book, chapter: top[0].chapter, verse: top[0].verse })) {
         streamTarget = 'suggestions';
+        // Held only for want of a second method — remember it, so the second
+        // method arriving a moment LATER can still promote it (see
+        // awaitingCorroboration). Corroboration used to count only if it
+        // happened to arrive first.
+        awaitingCorroboration.set(`${top[0].book}|${top[0].chapter}|${top[0].verse}`, { verses: top, score: top[0].similarity || 0.90, at: Date.now() });
       }
 
       // ── Cross-method verbatim sanity check ───────────────────────────────
@@ -4198,8 +4310,13 @@ function bookIsAnnounced(tokens, book) {
 }
 function announcesDifferentBook(text, prev = { text: prevFinalTranscript, at: prevFinalTranscriptAt }) {
   try {
-    const prevTail = (prev.text && Date.now() - prev.at < PREV_FINAL_JOIN_WINDOW_MS)
+    let prevTail = (prev.text && Date.now() - prev.at < PREV_FINAL_JOIN_WINDOW_MS)
       ? prev.text.split(RE_SPACES).slice(-8).join(' ') : '';
+    // Only an UNFINISHED mention carries over ("...in the book of Acts" | "of
+    // Apostle one verse eight"). A complete citation in the previous segment
+    // ("Romans chapter eight verse twenty eight.") was already handled there,
+    // and the screen may have moved on since — it announces nothing new.
+    if (prevTail && parseAllSpokenReferences(prevTail, true).some(r => r.verse != null || r.verseStart != null || r.ranges?.length)) prevTail = '';
     const combined = `${prevTail} ${text}`;
     const tokens = combined.toLowerCase().replace(/[.,!?;:"]/g, ' ').split(RE_SPACES).filter(Boolean);
     return detectBookMentions(combined, true).some(b => b !== referenceContext.book && bookIsAnnounced(tokens, b));
@@ -4520,51 +4637,19 @@ async function processForReferences(transcript, isFinal) {
         // ── Interim range advance via explicit reference ──────────────────────
         if (tryRangeAdvanceByRef(verses)) return true;
 
-        // Interim: only show in suggestions (less confirmed), use lighter dedup
+        // Interim citations go through the SAME decision as everything else
+        // (scoring, the corrected-away and backward-reshow guards, dedup, the
+        // evidence ledger, translations, outputs). They used to broadcast and
+        // send on a separate path of their own, so none of those guards applied
+        // to the fastest route. The light interim dedup below only stops the
+        // same growing interim from re-entering on every update.
         const topKey = `${verses[0].book}|${verses[0].chapter}|${verses[0].verse}`;
         const now = Date.now();
         if (topKey === interimDetectedRef && now - interimDetectedTime < DIRECT_DEDUP_MS) continue;
         interimDetectedRef  = topKey;
         interimDetectedTime = now;
-        // Also feed through the main dedup so final won't re-fire
-        lastDetectedRef    = topKey;
-        lastDetectedTime   = now;
-        lastDetectedMethod = 'direct';
-        // TWENTIETH bug fix (see the comment at the bottom of this function
-        // for the real incident) — this direct `broadcast()` call bypasses
-        // broadcastDetection entirely (interim citations skip its dedup/
-        // scoring machinery on purpose, for speed), so it must attach Bible
-        // translations itself, the same way broadcastDetection's own
-        // `if (target === 'viewer') await attachBibleTranslations(verses);`
-        // does for the final path. Without this, the Multi-Language split
-        // theme's English side updated on this interim broadcast while the
-        // translated side stayed blank until the final transcript's own,
-        // properly-translated broadcast landed moments later — a real,
-        // visible lag between the two panels.
-        applyTranslation(verses);
-        applyScriptureLanguage(verses);
-        await attachBibleTranslations(verses);
-        broadcast({
-          type: 'detection',
-          verses,
-          method: 'direct',
-          topScore: 1.0,
-          target: 'viewer',   // explicit citation → go to viewer even on interim
-          timestamp: now,
-        });
-        // Auto-send on interim too — preacher stated it explicitly
-        if (settings.autoSend !== false) {
-          const vKey = `${verses[0].book}|${verses[0].chapter}|${verses[0].verse}`;
-          if (vKey !== lastSentRef || now - lastSentTime >= SEND_DEDUP_MS) {
-            lastSentBook     = verses[0].book;
-            lastSentBookTime = now;
-            lastDirectSentVerse = verses[0];
-            lastDirectSentTime  = now;
-            lastDirectSentWords = wordsHeard;
-            console.log(`[Direct] "${verses[0].reference}" (interim) → viewer`);
-            sendToOutputs(verses[0]).catch(err => console.warn('[Server] sendToOutputs failed:', err.message));
-          }
-        }
+        const sent = await broadcastDetection(verses, 'direct', 1.0, 'viewer');
+        if (sent === 'viewer') console.log(`[Direct] "${verses[0].reference}" (interim) → viewer`);
       }
     } catch (err) {
       console.warn('[Server] Reference lookup error:', err.message);
@@ -4573,9 +4658,6 @@ async function processForReferences(transcript, isFinal) {
   return true;
 }
 
-// (TWENTIETH bug — see the attachBibleTranslations call inside the interim
-// branch above. Owner, live, on the Multi-Language split theme: "we didn't
-// fix the translation issue. it delays.")
 
 // ── Verbatim phrase match ─────────────────────────────────────────────────
 // Run on punctuation-split clauses so the preacher's intro ("as Paul writes,")
@@ -4656,7 +4738,7 @@ async function processVerbatim(transcript) {
       if (sent === 'viewer') console.log(`[Verbatim] "${top.reference}" raw=${(top.similarity*100).toFixed(0)}% score=${(effectiveScore*100).toFixed(0)}%${viaIdf ? ` (via matchedIdf=${top.matchedIdf.toFixed(1)}, sequence-certain despite partial coverage)` : ''} → viewer`);
       // Feed high-confidence verbatim hits into sermon context + reading mode tracker
       if (top.similarity >= 0.92) {
-        updateSermonContext({ book: top.book, chapter: top.chapter, verse: top.verse });
+        updateSermonContext({ book: top.book, chapter: top.chapter, verse: top.verse }, { fromText: true });
         trackReadingModeHit(top, top.similarity);
       }
     } else if (results[0]) {
@@ -5060,7 +5142,7 @@ async function runFingerprintSearch(currentSegment, skipNewTranscriptCheck = fal
         const sent = await broadcastDetection(qualifying, 'fingerprint', qualifying[0].similarity, 'suggestions');
         if (sent) console.log(`[Fingerprint] ${qualifying.map(r => `"${r.reference}" ${(r.similarity*100).toFixed(0)}%`).join(', ')} → candidates`);
         if (qualifying[0].similarity >= 0.87) {
-          updateSermonContext({ book: qualifying[0].book, chapter: qualifying[0].chapter, verse: qualifying[0].verse });
+          updateSermonContext({ book: qualifying[0].book, chapter: qualifying[0].chapter, verse: qualifying[0].verse }, { fromText: true });
         }
       }
     }
@@ -5326,6 +5408,173 @@ function speechFavoursCandidateOverRange(candidate) {
   return cand > best;
 }
 
+// A song, announcement or other non-scripture slide went out (service send
+// with no book) and nothing has replaced it yet. 0 = none live.
+let liveNonScriptureSlideAt = 0;
+
+// See the "text match must not replace what is on screen" rule in
+// broadcastDetection. Words JUST spoken: the interim in progress, or else the
+// latest final segment.
+// Most of a verse's own words just heard in order means it is being quoted —
+// the on-screen comparison (which only sees the newest words) doesn't apply.
+const ON_SCREEN_GUARD_MAX_COVERAGE = 0.8;
+function onScreenExplainsSpeechBetter(candidate) {
+  const shown = lastOutputVerse;
+  if (!shown?.book || !(shown.text || shown.kjv_text)) return false;
+  if (Date.now() - lastOutputVerseAt > SAME_BOOK_WINDOW_MS) return false;
+  if (shown.book === candidate.book && shown.chapter === candidate.chapter && shown.verse === candidate.verse) return false;
+  if (rangeAllVerses.some(v => v.book === candidate.book && v.chapter === candidate.chapter && v.verse === candidate.verse)) return false;
+  const nowText = currentInterimText || (transcriptBuffer.length ? transcriptBuffer[transcriptBuffer.length - 1].text : '');
+  const speech = new Set(meaningfulWords(nowText).map(stemLite));
+  if (!speech.size) return false;
+  const shownWords = new Set(meaningfulWords(shown.text || shown.kjv_text).map(stemLite));
+  const candWords  = new Set(meaningfulWords(candidate.text || candidate.kjv_text || '').map(stemLite));
+  let shownOnly = 0, candOnly = 0;
+  for (const w of shownWords) if (!candWords.has(w) && speech.has(w)) shownOnly++;
+  for (const w of candWords) if (!shownWords.has(w) && speech.has(w)) candOnly++;
+  // Hold only on real evidence for what's on screen: the speech contains words
+  // unique to it, at least as many as unique to the new verse. 0 vs 0 means
+  // the words just said don't separate them — no reason to block.
+  return shownOnly > 0 && shownOnly >= candOnly;
+}
+
+// ── What the sermon has in play ─────────────────────────────────────────────
+// One view over every context signal the server keeps, each with its own
+// memory: the active range, the verse on screen, the book/chapter a bare
+// "verse N" resolves against, a passage being read in reading mode, citations
+// from the last 5 minutes, and the person just named. Higher = more clearly
+// the passage the preacher is on. Used to decide between near-duplicate verses.
+function passageAffinity(book, chapter, verse) {
+  const now = Date.now();
+  let a = 0;
+  if (rangeAllVerses.some(v => v.book === book && v.chapter === chapter)) a = Math.max(a, 3);
+  if (lastOutputVerse && lastOutputVerse.book === book && lastOutputVerse.chapter === chapter
+      && now - lastOutputVerseAt < SAME_BOOK_WINDOW_MS) {
+    a = Math.max(a, 2);
+    if (verse === lastOutputVerse.verse + 1) a = Math.max(a, 2.5);   // the very next verse of the one on screen
+  }
+  if (referenceContext.book === book && referenceContext.chapter === chapter) a = Math.max(a, 2);
+  if (readingModeActive && readingModeBook === book && readingModeChapter === chapter) a = Math.max(a, 2);
+  for (const c of recentCitations) {
+    if (now - c.time > CONTEXT_WINDOW_MS || c.book !== book) continue;
+    a = Math.max(a, c.chapter === chapter ? 2 : 1);
+  }
+  if (recentlyMentionedName && now - recentlyMentionedNameAt < NAMED_ENTITY_WINDOW_MS
+      && nameChapterIndex.get(recentlyMentionedName)?.has(`${book}|${chapter}`)) a = Math.max(a, 1);
+  return a;
+}
+
+// "The Lord's Prayer", "the prodigal son": offer the passage's opening verse
+// in Possible Matches. A name is usually an allusion, so never auto-sent.
+async function offerNamedPassages(text) {
+  for (const p of findNamedPassages(text)) {
+    const msg = await workerCall('directLookup', { book: p.book, chapter: p.chapter, verse: p.verseStart }, 2000);
+    if (!msg.result) continue;
+    const sent = await broadcastDetection([msg.result], 'named-passage', 0.7, 'suggestions', { capAtSuggestions: true });
+    if (sent) console.log(`[Named] "${p.name}" → ${msg.result.reference} offered in Possible Matches`);
+  }
+}
+
+// The preacher pointed at this passage: the verse is in the active range, on
+// screen (or right after it), or its chapter was named in a spoken citation.
+// A chapter that is only on screen because of a text match is not enough.
+function passagePointedAt(book, chapter, verse) {
+  const now = Date.now();
+  const same = (v) => v && v.book === book && v.chapter === chapter;
+  if (rangeAllVerses.some(v => same(v) && v.verse === verse)) return true;
+  if (same(lastOutputVerse) && now - lastOutputVerseAt < SAME_BOOK_WINDOW_MS
+      && (verse === lastOutputVerse.verse || verse === lastOutputVerse.verse + 1)) return true;
+  return recentCitations.some(c => same(c) && c.cited && now - c.time < CONTEXT_WINDOW_MS);
+}
+
+// A text match can't tell near-duplicate verses apart on their shared wording
+// (Matthew 6:33 / Luke 12:31: "all these things shall be added unto you").
+// The matcher's pick already weighs every word by how identifying it is, so
+// this only steps in where the words spoken genuinely don't separate the pair:
+//   - speech: compare only the words UNIQUE to each verse (shared words can't
+//     separate them). The twin must win clearly (by TWIN_SPEECH_MARGIN) to
+//     override the matcher — a one-word edge is noise, and counting ALL words
+//     just favoured the longer verse (eval 2026-09-26: 87 switches, most wrong,
+//     e.g. a correct Genesis 24:12 swapped for 24:42).
+//   - context: when the speech can't separate them at all, prefer the twin in
+//     a passage that's actually in play (range, citation, verse on screen).
+// Returns null (keep), {kind:'switch', verse} or {kind:'hold', verse} (a
+// strong twin nothing separates — show both as Candidates).
+const TWIN_SPEECH_MARGIN = 2;
+const TWIN_HOLD_MIN_SHARED = 3;
+// A twin decision holds for the passage: repeat detections of the same verse
+// (verbatim, a re-checked stream match, a rescan) reuse it instead of each
+// deciding again on slightly different words and flip-flopping the screen.
+const twinDecisions = new Map();   // candidateKey -> { result, at }
+const TWIN_DECISION_TTL_MS = 20000;
+
+async function resolveTwin(candidate) {
+  const key = `${candidate.book}|${candidate.chapter}|${candidate.verse}`;
+  const twins = (twinMap.get(key) || []).slice().sort((a, b) => b[1] - a[1]).slice(0, 4);
+  if (!twins.length) return null;
+  const now = Date.now();
+  const prior = twinDecisions.get(key);
+  if (prior && now - prior.at < TWIN_DECISION_TTL_MS) return prior.pending;   // in flight or decided
+  // The verse the preacher just named is the one being read — never trade it
+  // for a twin on a word or two of speech.
+  if (recentCitations.some(c => c.cited && c.book === candidate.book && c.chapter === candidate.chapter
+      && c.verse === candidate.verse && now - c.time < CONTEXT_WINDOW_MS)) return null;
+  for (const [k, d] of twinDecisions) if (now - d.at > TWIN_DECISION_TTL_MS) twinDecisions.delete(k);
+  const pending = decideTwin(candidate, key, twins).catch(() => null);
+  twinDecisions.set(key, { pending, at: now });
+  // "Can't tell yet" stays open — more of the verse may settle it.
+  pending.then(r => { if (r?.kind === 'hold' && twinDecisions.get(key)?.pending === pending) twinDecisions.delete(key); });
+  return pending;
+}
+
+async function decideTwin(candidate, key, twins) {
+  const speech = new Set(recentSpeechWords().map(stemLite));
+  if (!speech.size) return null;
+  // Compared on every wording the worker matched against (KJV + the church's
+  // translation or the service language's Bible) — speech in Spanish or read
+  // from the NIV shares few words with the KJV text alone, which made every
+  // such twin a 0–0 tie.
+  let texts;
+  try { texts = (await workerCall('matchTexts', { keys: [key, ...twins.map(t => t[0])] }, 2000)).texts; } catch { return null; }
+  const words = (text) => new Set(meaningfulWords(text || '').map(stemLite));
+  const candWords = words(texts[0]);
+  const candAff = passageAffinity(candidate.book, candidate.chapter, candidate.verse);
+  let best = null;
+  twins.forEach(([twinKey, shared], i) => {
+    if (!texts[i + 1]) return;
+    const [b, c, v] = twinKey.split('|');
+    const twinWords = words(texts[i + 1]);
+    let candOnly = 0, twinOnly = 0;
+    for (const w of candWords) if (!twinWords.has(w) && speech.has(w)) candOnly++;
+    for (const w of twinWords) if (!candWords.has(w) && speech.has(w)) twinOnly++;
+    const aff = passageAffinity(b, +c, +v);
+    const other = { ref: { book: b, chapter: +c, verse: +v }, shared, hits: twinOnly, aff };
+    if (twinOnly >= candOnly + TWIN_SPEECH_MARGIN) {
+      if (!best || best.kind !== 'switch' || twinOnly > best.hits) best = { ...other, kind: 'switch' };
+    } else if (candOnly === 0 && twinOnly === 0) {
+      // Context only decides for the twin when the preacher pointed at it (a
+      // citation of its chapter, the range, the screen). A chapter that is only
+      // active through a text match is not enough to send a verse nobody said.
+      if (aff >= 2 && aff > candAff && passagePointedAt(b, +c, +v)) {
+        if (!best || best.kind !== 'switch') best = { ...other, kind: 'switch' };
+      } else if (!best && ((aff >= 2 && aff > candAff) || (aff === candAff && shared >= TWIN_HOLD_MIN_SHARED))) {
+        best = { ...other, kind: 'hold' };
+      }
+    }
+  });
+  if (!best) return null;
+  try { best.verse = (await workerCall('directLookup', best.ref, 2000)).result; } catch { return null; }
+  return best.verse ? best : null;
+}
+const TWIN_EXEMPT_METHODS = new Set(['direct', 'direct-partial', 'chapter-keyword', 'continuation', 'context-citation', 'named-passage']);
+// Evidence that is a match against the Bible's TEXT — as opposed to anything spoken as a reference or trigger.
+const TEXT_MATCH_METHODS = new Set(['stream', 'verbatim', 'fingerprint', 'semantic']);
+
+// Stream matches held back only because no second, independent method had hit
+// the same verse yet. verseKey -> { verses, score, at }.
+const awaitingCorroboration = new Map();
+const LATE_CORROBORATION_WINDOW_MS = 20000;   // the evidence ledger's own window
+
 async function broadcastDetection(verses, method, topScore, target, opts = {}) {
   const now    = Date.now();
   const topKey = verses[0] ? `${verses[0].book}|${verses[0].chapter}|${verses[0].verse}` : null;
@@ -5440,6 +5689,16 @@ async function broadcastDetection(verses, method, topScore, target, opts = {}) {
       // Read corroboration BEFORE record(): a candidate must not corroborate itself.
       const corroborated = evidenceLedger.hasCorroboration(candidate);
       evidenceLedger.record(candidate, method, now);
+      // A different method has now hit a verse a stream match was held for:
+      // re-run that match through this same decision, now corroborated.
+      const held = method !== 'stream' && topKey ? awaitingCorroboration.get(topKey) : null;
+      if (held) {
+        awaitingCorroboration.delete(topKey);
+        if (now - held.at < LATE_CORROBORATION_WINDOW_MS) {
+          console.log(`[Stream] "${held.verses[0].reference}" now corroborated by ${method} — re-evaluating`);
+          setImmediate(() => broadcastDetection(held.verses, 'stream', held.score, 'viewer').catch(() => {}));
+        }
+      }
       const decided = detectionScoring.decideTarget(finalScore, method, { corroborated, veryHighConfidence: breakdown.veryHighConfidence });
       target = chapterContinuity ? 'viewer' : decided;
       topScore = chapterContinuity ? Math.max(topScore, finalScore) : finalScore;
@@ -5459,6 +5718,42 @@ async function broadcastDetection(verses, method, topScore, target, opts = {}) {
   // Below the model's floor → drop entirely; it is not useful enough to show
   // anywhere. (Nothing else may let a 'drop' fall through to a broadcast.)
   if (target === 'drop') return false;
+
+  // Near-duplicate twins (see resolveTwin). Only for text-matched evidence —
+  // a spoken citation names its own verse. Evidence fields travel with a
+  // switch so the twin is scored on the same evidence the candidate had.
+  if (target === 'viewer' && verses[0] && !opts.twinResolved && !TWIN_EXEMPT_METHODS.has(method)) {
+    const tw = await resolveTwin(verses[0]);
+    if (tw?.kind === 'switch') {
+      const e = verses[0];
+      const twinVerse = { ...tw.verse, similarity: e.similarity, matchedIdf: e.matchedIdf, confirmed: e.confirmed, matched: e.matched, df: e.df, idf: e.idf, rerankScore: e.rerankScore };
+      console.log(`[Twin] "${e.reference}" → "${twinVerse.reference}" (near-duplicate; speech ${tw.hits} words, context ${tw.aff}) — sending the better-supported twin`);
+      return broadcastDetection([twinVerse], method, topScore, 'viewer', { ...opts, twinResolved: true });
+    }
+    if (tw?.kind === 'hold') {
+      console.log(`[Twin] "${verses[0].reference}" / "${tw.verse.reference}" read the same and nothing in the sermon separates them — both to Candidates`);
+      target = 'suggestions';
+      verses = [verses[0], tw.verse];
+    }
+  }
+
+  // A text match (not a spoken citation) must not replace what is on screen
+  // unless what is being said favours it:
+  //  - a song / announcement / slide is live (the congregation is singing or
+  //    reading it — lyrics quote scripture constantly): offer it, don't take over;
+  //  - a scripture is on screen and the words being said now fit THAT verse at
+  //    least as well as the new one (formula verses: "…lived an hundred and
+  //    five years, and begat Enos" is Genesis 5:6, not 5:3). Only the words
+  //    the two verses DON'T share are compared — shared words can't tell them apart.
+  if (target === 'viewer' && verses[0] && TEXT_MATCH_METHODS.has(method)) {
+    if (liveNonScriptureSlideAt) {
+      console.log(`[Guard] "${verses[0].reference}" (${method}) held for the operator — a song/slide is live`);
+      target = 'suggestions';
+    } else if (!(method === 'verbatim' && verses[0].similarity >= ON_SCREEN_GUARD_MAX_COVERAGE) && onScreenExplainsSpeechBetter(verses[0])) {
+      console.log(`[Guard] "${verses[0].reference}" would replace "${lastOutputVerse.reference}", but what's being said fits the verse on screen at least as well — held for the operator`);
+      target = 'suggestions';
+    }
+  }
   // ── Suggestions dedup ─────────────────────────────────────────────────────
   // Drop verses already suggested within the window; if nothing new remains,
   // skip the broadcast entirely. Keeps repeated near-misses from flooding the
@@ -5561,12 +5856,13 @@ async function broadcastDetection(verses, method, topScore, target, opts = {}) {
   }
 
   if (target === 'viewer') {
-    const dedupMs = method === 'direct' ? DIRECT_DEDUP_MS : DETECT_DEDUP_MS;
+    const explicitTrigger = method === 'direct' || method === 'continuation';   // spoken, not text-matched
+    const dedupMs = explicitTrigger ? DIRECT_DEDUP_MS : DETECT_DEDUP_MS;
     const incomingBook = verses[0]?.book || null;
     const sameBookContinuation = incomingBook && incomingBook === lastSentBook
       && now - lastSentBookTime < SAME_BOOK_WINDOW_MS
       && topKey !== lastDetectedRef; // only bypass if it's actually a different verse
-    const directOverridesWeaker = method === 'direct' && lastDetectedMethod !== 'direct';
+    const directOverridesWeaker = explicitTrigger && lastDetectedMethod !== 'direct' && lastDetectedMethod !== 'continuation';
     // Exception 3: a direct multi-verse citation that starts on the SAME verse
     // as what was already sent, but carries MORE verses than the range
     // currently queued, is a genuine reconstruction/extension — not a
@@ -5622,9 +5918,17 @@ async function broadcastDetection(verses, method, topScore, target, opts = {}) {
         lastDirectSentVerse = verses[0];
         lastDirectSentTime  = now;
         lastDirectSentWords = wordsHeard;
-      } else {
+      } else if (method !== 'continuation') {
         noteStaleOverride(verses[0], topKey, now);   // before sendToOutputs replaces lastOutputVerse
       }
+      liveNonScriptureSlideAt = 0;   // a scripture now covers whatever slide was live
+      setBibleOnTop(true);
+      // A bare "verse N" means verse N of the passage ON SCREEN. Spoken
+      // citations already set this context at their call sites; a passage
+      // reached by text matching never did, so "verse 11" right after
+      // 1 Corinthians 2:9 went up by verbatim still resolved against the
+      // Romans 8 cited minutes earlier (real eval wrong send, 2026-09-26).
+      if (method !== 'direct' && method !== 'direct-partial') referenceContext.update(verses[0].book, verses[0].chapter);
       sendToOutputs(verses[0]).catch(err => console.warn('[Server] sendToOutputs failed:', err.message));
     }
   }
@@ -5716,6 +6020,12 @@ if (require.main === module) {
     resolveAmbiguousRefs,
     maybeCorrectMiscitation,
     setRangeQueue,
+    clearRangeQueue,
+    clearLayer,
+    startDeepgram,
+    sendServiceSlide,
+    stopDeepgram,
+    ingestAudio,
     handleSecondaryFinal: (...a) => citationVoting.handleSecondaryFinal(...a),
     recordPrimaryCitation: (...a) => citationVoting.recordPrimaryCitation(...a),
     // Exposed for direct, surgical regression tests (e.g. the Joshua 1:18/

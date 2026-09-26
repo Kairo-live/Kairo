@@ -290,7 +290,7 @@ test('a spoken clock time ("is 04:10", "before he see 01:02") does not resolve a
   assert.deepEqual(resolvePartialReference('verse 10'),
     { book: 'Romans', chapter: 8, verse: 10, partial: true });
   assert.deepEqual(resolvePartialReference('chapter 3 verse 16'),
-    { book: 'Romans', chapter: 3, verse: 16, partial: true });
+    { book: 'Romans', chapter: 3, verse: 16, partial: true, chapterGiven: true });
 });
 
 // Real incident (2026-09-20 eval audit, shiloh2025-impartation.json):
@@ -357,4 +357,16 @@ test('an enumeration ("point number two", "the number one thing") is not the boo
   }
   assert.equal(parseAllSpokenReferences('number six verse twenty four', true)[0]?.book, 'Numbers');
   assert.equal(parseAllSpokenReferences('Numbers 6 24', true)[0]?.verse, 24);
+});
+
+test('ordinal forms: "the twenty third psalm", "the second book of Timothy", "the first epistle of John"', () => {
+  const ref = (t) => { const r = parseAllSpokenReferences(t, true)[0]; return r ? `${r.book} ${r.chapter}${r.verse != null ? ':' + r.verse : ''}` : null; };
+  assert.equal(ref('the twenty third psalm'), 'Psalms 23');
+  assert.equal(ref('the 23rd psalm'), 'Psalms 23');
+  assert.equal(ref('the hundred and nineteenth psalm verse 105'), 'Psalms 119:105');
+  assert.equal(ref('the second book of Timothy chapter two verse fifteen'), '2 Timothy 2:15');
+  assert.equal(ref('the first epistle of John chapter one verse nine'), '1 John 1:9');
+  assert.equal(ref('second letter to the Corinthians five seventeen'), '2 Corinthians 5:17');
+  assert.equal(ref('I love the psalms'), null);
+  assert.equal(ref('the second time he read a psalm'), null);
 });

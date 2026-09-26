@@ -469,6 +469,54 @@ async function main() {
     assert.notEqual(sent, 'viewer', 'the range text matched to its same-book twin must not replace the range');
   });
 
+  // ── Context model + near-duplicate twins (2026-09-26) ──────────────────
+  await new Promise(r => setTimeout(r, 2500));   // twin table loads just after the worker is ready
+  const luke1231 = { book: 'Luke', chapter: 12, verse: 31, reference: 'Luke 12:31', similarity: 0.95, matched: 8, confirmed: true, matchedIdf: 20,
+    text: 'But rather seek ye the kingdom of God; and all these things shall be added unto you.' };
+
+  await test('a near-duplicate is switched to the twin the sermon is on (Luke 12:31 -> Matthew 6:33 after Matthew 6 was named)', async () => {
+    server.resetDetectionSession(); referenceContext.reset();
+    const broadcasts = [];
+    server.onBroadcast((msg) => { if (msg.type === 'detection') broadcasts.push(msg); });
+    // Named the way a preacher names it — a spoken citation of the chapter.
+    await server.handleTranscriptSegment('turn with me to Matthew chapter 6', true, 0.9, true);
+    await server.handleTranscriptSegment('and all these things shall be added unto you', true, 0.9, true);
+    await server.broadcastDetection([luke1231], 'stream', 0.95, 'viewer');
+    await new Promise(r => setTimeout(r, 200));
+    const shown = broadcasts.filter(b => b.target === 'viewer').map(b => b.verses[0].reference);
+    assert.ok(!shown.includes('Luke 12:31'), `the twin the sermon is not on must not go up, got ${JSON.stringify(shown)}`);
+    assert.ok(shown.includes('Matthew 6:33'), `the twin in context should go up instead, got ${JSON.stringify(shown)}`);
+  });
+
+  await test('a near-duplicate nothing can separate is held for the operator with both verses', async () => {
+    server.resetDetectionSession(); referenceContext.reset();
+    const broadcasts = [];
+    server.onBroadcast((msg) => { if (msg.type === 'detection') broadcasts.push(msg); });
+    await server.handleTranscriptSegment('and all these things shall be added unto you', true, 0.9, true);
+    const sent = await server.broadcastDetection([luke1231], 'stream', 0.95, 'viewer');
+    assert.notEqual(sent, 'viewer', `a coin-flip between twins must not auto-send, got ${sent}`);
+    const onScreen = broadcasts.filter(b => b.target === 'viewer').map(b => b.verses[0].reference);
+    assert.ok(!onScreen.includes('Luke 12:31') && !onScreen.includes('Matthew 6:33'), `neither twin may go up on a coin-flip, got ${JSON.stringify(onScreen)}`);
+    const offered = broadcasts.filter(b => b.target === 'suggestions').flatMap(b => b.verses.map(v => v.reference));
+    assert.ok(offered.includes('Luke 12:31') || offered.includes('Matthew 6:33'), 'the pair is offered to the operator');
+  });
+
+  await test('"verse N" resolves against the passage on screen, even when the screen got there by text matching (1 Corinthians 2:9 -> "verse 11")', async () => {
+    server.resetDetectionSession(); referenceContext.reset();
+    const broadcasts = [];
+    server.onBroadcast((msg) => { if (msg.type === 'detection') broadcasts.push(msg); });
+    await server.handleTranscriptSegment('Romans chapter eight verse twenty eight.', true, 0.9, true);
+    await new Promise(r => setTimeout(r, 200));
+    const cor29 = { book: '1 Corinthians', chapter: 2, verse: 9, reference: '1 Corinthians 2:9', similarity: 0.95, matchedIdf: 27.6,
+      text: 'But as it is written, Eye hath not seen, nor ear heard, neither have entered into the heart of man, the things which God hath prepared for them that love him.' };
+    await server.broadcastDetection([cor29], 'verbatim', 0.95, 'viewer');
+    await server.handleTranscriptSegment('you should know verse 11.', true, 0.9, true);
+    await new Promise(r => setTimeout(r, 300));
+    const shown = broadcasts.filter(b => b.target === 'viewer').map(b => b.verses[0].reference);
+    assert.ok(!shown.includes('Romans 8:11'), `must not resolve against the stale Romans 8, got ${JSON.stringify(shown)}`);
+    assert.ok(shown.includes('1 Corinthians 2:11'), `should resolve against the passage on screen, got ${JSON.stringify(shown)}`);
+  });
+
   console.log(`\n${pass} passed, ${fail} failed`);
   fs.rmSync(appDataDir, { recursive: true, force: true });
   process.exit(fail === 0 ? 0 : 1);

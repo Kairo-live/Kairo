@@ -147,7 +147,10 @@ function clamp01(x) { return Math.max(0, Math.min(1, x)); }
 // methods identically for that reason; only the calibrated B score itself
 // (0.93 vs 0.82) reflects that 'chapter-keyword' still guessed the verse.
 function isExplicitBookCitation(method) {
-  return method === 'direct' || method === 'chapter-keyword';
+  // 'continuation': a spoken "next verse" / next number / verse jump relative
+  // to the verse on screen — it names its passage as surely as a citation.
+  // 'context-citation': "chapter 5 verse 1" with the book taken from context.
+  return method === 'direct' || method === 'chapter-keyword' || method === 'continuation' || method === 'context-citation';
 }
 
 // The single registry of known near-duplicate passages (server.js's
@@ -169,6 +172,18 @@ function calibrateMethodScore(method, rawResult) {
       // its own (0.93 > 0.80), so a plain citation auto-sends exactly as
       // expected; it just isn't unoverridable by strong contradicting text
       // evidence anymore (maybeCorrectMiscitation in server.js).
+      return 0.93;
+
+    case 'context-citation':
+      // An explicit "chapter N verse M" with the book implied by what the
+      // preacher is already in — a citation, just without the book name.
+      // Below 'direct' (the book is inferred), above the viewer bar.
+      return 0.85;
+
+    case 'continuation':
+      // A spoken advance relative to the verse already on screen ("next verse",
+      // the next number, a called-out verse right after finishing one) — an
+      // explicit trigger, not text evidence, so it carries citation weight.
       return 0.93;
 
     case 'direct-partial':
@@ -336,6 +351,12 @@ function calibrateMethodScore(method, rawResult) {
       // rather than trusting B implicitly).
       if (isVeryHighRawConfidence('semantic', r)) return 0.85;
       return Math.min(0.60, clamp01(typeof r.similarity === 'number' ? r.similarity : 0) * 0.7);
+
+    case 'named-passage':
+      // "The Lord's Prayer", "the Beatitudes": a passage named, not read.
+      // Suggestions-only (the caller caps it too) — a name is usually an allusion.
+      // High enough to stay above the 0.50 floor after any distance penalty.
+      return 0.70;
 
     default:
       return 0;

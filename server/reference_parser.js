@@ -3,6 +3,8 @@
 // Deepgram STT healing, fuzzy book matching, and verse range detection.
 'use strict';
 
+const { localizeCitationText } = require('./citation_i18n');
+
 const WORD_TO_NUM = {
   'zero':0,'one':1,'two':2,'three':3,'four':4,'five':5,
   'six':6,'seven':7,'eight':8,'nine':9,'ten':10,
@@ -325,15 +327,130 @@ function cachedLevenshtein(a, b) {
 // malformed STT payload (null/undefined/non-string) reaching this function
 // used to throw uncaught and could crash the live-service process — guard
 // it so bad input degrades to "no reference found" instead.
+// Ordinal forms preachers use instead of a citation's own shape:
+//   "the twenty third psalm" / "the 23rd psalm"  -> "psalm 23"
+//   "the second book of Timothy", "the first epistle of John",
+//   "second letter to the Corinthians"            -> "second timothy" ... (then
+//   PARSER_HEALING_PAIRS turns "second timothy" into "2 timothy" as usual)
+const ORDINAL_UNITS = ['', 'first', 'second', 'third', 'fourth', 'fifth', 'sixth', 'seventh', 'eighth', 'ninth'];
+const ORDINAL_TEENS = ['tenth', 'eleventh', 'twelfth', 'thirteenth', 'fourteenth', 'fifteenth', 'sixteenth', 'seventeenth', 'eighteenth', 'nineteenth'];
+const TENS_CARD = ['', '', 'twenty', 'thirty', 'forty', 'fifty', 'sixty', 'seventy', 'eighty', 'ninety'];
+const TENS_ORD  = ['', '', 'twentieth', 'thirtieth', 'fortieth', 'fiftieth', 'sixtieth', 'seventieth', 'eightieth', 'ninetieth'];
+function ordinalPhrasesUnder100(n) {
+  if (n < 10) return [ORDINAL_UNITS[n]];
+  if (n < 20) return [ORDINAL_TEENS[n - 10]];
+  const t = Math.floor(n / 10), u = n % 10;
+  return [u ? `${TENS_CARD[t]} ${ORDINAL_UNITS[u]}` : TENS_ORD[t]];
+}
+const ORDINAL_TO_NUM = (() => {
+  const m = new Map();
+  for (let n = 1; n <= 150; n++) {
+    const phrases = [];
+    if (n < 100) phrases.push(...ordinalPhrasesUnder100(n));
+    else if (n === 100) phrases.push('hundredth', 'one hundredth');
+    else for (const rest of ordinalPhrasesUnder100(n - 100)) {
+      for (const lead of ['hundred', 'one hundred']) { phrases.push(`${lead} ${rest}`, `${lead} and ${rest}`); }
+    }
+    for (const p of phrases) m.set(p, n);
+  }
+  return m;
+})();
+const ORDINAL_PSALM_RE = new RegExp(`\\b(?:the )?(${[...ORDINAL_TO_NUM.keys()].sort((a, b) => b.length - a.length).join('|')}) psalm\\b`, 'g');
+const NUMERIC_ORDINAL_PSALM_RE = /\b(?:the )?(\d{1,3})(?:st|nd|rd|th) psalm\b/g;
+const NUMBERED_BOOK_PHRASE_RE = /\b(?:the )?(first|second|third|1st|2nd|3rd) (?:book|epistle|letter) (?:of|to) (?:the )?([a-z]+)\b/g;
+const ORDINAL_WORD = { '1st': 'first', '2nd': 'second', '3rd': 'third' };
+// "from verse 4 to the end (of the chapter)" -> "... 4 to 176" (the longest
+// chapter's last verse; the lookup stops at the chapter's real end). Only
+// right after a number, so "endure unto the end" in running text is untouched.
+const TO_THE_END_RE = new RegExp(`\\b(\\d{1,3}|${Object.keys(WORD_TO_NUM).join('|')}) (to|till|until|through|thru) the end(?: of (?:the|that|this) chapter)?\\b`, 'g');
+// "the eighth chapter of Romans", "the 28th verse of Romans 8" -> "chapter 8 of
+// Romans", "verse 28 of Romans 8" (normalizeChapterOfBook / normalizeVerseOfBook
+// then reorder them into book-first form).
+const ORDINAL_ALT = [...ORDINAL_TO_NUM.keys()].sort((a, b) => b.length - a.length).join('|');
+const ORDINAL_UNIT_RE = new RegExp(`\\b(?:the )?(?:(${ORDINAL_ALT})|(\\d{1,3})(?:st|nd|rd|th)) (chapter|verse) of\\b`, 'g');
+function normalizeOrdinalForms(lc) {
+  if (lc.includes(' the end')) lc = lc.replace(TO_THE_END_RE, (_, n) => `${n} to 176`);
+  if (/(?:chapter|verse) of /.test(lc)) {
+    // Only when a passage follows ("…of Romans", "…of chapter 8") — never
+    // "the first verse of the song".
+    lc = lc.replace(ORDINAL_UNIT_RE, (m, word, digits, unit, at, str) => {
+      const [a = '', b = ''] = str.slice(at + m.length).trim().split(' ');
+      const passage = a === 'chapter' || SINGLE_WORD_BOOKS.has(a) || (getNumberedPrefix(a) && BOOK_ALIASES[`${getNumberedPrefix(a)} ${b}`]);
+      return passage ? `${unit} ${word ? ORDINAL_TO_NUM.get(word) : digits} of` : m;
+    });
+  }
+  if (lc.includes('psalm')) {
+    lc = lc.replace(ORDINAL_PSALM_RE, (_, p) => `psalm ${ORDINAL_TO_NUM.get(p)}`)
+           .replace(NUMERIC_ORDINAL_PSALM_RE, (_, n) => `psalm ${n}`);
+  }
+  if (/ (?:book|epistle|letter) (?:of|to) /.test(lc)) {
+    lc = lc.replace(NUMBERED_BOOK_PHRASE_RE, (_, ord, book) => `${ORDINAL_WORD[ord] || ord} ${book}`);
+  }
+  return lc;
+}
+
+// Speech language for citations. A Spanish/Portuguese/French/German citation
+// ("Juan capítulo tres versículo dieciséis") is rewritten into the English
+// tokens every check below expects — see citation_i18n.js. English: no-op.
+let citationLanguage = 'en';
+function setCitationLanguage(lang) { citationLanguage = String(lang || 'en').slice(0, 2).toLowerCase(); }
+
+// A comma between two numbers is a list ("verses 4, 5 and 6") — kept as "and"
+// so the list survives punctuation stripping. Never for the everyday words
+// that double as numbers ("verse 12, for we wrestle…").
+const isListNumber = (w) => /^\d+$/.test(w) || (WORD_TO_NUM[w.toLowerCase()] !== undefined && !AMBIGUOUS_NUMBER_WORDS.has(w.toLowerCase()) && w.toLowerCase() !== 'oh');
+
+// A citation corrected in the same breath — "John 3:17, sorry, 16", "Romans
+// 8:28, I mean 8:29", "3:7… 3:17, sorry" — keeps only what the preacher
+// settled on.
+const CORRECTION_MARKERS = [['i', 'mean'], ['or', 'rather'], ['sorry'], ['rather'], ['correction']];
+function applySelfCorrections(lc) {
+  if (!/\b(sorry|mean|rather|correction)\b/.test(lc)) return lc;
+  const w = lc.split(' ');
+  const numberEndingAt = (end) => {                 // number phrase ending right before index `end`
+    for (let st = Math.max(0, end - 3); st < end; st++) {
+      const n = consumeNumber(w, st);
+      if (n && st + n.consumed === end && !(n.consumed === 1 && AMBIGUOUS_NUMBER_WORDS.has(w[st]))) return { st, value: n.value };
+    }
+    return null;
+  };
+  for (let m = 0; m < w.length; m++) {
+    const marker = CORRECTION_MARKERS.find(mk => mk.every((t, k) => w[m + k] === t));
+    if (!marker) continue;
+    const after = m + marker.length;
+    const before1 = numberEndingAt(m);
+    if (!before1) continue;
+    const next1 = consumeNumber(w, after);
+    if (next1) {
+      const next2 = consumeNumber(w, after + next1.consumed);
+      // "8 28 i mean 8 29" replaces chapter and verse; "3 17 sorry 16" only the verse.
+      const before2 = next2 ? numberEndingAt(before1.st) : null;
+      const from = before2 ? before2.st : before1.st;
+      w.splice(from, after - from);
+      return applySelfCorrections(w.join(' '));
+    }
+    // "3 7 3 17 sorry": the same chapter restated with a new verse just before the marker.
+    const v2 = before1, c2 = numberEndingAt(v2.st), v1 = c2 && numberEndingAt(c2.st), c1 = v1 && numberEndingAt(v1.st);
+    if (c1 && c1.value === c2.value) {
+      w.splice(m, marker.length);
+      w.splice(c1.st, c2.st - c1.st);
+      return applySelfCorrections(w.join(' '));
+    }
+  }
+  return lc;
+}
+
 function cleanReferenceText(text) {
   if (typeof text !== 'string') return '';
-  return text
+  if (citationLanguage !== 'en') text = localizeCitationText(text, citationLanguage);
+  text = text.replace(/([\w-]+)\s*,\s*(?=([\w-]+))/g, (m, a, b) => isListNumber(a) && isListNumber(b) ? `${a} and ` : m);
+  return applySelfCorrections(normalizeOrdinalForms(text
     .replace(/[.,!?;]/g, ' ')
     .replace(/\bcolon\b/gi, ':')
     .replace(/(\d)\s*:\s*(\d)/g, '$1 $2')
     .replace(/(\d)\s*-\s*(\d)/g, '$1 to $2')
     .replace(/([a-z])-([a-z])/gi, '$1 $2')
-    .replace(/\s+/g, ' ').trim().toLowerCase();
+    .replace(/\s+/g, ' ').trim().toLowerCase()));
 }
 
 // Requires the digit immediately before "zero" to itself repeat (e.g. "one
@@ -394,8 +511,52 @@ function normalizeChapterOfBook(text) {
         }
       }
     }
+    // "twenty four of Genesis verse twelve" — the same order without the word
+    // "chapter" (often lost to the STT). Only with a verse right after the
+    // book, so "one of John's disciples" never reads as a citation.
+    const n = words[i] !== 'chapter' && !AMBIGUOUS_NUMBER_WORDS.has(words[i]) && words[i] !== 'one' ? consumeNumber(words, i) : null;
+    if (n && words[i + n.consumed] === 'of') {
+      const b = i + n.consumed + 1;
+      const num = getNumberedPrefix(words[b]);
+      const bookTokens = num && BOOK_ALIASES[`${num} ${words[b + 1]}`] ? [words[b], words[b + 1]]
+        : SINGLE_WORD_BOOKS.has(words[b]) ? [words[b]] : null;
+      if (bookTokens && ['verse', 'verses', 'vers'].includes(words[b + bookTokens.length])) {
+        out.push(...bookTokens, 'chapter', ...words.slice(i, i + n.consumed));
+        i = b + bookTokens.length;
+        continue;
+      }
+    }
     out.push(words[i]);
     i++;
+  }
+  return normalizeVerseOfBook(out);
+}
+
+// "verse 28 of Romans 8" / "verse 28 of Romans chapter 8" -> "romans chapter 8 verse 28".
+function normalizeVerseOfBook(words) {
+  const out = [];
+  for (let i = 0; i < words.length; i++) {
+    if (['verse', 'verses'].includes(words[i])) {
+      const v = consumeNumber(words, i + 1);
+      const of = v ? i + 1 + v.consumed : -1;
+      if (v && words[of] === 'of') {
+        const b = of + 1;
+        const num = getNumberedPrefix(words[b]);
+        const bookTokens = num && BOOK_ALIASES[`${num} ${words[b + 1]}`] ? [words[b], words[b + 1]]
+          : SINGLE_WORD_BOOKS.has(words[b]) ? [words[b]] : null;
+        if (bookTokens) {
+          let c = b + bookTokens.length;
+          if (words[c] === 'chapter') c++;
+          const ch = consumeNumber(words, c);
+          if (ch) {
+            out.push(...bookTokens, 'chapter', ...words.slice(c, c + ch.consumed), 'verse', ...words.slice(i + 1, i + 1 + v.consumed));
+            i = c + ch.consumed - 1;
+            continue;
+          }
+        }
+      }
+    }
+    out.push(words[i]);
   }
   return out.join(' ');
 }
@@ -508,7 +669,7 @@ function parseSpokenReference(text, inBibleMode = false) {
     regex.lastIndex = 0;
     cleanText = cleanText.replace(regex, replace);
   }
-  if (cleanText.includes('chapter') && cleanText.includes(' of ')) {
+  if (cleanText.includes(' of ')) {
     cleanText = normalizeChapterOfBook(cleanText);
   }
 
@@ -823,6 +984,11 @@ function parseSpokenReference(text, inBibleMode = false) {
       }
     }
 
+    // "verses 4, 5 and 6" / "16 and 17": consecutive verses are one range.
+    for (let r = collectedRanges.length - 1; r > 0; r--) {
+      const prev = collectedRanges[r - 1], cur = collectedRanges[r];
+      if (cur.verseStart === prev.verseEnd + 1) { prev.verseEnd = Math.max(prev.verseEnd, cur.verseEnd); collectedRanges.splice(r, 1); }
+    }
     if (collectedRanges.length > 1) return { book: bookName, chapter, ranges: collectedRanges };
     const only = collectedRanges[0];
     if (only.verseEnd !== only.verseStart) return { book: bookName, chapter, verseStart: only.verseStart, verseEnd: only.verseEnd };
@@ -845,7 +1011,7 @@ function parseAllSpokenReferences(text, inBibleMode = false) {
     regex.lastIndex = 0;
     cleanText = cleanText.replace(regex, replace);
   }
-  if (cleanText.includes('chapter') && cleanText.includes(' of ')) {
+  if (cleanText.includes(' of ')) {
     cleanText = normalizeChapterOfBook(cleanText);
   }
   const words = cleanText.split(/\s+/);
@@ -945,6 +1111,7 @@ const BIBLE_TRIGGER_PHRASES = [
 
 function detectBookMentions(text, inBibleMode = false) {
   if (typeof text !== 'string') return [];
+  if (citationLanguage !== 'en') text = localizeCitationText(text, citationLanguage);
   const lowered = text.toLowerCase().replace(/[.,!?;:]/g, ' ').replace(/\s+/g, ' ').trim();
   const books = [];
   const seen  = new Set();
@@ -1095,6 +1262,36 @@ const referenceContext = new ReferenceContext();
 // "and verse eighteen" and resolves them against the current context.
 // Returns null if no context or no bare verse pattern found.
 
+// Just before "verse N": another chapter number ("…nine and nine, I mean
+// verse eleven") or another book ("Genesis verse twelve") means a different
+// passage is being named — its verse is not a verse of the current chapter.
+const LOOKBACK_SKIP = new Set(['and', 'i', 'mean', 'sorry', 'uh', 'um', 'so', 'now', 'the', 'in']);
+function namesOtherPassageBefore(words, i) {
+  for (let k = i - 1, looked = 0; k >= 0 && looked < 4; k--, looked++) {
+    const w = words[k];
+    if (LOOKBACK_SKIP.has(w)) continue;
+    if (['verse', 'verses', 'vers'].includes(w)) return false;
+    const alias = (k > 0 && BOOK_ALIASES[`${words[k - 1]} ${w}`]) || BOOK_ALIASES[w];
+    if (alias) return (Array.isArray(alias) ? alias[0] : alias) !== referenceContext.book;
+    for (let st = Math.max(0, k - 2); st <= k; st++) {
+      const n = consumeNumber(words, st);
+      if (!n || st + n.consumed !== k + 1) continue;
+      if (n.consumed === 1 && (AMBIGUOUS_NUMBER_WORDS.has(w) || w === 'one' || w === 'oh')) return false;
+      if (['verse', 'verses', 'vers'].includes(words[st - 1])) return false;   // "verse 10 and verse 11"
+      return n.value !== referenceContext.chapter;
+    }
+    return false;
+  }
+  return false;
+}
+
+// A number said on its own is a verse call ("...fifteen.") only when nothing
+// but filler precedes it. Shared with server.js's end-of-verse number jump.
+const BARE_NUMBER_FILLER = new Set(['and', 'so', 'now', 'okay', 'ok', 'um', 'uh', 'then', 'also', 'yes', 'yeah', 'right', 'alright', 'verse', 'verses', 'next']);
+// Number words that are far more often ordinary words — never a verse number
+// on their own (see Pattern 3's comment below for the real incidents).
+const AMBIGUOUS_NUMBER_WORDS = new Set(['for', 'won', 'too', 'ate', 'first', 'second', 'third', 'fourth', 'fifth']);
+
 function resolvePartialReference(text, { allowBareNumber = true } = {}) {
   if (!referenceContext.isValid) return null;
 
@@ -1140,10 +1337,21 @@ function resolvePartialReference(text, { allowBareNumber = true } = {}) {
     if (!vRes || !referenceContext.book) continue;
     const maxCh = MAX_CHAPTERS[referenceContext.book];
     if (maxCh && chRes.value > maxCh) continue;
-    return { book: referenceContext.book, chapter: chRes.value, verse: vRes.value, partial: true };
+    return { book: referenceContext.book, chapter: chRes.value, verse: vRes.value, partial: true, chapterGiven: true };
   }
 
   // Pattern 2: bare "verse N" or "verses N to M" — needs a chapter in context.
+  // "the first verse", "the last verse" of the chapter in play (not "…of X",
+  // which names its own passage). verse -1 = the chapter's last verse, which
+  // the worker's directLookup resolves.
+  if (referenceContext.chapter) {
+    for (let i = 0; i < words.length - 1; i++) {
+      if (words[i + 1] !== 'verse' || words[i + 2] === 'of') continue;
+      const which = { first: 1, opening: 1, last: -1, final: -1, closing: -1 }[words[i]];
+      if (which) return { book: referenceContext.book, chapter: referenceContext.chapter, verse: which, partial: true };
+    }
+  }
+
   for (let i = 0; i < words.length; i++) {
     if (!['verse','verses','vers'].includes(words[i])) continue;
     const vRes = consumeNumber(words, i + 1);
@@ -1153,6 +1361,7 @@ function resolvePartialReference(text, { allowBareNumber = true } = {}) {
     const book    = referenceContext.book;
     const chapter = referenceContext.chapter;
     if (!chapter) return null;
+    if (namesOtherPassageBefore(words, i)) return null;
     let j = i + 1 + vRes.consumed;
     if (['to','through','-'].includes(words[j])) {
       let a = j + 1;
@@ -1162,6 +1371,16 @@ function resolvePartialReference(text, { allowBareNumber = true } = {}) {
         return { book, chapter, verseStart, verseEnd: vEnd.value, partial: true };
       }
     }
+    // "verses 5 and 6", "verses 5, 6 and 7": consecutive verses read together.
+    let end = verseStart;
+    while (words[j] === 'and') {
+      let a = j + 1;
+      if (['verse','verses'].includes(words[a])) a++;
+      const n = consumeNumber(words, a);
+      if (!n || n.value !== end + 1 || (n.consumed === 1 && AMBIGUOUS_NUMBER_WORDS.has(words[a]))) break;
+      end = n.value; j = a + n.consumed;
+    }
+    if (end > verseStart) return { book, chapter, verseStart, verseEnd: end, partial: true };
     return { book, chapter, verse: verseStart, partial: true };
   }
 
@@ -1226,12 +1445,11 @@ function resolvePartialReference(text, { allowBareNumber = true } = {}) {
   // deliberate citation shape (see reference_parser.test.js's own 2026-09-07
   // regression) and must keep working; it's specifically "one" embedded
   // alongside other words that's the ambiguous, pronoun-shaped case.
-  const AMBIGUOUS_HOMOPHONES = new Set([
-    'for', 'won', 'too', 'ate',
-    'first', 'second', 'third', 'fourth', 'fifth',
-  ]);
   if (allowBareNumber && referenceContext.chapter) {
     for (let i = 0; i < words.length && i <= 2; i++) {
+      // Only filler may come before the number ("and fifteen", "so twelve") —
+      // "group two", "day three", "point four" are counting, not a verse call.
+      if (i > 0 && !BARE_NUMBER_FILLER.has(words[i - 1])) break;
       const nRes = consumeNumber(words, i);
       if (!nRes || i + nRes.consumed !== words.length) continue;
       // A book name right before the number makes it a CHAPTER of that book,
@@ -1240,7 +1458,7 @@ function resolvePartialReference(text, { allowBareNumber = true } = {}) {
       // alias counts here, including the ambiguous ones ("john", "acts") that
       // detectBookMentions refuses to trust on their own.
       if (i > 0 && (BOOK_ALIASES[words[i - 1]] || NUMBERED_BOOK_VARIANTS[words[i - 1]])) continue;
-      if (nRes.consumed === 1 && AMBIGUOUS_HOMOPHONES.has(words[i])) continue;
+      if (nRes.consumed === 1 && AMBIGUOUS_NUMBER_WORDS.has(words[i])) continue;
       if (nRes.consumed === 1 && words[i] === 'one' && words.length > 1) continue;
       const verseStart = nRes.value;
       if (verseStart < 1 || verseStart > 176) continue;
@@ -1252,6 +1470,9 @@ function resolvePartialReference(text, { allowBareNumber = true } = {}) {
 }
 
 module.exports = {
+  setCitationLanguage,
+  BARE_NUMBER_FILLER,
+  AMBIGUOUS_NUMBER_WORDS,
   parseSpokenReference,
   parseAllSpokenReferences,
   resolvePartialReference,

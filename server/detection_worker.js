@@ -32,7 +32,16 @@ const RE_WS   = /\s+/g;
 // Hoisted once to module scope — this was previously redefined as an inline
 // closure inside init(), verbatimSearch(), fingerprintSearch(), and
 // fingerprintSearchInLibrary(), reallocating a closure on every hot-path call.
-function norm(s) { return s.toLowerCase().replace(RE_NORM, '').replace(RE_WS, ' ').trim(); }
+// Accents are folded first (the server folds speech the same way), so a
+// Spanish/Portuguese/French/German reading matches its language pack's text
+// instead of losing every accented letter to RE_NORM.
+const RE_NON_ASCII = /[^\x00-\x7f]/;
+const RE_MARKS     = /[\u0300-\u036f]/g;
+function norm(s) {
+  s = s.toLowerCase();
+  if (RE_NON_ASCII.test(s)) s = s.normalize('NFD').replace(RE_MARKS, '');
+  return s.replace(RE_NORM, '').replace(RE_WS, ' ').trim();
+}
 
 // ── Top-K selection (avoids full sort for large arrays) ──────────────────
 function topK(arr, k, compareFn) {
@@ -82,12 +91,43 @@ function applyContextBoost(matchedWeight, contextHint, allVerses) {
 
 let verseMetadata        = [];
 let directIndex          = null;   // Map<"Book|ch|vs", verse>
+let idxByKey             = null;   // Map<"Book|ch|vs", verseIdx>
 let verbatimIndex        = null;   // Map<word, number[]>  — inverted index for phrase match
 let stemIndex            = null;   // Map<stem, number[]>  — healed(word) → verses, morphology bridge
 let idfMap               = null;   // Map<word, number>    — IDF scores
 let verseSignatures      = null;   // Map<idx, Map<word, idf>> — top N distinctive words per verse
 let verseSignatureWeight = null;   // Map<idx, number> — total IDF weight of each verse's signature
 let verseNormText        = null;   // Map<idx, string> — pre-computed norm(kjv_text)
+// The church's own translation, when it isn't KJV/NLT (workerData.altTranslation).
+// A preacher reading NIV/ESV/NKJV/NASB aloud shares far less wording with the
+// KJV than a KJV reader, so the text layers match against it too. For a
+// non-English service it is "pack:<lang>" — that language's bundled Bible
+// (databases/bibles/packs), since the preacher reads in the language spoken.
+// The stream index stores its wording under "slot" ids (verse index +
+// ALT_SLOT_BASE) so the alignment machinery, keyed by slot, needs no other changes.
+const ALT_SLOT_BASE = 100000;
+let altTextByIdx = null;   // Map<verseIdx, text> or null
+function loadAltTranslation() {
+  const code = workerData?.altTranslation;
+  const pack = /^pack:([a-z]{2})$/.exec(code || '');
+  if (!code || (!pack && !/^[A-Z]{2,5}$/.test(code))) return;
+  try {
+    const file = pack ? path.join(DATA_DIR, 'packs', `${pack[1]}.json`) : path.join(DATA_DIR, 'translations', `${code}.json`);
+    const data = JSON.parse(fs.readFileSync(file, 'utf8'));
+    const byRef = new Map(data.verses.map(v => [`${v.book}|${v.chapter}|${v.verse}`, v.text]));
+    altTextByIdx = new Map();
+    for (let i = 0; i < verseMetadata.length; i++) {
+      const v = verseMetadata[i];
+      const t = byRef.get(`${v.book}|${v.chapter}|${v.verse}`);
+      if (t) altTextByIdx.set(i, t);
+    }
+    console.log(`[DetectionWorker] Matching ${code} as well as KJV (${altTextByIdx.size} verses).`);
+  } catch (err) {
+    console.warn(`[DetectionWorker] Could not load ${code} for matching (KJV/NLT only):`, err.message);
+    altTextByIdx = null;
+  }
+}
+const slotToVerse = (slot) => (slot >= ALT_SLOT_BASE ? slot - ALT_SLOT_BASE : slot);
 let verseNormNlt         = null;   // Map<idx, string> — pre-computed norm(nlt_text)
 let verseStemText        = null;   // Map<idx, string> — verseNormText with every word healWord()'d
 let verseStemNlt         = null;   // Map<idx, string> — verseNormNlt with every word healWord()'d
@@ -422,8 +462,11 @@ async function init() {
 
   // O(1) direct lookup
   directIndex = new Map();
-  for (const v of verseMetadata) {
-    directIndex.set(`${v.book}|${v.chapter}|${v.verse}`, v);
+  idxByKey = new Map();
+  for (let i = 0; i < verseMetadata.length; i++) {
+    const v = verseMetadata[i], key = `${v.book}|${v.chapter}|${v.verse}`;
+    directIndex.set(key, v);
+    idxByKey.set(key, i);
   }
   console.log(`[DetectionWorker] ${verseMetadata.length} verses indexed.`);
 
@@ -441,10 +484,15 @@ async function init() {
   // Pre-compute normalized text for every verse (avoids re-normalizing in hot loops)
   verseNormText = new Map();
   verseNormNlt  = new Map();
+  loadAltTranslation();
   for (let i = 0; i < verseMetadata.length; i++) {
     const v = verseMetadata[i];
     verseNormText.set(i, norm(v.kjv_text.replace(RE_HEADING, ' ')));
-    if (v.nlt_text) verseNormNlt.set(i, norm(v.nlt_text.replace(RE_HEADING, ' ')));
+    // The second text verbatim matches against: the translation the church
+    // reads (NKJV/NIV/ESV/NASB) when one is selected, else NLT. (The *_nlt
+    // map names are historical — this slot is "the other translation".)
+    const second = altTextByIdx ? altTextByIdx.get(i) : v.nlt_text;
+    if (second) verseNormNlt.set(i, norm(second.replace(RE_HEADING, ' ')));
   }
 
   // Stemmed text for every verse — same content as verseNormText/verseNormNlt
@@ -592,13 +640,20 @@ function buildAnchorTrie() {
   verseHealedWords = new Map();
   const dfCounts   = new Map();   // Map<"w1 w2 w3 w4", Set<verseIdx>>
 
-  // Pass 1 — cache healed word list per verse + count 4-gram DF
-  for (let i = 0; i < verseMetadata.length; i++) {
-    const words = (verseNormText.get(i) || '')
-      .split(' ')
-      .filter(Boolean)
-      .map(healWord);
-    verseHealedWords.set(i, words);
+  // Pass 1 — cache healed word list per verse + count 4-gram DF. The church's
+  // translation (if any) is indexed too, under slot ids; DF always counts REAL
+  // verses, so a verse's two wordings never make its own 4-grams look shared.
+  const slots = [];
+  for (let i = 0; i < verseMetadata.length; i++) slots.push(i);
+  if (altTextByIdx) for (const i of altTextByIdx.keys()) slots.push(i + ALT_SLOT_BASE);
+  for (const slot of slots) {
+    const i = slotToVerse(slot);
+    const raw = slot === i
+      ? (verseNormText.get(i) || '')
+      : norm(altTextByIdx.get(i).replace(/\[[^\]]*\]/g, ' '));
+    const words = raw.split(' ').filter(Boolean).map(healWord);
+    verseHealedWords.set(slot, words);
+    if (slot !== i) verseNormWords.set(slot, raw.split(' ').filter(Boolean));   // IDF lookups during alignment
     for (let k = 0; k + ANCHOR_N <= words.length; k++) {
       const key = words.slice(k, k + ANCHOR_N).join(' ');
       let set = dfCounts.get(key);
@@ -614,7 +669,7 @@ function buildAnchorTrie() {
   anchorTerminals = new Map();
   let kept = 0, skipped = 0;
 
-  for (let i = 0; i < verseMetadata.length; i++) {
+  for (const i of slots) {   // slot id: verse index, or verse index + ALT_SLOT_BASE
     const words = verseHealedWords.get(i) || [];
     for (let k = 0; k + ANCHOR_N <= words.length; k++) {
       const gram = words.slice(k, k + ANCHOR_N);
@@ -635,6 +690,41 @@ function buildAnchorTrie() {
   }
 
   console.log(`[Anchor] Trie built in ${Date.now() - t0}ms — ${kept} distinctive 4-grams kept, ${skipped} common skipped.`);
+  buildTwinTable(dfCounts);
+}
+
+// ── Near-duplicate verse pairs ("twins") ────────────────────────────────────
+// Verses that share several distinctive 4-grams read almost the same when
+// spoken — parallel gospel passages (Matthew 6:33 / Luke 12:31), retellings
+// (Genesis 24:13 / 24:43), repeated narrative formulas (Exodus 10:16 / 12:31).
+// A text match on the shared wording can't tell them apart, so server.js
+// resolves the pair from the words actually spoken and the sermon's context.
+// Derived from the whole corpus once, instead of a hand-kept incident list.
+const TWIN_GRAM_DF_MAX = 6;     // a 4-gram shared by 2..6 verses is distinctive-but-shared
+const TWIN_MIN_SHARED  = 2;     // ...and a pair needs at least this many of them
+let twinTable = new Map();      // verseIdx -> [{ idx, shared }]
+function buildTwinTable(dfCounts) {
+  const t0 = Date.now();
+  const pairs = new Map();      // a*40000+b (a<b) -> shared 4-gram count
+  for (const set of dfCounts.values()) {
+    if (set.size < 2 || set.size > TWIN_GRAM_DF_MAX) continue;
+    const ids = [...set];
+    for (let x = 0; x < ids.length; x++) for (let y = x + 1; y < ids.length; y++) {
+      const a = Math.min(ids[x], ids[y]), b = Math.max(ids[x], ids[y]);
+      const k = a * 40000 + b;
+      pairs.set(k, (pairs.get(k) || 0) + 1);
+    }
+  }
+  twinTable = new Map();
+  for (const [k, shared] of pairs) {
+    if (shared < TWIN_MIN_SHARED) continue;
+    const a = Math.floor(k / 40000), b = k % 40000;
+    if (!twinTable.has(a)) twinTable.set(a, []);
+    if (!twinTable.has(b)) twinTable.set(b, []);
+    twinTable.get(a).push({ idx: b, shared });
+    twinTable.get(b).push({ idx: a, shared });
+  }
+  console.log(`[Twins] ${twinTable.size} verses have a near-duplicate twin (${Date.now() - t0}ms)`);
 }
 
 // An anchor only ever fires on the word that completes its own 4-gram, and
@@ -950,6 +1040,7 @@ function lookupRange(book, chapter, verseStart, verseEnd) {
   for (let vs = verseStart; vs <= verseEnd; vs++) {
     const v = directLookup(book, chapter, vs);
     if (v) results.push(v);
+    else if (results.length) break;   // past the chapter's last verse ("to the end")
   }
   return results;
 }
@@ -1576,7 +1667,12 @@ parentPort.on('message', async (msg) => {
   try {
     switch (msg.type) {
       case 'directLookup': {
-        const result = directLookup(msg.book, msg.chapter, msg.verse);
+        let verse = msg.verse;
+        if (verse === -1) {                        // "the last verse" of the chapter
+          verse = 0;
+          while (directLookup(msg.book, msg.chapter, verse + 1)) verse++;
+        }
+        const result = verse > 0 ? directLookup(msg.book, msg.chapter, verse) : null;
         parentPort.postMessage({ type: 'directResult', id: msg.id, result });
         break;
       }
@@ -1618,6 +1714,28 @@ parentPort.on('message', async (msg) => {
         }
         rows.sort((a, b) => b.idfSum - a.idfSum);
         parentPort.postMessage({ type: 'rangeResult', id: msg.id, results: rows.slice(0, 2) });
+        break;
+      }
+      case 'matchTexts': {
+        // The wording(s) a preacher reads a verse in: KJV, plus the church's
+        // translation or the service language's Bible when one is set —
+        // normalized the way speech is. For comparing speech with verses.
+        // Not the NLT fallback: its everyday modern words turn up in any
+        // English speech and would make unrelated wording look like evidence.
+        const texts = (msg.keys || []).map(k => {
+          const i = idxByKey.get(k);
+          if (i == null) return '';
+          return [verseNormText.get(i), altTextByIdx ? verseNormNlt.get(i) : null].filter(Boolean).join(' ');
+        });
+        parentPort.postMessage({ type: 'matchTextsResult', id: msg.id, texts });
+        break;
+      }
+      case 'getTwins': {
+        // verseKey -> [[twinKey, sharedGrams], ...] for every verse with a twin.
+        const key = (i) => { const v = verseMetadata[i]; return `${v.book}|${v.chapter}|${v.verse}`; };
+        const twins = [];
+        for (const [idx, list] of twinTable) twins.push([key(idx), list.map(t => [key(t.idx), t.shared])]);
+        parentPort.postMessage({ type: 'twinsResult', id: msg.id, twins });
         break;
       }
       case 'buildNameIndex': {
@@ -1724,13 +1842,15 @@ parentPort.on('message', async (msg) => {
         for (const w of words) {
           const { anchors, confirmed } = streamWord(w);
           for (const a of anchors) {
-            const prev = anchorsByVerse.get(a.verseIdx);
+            const vIdx = slotToVerse(a.verseIdx);
+            const prev = anchorsByVerse.get(vIdx);
             // Keep the most distinctive (lowest df) anchor seen for this verse
             if (!prev || a.df < prev.df || (a.df === prev.df && a.depth > prev.depth)) {
-              anchorsByVerse.set(a.verseIdx, { depth: a.depth, df: a.df, idf: a.idf });
+              anchorsByVerse.set(vIdx, { depth: a.depth, df: a.df, idf: a.idf });
             }
           }
           for (const c of confirmed) {
+            c.verseIdx = slotToVerse(c.verseIdx);
             const prev = confirmedByVerse.get(c.verseIdx);
             if (!prev || c.matched > prev.matched) {
               // viaBackwardExtension: if a LATER, higher-matched confirmation
