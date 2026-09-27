@@ -177,6 +177,8 @@
                 <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor"><rect x="1" y="1" width="8" height="8" rx="1.5"/></svg>
                 <span class="listen-text">Start Listening</span>
             </button>
+            <!-- Live input level while listening — is it actually hearing the preacher? -->
+            <span class="tb-mic-meter" id="mic-meter" title="Input level" hidden><i></i></span>
             <div class="tb-divider"></div>
             <div class="tb-download-wrap">
                 <button id="export-btn" class="tb-studio-btn tb-icon-only" title="Export" aria-label="Export" aria-haspopup="menu" aria-expanded="false">
@@ -581,7 +583,12 @@
                      Bible brings the slide back (lit while that applies),
                      Clear Slide removes only the slide. See the server's
                      output-layer rule by sendServiceSlide. -->
-                <button id="clear-bible-layer-btn" class="rs-layer-clear-btn" title="Clear the Bible layer">Clear Bible</button>
+                <!-- Back: puts back whatever was on screen before the last change — a
+                     wrong verse, or an accidental clear (server screenBack). -->
+                <button id="output-back-btn" class="rs-layer-clear-btn rs-layer-clear-all-icon rs-layer-back" title="Back — put back what was on screen before (⌘←)" aria-label="Back">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 14L4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/></svg>
+                </button>
+                <button id="clear-bible-layer-btn" class="rs-layer-clear-btn" title="Clear the Bible layer (⌘K)">Clear Bible</button>
                 <button id="clear-slide-layer-btn" class="rs-layer-clear-btn" title="Clear the slide/text layer only">Clear Slide</button>
                 <button id="clear-timer-layer-btn" class="rs-layer-clear-btn" title="Stop the live segment timer/clock">Clear Timer</button>
                 <button id="clear-media-layer-btn" class="rs-layer-clear-btn" title="Clear the media layer only">Clear Media</button>
@@ -1381,7 +1388,7 @@
                                     <li>Open <strong>Settings → Audio</strong> and pick the microphone (or audio-routing device, e.g. BlackHole) capturing the preacher.</li>
                                     <li>Open <strong>Settings → Outputs</strong> and turn on at least one destination — usually External Display for the projector/screen.</li>
                                     <li>Set the spoken language under <strong>Settings → Language</strong> if it isn't English.</li>
-                                    <li>Press <strong>Start Listening</strong>. Live Status switches from Idle to Listening, and the Live Transcript Log starts filling in as words are heard. <strong>Stop</strong> ends the session — nothing else does: if the internet drops, the status shows <em>Reconnecting…</em> and Kairo keeps listening; the words said meanwhile are caught up when it's back.</li>
+                                    <li>Press <strong>Start Listening</strong>. Live Status switches from Idle to Listening, and the Live Transcript Log starts filling in as words are heard. <strong>Stop</strong> ends the session — nothing else does: if the internet drops, the status shows <em>Reconnecting…</em> and Kairo keeps listening; the words said meanwhile are caught up when it's back. The small level bar beside the button shows the preacher is actually being heard.</li>
                                 </ol>
                                 <p>Everything else — playlists, slides, songs, themes — can be prepared before or during the service; detection runs independently in the background the whole time.</p>
                             </div>
@@ -1399,6 +1406,7 @@
                                 <p>Once a passage is up, the preacher can move within it: "verse 5", a number said on its own, "next verse" / "the following verse", "previous verse", "go back to verse 3", "the last verse". A spoken range ("verses 1 to 9", "from verse 4 to the end") advances verse by verse as the reading continues.</p>
                                 <p>Kairo also follows a verse put in the preacher's <strong>own words</strong> ("the Bible says don't worry about anything, pray about everything…"). A paraphrase goes to the screen on its own only when every check agrees; otherwise it waits in Possible Matches. Well-known passages named in passing ("the prodigal son", "the Lord's Prayer") are offered in Possible Matches too.</p>
                                 <p><strong>Possible Matches</strong> holds what Kairo found but isn't certain enough to put up on its own — click one to send it. This is deliberate: a wrong verse on screen is worse than a missed one. While a song or slide is live, only a spoken citation goes up on its own; lyrics that quote scripture are offered in Possible Matches instead.</p>
+                                <p>The <strong>Live Queue</strong> marks the verse on screen right now with <strong>LIVE</strong>. If a wrong verse goes up — or something is cleared by mistake — press <strong>Back</strong> (the arrow by Clear Bible, or ⌘←) to put back what was showing before; Kairo won't immediately send the undone verse again. In the Live Transcript Log, a green chip marks the words that sent each verse.</p>
                             </div>
                         </details>
 
@@ -1411,6 +1419,7 @@
                                     <li>Type a few words of a verse — from the third word, matching verses appear right under the field, even if the words are out of order or in your own words ("renew strength eagles", "cast your cares on him"). <strong>One click sends it to the screen</strong>; the arrow keys and Enter work too, Escape closes the list.</li>
                                 </ul>
                                 <p>The list only shows verses the words actually identify, so a phrase every other verse contains ("the Lord is") shows nothing until you type a little more.</p>
+                                <p>Press <strong>/</strong> to jump to the search field. Double-click a line in the Live Transcript Log to search those words — the quickest way to find a verse Kairo missed.</p>
                             </div>
                         </details>
 

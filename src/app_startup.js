@@ -119,6 +119,8 @@
   window.__TAURI__.event.listen('menu-range-next',       () => clickDirect('range-next-btn'));
   window.__TAURI__.event.listen('menu-range-end',        () => clickDirect('range-clear-btn'));
   window.__TAURI__.event.listen('menu-clear-slide',      () => clickDirect('clear-slide-layer-btn'));
+  window.__TAURI__.event.listen('menu-clear-bible',      () => clickDirect('clear-bible-layer-btn'));
+  window.__TAURI__.event.listen('menu-output-back',      () => clickDirect('output-back-btn'));
   window.__TAURI__.event.listen('menu-clear-media',      () => clickDirect('clear-media-layer-btn'));
   window.__TAURI__.event.listen('menu-clear-timer',      () => clickDirect('clear-timer-layer-btn'));
   window.__TAURI__.event.listen('menu-clear-all',        () => clickDirect('clear-all-layers-btn'));
@@ -133,9 +135,12 @@
 // drives, on purpose — one list, two independent ways to trigger it.
 const HOTKEY_ACTIONS = [
   { id: 'toggle-listening', label: 'Start/Stop Listening', btnId: 'listen-btn',            default: 'cmd+l' },
+  { id: 'find-verse',       label: 'Find a verse',         run: () => { const el = document.getElementById('scripture-search-input'); el?.focus(); el?.select(); }, default: '/' },
   { id: 'range-next',       label: 'Next',                 btnId: 'range-next-btn',        default: 'cmd+arrowright' },
+  { id: 'output-back',      label: 'Back (undo last change)', btnId: 'output-back-btn',    default: 'cmd+arrowleft' },
   { id: 'range-end',        label: 'End Range',            btnId: 'range-clear-btn',       default: '' },
-  { id: 'clear-slide',      label: 'Clear Slide',          btnId: 'clear-slide-layer-btn', default: 'cmd+k' },
+  { id: 'clear-bible',      label: 'Clear Bible',          btnId: 'clear-bible-layer-btn', default: 'cmd+k' },
+  { id: 'clear-slide',      label: 'Clear Slide',          btnId: 'clear-slide-layer-btn', default: '' },
   { id: 'clear-media',      label: 'Clear Media',          btnId: 'clear-media-layer-btn', default: '' },
   { id: 'clear-timer',      label: 'Clear Timer',          btnId: 'clear-timer-layer-btn', default: '' },
   { id: 'clear-all',        label: 'Clear All',            btnId: 'clear-all-layers-btn',  default: 'cmd+shift+k' },
@@ -241,7 +246,8 @@ document.addEventListener('keydown', (e) => {
   const action = HOTKEY_ACTIONS.find(a => hotkeyFor(a.id) === combo);
   if (!action) return;
   e.preventDefault();
-  document.getElementById(action.btnId)?.click();
+  if (action.run) action.run();
+  else document.getElementById(action.btnId)?.click();
 });
 
 renderHotkeysList();

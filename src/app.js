@@ -295,6 +295,7 @@ function handleServerMessage(msg) {
       break;
 
     case 'clear-layer':
+      if (msg.layer === 'slide' || msg.layer === 'all') clearPreviewScreen();
       if (msg.layer === 'media' || msg.layer === 'all') clearMediaPreview();
       if (msg.layer === 'timer' || msg.layer === 'all') window.KairoService?.onTimerSlide?.({ clear: true });
       break;
@@ -458,12 +459,49 @@ function handleDetection(msg) {
   const { verses, method, target, topScore, correctedFrom, look } = msg;
   if (!verses?.length) return;
 
+  // Back (server screenBack) re-sends what was on screen before: repaint and
+  // move its card back to the top, without counting it as a new send.
+  if (msg.restoredByBack) {
+    const v = verses[0];
+    renderPreviewScreen(cleanVerseText(v.text), v.reference, look, v.translatedText || '', v.image || null, v.fit || 'contain', v.slideStyle || {}, v.timerText || '', v.label || '');
+    const card = currentDisplayCard?.querySelector(`[data-ref="${CSS.escape(v.reference || '')}"]`);
+    if (card && card !== currentDisplayCard.firstChild) currentDisplayCard.insertBefore(card, currentDisplayCard.firstChild);
+    return;
+  }
+
   if (target === 'viewer' && (topScore == null || topScore >= CLIENT_VIEWER_MIN_SCORE)) {
     showInViewer(verses, method, topScore, correctedFrom, look);
+    if (method !== 'service') noteTranscriptSend(verses[0].reference);
   } else {
     showInSuggestions(verses, method);
   }
 }
+
+// ── Transcript log: which words sent which verse ────────────────────────────
+// A small chip after the line being spoken when a verse went up; double-click
+// any line to search it (a miss is usually right there in the words).
+function noteTranscriptSend(reference) {
+  if (!transcriptDiv || !reference) return;
+  const finals = transcriptDiv.querySelectorAll('.transcript-final');
+  const line = finals[finals.length - 1];
+  if (!line || line.querySelector(`.transcript-sent-chip[data-ref="${CSS.escape(reference)}"]`)) return;
+  const chip = document.createElement('span');
+  chip.className = 'transcript-sent-chip';
+  chip.dataset.ref = reference;
+  chip.textContent = `→ ${reference}`;
+  line.appendChild(chip);
+}
+document.addEventListener('dblclick', (e) => {
+  const line = e.target.closest?.('.transcript-final');
+  if (!line || !scriptureSearchInput) return;
+  const words = [...line.childNodes].filter(n => n.nodeType === Node.TEXT_NODE).map(n => n.textContent).join(' ')
+    .split(/\s+/).filter(Boolean).slice(-14).join(' ');
+  if (!words) return;
+  window.getSelection?.()?.removeAllRanges();
+  scriptureSearchInput.value = words;
+  scriptureSearchInput.focus();
+  scriptureSearchInput.dispatchEvent(new Event('input', { bubbles: true }));
+});
 
 // Render the live preview screen. A sent item can carry its own theme (e.g. a
 // ProPresenter import via Send/Flow) — when it does, paint it with the exact
@@ -745,7 +783,16 @@ function repaintPreviewWithOutputLook() {
   renderPreviewScreen(a.text, a.reference, null, a.translatedText, a.image, a.fit, a.styleByLayerId, a.timerText, a.sectionLabel);
 }
 
+// Exactly one Live Queue card is marked LIVE — the verse on screen now (none
+// while a slide is up or the screen is clear).
+function markLiveInQueue(reference) {
+  currentDisplayCard?.querySelectorAll('.is-live').forEach(c => c.classList.remove('is-live'));
+  if (!reference) return;
+  currentDisplayCard?.querySelector(`[data-ref="${CSS.escape(reference)}"]`)?.classList.add('is-live');
+}
+
 function renderPreviewScreen(text, reference, look, translatedText = '', image = null, fit = 'contain', styleByLayerId = {}, timerText = '', sectionLabel = '') {
+  queueMicrotask(() => markLiveInQueue(reference));   // after showInViewer has placed the card
   const effectiveLook = look || primaryOutputLook();
   const newPreviewKey = `${reference || ''} ${text || ''}`;
   // Identical content + look already painted: re-running paint() tears down
@@ -1118,6 +1165,7 @@ function buildCandidateCard(v, method, isSent = false) {
   const card = document.createElement('div');
   card.className = 'cand-card' + (isSent ? ' cand-sent' : '') + (isSearchHit ? ' cand-search' : '');
   card.dataset.ref = v.reference;
+  card.dataset.at = String(Date.now());
   card.innerHTML = `
     <div class="cand-row">
       <span class="cand-ref">${v.reference}</span>
@@ -1206,6 +1254,20 @@ function buildQueueRow(v, method, correctedFrom = null) {
   });
   return card;
 }
+
+// Possible Matches shows now, not history: a suggestion fades after a minute
+// and leaves after five.
+const SUGGESTION_FADE_MS = 60000, SUGGESTION_DROP_MS = 300000;
+setInterval(() => {
+  const now = Date.now();
+  let dropped = false;
+  queueList?.querySelectorAll('.cand-card[data-at]').forEach(card => {
+    const age = now - Number(card.dataset.at);
+    if (age > SUGGESTION_DROP_MS) { card.remove(); dropped = true; }
+    else card.classList.toggle('is-stale', age > SUGGESTION_FADE_MS);
+  });
+  if (dropped) updateSuggestionCount();
+}, 10000);
 
 function updateSuggestionCount() {
   const count = queueList?.children.length ?? 0;
@@ -1449,6 +1511,21 @@ function captureIsVirtualInput() {
   return VIRTUAL_INPUT_RE.test(mediaStream?.getAudioTracks?.()[0]?.label || '');
 }
 
+// Input level meter beside Start Listening — the loudest sample since the
+// last paint, on a dB scale so ordinary speech sits mid-bar.
+let micMeterPeak = 0;
+setInterval(() => {
+  const meter = document.getElementById('mic-meter');
+  if (!meter) return;
+  meter.hidden = !isListening;
+  if (!isListening) { micMeterPeak = 0; return; }
+  const db = micMeterPeak > 0 ? 20 * Math.log10(micMeterPeak / 32768) : -90;
+  const pct = Math.max(0, Math.min(100, ((db + 60) / 60) * 100));
+  meter.firstElementChild.style.width = `${pct}%`;
+  meter.classList.toggle('is-silent', micMeterPeak === 0);
+  meter.classList.toggle('is-hot', db > -1);
+  micMeterPeak = 0;
+}, 100);
 let lastNonZeroAudioAt = 0;   // any non-zero sample at all (a real mic always has some noise)
 let _lastLevelLogAt = 0;
 // One capture graph: getUserMedia stream -> 16 kHz AudioContext -> frames to
@@ -1476,6 +1553,7 @@ async function buildCaptureGraph(deviceId, existingStream = null) {
       if (a > peak) peak = a;
     }
     const now = Date.now();
+    if (peak > micMeterPeak) micMeterPeak = peak;
     if (peak > 0) lastNonZeroAudioAt = now;
     if (peak > AUDIO_PEAK_NOISE_FLOOR) lastRealAudioAt = now;
     if (now - _lastLevelLogAt > 3000) {
@@ -2459,6 +2537,7 @@ clearSuggestionsBtn?.addEventListener('click', () => {
 // This bypasses that fallback entirely: plain text, theme layer hidden, full
 // stop — matching what "cleared" is supposed to communicate.
 function clearPreviewScreen() {
+  markLiveInQueue(null);
   const themed = document.getElementById('slide-preview-themed');
   const plain  = document.querySelector('#slide-preview .live-screen-inner');
   themed?.classList.add('hidden');
@@ -2493,6 +2572,15 @@ async function clearOutputLayer(layer) {
   if (layer === 'media' || layer === 'all') clearMediaPreview();
 }
 document.getElementById('clear-bible-layer-btn')?.addEventListener('click', () => clearOutputLayer('bible'));
+// Back — undo the last change to the screen (server keeps the history).
+// Debounced: a menu accelerator and the in-app hotkey may both fire.
+let _lastBackAt = 0;
+document.getElementById('output-back-btn')?.addEventListener('click', () => {
+  const now = Date.now();
+  if (now - _lastBackAt < 400) return;
+  _lastBackAt = now;
+  fetch(`${SERVER}/api/output/back`, { method: 'POST' }).catch(err => console.warn('[KAIRO] Back failed:', err.message));
+});
 // Lit while a scripture covers a live slide — Clear Bible is the way back to it.
 function handleLayerState(msg) {
   const btn = document.getElementById('clear-bible-layer-btn');

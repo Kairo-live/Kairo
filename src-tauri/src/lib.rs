@@ -101,7 +101,13 @@ fn build_app_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry
     let range_next_item = MenuItemBuilder::with_id("menu-range-next", "Next")
         .accelerator("CmdOrCtrl+Right")
         .build(app)?;
-    let clear_slide_item = MenuItemBuilder::with_id("menu-clear-slide", "Clear Slide")
+    // Back (undo the last change to the screen) mirrors Next; Clear Bible is
+    // what gets cleared most during a sermon, so it owns Cmd+K. Clear Slide
+    // (only the slide under a verse since the layered output) has no default.
+    let output_back_item = MenuItemBuilder::with_id("menu-output-back", "Back")
+        .accelerator("CmdOrCtrl+Left")
+        .build(app)?;
+    let clear_bible_item = MenuItemBuilder::with_id("menu-clear-bible", "Clear Bible")
         .accelerator("CmdOrCtrl+K")
         .build(app)?;
     let clear_all_item = MenuItemBuilder::with_id("menu-clear-all", "Clear All")
@@ -112,9 +118,11 @@ fn build_app_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry
         .item(&toggle_listening_item)
         .separator()
         .item(&range_next_item)
+        .item(&output_back_item)
         .text("menu-range-end", "End Range")
         .separator()
-        .item(&clear_slide_item)
+        .item(&clear_bible_item)
+        .text("menu-clear-slide", "Clear Slide")
         .text("menu-clear-media", "Clear Media")
         // The timer/clock layer's own clear — added once the output grew
         // a third composited layer alongside slide/media (see the Timer
@@ -871,7 +879,8 @@ pub fn run() {
                 "menu-learn-more" => { let _ = app.shell().open("https://github.com/Kairo-live/Kairo", None); }
                 "menu-new-theme" | "menu-import" | "menu-export-theme" | "menu-settings"
                 | "menu-toggle-listening" | "menu-range-next" | "menu-range-end"
-                | "menu-clear-slide" | "menu-clear-media" | "menu-clear-timer" | "menu-clear-all" => {
+                | "menu-clear-slide" | "menu-clear-bible" | "menu-output-back"
+                | "menu-clear-media" | "menu-clear-timer" | "menu-clear-all" => {
                     let _ = app.emit(id, ());
                 }
                 _ => {}

@@ -46,6 +46,31 @@ const fresh = () => { server.resetDetectionSession(); referenceContext.reset(); 
     assert.deepEqual(sent.filter(s => s.method === 'paraphrase'), [], JSON.stringify(sent));
   });
 
+  // ── Back: undo the last change to the screen ──
+  await test('Back puts the previous verse back up, and the undone verse is not re-sent by detection', async () => {
+    fresh(); server.clearRangeQueue(); await server.clearLayer('all');
+    await say('John 3 verse 16.'); await wait(4500);
+    await say('Romans 8 verse 28.');
+    sent = [];
+    const r = await server.screenBack();
+    assert.equal(r.restored, 'John 3:16', JSON.stringify(r));
+    assert.equal(sent.filter(s => s.target === 'viewer').at(-1)?.ref, 'John 3:16');
+    sent = [];
+    await say('And we know that all things work together for good to them that love God, to them who are the called according to his purpose.');
+    assert.ok(!onScreen().includes('Romans 8:28'), JSON.stringify(sent));
+  });
+
+  await test('Back undoes an accidental clear, and returns to the slide a verse covered', async () => {
+    fresh(); server.clearRangeQueue(); await server.clearLayer('all');
+    await server.sendServiceSlide({ reference: 'Welcome', text: 'Welcome to church' }, null);
+    await say('Psalm 23 verse 1.');
+    await server.clearLayer('all');
+    sent = [];
+    assert.equal((await server.screenBack()).restored, 'Psalms 23:1');   // the clear undone
+    assert.equal((await server.screenBack()).restored, 'Welcome');       // the slide under it
+    assert.equal(sent.filter(s => s.target === 'viewer').at(-1)?.ref, 'Welcome');
+  });
+
   // ── Output layers: media < slide < Bible ──
   await test('a scripture called during slides goes up over the slide; Clear Bible brings the slide back', async () => {
     fresh(); server.clearRangeQueue(); await server.clearLayer('all');

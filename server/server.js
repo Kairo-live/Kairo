@@ -661,7 +661,25 @@ let lastSlideBroadcast = null; // last 'detection'(target:'viewer') or 'range-ac
 let lastMediaBroadcast = null; // last 'media'
 let lastTimerBroadcast = null; // last 'timer-slide'
 
+// ── Back: undo the last change to what's on screen ────────────────────────
+// Every change to the slide/Bible layer (a verse or slide going up, or the
+// layer being cleared) first records what was showing, so the operator can
+// put it back in one keystroke after a wrong send or an accidental clear.
+const SCREEN_HISTORY_MAX = 20;
+const screenHistory = [];          // earlier states, newest last
+let screenNow = null;              // the detection(viewer) message now on screen, or null
+let restoringScreen = false;
+const screenKey = (m) => (m ? `${m.verses?.[0]?.reference || ''}|${m.verses?.[0]?.text || ''}` : '');
+function noteScreenChange(next) {
+  if (restoringScreen || screenKey(next) === screenKey(screenNow)) return;
+  screenHistory.push({ slide: screenNow, slideUnderneath, bibleOnTop });
+  if (screenHistory.length > SCREEN_HISTORY_MAX) screenHistory.shift();
+  screenNow = next;
+}
+
 function broadcast(data) {
+  if (data.type === 'detection' && data.target === 'viewer' && data.verses?.length) noteScreenChange(data);
+  else if (data.type === 'clear-layer' && (data.layer === 'slide' || data.layer === 'all')) noteScreenChange(null);
   const msg = JSON.stringify(data);
   for (const ws of clients) {
     if (ws.readyState === ws.OPEN) ws.send(msg);
@@ -2356,6 +2374,54 @@ app.post('/api/service/send-timer', (req, res) => {
 app.post('/api/service/clear-layer', async (req, res) => {
   res.json({ ok: true, ...(await clearLayer(req.body?.layer || 'all')) });
 });
+
+app.post('/api/output/back', async (_req, res) => {
+  res.json(await screenBack());
+});
+
+async function screenBack() {
+  const prev = screenHistory.pop();
+  if (!prev) return { ok: false, reason: 'Nothing earlier to go back to' };
+  const undone = screenNow;
+  restoringScreen = true;
+  try {
+    slideUnderneath = prev.slideUnderneath;
+    if (prev.slide) {
+      broadcast({ ...prev.slide, timestamp: Date.now(), restoredByBack: true });
+      const v = prev.slide.verses[0];
+      liveNonScriptureSlideAt = v.book ? 0 : Date.now();
+      await sendToOutputs(v).catch(() => {});
+    } else {
+      broadcast({ type: 'clear-layer', target: 'viewer', layer: 'slide', restoredByBack: true });
+      liveNonScriptureSlideAt = 0;
+      await clearExternalOutputs();
+    }
+    screenNow = prev.slide;
+    bibleOnTop = prev.bibleOnTop;
+    broadcastLayerState();
+  } finally {
+    restoringScreen = false;
+  }
+  // A range the undone send started doesn't survive going back past it.
+  const restored = prev.slide?.verses?.[0];
+  if (rangeAllVerses.length) {
+    const inRange = restored?.book && rangeAllVerses.some(r => r.book === restored.book && r.chapter === restored.chapter && r.verse === restored.verse);
+    if (inRange) jumpRangeTo(restored.book, restored.chapter, restored.verse); else clearRangeQueue();
+  }
+  // Detection must not put the undone verse straight back up.
+  const u = undone?.verses?.[0];
+  if (u?.book) {
+    const key = `${u.book}|${u.chapter}|${u.verse}`;
+    recentDetections.set(key, Date.now());
+    recentlyCorrectedAway = {
+      key, at: Date.now(),
+      replacedByKey: restored?.book ? `${restored.book}|${restored.chapter}|${restored.verse}` : null,
+      replacedByReference: restored?.reference || null,
+    };
+  }
+  console.log(`[Back] ${undone ? `"${u?.reference || 'slide'}" taken down` : 'clear undone'} — back to ${restored ? `"${restored.reference || 'slide'}"` : 'an empty screen'}`);
+  return { ok: true, restored: restored?.reference || null };
+}
 
 // The operator's per-layer Clear buttons.
 async function clearLayer(layer) {
@@ -6050,6 +6116,7 @@ if (require.main === module) {
     setRangeQueue,
     clearRangeQueue,
     clearLayer,
+    screenBack,
     startDeepgram,
     sendServiceSlide,
     stopDeepgram,

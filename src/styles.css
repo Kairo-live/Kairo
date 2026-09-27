@@ -6800,3 +6800,69 @@ select {
   margin: 6px 0;
 }
 
+
+/* ── Live Queue: the one verse on screen now ─────────────────────────────── */
+.cs-live-queue-body .locked-verse-card:not(.is-live) { opacity: 0.72; }
+.cs-live-queue-body .locked-verse-card.is-live {
+  opacity: 1;
+  border-left-color: var(--brand);
+  background: var(--brand-dim);
+}
+.cs-live-queue-body .locked-verse-card.is-live .lvc-ref::after {
+  content: 'LIVE';
+  margin-left: 8px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--brand);
+  color: #fff;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  vertical-align: 1px;
+}
+
+/* ── Possible Matches: calm, and fading once they're old ──────────────────── */
+.cand-card .cand-send {
+  background: transparent !important;
+  color: var(--text-2) !important;
+  border: 1px solid var(--border-md) !important;
+}
+.cand-card .cand-send:hover { background: var(--brand) !important; color: #fff !important; border-color: var(--brand) !important; }
+.cand-card.is-stale { opacity: 0.45; }
+
+/* Six controls share the row since Back joined — labels stay on one line. */
+.rs-layer-clear-bar .rs-layer-clear-btn { white-space: nowrap; flex: 1 1 auto; min-width: 0; padding-left: 3px; padding-right: 3px; }
+.rs-layer-clear-bar .rs-layer-clear-all-icon { flex: 0 0 auto; }
+
+/* ── Back button ─────────────────────────────────────────────────────────── */
+.rs-layer-clear-btn.rs-layer-back:hover { color: var(--text); border-color: var(--selected-border); }
+
+/* ── Input level meter next to Start Listening ───────────────────────────── */
+.tb-mic-meter {
+  display: inline-block;
+  width: 38px; height: 5px;
+  border-radius: 3px;
+  background: var(--bg-hover);
+  overflow: hidden;
+  margin-left: 6px;
+  vertical-align: middle;
+}
+.tb-mic-meter[hidden] { display: none; }
+.tb-mic-meter i { display: block; height: 100%; width: 0%; background: var(--green); transition: width 90ms linear; }
+.tb-mic-meter.is-silent i { background: var(--text-3); }
+.tb-mic-meter.is-hot i { background: var(--red); }
+
+/* ── Transcript: which words sent which verse ───────────────────────────── */
+.transcript-final { cursor: text; }
+.transcript-sent-chip {
+  display: inline-block;
+  margin: 0 4px 0 2px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--green-dim);
+  color: var(--green);
+  font-size: 10px;
+  font-weight: 700;
+  font-style: normal;
+  white-space: nowrap;
+}
