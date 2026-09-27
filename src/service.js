@@ -704,9 +704,11 @@
   let follower = null;
   let followItemId = null;
   let contentLookup = null;
+  // On exactly while listening — Start Listening is the one control (app.js
+  // calls setAutoFollow on connect/stop). No separate switch: a slide the
+  // operator clicks re-syncs the follower from there.
   let autoFollow = false;
   let followerAdvancing = false; // guard: our own sendSlide must not resync
-  try { autoFollow = localStorage.getItem('kairo-auto-follow') === '1'; } catch {}
 
   function songShapeForFollow(item) {
     return { title: item.title || 'Song', blocks: (item.blocks || []).map(b => ({ label: b.label, lines: b.lines || [] })) };
@@ -936,18 +938,11 @@
     return item;
   }
 
-  // Rebuild content_lookup.js's candidate pool — every song/'slides' item
-  // already in the CURRENT PLAYLIST (except whatever's already live), PLUS
-  // every song in the Song Bank/Library that ISN'T already sitting in the
-  // playlist under the same title. "It's in my song bank" was explicit —
-  // a song doesn't need to have been staged for this service ahead of
-  // time, the same way scripture detection doesn't need a verse queued up
-  // first. Bank entries are tagged _bank so onMatch below knows to add them
-  // to the playlist (addHymnToPlaylist) before sending, instead of trying
-  // to sendSlide something that was never a real item. Cheap either way —
-  // tokenizing one opening line per candidate, a few hundred short hymns
-  // included — called fresh on every ingest rather than tracked as dirty
-  // state, so it can never go stale after an item's added or edited.
+  // Rebuild content_lookup.js's candidate pool — every slide deck ('slides'
+  // item) in the CURRENT PLAYLIST except whatever's already live. Songs are
+  // not auto-detected (disabled in 9b2ef2e — "scrapped songs, not viable");
+  // once a song is live, auto-follow still tracks it. onMatch still handles a
+  // _bank entry (addHymnToPlaylist) should bank songs ever be pooled again.
   // onTranscript calls this on EVERY transcript delivery while auto-follow
   // is on — per app.js's own comment, interim transcripts can arrive
   // several times a second during continuous speech. Rebuilding from
@@ -1010,7 +1005,6 @@
   }
   function setAutoFollow(on) {
     autoFollow = !!on;
-    try { localStorage.setItem('kairo-auto-follow', autoFollow ? '1' : '0'); } catch {}
     if (!autoFollow) { stopFollower(); }
     else if (liveSlideKey) {
       const [id, idx] = liveSlideKey.split(':');
@@ -1043,12 +1037,12 @@
     const posLabel = !snap ? 'listening…'
       : snap.blockLabel ? snap.blockLabel
       : (slidesFor(liveItem)[snap.index]?.text || '').split('\n')[0].slice(0, 40) || `Slide ${snap.index + 1}`;
+    // Status only — following is on exactly while Kairo is listening.
     el.innerHTML =
-      `<button class="lfh-toggle ${on ? 'on' : ''}" title="Auto-advance slides by listening">` +
-        `<span class="lfh-dot ${state}"></span>Auto-follow</button>` +
+      `<span class="lfh-status ${on ? 'on' : ''}" title="${on ? 'Slides advance as they are sung or preached' : 'Start Listening to follow along'}">` +
+        `<span class="lfh-dot ${state}"></span>${on ? 'Following' : 'Not listening'}</span>` +
       (on ? `<span class="lfh-info">${posLabel}` +
         `<span class="lfh-bar"><i style="width:${pct}%"></i></span></span>` : '');
-    el.querySelector('.lfh-toggle').onclick = () => setAutoFollow(!autoFollow);
   }
 
   // auto: a change the operator didn't click (auto-follow, auto-lookup, a live

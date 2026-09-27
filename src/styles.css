@@ -2041,17 +2041,14 @@ input[type="range"]:disabled { opacity: 0.4; cursor: default; }
   font-size: var(--fs-xs, 11px);
   box-shadow: 0 6px 20px rgba(0,0,0,0.35);
 }
-.lfh-toggle {
+.lfh-status {
   display: flex;
   align-items: center;
   gap: 6px;
-  background: none;
-  border: none;
   color: var(--text-3);
-  cursor: pointer;
   font-size: inherit;
 }
-.lfh-toggle.on { color: var(--text-1); }
+.lfh-status.on { color: var(--text-1); }
 .lfh-dot {
   width: 8px; height: 8px; border-radius: 50%;
   background: var(--text-3);
