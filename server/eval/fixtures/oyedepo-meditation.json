@@ -2221,19 +2221,10 @@
     {
       "book": "Psalms",
       "chapter": 119,
-      "ranges": [
-        {
-          "verseStart": 97,
-          "verseEnd": 97
-        },
-        {
-          "verseStart": 0,
-          "verseEnd": 0
-        }
-      ],
       "kind": "citation",
-      "startMs": 331000,
-      "verse": 97
+      "startMs": 349000,
+      "verse": 97,
+      "note": "2026-09-27 audit round 5: \"Psalm 11 19 and verse 97, oh how love I thy law\" at 349s (caption splits 119); entry had a malformed range"
     },
     {
       "book": "Psalms",

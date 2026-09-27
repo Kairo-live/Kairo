@@ -4699,46 +4699,6 @@
       "verseEnd": 35
     },
     {
-      "book": "Matthew",
-      "chapter": 26,
-      "verse": 31,
-      "kind": "citation",
-      "startMs": 3140085,
-      "unverified": true
-    },
-    {
-      "book": "Matthew",
-      "chapter": 26,
-      "verse": 32,
-      "kind": "citation",
-      "startMs": 3140085,
-      "unverified": true
-    },
-    {
-      "book": "Matthew",
-      "chapter": 26,
-      "verse": 33,
-      "kind": "citation",
-      "startMs": 3140085,
-      "unverified": true
-    },
-    {
-      "book": "Matthew",
-      "chapter": 26,
-      "verse": 34,
-      "kind": "citation",
-      "startMs": 3140085,
-      "unverified": true
-    },
-    {
-      "book": "Matthew",
-      "chapter": 26,
-      "verse": 35,
-      "kind": "citation",
-      "startMs": 3140085,
-      "unverified": true
-    },
-    {
       "book": "Romans",
       "chapter": 5,
       "kind": "citation",

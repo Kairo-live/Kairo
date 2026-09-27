@@ -413,6 +413,45 @@ const fresh = () => { server.resetDetectionSession(); referenceContext.reset(); 
     assert.ok(!onScreen().includes('2 Samuel 5:8'), JSON.stringify(sent));
   });
 
+  await test('a citation split across segments completes even when the next segment cites something else', async () => {
+    fresh(); server.clearRangeQueue(); await server.clearLayer('all');
+    await say('this is my blood which is shed for the remission of sins, my blood, my blood, John 6');
+    await say('48-57, reference again in 1 Corinthians 11 28-30, my blood.');
+    await wait(1200);
+    assert.ok(onScreen().includes('John 6:48'), JSON.stringify(sent));
+  });
+
+  await test('"…on our high places verse" | "14, favour…" is verse 14 of the chapter in play', async () => {
+    fresh(); server.clearRangeQueue(); await server.clearLayer('all');
+    await say('Isaiah 58 verse 12.');
+    await say('It impacts our generation after us, verse 12, and then it gets us up on our high places verse');
+    await say('14, favour, I mean prayer and fasting is a game changer.');
+    await wait(1200);
+    assert.ok(onScreen().includes('Isaiah 58:14'), JSON.stringify(sent));
+  });
+
+  await test('a "verse" | number split doesn\'t resolve against a chapter the words don\'t fit', async () => {
+    fresh(); server.clearRangeQueue(); await server.clearLayer('all');
+    await say('2 Corinthians 3 verse 17.');
+    await say('Isaac sowed in that land and received in the same year an hundredfold, and he had possession of flocks, and the Philistines envied him verse');
+    await say('16, and Abimelech said unto Isaac, go from us, for thou art much mightier than we.');
+    await wait(1200);
+    assert.ok(!onScreen().includes('2 Corinthians 3:16'), JSON.stringify(sent));
+    fresh(); server.clearRangeQueue(); await server.clearLayer('all');
+    await say('He said Isaiah 66:3, what does he mean? I said start from verse');
+    await say('one, start from verse one. Unto this man that has a contrite spirit, who trembles at my word.');
+    await wait(1200);
+    assert.ok(!onScreen().includes('Isaiah 66:1'), JSON.stringify(sent));
+  });
+
+  await test('"Jeremiah 29:1" then 29:11 in modern words ends on Jeremiah 29:11', async () => {
+    fresh(); server.clearRangeQueue(); await server.clearLayer('all');
+    await say('Your future is in his plan, not in your plan. Jeremiah');
+    await say('29:1, Revised Standard Version: for I know the plans I have for you, says the Lord, plans for welfare and not for evil, to give you a future and a hope.');
+    await wait(1500);
+    assert.equal(onScreen().at(-1), 'Jeremiah 29:11', JSON.stringify(sent));
+  });
+
   await test('a verse quoted from memory in NIV words is offered ("plans to prosper you" = Jeremiah 29:11)', async () => {
     fresh(); server.clearRangeQueue(); await server.clearLayer('all');
     await say('God has not forgotten you church. For I know the plans I have for you, plans to prosper you and not to harm you, plans to give you hope and a future.');

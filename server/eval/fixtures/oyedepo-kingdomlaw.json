@@ -4947,7 +4947,8 @@
       "chapter": 48,
       "verse": 17,
       "kind": "citation",
-      "startMs": 5854000
+      "startMs": 5718000,
+      "note": "2026-09-27 audit round 5: cited at 5718s (\"Isaiah 48 and: 17, I'm the Lord that leadeth…\"); was timed at 5854s, where 48:21 is read"
     },
     {
       "book": "Isaiah",

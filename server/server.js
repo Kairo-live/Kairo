@@ -44,7 +44,7 @@ const { Worker } = require('worker_threads');
 const axios      = require('axios');
 const OBSWebSocket = require('obs-websocket-js/json').default;
 
-const { createChapterResolver, textAfterBookMention } = require('./chapter_resolver');
+const { createChapterResolver, textAfterBookMention, CHAPTER_KEYWORD_MIN_IDF } = require('./chapter_resolver');
 const { createCitationVoting, citationKey } = require('./citation_voting');
 const { setCitationLanguage, BARE_NUMBER_FILLER, AMBIGUOUS_NUMBER_WORDS, parseSpokenReference, parseAllSpokenReferences, resolvePartialReference, detectBookMentions, referenceContext, SINGLE_WORD_BOOKS, consumeNumber, MAX_CHAPTERS, SOUND_ALIKE_BOOKS, WORD_TO_NUM } = require('./reference_parser');
 const { localizeCitationText, stripAccents } = require('./citation_i18n');
@@ -3250,7 +3250,25 @@ async function handleTranscriptSegment(transcript, isFinal, confidence, speechFi
 
   if (!foundRef && referenceContext.isValid) {
     const newBook = announcesDifferentBook(transcript, prevFinalBefore);
-    const partial = newBook ? null : resolvePartialReference(transcript);
+    // "…on our high places verse" | "14, favour…": the verse word ended the
+    // previous segment and the number opens this one (eval: Isaiah 58:14).
+    const prevTail = String(prevFinalBefore.text || '').trim().replace(/[.,!?]+$/, '').split(RE_SPACES).pop()?.toLowerCase();
+    const verseCarried = (prevTail === 'verse' || prevTail === 'verses') && Date.now() - prevFinalBefore.at < PREV_FINAL_JOIN_WINDOW_MS
+      && opensWithNumber(transcript);
+    let partial = newBook ? null : resolvePartialReference(verseCarried ? `verse ${transcript}` : transcript);
+    // Split from its "verse", a number is weaker evidence: the verse must share
+    // words with what's being said around it ("…high places verse" | "14" is
+    // Isaiah 58:14). Otherwise it's a stale chapter or a story — "…the
+    // Philistines envied them, verse" | "16, and said unto Isaac" resolved
+    // against a 2 Corinthians 3 context; "I said start from verse" | "one"
+    // (then 66:2 is quoted) sent Isaiah 66:1 (eval).
+    if (partial && verseCarried && partial.verse != null) {
+      const v = (await workerCall('directLookup', { book: partial.book, chapter: partial.chapter, verse: partial.verse }, 2000).catch(() => null))?.result;
+      if (!v || !sharesWordsWith(v, `${prevFinalBefore.text} ${transcript}`)) {
+        console.log(`[Context] "verse" | "${partial.verse}" split across segments — ${partial.book} ${partial.chapter}:${partial.verse} doesn't fit what's being said, not sent`);
+        partial = null;
+      }
+    }
     if (!partial && /\bverses?\b/i.test(transcript)) {
       console.log(newBook
         ? `[Context] "verse" heard but a different book is being announced — not resolving against ${referenceContext.book} ${referenceContext.chapter}: "${transcript}"`
@@ -4500,6 +4518,22 @@ async function sendChapterCallout(book, chapter, text) {
   return true;
 }
 
+// A segment that opens on a number ("48-57, reference…", "14 favour…").
+function opensWithNumber(text) {
+  const w = String(text || '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ').trim().split(RE_SPACES).filter(Boolean);
+  return w.length > 0 && !!consumeNumber(w, 0);
+}
+// A segment that stops mid-citation: on "verse"/"and"/"to", or on a book
+// and chapter with no verse ("…John 6").
+function endsMidCitation(text) {
+  const t = String(text || '').trim().replace(/[.,!?]+$/, '');
+  const tail = t.split(RE_SPACES).pop()?.toLowerCase();
+  if (DANGLING_CONTINUATION_WORDS.has(tail)) return true;
+  // Ending on a number ("…John 6"): only the join can tell — a bare "John 6"
+  // isn't a citation on its own, and the join still needs a book to make one.
+  return /\d$/.test(t) || !!consumeNumber([tail], 0);
+}
+
 async function processForReferences(transcript, isFinal) {
   if (!workerBasicReady) return false;
   let refs = await resolveAmbiguousRefs(parseAllSpokenReferences(transcript, inBibleMode));
@@ -4521,7 +4555,13 @@ async function processForReferences(transcript, isFinal) {
   // in the PREVIOUS segment — searching just the newest one throws them
   // away (real incident: Matthew 11:28, live, 2026-09-24).
   let joinedText = null;
-  if (!refs.length && isFinal && prevFinalTranscript
+  // Also when this segment has a citation of its own but the previous one
+  // stopped mid-citation and this one opens with its number: "…my blood, my
+  // blood, John 6" | "48-57, reference again in 1 Corinthians 11:28-30" lost
+  // John 6:48-57 to the Corinthians citation (eval).
+  const splitCitation = refs.length > 0 && isFinal && !!prevFinalTranscript
+    && opensWithNumber(transcript) && endsMidCitation(prevFinalTranscript);
+  if ((!refs.length || splitCitation) && isFinal && prevFinalTranscript
       && Date.now() - prevFinalTranscriptAt < PREV_FINAL_JOIN_WINDOW_MS) {
     // Only citations the join actually creates or extends. A citation the
     // previous segment already contained on its own was processed with it —
@@ -4531,7 +4571,14 @@ async function processForReferences(transcript, isFinal) {
     const joinedNew = parseAllSpokenReferences(`${prevFinalTranscript} ${transcript}`, inBibleMode)
       .filter(r => !prevKeys.has(citationKey(r)));
     const joinedRefs = joinedNew.length ? await resolveAmbiguousRefs(joinedNew) : [];
-    if (joinedRefs.length) {
+    if (joinedRefs.length && splitCitation) {
+      const own = new Set(refs.map(citationKey));
+      const added = joinedRefs.filter(r => !own.has(citationKey(r)));
+      if (added.length) {
+        console.log(`[Direct] Split citation completed from joined segments: "${prevFinalTranscript}" + "${transcript}"`);
+        refs = [...added, ...refs];
+      }
+    } else if (joinedRefs.length) {
       console.log(`[Direct] Resolved from joined segments: "${prevFinalTranscript}" + "${transcript}"`);
       refs = joinedRefs;
       joinedText = `${prevFinalTranscript} ${transcript}`;
@@ -6029,10 +6076,14 @@ async function switchCitationToSibling(c, verse, why, spokenText = '') {
   // A sound-alike verse NUMBER (same chapter) must also be the chapter's best
   // match for what was said — "2 Samuel 5:18" with 5:19's words around it
   // ("David enquired… shall I go up") switched to the look-alike 5:8 (eval).
+  // A clear chapter winner that isn't the sibling vetoes; no clear winner
+  // (words in modern wording share little with the KJV — "Jeremiah 29:1…
+  // the plans I have for you" is 29:11 in the RSV) leaves it to the
+  // cross-encoder.
   if (c.numberSibling?.(verse)) {
     let best = null;
     try { best = (await workerCall('scoreChapterText', { book: verse.book, chapter: verse.chapter, text: spokenText || `${c.before || ''} ${c.finals || ''}` }, 3000)).results?.[0]; } catch {}
-    if (!best || best.verse !== verse.verse) return;   // keep listening
+    if (best && best.verse !== verse.verse && best.idfSum >= CHAPTER_KEYWORD_MIN_IDF) return;   // keep listening
   }
   if (citationCheck !== c) return;
   citationCheck = null;
