@@ -801,7 +801,7 @@
           const idx = firstSlideOfBlock(item, e.toBlockIdx);
           if (idx == null || `${item.id}:${idx}` === liveSlideKey) return;
           followerAdvancing = true;
-          Promise.resolve(sendSlide(item, idx, { auto: true })).finally(() => { followerAdvancing = false; });
+          Promise.resolve(sendSlide(item, idx, { auto: true, follow: true })).finally(() => { followerAdvancing = false; });
         },
         onPosition: (s) => renderFollowHud(s),
       });
@@ -821,7 +821,7 @@
           const idx = firstSlideOfBlock(item, e.toBlockIdx);
           if (idx == null || `${item.id}:${idx}` === liveSlideKey) return;
           followerAdvancing = true;
-          Promise.resolve(sendSlide(item, idx, { auto: true })).finally(() => { followerAdvancing = false; });
+          Promise.resolve(sendSlide(item, idx, { auto: true, follow: true })).finally(() => { followerAdvancing = false; });
         },
         onPosition: (s) => renderFollowHud(s),
       });
@@ -835,7 +835,7 @@
         onAdvance: (e) => {
           if (e.toIndex == null || `${item.id}:${e.toIndex}` === liveSlideKey) return;
           followerAdvancing = true;
-          Promise.resolve(sendSlide(item, e.toIndex, { auto: true })).finally(() => { followerAdvancing = false; });
+          Promise.resolve(sendSlide(item, e.toIndex, { auto: true, follow: true })).finally(() => { followerAdvancing = false; });
         },
         onPosition: (s) => renderFollowHud(s),
       });
@@ -992,7 +992,7 @@
             onMatch: ({ item, confidence }) => {
               const target = item._bank ? addHymnToPlaylist(item._bank) : item;
               debugLog('content-lookup-match', { itemId: target.id, itemType: target.type, fromBank: !!item._bank, confidence });
-              sendSlide(target, 0, { auto: true });
+              sendSlide(target, 0, { auto: true, follow: true });
             },
           });
         }
@@ -1026,7 +1026,9 @@
       el = document.createElement('div');
       el.id = 'lyric-follow-hud';
       el.className = 'lyric-follow-hud';
-      document.body.appendChild(el);
+      // Docked at the foot of the playlist it follows — floating over the
+      // window's bottom-left corner, it covered the Live Transcript (owner).
+      (document.querySelector('.ls-playlist-section') || document.body).appendChild(el);
     }
     const on = autoFollow;
     const state = !on ? 'off' : !snap ? 'idle' : snap.frozen ? 'frozen' : snap.armed ? 'armed' : 'tracking';
@@ -1049,7 +1051,10 @@
   // slide refreshed after an edit) — while a scripture covers the output it
   // updates the slide underneath instead of uncovering it (see the server's
   // output-layer rule). An operator's click always sends.
-  async function sendSlide(item, index, { auto = false } = {}) {
+  // follow: the slides moving on because the speech matched one (the follower,
+  // content lookup) — that takes the screen back from a scripture. Other
+  // automatic re-sends (a theme edit re-rendering the live slide) stay under it.
+  async function sendSlide(item, index, { auto = false, follow = false } = {}) {
     const slide = slidesFor(item)[index];
     if (!slide) return;
     liveSlideKey = `${item.id}:${index}`;
@@ -1100,6 +1105,7 @@
         body: JSON.stringify({
           look,
           auto,
+          follow,
           verse: {
             reference: slide.reference || '',
             // ProPresenter-style section annotation (Verse/Chorus/Bridge/

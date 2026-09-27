@@ -2024,12 +2024,11 @@ input[type="range"]:disabled { opacity: 0.4; cursor: default; }
 }
 .svc-link-btn:hover { color: var(--text-1); }
 
-/* Lyric follower status chip — floats bottom-left while a song is live. */
+/* Follower status chip — docked at the foot of the playlist panel while a
+   followable item is live (it used to float bottom-left, over the transcript). */
 .lyric-follow-hud {
-  position: fixed;
-  left: 14px;
-  bottom: 14px;
-  z-index: 40;
+  flex-shrink: 0;
+  margin: 6px 8px 8px;
   display: flex;
   align-items: center;
   gap: 10px;
@@ -2038,8 +2037,8 @@ input[type="range"]:disabled { opacity: 0.4; cursor: default; }
   background: var(--surface-2, rgba(20,20,24,0.92));
   border: 1px solid var(--border, rgba(255,255,255,0.08));
   font-size: var(--fs-xs, 11px);
-  box-shadow: 0 6px 20px rgba(0,0,0,0.35);
 }
+body > .lyric-follow-hud { position: fixed; left: 14px; bottom: 14px; z-index: 40; margin: 0; }
 .lfh-status {
   display: flex;
   align-items: center;

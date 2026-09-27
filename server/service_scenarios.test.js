@@ -80,7 +80,7 @@ const fresh = () => { server.resetDetectionSession(); referenceContext.reset(); 
     await say('Turn with me to John 3 verse 16.');
     assert.ok(onScreen().includes('John 3:16'), JSON.stringify(sent));
     assert.ok(layerStates.at(-1)?.bibleOnTop && layerStates.at(-1)?.slideUnderneath, JSON.stringify(layerStates));
-    // auto-follow moving the slide underneath does not uncover the scripture
+    // an automatic re-send (a theme edit on the live slide) stays under the scripture
     sent = [];
     const landed = await server.sendServiceSlide({ reference: 'Announcements', text: 'Next week' }, null, { auto: true });
     assert.equal(landed, 'under-bible');
@@ -89,6 +89,16 @@ const fresh = () => { server.resetDetectionSession(); referenceContext.reset(); 
     const r = await server.clearLayer('bible');
     assert.ok(r.restored);
     assert.equal(sent.filter(s => s.target === 'viewer').at(-1)?.ref, 'Announcements');
+  });
+
+  await test('slides that follow the preacher take the screen back from a scripture', async () => {
+    fresh(); server.clearRangeQueue(); await server.clearLayer('all');
+    await server.sendServiceSlide({ reference: 'Point 1', text: 'Faith that speaks' }, null);
+    await say('Turn with me to John 3 verse 16.');
+    assert.ok(onScreen().includes('John 3:16'), JSON.stringify(sent));
+    sent = [];
+    await server.sendServiceSlide({ reference: 'Point 2', text: 'Faith that acts' }, null, { auto: true, follow: true });
+    assert.equal(sent.filter(s => s.target === 'viewer').at(-1)?.ref, 'Point 2', JSON.stringify(sent));
   });
 
   await test('an operator clicking a slide while a scripture is up sends it', async () => {

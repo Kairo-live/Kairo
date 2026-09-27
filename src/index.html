@@ -1437,7 +1437,7 @@
                                 </ul>
                                 <p>Use <strong>+ New</strong> in the sidebar to create additional named playlists (e.g. one per service) — Default is just the one that's there from the start.</p>
                                 <p>Click any slide in an item to send it live; the currently-live slide is highlighted. Right-click a slide for more options (duplicate, delete, split, etc.).</p>
-                                <p>While Kairo is listening, slides follow along by themselves: a live song or sermon deck advances as it's sung or preached (the bar at the bottom shows <strong>Following</strong> and where it is), and a slide deck in the playlist comes up on its own when its first slide is said. Click any slide to take over — following carries on from there. Stop listening and it stops.</p>
+                                <p>While Kairo is listening, slides follow along by themselves: a live song or sermon deck advances as it's sung or preached (the bar under the playlist shows <strong>Following</strong> and where it is), and a slide deck in the playlist comes up on its own when its first slide is said. When the slides move on while a scripture is on screen, the slide takes the screen back — the preacher has moved on. A slide that is itself scripture (the sermon's verses put on slides) is left to Bible detection, which puts the verse up as it's read. Click any slide to take over — following carries on from there. Stop listening and it stops.</p>
                             </div>
                         </details>
 
@@ -1506,7 +1506,8 @@
                                     <li><strong>The output window is blank or on the wrong screen</strong> — reselect it under Settings → Outputs → External Display.</li>
                                     <li><strong>An NDI output won't turn on</strong> — install the free NDI Tools runtime (ndi.video/tools) and try the toggle again; Kairo doesn't bundle it. The output's own status line shows the exact reason when it fails.</li>
                                     <li><strong>An imported file lost its look</strong> — only ProPresenter files preserve their own design automatically; a plain text/Word import always uses a Kairo theme instead, by design.</li>
-                                    <li><strong>A slide disappeared when the preacher cited a verse</strong> — the verse covers the slide; the slide is still live underneath. Press <strong>Clear Bible</strong> (lit while this is the case) to bring it back.</li>
+                                    <li><strong>A slide disappeared when the preacher cited a verse</strong> — the verse covers the slide; the slide is still live underneath. Press <strong>Clear Bible</strong> (lit while this is the case) to bring it back, or it comes back by itself when the slides follow the preacher on to the next one.</li>
+                                    <li><strong>Something odd happened in a live service</strong> — Kairo keeps a log of what it heard and did in <em>server.log</em>, in its app-data folder (on a Mac: ~/Library/Application Support/com.kairo.scripture). Send it along with what you saw.</li>
                                     <li><strong>Live Status says Reconnecting…</strong> — the internet connection dropped. Kairo keeps listening and reconnects by itself; words said in the meantime are caught up. Nothing to do.</li>
                                     <li><strong>A name keeps being misheard</strong> (the pastor, the church) — add it under Settings → Language → Church vocabulary.</li>
                                     <li><strong>A citation's book or verse number comes through wrong</strong> ("Philippians" for Ephesians, "John" for First John, 53 for 63) — Kairo switches once the words around it show which verse is meant. If the preacher only names the verse and moves on, nothing tells them apart: send the right one from Possible Matches or the search box.</li>
@@ -1951,71 +1952,21 @@
                 try {
                     const { WebviewWindow } = window.__TAURI__.webviewWindow;
                     // Reuse an existing display window if it's already open.
+                    let replacedExisting = false;
                     const existing = await WebviewWindow.getByLabel(label);
                     if (existing) {
-                        // Real incident: reassigning an output to a different
-                        // monitor (or re-picking a previously-used one) only
-                        // ever navigate()d this existing window — never
-                        // repositioned/resized it. A window that happened to
-                        // be sitting on the operator's own screen (from an
-                        // earlier fallback, a manual drag, or the OS restoring
-                        // it there after a restart) just stayed there forever;
-                        // only a brand-new window ever picked up opts.x/y/
-                        // width/height. Owner: "when a user selects a
-                        // previous output, it naturally defaults back to the
-                        // screen of the app running." A window can't be
-                        // moved/resized while fullscreen on most platforms,
-                        // so drop fullscreen first, reposition, then reapply
-                        // it — matching the fullscreen:true this is always
-                        // called with (see openDisplayOutput in app.js).
-                        try {
-                            await existing.setFullscreen(false);
-                            const { LogicalPosition, LogicalSize } = window.__TAURI__.dpi;
-                            if (opts.width != null && opts.height != null) {
-                                await existing.setSize(new LogicalSize(opts.width, opts.height));
-                            }
-                            if (opts.x != null && opts.y != null) {
-                                await existing.setPosition(new LogicalPosition(opts.x, opts.y));
-                            }
-                            if (opts.fullscreen) await existing.setFullscreen(true);
-                        } catch (e) {
-                            fetch('/api/debug-log', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({
-                                event: 'openDisplayWindow reposition failed', data: { label, error: String(e), message: e && e.message },
-                            }) }).catch(function(){});
-                            console.warn('[KAIRO] Failed to reposition existing display window:', e);
+                        // Replace it with a fresh window at the new place/size.
+                        // Tauri 2 has no navigate() on a window from JavaScript:
+                        // the old reload-in-place called it after hiding the
+                        // window, threw, and left the output invisible — slides
+                        // "didn't send" (live test, 3.0.1). A fresh window also
+                        // takes the new monitor's position and size, which
+                        // reassigning an output needs (see openDisplayOutput).
+                        try { await existing.close(); } catch {}
+                        for (let i = 0; i < 30 && await WebviewWindow.getByLabel(label); i++) {
+                            await new Promise(r => setTimeout(r, 100));
                         }
-                        // Deliberately NOT show()/setFocus() here before the
-                        // reload below — that used to make an ALREADY-VISIBLE
-                        // window flash to WebKit's default white background
-                        // the instant navigate() started reloading it, then
-                        // back to dark once display.html's CSS repainted —
-                        // visible on the real output screen every time an
-                        // output got reassigned to a different monitor.
-                        // Hidden instead, so the reload happens off-screen —
-                        // same fix already applied to fresh window creation
-                        // below, and display.html's own boot script (its
-                        // "Reveal the window" step) already calls show()
-                        // itself on EVERY load, fresh or reloaded, once its
-                        // own dark CSS has actually settled, so nothing here
-                        // needs to show it again.
-                        try { await existing.hide(); } catch {}
-                        // Push the new URL so layout / opacity changes apply.
-                        // A navigate() is a real page reload of display.html — it
-                        // boots blank by design, so anything genuinely live (a
-                        // slide, a running timer segment) has to be re-pushed or
-                        // the screen just stays blank until the operator notices
-                        // and manually re-sends. Reachable from an ordinary action
-                        // (reassigning the output's monitor), not just a rare
-                        // reopen, so this can't be skipped.
-                        await existing.navigate(location.origin + url);
-                        // navigate() resolves once navigation is ISSUED, not once the
-                        // reloaded display.html has reopened its WebSocket — a resend
-                        // right here can race ahead of that reconnect and be dropped.
-                        // Try immediately (usually plenty) and once more after the
-                        // window's own reconnect backoff would have caught up.
-                        try { window.KairoService?.resendLiveForThemeEdit?.(null); } catch {}
-                        setTimeout(() => { try { window.KairoService?.resendLiveForThemeEdit?.(null); } catch {} }, 1500);
-                        return;
+                        replacedExisting = true;
                     }
                     const win = new WebviewWindow(label, {
                         // fullscreen intent rides on the URL (see &fs=1 below)
@@ -2062,6 +2013,15 @@
                       }) }).catch(function(){});
                       console.warn('[KAIRO] WebviewWindow creation error:', e);
                     });
+                    // A replaced window boots blank — re-push whatever is live
+                    // (slide, timer) once it has connected, and once more after
+                    // its reconnect backoff would have caught up.
+                    if (replacedExisting) {
+                        win.once('tauri://created', function() {
+                            setTimeout(function() { try { window.KairoService?.resendLiveForThemeEdit?.(null); } catch {} }, 600);
+                            setTimeout(function() { try { window.KairoService?.resendLiveForThemeEdit?.(null); } catch {} }, 2000);
+                        });
+                    }
                 } catch (e) {
                     fetch('/api/debug-log', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({
                       event: 'openDisplayWindow threw', data: { label, error: String(e), message: e && e.message },

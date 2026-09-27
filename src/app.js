@@ -727,8 +727,13 @@ async function openMonitorWindow() {
   // keeps working in the main window while it's up.
   const width = Math.min(880, Math.round(window.screen.availWidth * 0.9));
   const height = Math.max(420, Math.round(window.innerHeight * 0.78));
-  const path = `/display.html?output=${encodeURIComponent(target.type === 'main' ? 'main' : target.id)}&monitor=1`;
-  const title = `KAIRO Monitor — ${target.name}`;
+  // The grid pops out as the grid (monitor.html: every output that's on, plus
+  // Main); the single view pops out that one output.
+  const tiles = monitorTargets().map(t => { const { w, h } = monitorResolution(t); return { id: t.type === 'main' ? 'main' : t.id, name: t.name, w, h }; });
+  const path = monitorGridActive
+    ? `/monitor.html?tiles=${encodeURIComponent(JSON.stringify(tiles))}`
+    : `/display.html?output=${encodeURIComponent(target.type === 'main' ? 'main' : target.id)}&monitor=1`;
+  const title = monitorGridActive ? 'KAIRO Monitor — all outputs' : `KAIRO Monitor — ${target.name}`;
   const WebviewWindow = window.__TAURI__?.webviewWindow?.WebviewWindow;
   if (!WebviewWindow) { window.open(path, MONITOR_WINDOW_LABEL, `width=${width},height=${height}`); return; }
   try {

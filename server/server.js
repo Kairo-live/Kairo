@@ -2122,10 +2122,10 @@ app.post('/api/theme/import-protheme', (req, res) => {
 // Syphon), and carries an optional per-item `look` so a song can render on
 // the lyrics theme while scripture stays on the output's own theme.
 app.post('/api/service/send', async (req, res) => {
-  const { verse, look, auto } = req.body;
+  const { verse, look, auto, follow } = req.body;
   if (!verse) return res.status(400).json({ error: 'No slide provided' });
-  const landed = await sendServiceSlide(verse, look, { auto: !!auto });
-  res.json({ ok: true, underBible: landed === 'under-bible' });
+  const landed = await sendServiceSlide(verse, look, { auto: !!auto, follow: !!follow });
+  res.json({ ok: true, underBible: landed === 'under-bible', skipped: landed === 'scripture-slide' ? 'scripture' : null });
 });
 
 // ── Output layers: the Bible sits above slides ────────────────────────────
@@ -2147,13 +2147,44 @@ function broadcastLayerState() {
 }
 
 // A playlist item (song, announcement, slide) or a manual scripture send.
+// A slide whose text names a verse ("John 3:16 — For God so loved…") or reads
+// as one. Cached by text: the follower can match the same slide repeatedly.
+const scriptureSlideCache = new Map();
+async function isScriptureSlide(verse) {
+  const text = `${verse.reference || ''} ${verse.text || ''}`.replace(/\s+/g, ' ').trim();
+  if (!text) return false;
+  if (scriptureSlideCache.has(text)) return scriptureSlideCache.get(text);
+  let yes = parseAllSpokenReferences(text).some(r => r.verse != null || r.verseStart != null || r.ranges);
+  if (!yes && workerBasicReady && text.split(' ').length >= 6) {
+    try {
+      const top = ((await workerCall('verbatimSearch', { text, minWords: 6, limit: 1 }, 2000)).results || [])[0];
+      yes = !!top && (top.similarity >= VERBATIM_AUTOSEND_MIN || (top.matchedIdf ?? 0) >= VERBATIM_CERTAIN_IDF);
+    } catch {}
+  }
+  if (scriptureSlideCache.size > 200) scriptureSlideCache.clear();
+  scriptureSlideCache.set(text, yes);
+  return yes;
+}
+
 // Returns 'under-bible' when an automatic slide change was kept under the Bible.
-async function sendServiceSlide(verse, look, { auto = false } = {}) {
+// follow: the slides moved on because the preacher's words matched one (the
+// follower or content lookup) — the preacher has moved on from the scripture,
+// so the slide takes the screen (owner, live test). Any other automatic
+// re-send (a theme edit re-rendering the live slide) stays underneath.
+async function sendServiceSlide(verse, look, { auto = false, follow = false } = {}) {
+  // A slide that is itself scripture (the sermon's verses put on slides) is
+  // never sent by the follower: Bible detection puts the verse up as it's
+  // read, in the church's translation and theme (owner). An operator's own
+  // click still sends it.
+  if (follow && !verse.book && await isScriptureSlide(verse)) {
+    console.log(`[Service] Follower skipped a scripture slide ("${String(verse.text || '').slice(0, 50)}…") — Bible detection handles it`);
+    return 'scripture-slide';
+  }
   if (verse.book) {
     setBibleOnTop(true);
   } else {
     slideUnderneath = { verse, look };
-    if (bibleOnTop && auto) { broadcastLayerState(); return 'under-bible'; }
+    if (bibleOnTop && auto && !follow) { broadcastLayerState(); return 'under-bible'; }
     setBibleOnTop(false);
   }
   // A song/announcement/slide (no book) is now live — see liveNonScriptureSlideAt.
@@ -3726,7 +3757,21 @@ async function startDeepgram(config = {}, { reconnect = false } = {}) {
             lastDeepgramEventLoggedAt = now;
             console.log(`[Deepgram] Transcript event received — text="${alt?.transcript || ''}" confidence=${alt?.confidence ?? 'n/a'} is_final=${data.is_final}`);
           }
-          if (data.is_final) { deepgramPendingInterim = null; deepgramFinalWaiter?.(); }
+          if (data.is_final) {
+            deepgramFinalWaiter?.();
+            // Deepgram can close a segment EMPTY after showing words for it —
+            // most often when audio arrives in stalls and bursts. The operator
+            // watched those words appear, then vanish, and the transcript went
+            // on without them (live test). Keep them, the same as on a dropped
+            // connection.
+            const pending = deepgramPendingInterim;
+            deepgramPendingInterim = null;
+            if (!alt?.transcript?.trim() && pending?.text && pending.text.trim().split(RE_SPACES).length >= 3) {
+              deepgramPendingInterim = pending;
+              lockPendingInterim('segment finalized empty');
+              return;
+            }
+          }
           if (!alt?.transcript?.trim()) return;
           deepgramLastTranscriptAt = now;
           speechMsSinceTranscript = 0;
@@ -4210,7 +4255,9 @@ async function processStreamText(text) {
       const pointedAt = passagePointedAt(top[0].book, top[0].chapter, top[0].verse);   // before the send puts it on screen
       const sent = await broadcastDetection(top, 'stream', top[0].similarity || 0.90, streamTarget, { verbatimDisagreed });
       if (sent === 'viewer') console.log(`[Stream] "${top[0].reference}" confirmed-alignment (matchedIdf=${(top[0].matchedIdf ?? 0).toFixed(1)}) → viewer`);
-      if (sent === 'viewer' && !pointedAt) {
+      // Not for a match that's already certain on its words alone — that's the
+      // verse being read, and each check costs model time.
+      if (sent === 'viewer' && !pointedAt && !((top[0].matchedIdf ?? 0) >= VERBATIM_CERTAIN_IDF)) {
         const relatives = streamAnchorsNear(top[0]);
         if (relatives.length) await startCitationCheck(top[0], '', false, { siblings: relatives });
       }
@@ -5889,6 +5936,8 @@ async function decideTwin(candidate, key, twins) {
 const CITATION_CHECK_WORDS = 35;      // speech after the citation that may decide
 const CITATION_CHECK_MS = 25000;
 const CITATION_MEANING_MIN_WORDS = 6;
+const CITATION_MEANING_EVERY_WORDS = 8;   // between meaning checks on speech in progress (finals always check)
+const CITATION_MAX_SIBLINGS = 4;
 const CITATION_RR_FITS = 0.5;         // the cross-encoder says "this is the verse"
 const CITATION_RR_NOT = 0.1;          // …and "this is not"
 const CITATION_COS_LEAD = 0.1;
@@ -5975,6 +6024,7 @@ async function startCitationCheck(verse, transcript, isFinal, { siblings: given 
     }
   }
   if (!siblings.length) return;
+  siblings.splice(CITATION_MAX_SIBLINGS);
   const numberSibling = (v) => v.book === verse.book && v.chapter === verse.chapter;
   const keys = [key, ...siblings.map(v => `${v.book}|${v.chapter}|${v.verse}`)];
   let texts, idf;
@@ -6037,10 +6087,14 @@ async function checkCitationSiblings(transcript, isFinal, { justStarted = false 
   }
   if (heardReadAloud) { citationCheck = null; return; }   // the heard verse is being read: settled
 
-  if (judged >= CITATION_MEANING_MIN_WORDS && !c.meaningBusy && (isFinal || justStarted || spoken - c.meaningAt >= 4)) {
+  if (judged >= CITATION_MEANING_MIN_WORDS && !c.meaningBusy && (isFinal || justStarted || spoken - c.meaningAt >= CITATION_MEANING_EVERY_WORDS)) {
     c.meaningBusy = true; c.meaningAt = spoken;
     let r = null;
-    const windows = [...new Set([text.trim(), ...paraphraseWindows(text)])].filter(Boolean);
+    // Three windows at most (the whole stretch, the last sentence or two) and
+    // four siblings: each call is model time on the same machine as the audio
+    // capture — six windows x six verses took 0.6s a call (live test: audio
+    // buffered, the transcript stopped updating in real time).
+    const windows = [...new Set([text.split(RE_SPACES).slice(-40).join(' '), ...paraphraseWindows(text).slice(0, 2)])].filter(Boolean);
     try { r = (await workerCall('compareVerses', { texts: windows, keys: [c.key, ...c.siblings.map(s => s.key)] }, 3000)).results; } catch {}
     c.meaningBusy = false;
     if (process.env.KAIRO_DEBUG_CITATION) console.log('[DEBUG-CITATION]', JSON.stringify({ heard: c.verse.reference, siblings: c.siblings.map(s => s.verse.reference), text, r }));
@@ -6571,7 +6625,45 @@ server.on('error', (err) => {
 // resetDetectionSession) rather than a reimplementation that could drift,
 // without wanting a real Deepgram connection, OBS polling, or an HTTP
 // server bound to the live port.
+// The packaged app starts this server with no terminal, so everything it
+// prints (detections, transcripts, guards) used to go nowhere — a live test
+// couldn't be read back afterwards. Copied to server.log beside settings.json,
+// timestamped; over 10 MB it rolls to server.log.1 (one kept).
+function teeConsoleToFile() {
+  if (!process.env.KAIRO_APP_DATA_DIR || process.env.KAIRO_EVAL_MODE) return;
+  const logPath = path.join(process.env.KAIRO_APP_DATA_DIR, 'server.log');
+  try { if (fs.statSync(logPath).size > 10 * 1024 * 1024) fs.renameSync(logPath, `${logPath}.1`); } catch {}
+  let out;
+  try { out = fs.createWriteStream(logPath, { flags: 'a' }); } catch { return; }
+  out.on('error', () => {});
+  let written = 0;
+  for (const level of ['log', 'warn', 'error']) {
+    const original = console[level].bind(console);
+    console[level] = (...args) => {
+      original(...args);
+      if (written > 10 * 1024 * 1024) return;   // this run's share; the next start rolls the file
+      const line = `${new Date().toISOString()} ${args.map(a => (typeof a === 'string' ? a : (() => { try { return JSON.stringify(a); } catch { return String(a); } })())).join(' ')}\n`;
+      written += line.length;
+      out.write(line);
+    };
+  }
+  console.log(`[Server] Logging to ${logPath}`);
+  // A stalled main loop is what "audio buffering, the transcript isn't real
+  // time" looks like from here: note it whenever it happens.
+  try {
+    const { monitorEventLoopDelay } = require('perf_hooks');
+    const h = monitorEventLoopDelay({ resolution: 20 });
+    h.enable();
+    setInterval(() => {
+      const p99 = h.percentile(99) / 1e6, max = h.max / 1e6;
+      if (max > 150) console.warn(`[Server] Main loop fell behind: worst ${max.toFixed(0)}ms, 99th pct ${p99.toFixed(0)}ms over the last 30s`);
+      h.reset();
+    }, 30000).unref();
+  } catch {}
+}
+
 if (require.main === module) {
+  teeConsoleToFile();
   startListening();
 } else {
   module.exports = {

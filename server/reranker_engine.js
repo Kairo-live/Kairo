@@ -75,7 +75,7 @@ function ensureLoaded() {
       throw new Error('Reranker model not found — run the reranker installer (Settings) first.');
     }
     const { AutoTokenizer, AutoModelForSequenceClassification } = await loadHf();
-    const opts = { dtype: 'int8', cache_dir: MODEL_CACHE_BASE, local_files_only: true };
+    const opts = { dtype: 'int8', cache_dir: MODEL_CACHE_BASE, local_files_only: true, session_options: require('./semantic_engine').ORT_SESSION_OPTIONS };
     _tokenizer = await AutoTokenizer.from_pretrained(MODEL_ID, opts);
     _model     = await AutoModelForSequenceClassification.from_pretrained(MODEL_ID, opts);
     console.log('[Reranker] Ready — cross-encoder loaded.');

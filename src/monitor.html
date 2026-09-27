@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>KAIRO Monitor</title>
+  <!-- The Monitor's grid, popped out into its own window: a live copy of each
+       output (display.html?monitor=1, silent), laid out at the output's own
+       resolution and scaled into its tile — the same tiles as the in-app grid
+       (renderMonitorGrid in app.js). The tile list comes in ?tiles=. -->
+  <style>
+    :root { color-scheme: dark; }
+    html, body { margin: 0; height: 100%; background: #0c0c0e; color: #e6e6e6;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; }
+    .grid { display: grid; gap: 10px; padding: 10px; box-sizing: border-box;
+      grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); align-content: start; }
+    .tile { border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 8px; background: #141416;
+      padding: 8px 10px; display: flex; flex-direction: column; gap: 6px; }
+    .tile h2 { margin: 0; font-size: 12px; font-weight: 600; color: #bdbdbd; }
+    .frame { position: relative; overflow: hidden; border-radius: 4px; background: #000; }
+    .frame iframe { position: absolute; top: 0; left: 0; border: 0; transform-origin: 0 0; pointer-events: none; }
+    .empty { padding: 24px; color: #8e8e8e; font-size: 13px; }
+  </style>
+</head>
+<body>
+  <div class="grid" id="grid"></div>
+  <script src="client_common.js"></script>
+  <script>
+    (async () => {
+      // The output copies borrow this page's token (client_common.js's
+      // window.kairoAuthToken), so it's loaded before any tile is built.
+      await loadAuthToken();
+      let tiles = [];
+      try { tiles = JSON.parse(new URLSearchParams(location.search).get('tiles') || '[]'); } catch {}
+      const grid = document.getElementById('grid');
+      if (!tiles.length) {
+        grid.innerHTML = '<div class="empty">No outputs are on.</div>';
+        return;
+      }
+      for (const t of tiles) {
+        const w = t.w || 1920, h = t.h || 1080;
+        const tile = document.createElement('div');
+        tile.className = 'tile';
+        const name = document.createElement('h2');
+        name.textContent = t.name || t.id;
+        const box = document.createElement('div');
+        box.className = 'frame';
+        box.style.aspectRatio = `${w} / ${h}`;
+        const frame = document.createElement('iframe');
+        frame.src = `/display.html?output=${encodeURIComponent(t.id)}&monitor=1`;
+        frame.title = `${t.name || t.id} — live`;
+        frame.setAttribute('tabindex', '-1');
+        frame.style.width = `${w}px`;
+        frame.style.height = `${h}px`;
+        box.appendChild(frame);
+        new ResizeObserver(() => { frame.style.transform = `scale(${box.clientWidth / w})`; }).observe(box);
+        tile.append(name, box);
+        grid.appendChild(tile);
+      }
+    })();
+  </script>
+</body>
+</html>

@@ -119,6 +119,7 @@ function ensureLoaded() {
       dtype: 'q4',
       cache_dir: MODEL_CACHE_BASE,
       local_files_only: true,
+      session_options: ORT_SESSION_OPTIONS,
     });
     console.log(`[Semantic] Ready — ${_count} verse embeddings (${_dims}d) + model loaded.`);
   })();
@@ -140,6 +141,12 @@ async function installModel(onProgress) {
 }
 
 function isReady() { return !!(_extractor && _corpus); }
+
+// Half the cores for inference, not all of them (the runtime's default): the
+// audio capture, the transcript and the outputs run on this same machine, and
+// back-to-back model calls on every core starved them — "audio buffering, no
+// real-time text" in a live test. Shared with the reranker.
+const ORT_SESSION_OPTIONS = { intraOpNumThreads: Math.max(1, Math.floor(require('os').cpus().length / 2)), interOpNumThreads: 1 };
 
 // Embeds arbitrary text into the same space as the corpus. Returns a plain
 // Float32Array (already unit-normalized — pooling:'mean', normalize:true,
@@ -260,6 +267,7 @@ async function searchMany(texts, limit = 5) {
 }
 
 module.exports = {
+  ORT_SESSION_OPTIONS,
   ensureLoaded, retryLoaded, isReady, embed, search, searchWithin, searchMany,
   isModelPresent, embeddingsPresent, installModel,
   MODEL_DIR, MODEL_WEIGHTS_FILE, EMB_BIN, EMB_META,
