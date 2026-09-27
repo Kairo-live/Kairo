@@ -44,9 +44,9 @@ const { Worker } = require('worker_threads');
 const axios      = require('axios');
 const OBSWebSocket = require('obs-websocket-js/json').default;
 
-const { createChapterResolver } = require('./chapter_resolver');
+const { createChapterResolver, textAfterBookMention } = require('./chapter_resolver');
 const { createCitationVoting, citationKey } = require('./citation_voting');
-const { setCitationLanguage, BARE_NUMBER_FILLER, AMBIGUOUS_NUMBER_WORDS, parseSpokenReference, parseAllSpokenReferences, resolvePartialReference, detectBookMentions, referenceContext, SINGLE_WORD_BOOKS, consumeNumber, MAX_CHAPTERS, WORD_TO_NUM } = require('./reference_parser');
+const { setCitationLanguage, BARE_NUMBER_FILLER, AMBIGUOUS_NUMBER_WORDS, parseSpokenReference, parseAllSpokenReferences, resolvePartialReference, detectBookMentions, referenceContext, SINGLE_WORD_BOOKS, consumeNumber, MAX_CHAPTERS, SOUND_ALIKE_BOOKS, WORD_TO_NUM } = require('./reference_parser');
 const { localizeCitationText, stripAccents } = require('./citation_i18n');
 const { findNamedPassages } = require('./named_passages');
 const { paraphraseWindows, decideParaphrase } = require('./paraphrase');
@@ -3096,6 +3096,7 @@ async function handleTranscriptSegment(transcript, isFinal, confidence, speechFi
     maybeAdvanceRangeOnNextVersePrefix(transcript);
     if (workerBasicReady) {
       let foundRef = await processForReferences(transcript, false);
+      await checkCitationSiblings(transcript, false);
       if (!foundRef && referenceContext.isValid) {
         // allowBareNumber:false — see resolvePartialReference's own comment
         // for the real incident (an enumerated-points sermon structure,
@@ -3202,6 +3203,7 @@ async function handleTranscriptSegment(transcript, isFinal, confidence, speechFi
   // segment — announcesDifferentBook below needs the real previous segment.
   const prevFinalBefore = { text: prevFinalTranscript, at: prevFinalTranscriptAt };
   let foundRef = await processForReferences(transcript, true);
+  await checkCitationSiblings(transcript, true);
   if (!foundRef) offerNamedPassages(transcript).catch(() => {});
 
   // Diagnostic only (cheap — one branch, no extra work) for a real,
@@ -3448,6 +3450,7 @@ function resetDetectionSession({ keepContinuity = false } = {}) {
   hasNewTranscript      = false;
   interimDetectedRef    = null;
   interimSeenAt.clear();
+  citationCheck         = null;
   lastInterimVerbatim   = 0;
   lastDirectRefTime     = 0;
   streamWatermark       = 0;
@@ -4298,6 +4301,20 @@ async function preferActiveNumberedJohn(ref) {
   return { ...ref, book: ctxBook };
 }
 
+// The spoken ordinal ("first"/"second"/"third", "1st"…) right before the last
+// mention of a bare book word in the last few seconds of speech, across segment
+// breaks — the parser only sees one segment (or two joined) at a time. Only
+// spoken ordinals: a bare "2" there is as likely the previous verse's number.
+const SPOKEN_ORDINALS = { first: 1, '1st': 1, second: 2, '2nd': 2, third: 3, '3rd': 3 };
+function ordinalSaidBefore(bareWord) {
+  if (!bareWord || bareWord.includes('/')) return null;
+  const now = Date.now();
+  const recent = transcriptBuffer.filter(t => now - t.time < 15000).slice(-3).map(t => t.text);
+  const words = `${recent.join(' ')} ${currentInterimText || ''}`.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(RE_SPACES).filter(Boolean);
+  const at = words.lastIndexOf(bareWord.toLowerCase());
+  return at > 0 ? (SPOKEN_ORDINALS[words[at - 1]] || null) : null;
+}
+
 async function resolveAmbiguousRefs(refs) {
   refs = await Promise.all(refs.map(preferActiveNumberedJohn));
   if (!refs.some(r => r.ambiguousGroup)) return refs;
@@ -4308,12 +4325,20 @@ async function resolveAmbiguousRefs(refs) {
     if (seen.has(ref.ambiguousGroup)) continue; // this group's already been resolved
     seen.add(ref.ambiguousGroup);
     const group = refs.filter(r => r.ambiguousGroup === ref.ambiguousGroup);
-    const contextMatch = group.find(r => r.book === referenceContext.book);
+    // The ordinal was said, but in the previous segment: "…it's listed in
+    // second" | "Timothy" | "three one to five" (eval, Impartation service).
+    const spokenNumber = ordinalSaidBefore(ref.ambiguousGroup.split('@')[0]);
+    const ordinalMatch = spokenNumber && group.find(r => r.book.startsWith(`${spokenNumber} `));
+    // The context, or else the book of the last citation that actually went
+    // up in the past minute — the context itself can already hold the misheard
+    // book from a half-heard interim ("third John…" before "…five verse 19").
+    const lastCited = recentCitations.findLast(c => c.cited && Date.now() - c.time < 60000);
+    const contextMatch = ordinalMatch || group.find(r => r.book === referenceContext.book) || group.find(r => r.book === lastCited?.book);
     if (contextMatch) {
-      console.log(`[Direct] Ambiguous citation resolved to "${contextMatch.book}" via active context (was: ${group.map(g => g.book).join(' / ')})`);
+      console.log(`[Direct] Ambiguous citation resolved to "${contextMatch.book}" via ${ordinalMatch ? 'the ordinal said just before it' : 'active context'} (was: ${group.map(g => g.book).join(' / ')})`);
       resolved.push(contextMatch);
     } else {
-      console.log(`[Direct] Ambiguous citation (${group.map(g => g.book).join(' / ')}) — no active context to disambiguate, holding back from auto-send`);
+      console.log(`[Direct] Ambiguous citation (${group.map(g => g.book).join(' / ')}) — no active context to disambiguate (context: ${referenceContext.book || 'none'}), holding back from auto-send`);
       group.forEach(g => resolved.push({ ...g, ambiguousUnresolved: true }));
     }
   }
@@ -4670,6 +4695,22 @@ async function processForReferences(transcript, isFinal) {
               console.log(`[Direct] "${book} ${chapter}:${verse}" doesn't exist — context match found "${verses[0].reference}" instead`);
             }
           }
+          // Nothing in the speech points at a verse of this chapter, but the
+          // book it sounds like has this exact verse ("Jonah 3:16" — Jonah 3
+          // has 10 verses; John 3:16). A misheard book and a misheard verse
+          // number are about equally likely here, so it's offered in Possible
+          // Matches for the operator, never sent — the reading that follows
+          // puts the right one on screen either way. (A chapter the heard book
+          // doesn't have at all is swapped in the parser; that one is certain.)
+          const alike = SOUND_ALIKE_BOOKS[book];
+          if (!verses.length && alike) {
+            const alt = await workerCall('directLookup', { book: alike, chapter, verse }, 8000);
+            if (alt.result) {
+              verses = [alt.result];
+              ref.ambiguousUnresolved = true;
+              console.log(`[Direct] "${book} ${chapter}:${verse}" doesn't exist — offering the sound-alike "${alt.result.reference}"`);
+            }
+          }
         }
       }
 
@@ -4724,7 +4765,9 @@ async function processForReferences(transcript, isFinal) {
       // right one instead of the wrong one landing on the live screen. See
       // resolveAmbiguousRefs's own comment for the incident this fixes.
       if (ref.ambiguousUnresolved) {
-        const sent = await broadcastDetection(verses, 'direct', 1.0, 'suggestions');
+        // capAtSuggestions: the scoring model would otherwise re-decide a
+        // 'direct' citation straight onto the screen.
+        const sent = await broadcastDetection(verses, 'direct', 1.0, 'suggestions', { capAtSuggestions: true });
         if (sent === 'suggestions') console.log(`[Direct] Ambiguous "${verses[0].reference}" → Candidates (operator must confirm)`);
         continue;
       }
@@ -4735,6 +4778,7 @@ async function processForReferences(transcript, isFinal) {
         else clearRangeQueue();
         const sent = await broadcastDetection(verses, 'direct', 1.0, 'viewer');
         if (sent === 'viewer') console.log(`[Direct] "${verses[0].reference}"${verses.length > 1 ? ` (+${verses.length - 1} more in range)` : ''} → viewer`);
+        if (sent === 'viewer' && verses.length === 1) await startCitationCheck(verses[0], transcript, true);
       } else {
         // ── Interim range advance via explicit reference ──────────────────────
         if (tryRangeAdvanceByRef(verses)) return true;
@@ -4752,6 +4796,7 @@ async function processForReferences(transcript, isFinal) {
         interimDetectedTime = now;
         const sent = await broadcastDetection(verses, 'direct', 1.0, 'viewer');
         if (sent === 'viewer') console.log(`[Direct] "${verses[0].reference}" (interim) → viewer`);
+        if (sent === 'viewer' && verses.length === 1) await startCitationCheck(verses[0], transcript, false);
       }
     } catch (err) {
       console.warn('[Server] Reference lookup error:', err.message);
@@ -5151,6 +5196,10 @@ function maybeCorrectMiscitation(topMatch, sourceText, alternates) {
   lastDetectedRef    = `${topMatch.book}|${topMatch.chapter}|${topMatch.verse}`;
   lastDetectedTime   = now;
   lastDetectedMethod = topMatch.method || 'verbatim';
+  // Recorded like any other send: the "already on screen before this
+  // citation" guard above reads it (a corrected-in verse was invisible to it,
+  // so Jeremiah 17:7 shown this way later "corrected" a new Psalm 125:1).
+  recentDetections.set(lastDetectedRef, now);
   sendToOutputs(topMatch).catch(err => console.warn('[Server] sendToOutputs (correction) failed:', err.message));
   return true;
 }
@@ -5659,6 +5708,153 @@ async function decideTwin(candidate, key, twins) {
   try { best.verse = (await workerCall('directLookup', best.ref, 2000)).result; } catch { return null; }
   return best.verse ? best : null;
 }
+// ── A citation whose book was misheard as another real book ──────────────────
+// An accent or a garbled ordinal turns one book into another that has the same
+// chapter and verse: "First John 4:4" came through as "Fake John" / "Failure
+// John" (= John 4:4), "Philippians 2:10" as Ephesians. The citation goes up as
+// heard — it's usually right, and seconds matter — then what the preacher says
+// next decides. "Who is in you is greater than… the world" is 1 John 4:4;
+// nothing in it is John 4:4 ("he must needs go through Samaria").
+//
+// The cross-encoder decides (against the KJV and a modern wording — preachers
+// paraphrase): the sibling must clearly be what was said, the heard verse
+// clearly not, and the sibling must also be closer in meaning. Measured on real
+// and made-up cases: every misheard book scored 0.7–1.0 for the sibling and at
+// most 0.04 for the heard verse; a correct John 3:16 followed by "he laid down
+// his life for us" scored its sibling 0.998 but kept 0.19 itself and only a
+// 0.08 meaning lead — not switched. Without a cross-encoder (not installed),
+// the verses' own rare words decide instead; common words ("God", "Lord") are
+// in every verse and prove nothing (a 1 Kings 19 reading once "matched"
+// 2 Kings 19:4 on them).
+const CITATION_CHECK_WORDS = 35;      // speech after the citation that may decide
+const CITATION_CHECK_MS = 25000;
+const CITATION_MEANING_MIN_WORDS = 6;
+const CITATION_RR_FITS = 0.5;         // the cross-encoder says "this is the verse"
+const CITATION_RR_NOT = 0.1;          // …and "this is not"
+const CITATION_COS_LEAD = 0.1;
+const CITATION_WORD_MIN_IDF = 3.5;    // "world" 4.3, "greater" 5.5, "knee" 8.5; "God" 1.9, "Lord" 1.5
+let citationCheck = null;   // { verse, key, words, siblings, finals, inUtterance, at, meaningAt, meaningBusy }
+
+function citationSiblingBooks(book) {
+  const out = new Set();
+  if (SOUND_ALIKE_BOOKS[book]) out.add(SOUND_ALIKE_BOOKS[book]);
+  const base = book.replace(/^[123] /, '');
+  for (const b of [base, `1 ${base}`, `2 ${base}`, `3 ${base}`]) if (b !== book && MAX_CHAPTERS[b]) out.add(b);
+  return [...out];
+}
+
+async function startCitationCheck(verse, transcript, isFinal) {
+  const key = `${verse.book}|${verse.chapter}|${verse.verse}`;
+  if (citationCheck?.key === key && Date.now() - citationCheck.at < CITATION_CHECK_MS) return;   // the same citation re-parsed
+  citationCheck = null;
+  const siblings = [];
+  for (const book of citationSiblingBooks(verse.book)) {
+    const m = await workerCall('directLookup', { book, chapter: verse.chapter, verse: verse.verse }, 2000).catch(() => null);
+    if (m?.result) siblings.push(m.result);
+  }
+  if (!siblings.length) return;
+  const keys = [key, ...siblings.map(v => `${v.book}|${v.chapter}|${v.verse}`)];
+  let texts, idf;
+  try {
+    texts = (await workerCall('matchTexts', { keys }, 2000)).texts;
+    const all = [...new Set(texts.flatMap(t => meaningfulWords(t || '')))];
+    idf = new Map((await workerCall('getIdfScores', { words: all }, 2000)).words);
+  } catch { return; }
+  const rareWords = (t) => new Set(meaningfulWords(t || '').filter(w => (idf.get(w) || 0) >= CITATION_WORD_MIN_IDF).map(stemLite));
+  citationCheck = {
+    verse, key, words: rareWords(texts[0]),
+    siblings: siblings.map((v, i) => ({ verse: v, key: keys[i + 1], words: rareWords(texts[i + 1]) })),
+    finals: '', inUtterance: !isFinal, at: Date.now(), meaningAt: 0, meaningBusy: false,
+  };
+  if (isFinal) citationCheck.finals = textAfterBookMention(transcript, verse.book, verse.chapter);
+  await checkCitationSiblings(transcript, isFinal, { justStarted: true });
+}
+
+async function checkCitationSiblings(transcript, isFinal, { justStarted = false } = {}) {
+  const c = citationCheck;
+  if (!c) return;
+  const now = Date.now();
+  // Something else is on screen now (a new citation, the next verse, Back).
+  if (now - c.at > CITATION_CHECK_MS || lastDetectedRef !== c.key) { citationCheck = null; return; }
+  // Words after the citation: finished segments since, plus the one in
+  // progress (only the part after the citation, while it's the same utterance).
+  let text = c.finals;
+  if (!(justStarted && isFinal)) {
+    const part = c.inUtterance ? textAfterBookMention(transcript, c.verse.book, c.verse.chapter) : transcript;
+    text = `${c.finals} ${part}`;
+    if (isFinal) { c.finals = text; c.inUtterance = false; }
+  }
+  const spoken = text.split(RE_SPACES).filter(Boolean).length;
+
+  // Rare words only one of the two verses has, in the speech.
+  const speech = new Set(meaningfulWords(text).map(stemLite));
+  let byWords = null, heardReadAloud = false;
+  for (const s of c.siblings) {
+    let heardOnly = 0, siblingOnly = 0;
+    for (const w of c.words) if (!s.words.has(w) && speech.has(w)) heardOnly++;
+    for (const w of s.words) if (!c.words.has(w) && speech.has(w)) siblingOnly++;
+    if (heardOnly >= siblingOnly + TWIN_SPEECH_MARGIN) heardReadAloud = true;
+    else if (siblingOnly >= heardOnly + TWIN_SPEECH_MARGIN && (!byWords || siblingOnly > byWords.hits)) byWords = { verse: s.verse, hits: siblingOnly, against: heardOnly };
+  }
+  if (heardReadAloud) { citationCheck = null; return; }   // the heard verse is being read: settled
+
+  if (spoken >= CITATION_MEANING_MIN_WORDS && !c.meaningBusy && (isFinal || spoken - c.meaningAt >= 4)) {
+    c.meaningBusy = true; c.meaningAt = spoken;
+    let r = null;
+    try { r = (await workerCall('compareVerses', { text, keys: [c.key, ...c.siblings.map(s => s.key)] }, 3000)).results; } catch {}
+    c.meaningBusy = false;
+    if (citationCheck !== c || !r) return;
+    const heard = r[0];
+    if (heard.rr != null) {
+      if (heard.rr >= CITATION_RR_FITS) { citationCheck = null; return; }   // the heard verse is what's being said
+      let pick = null;
+      c.siblings.forEach((s, i) => {
+        const m = r[i + 1];
+        if (m?.rr >= CITATION_RR_FITS && heard.rr <= CITATION_RR_NOT && (m.cos ?? 0) >= (heard.cos ?? 0) + CITATION_COS_LEAD
+            && (!pick || m.rr > pick.rr)) pick = { verse: s.verse, rr: m.rr };
+      });
+      if (pick) return switchCitationToSibling(c, pick.verse, `the cross-encoder reads it as ${pick.verse.book} (${pick.rr.toFixed(2)} vs ${heard.rr.toFixed(2)})`);
+    } else if (byWords) {
+      return switchCitationToSibling(c, byWords.verse, `${byWords.hits} vs ${byWords.against} of each verse's own rare words`);
+    }
+  }
+  if (spoken >= CITATION_CHECK_WORDS) citationCheck = null;   // long past the citation
+}
+
+async function switchCitationToSibling(c, verse, why) {
+  citationCheck = null;
+  const from = c.verse.reference;
+  console.log(`[Citation] "${from}" → "${verse.reference}" — ${why}`);
+  recentlyCorrectedAway = { key: c.key, replacedByKey: `${verse.book}|${verse.chapter}|${verse.verse}`, replacedByReference: verse.reference, at: Date.now() };
+  await broadcastDetection([verse], 'direct', 1.0, 'viewer', { correctedFrom: from });
+  updateSermonContext({ book: verse.book, chapter: verse.chapter, verse: verse.verse, reference: verse.reference });
+  referenceContext.update(verse.book, verse.chapter);
+}
+
+// The verse (reference) in play — on screen within the last minute, in the
+// active range, or cited in the last five minutes — that `v` is a
+// near-duplicate of, or null. Twins from the worker's table, plus the known
+// collision chapters (Jeremiah 17 / Psalm 1), which share imagery verse to verse.
+function twinInPlay(v) {
+  const now = Date.now();
+  const inPlay = [];
+  if (lastOutputVerse && now - lastOutputVerseAt < SAME_BOOK_WINDOW_MS) inPlay.push(lastOutputVerse);
+  inPlay.push(...rangeAllVerses);
+  for (const c of recentCitations) if (c.cited && now - c.time < CONTEXT_WINDOW_MS) inPlay.push(c);
+  const twins = new Set((twinMap.get(`${v.book}|${v.chapter}|${v.verse}`) || []).map(t => t[0]));
+  for (const p of inPlay) {
+    if (!p || !p.book) continue;
+    if (p.book === v.book && p.chapter === v.chapter && p.verse === v.verse) return null;   // it IS the passage in play
+  }
+  for (const p of inPlay) {
+    if (!p || !p.book) continue;
+    const ref = p.reference || `${p.book} ${p.chapter}${p.verse ? ':' + p.verse : ''}`;
+    if (p.verse != null && twins.has(`${p.book}|${p.chapter}|${p.verse}`)) return ref;
+    if (p.book !== v.book && detectionScoring.isKnownCollisionPair(p.book, p.chapter, v.book, v.chapter)) return ref;
+  }
+  return null;
+}
+
 const TWIN_EXEMPT_METHODS = new Set(['direct', 'direct-partial', 'chapter-keyword', 'continuation', 'context-citation', 'named-passage']);
 // Evidence that is a match against the Bible's TEXT — as opposed to anything spoken as a reference or trigger.
 const TEXT_MATCH_METHODS = new Set(['stream', 'verbatim', 'fingerprint', 'semantic', 'paraphrase']);
@@ -5812,6 +6008,18 @@ async function broadcastDetection(verses, method, topScore, target, opts = {}) {
   // Below the model's floor → drop entirely; it is not useful enough to show
   // anywhere. (Nothing else may let a 'drop' fall through to a broadcast.)
   if (target === 'drop') return false;
+
+  // A text match whose near-twin is the passage in play is explained by it —
+  // "planted by the side of the river bank" while Jeremiah 17:8 is up fits
+  // Psalm 1:3 just as well. The screen already shows what was said, so the
+  // twin isn't offered in Possible Matches either (a citation of it still goes up).
+  if (target === 'suggestions' && verses[0] && TEXT_MATCH_METHODS.has(method)) {
+    const inPlay = twinInPlay(verses[0]);
+    if (inPlay) {
+      console.log(`[Twin] "${verses[0].reference}" not offered — its near-duplicate "${inPlay}" is already in play`);
+      return false;
+    }
+  }
 
   // Near-duplicate twins (see resolveTwin). Only for text-matched evidence —
   // a spoken citation names its own verse. Evidence fields travel with a
@@ -5999,7 +6207,8 @@ async function broadcastDetection(verses, method, topScore, target, opts = {}) {
     applyScriptureLanguage(verses);
     await attachBibleTranslations(verses);
   }
-  broadcast({ type: 'detection', verses, method, topScore, target, timestamp: now });
+  broadcast({ type: 'detection', verses, method, topScore, target, timestamp: now,
+    ...(opts.correctedFrom ? { corrected: true, correctedFrom: opts.correctedFrom } : {}) });
 
   // Do NOT clear candidates on viewer send — candidates is now a permanent session log.
 

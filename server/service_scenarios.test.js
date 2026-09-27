@@ -217,6 +217,89 @@ const fresh = () => { server.resetDetectionSession(); referenceContext.reset(); 
     assert.ok(onScreen().includes('Romans 8:28'), JSON.stringify(onScreen()));
   });
 
+  // ── A book heard as another real book (accents, a garbled ordinal) ──
+  await test('a chapter only the sound-alike book has goes up at once as that book', async () => {
+    fresh(); server.clearRangeQueue(); await server.clearLayer('all');
+    await say('Philippians 6 verse 12.');
+    assert.deepEqual(onScreen(), ['Ephesians 6:12'], JSON.stringify(sent));
+  });
+
+  await test('a verse only the sound-alike has is offered, not sent', async () => {
+    fresh(); server.clearRangeQueue(); await server.clearLayer('all');
+    await say('Jonah 3 verse 16.');
+    assert.deepEqual(onScreen(), [], JSON.stringify(sent));
+    assert.ok(sent.some(s => s.ref === 'John 3:16' && s.target === 'suggestions'), JSON.stringify(sent));
+  });
+
+  await test('"Fake John 4:4" then 1 John 4:4\'s words: the screen switches to 1 John 4:4', async () => {
+    fresh(); server.clearRangeQueue(); await server.clearLayer('all');
+    await say('Fake John four verse four say, who is in you is greater than the devils in the world.');
+    assert.equal(onScreen().at(-1), '1 John 4:4', JSON.stringify(sent));
+  });
+
+  await test('a paraphrase in modern words decides too ("the world… under the control of the evil one" = 1 John 5:19)', async () => {
+    fresh(); server.clearRangeQueue(); await server.clearLayer('all');
+    await say('But hear this, say John five verse 19 have said, the world where you are is under power controlled by the evil one.');
+    assert.equal(onScreen().at(-1), '1 John 5:19', JSON.stringify(sent));
+  });
+
+  await test('"Ephesians 2:10, in the name of Jesus every knee shall bow" is Philippians 2:10', async () => {
+    fresh(); server.clearRangeQueue(); await server.clearLayer('all');
+    await say('He said Ephesians two verse 10, in my name Jesus, every knee shall bow.');
+    assert.equal(onScreen().at(-1), 'Philippians 2:10', JSON.stringify(sent));
+  });
+
+  await test('a citation heard right stays, whatever follows it', async () => {
+    fresh(); server.clearRangeQueue(); await server.clearLayer('all');
+    await say('John 4 verse 4. And he must needs go through Samaria. Jesus went out of his way for one woman in the world.');
+    await say('Let us talk about love this morning, because love is the greatest thing in the world.');
+    assert.deepEqual(onScreen(), ['John 4:4'], JSON.stringify(sent));
+    fresh(); server.clearRangeQueue(); await server.clearLayer('all');
+    await say('John 3 verse 16.');
+    await say('He gave everything, even his own life, church, so we should give our lives for one another too.');
+    assert.ok(!sent.some(s => s.ref === '1 John 3:16' && s.method === 'direct'), JSON.stringify(sent));   // no switch by the citation check
+  });
+
+  await test('a bare "Timothy" with nothing to choose by is only offered', async () => {
+    fresh(); server.clearRangeQueue(); await server.clearLayer('all');
+    await say('Timothy 3 verse 16.');
+    assert.deepEqual(onScreen(), [], JSON.stringify(sent));
+  });
+
+  await test('"second" | "Timothy" | "three one to five" split across segments is 2 Timothy', async () => {
+    fresh(); server.clearRangeQueue(); await server.clearLayer('all');
+    await say('That will disconnect people from being partakers of this agenda and it is listed in second');
+    await say('Timothy');
+    await say('three one to five');
+    assert.equal(onScreen()[0], '2 Timothy 3:1', JSON.stringify(sent));
+    assert.ok(!onScreen().includes('1 Timothy 3:1'), JSON.stringify(sent));
+  });
+
+  await test('"third John five verse 19" after a 1 John citation is 1 John 5:19', async () => {
+    fresh(); server.clearRangeQueue(); await server.clearLayer('all');
+    await say('First John four verse four say, who is in you is greater than the devils in the world.');
+    await say('But hear this, third John five verse 19 have said, the world where you are is under power controlled by the evil one.');
+    assert.equal(onScreen().at(-1), '1 John 5:19', JSON.stringify(sent));
+  });
+
+  await test('the twin of the verse on screen is not offered (Psalm 1:3 while Jeremiah 17:8 is up)', async () => {
+    fresh(); server.clearRangeQueue(); await server.clearLayer('all');
+    await say('Jeremiah 17 verse seven to eight.');
+    await say('He said blessed are those who trusted in the Lord Jesus. For you shall be like a tree, planted by the side of the river bank. You will never dry.');
+    await wait(1500);
+    assert.ok(!sent.some(s => s.ref === 'Psalms 1:3'), JSON.stringify(sent));
+  });
+
+  await test('a verse read before a new citation can\'t "correct" it (Jeremiah 17:7, then Psalm 125)', async () => {
+    fresh(); server.clearRangeQueue(); await server.clearLayer('all');
+    await say('Ephesians two verse 10, in my name Jesus, every knee shall do what?');
+    await say('17 verse seven to eight. He said, blessed are those who trusted in the Lord Jesus. For you shall be like a tree.');
+    await say('Someone 25 verse one and two. He said, you shall be like a mountain Zion.');
+    await say('And nobody can take you away from your position. From today, prepare the barrier of your enemies.');
+    await wait(1500);
+    assert.equal(onScreen().at(-1), 'Psalms 125:1', JSON.stringify(sent));
+  });
+
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 })();

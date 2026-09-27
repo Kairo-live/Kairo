@@ -236,10 +236,23 @@ const MAX_CHAPTERS = {
   'Jude':1,'Revelation':22,
 };
 
+// Book names an accent or quick delivery turns into each other ("Ephesians"
+// heard as "Philippians"). Only used when a citation can't be right as heard —
+// the chapter or verse doesn't exist in the book as heard but does in its
+// sound-alike. A citation that exists as heard is never swapped; the reading
+// that follows corrects it if the book was misheard.
+const SOUND_ALIKE_BOOKS = {
+  Ephesians: 'Philippians', Philippians: 'Ephesians',
+  John: 'Jonah', Jonah: 'John',
+  Job: 'Joel', Joel: 'Job',
+};
+
 const PARSER_HEALING_PAIRS = [
   // Book name repairs
   ['acts of the apostles','acts'],['acts of the apostle','acts'],
   ['acts of apostles','acts'],['acts of apostle','acts'],['book of acts','acts'],
+  // "Acts" itself dropped: "in the book of Apostle one verse eight" (live run).
+  ['book of the apostles','acts'],['book of the apostle','acts'],['book of apostles','acts'],['book of apostle','acts'],
   ['zachariah','zechariah'],['zacharias','zechariah'],
   ['naha','nahum'],      // Deepgram mishear: "Nahum" → "naha"  (4-char, below fuzzy threshold)
   ['habakkak','habakkuk'],['habaka','habakkuk'],['habacuc','habakkuk'], // Habakkuk variants
@@ -454,7 +467,10 @@ function cleanReferenceText(text) {
     .replace(/(\d)\s*:\s*(\d)/g, '$1 $2')
     .replace(/(\d)\s*-\s*(\d)/g, '$1 to $2')
     .replace(/([a-z])-([a-z])/gi, '$1 $2')
-    .replace(/\s+/g, ' ').trim().toLowerCase()));
+    .replace(/\s+/g, ' ').trim().toLowerCase()
+    // STT stutter: "in in Matthew", "the book of of Apostle". A repeated
+    // number word is kept — "one one zero" is Psalm 110.
+    .replace(/\b([a-z]+)(?: \1\b)+/g, (m, w) => (spokenToNumber(w) !== null ? m : w))));
 }
 
 // Requires the digit immediately before "zero" to itself repeat (e.g. "one
@@ -681,7 +697,8 @@ function parseSpokenReference(text, inBibleMode = false) {
 
   for (let i = 0; i < words.length; i++) {
     const matched = matchBookAt(words, i);
-    const bookName = matched.bookName, consumed = matched.consumed;
+    let bookName = matched.bookName;
+    const consumed = matched.consumed;
 
     if (!bookName) continue;
 
@@ -704,6 +721,19 @@ function parseSpokenReference(text, inBibleMode = false) {
       for (let k = scan; k < words.length && k < scan + 4; k++) {
         if (['verse','verses','vers',':'].includes(words[k])) { vKeyword = k; break; }
         if (SINGLE_WORD_BOOKS.has(words[k])) break;
+      }
+      // "Third John five verse 19": a chapter this one-chapter book can't
+      // have, so the ordinal was misheard (really "First John 5:19"). Each
+      // sibling book that has that chapter is a candidate — tagged as an
+      // ambiguous group for the caller, which picks by context or offers them.
+      if (!skippedChapterKw && vKeyword > scan) {
+        const chNum = consumeNumber(words, scan);
+        const vRes = consumeNumber(words, vKeyword + 1);
+        if (chNum && chNum.value > 1 && scan + chNum.consumed === vKeyword && vRes) {
+          const base = bookName.replace(/^[123] /, '');
+          const alts = [`1 ${base}`, `2 ${base}`, `3 ${base}`, base].filter(b => b !== bookName && MAX_CHAPTERS[b] >= chNum.value);
+          if (alts.length) return { book: alts[0], chapter: chNum.value, verse: vRes.value, bookAlternatives: alts };
+        }
       }
       let vStart, consumedTo;
       if (vKeyword >= 0) {
@@ -766,10 +796,24 @@ function parseSpokenReference(text, inBibleMode = false) {
       }
     }
     if (!chRes) continue;
-    const chapter = chRes.value;
+    let chapter = chRes.value;
+    const chapterAt = idx;
     idx += chRes.consumed;
 
-    const maxCh = MAX_CHAPTERS[bookName];
+    let maxCh = MAX_CHAPTERS[bookName];
+    // A chapter the book as heard doesn't have, but its sound-alike does
+    // ("Philippians 6" — Philippians has 4 chapters; Ephesians 6 is the armour
+    // of God): the book name was misheard, the number wasn't. The number is
+    // re-read against the sound-alike's own chapter count so a two-word
+    // number composes ("Joel twenty eight" = Job 28, not Job 20:8).
+    const alike = SOUND_ALIKE_BOOKS[bookName];
+    if (maxCh && chapter > maxCh && alike) {
+      const alikeCh = consumeNumber(words, chapterAt, MAX_CHAPTERS[alike]);
+      if (alikeCh && alikeCh.value <= MAX_CHAPTERS[alike]) {
+        bookName = alike; maxCh = MAX_CHAPTERS[alike];
+        chRes = alikeCh; chapter = alikeCh.value; idx = chapterAt + alikeCh.consumed;
+      }
+    }
     if (maxCh && chapter > maxCh) {
       // The FIRST number exceeded this book's max chapter — try
       // reinterpreting it as the verse, with the number right after it as
@@ -1064,7 +1108,12 @@ function parseAllSpokenReferences(text, inBibleMode = false) {
       const bareWord = words[i];
       const hadPrefix = consumed > 1;
       const variants = NUMBERED_BOOK_VARIANTS[bareWord];
-      if (variants && !hadPrefix) {
+      if (ref.bookAlternatives) {
+        // A misheard ordinal (see the one-chapter branch in parseSpokenReference).
+        const { bookAlternatives, ...rest } = ref;
+        const ambiguousGroup = `${bookAlternatives.join('/')}@${i}`;
+        for (const b of bookAlternatives) refs.push({ ...rest, book: b, ambiguousGroup });
+      } else if (variants && !hadPrefix) {
         // Genuinely ambiguous — "Timothy" alone (no "first"/"second") could
         // mean either book, and this parser has no session context to
         // prefer one. Tagged (not silently picking variants[0]) so the
@@ -1494,6 +1543,7 @@ module.exports = {
   AMBIGUOUS_BOOKS,
   NUMBERED_BOOK_VARIANTS,
   MAX_CHAPTERS,
+  SOUND_ALIKE_BOOKS,
   WORD_TO_NUM,
   consumeNumber,
 };

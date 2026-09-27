@@ -1888,6 +1888,29 @@ parentPort.on('message', async (msg) => {
         parentPort.postMessage({ type: 'matchTextsResult', id: msg.id, texts });
         break;
       }
+      case 'compareVerses': {
+        // How well a stretch of speech fits each of a few named verses: meaning
+        // similarity (embeddings) and the cross-encoder's "does this passage say
+        // what the speech says" — for choosing between verses a citation could be.
+        const idxs = (msg.keys || []).map(k => idxByKey.get(k));
+        const cos = new Map();
+        if (semanticEngine.isReady()) {
+          const valid = idxs.filter(i => i != null);
+          for (const h of await semanticEngine.searchWithin(msg.text || '', valid, valid.length)) cos.set(h.idx, h.score);
+        }
+        let rr = null;
+        const englishText = !(workerData?.altTranslation || '').startsWith('pack:');
+        if (englishText && rerankerEngine.isReady()) {
+          // Scored against the KJV and a modern wording (the church's
+          // translation, else the NLT) — preachers paraphrase in modern English.
+          const wordings = idxs.flatMap(i => (i == null ? ['', ''] : [verseMetadata[i].kjv_text || '', altTextByIdx?.get(i) || verseMetadata[i].nlt_text || verseMetadata[i].kjv_text || '']));
+          const scores = await rerankerEngine.scorePairs(wordings.map(() => msg.text || ''), wordings);
+          rr = idxs.map((_, n) => Math.max(scores[2 * n] ?? 0, scores[2 * n + 1] ?? 0));
+        }
+        const results = idxs.map((i, n) => ({ cos: i == null ? null : (cos.get(i) ?? null), rr: rr ? rr[n] : null }));
+        parentPort.postMessage({ type: 'compareVersesResult', id: msg.id, results });
+        break;
+      }
       case 'getTwins': {
         // verseKey -> [[twinKey, sharedGrams], ...] for every verse with a twin.
         const key = (i) => { const v = verseMetadata[i]; return `${v.book}|${v.chapter}|${v.verse}`; };

@@ -389,3 +389,26 @@ test('"Psalm one twenty-five" heard as "someone 25" is read as Psalm 125 when a 
   assert.deepEqual(f('someone 19 verse 105'), ['Psalms 119:105']);
   assert.deepEqual(f('someone 25 years ago I was in Lagos'), []);
 });
+
+test('a chapter the book as heard doesn\'t have, but its sound-alike does, is the sound-alike', () => {
+  const f = (t) => parseAllSpokenReferences(t).map(r => `${r.book} ${r.chapter}:${r.verse ?? r.verseStart ?? ''}${r.verseEnd && r.verseEnd !== r.verseStart ? '-' + r.verseEnd : ''}`);
+  assert.deepEqual(f('Philippians 6 verse 12'), ['Ephesians 6:12']);          // Philippians has 4 chapters
+  assert.deepEqual(f('Philippians chapter 5 verse 18'), ['Ephesians 5:18']);
+  assert.deepEqual(f('Joel twenty eight verse twenty eight'), ['Job 28:28']);   // the number re-read for Job: 28, not 20
+  assert.deepEqual(f('Philippians 4 verse 13'), ['Philippians 4:13']);        // valid as heard: never swapped
+  assert.deepEqual(f('Ephesians 4 verse 13'), ['Ephesians 4:13']);
+});
+
+test('"the book of Apostle(s)" is Acts, and a stuttered word doesn\'t break a citation', () => {
+  const f = (t) => parseAllSpokenReferences(t).map(r => `${r.book} ${r.chapter}:${r.verse ?? ''}`);
+  assert.deepEqual(f('In the book of of Apostle one verse eight, he say'), ['Acts 1:8']);
+  assert.deepEqual(f('In In Matthew 11 verse 28'), ['Matthew 11:28']);
+  assert.deepEqual(f('Psalm one one zero verse one'), ['Psalms 110:1']);     // a repeated number word is kept
+});
+
+test('a one-chapter book said with another chapter number is a misheard ordinal — its siblings are offered as one group', () => {
+  const refs = parseAllSpokenReferences('But hear this, third John five verse 19 have said');
+  assert.deepEqual(refs.map(r => `${r.book} ${r.chapter}:${r.verse}`), ['1 John 5:19', 'John 5:19']);
+  assert.ok(refs[0].ambiguousGroup && refs[0].ambiguousGroup === refs[1].ambiguousGroup);
+  assert.deepEqual(parseAllSpokenReferences('3 John 4').map(r => `${r.book} ${r.chapter}:${r.verse}`), ['3 John 1:4']);
+});
