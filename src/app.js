@@ -485,13 +485,28 @@ function noteTranscriptSend(reference) {
   const finals = transcriptDiv.querySelectorAll('.transcript-final');
   const line = finals[finals.length - 1];
   if (!line || line.querySelector(`.transcript-sent-chip[data-ref="${CSS.escape(reference)}"]`)) return;
-  const chip = document.createElement('span');
+  const chip = document.createElement('button');
+  chip.type = 'button';
   chip.className = 'transcript-sent-chip';
   chip.dataset.ref = reference;
+  chip.title = `Send ${reference} to the screen`;
   chip.textContent = `→ ${reference}`;
+  chip.addEventListener('click', (e) => { e.stopPropagation(); sendReferenceToScreen(reference); });
   line.appendChild(chip);
 }
+
+// Send a verse by reference: through its Live Queue card when it's there
+// (the same path as that card's Send), otherwise by looking it up.
+function sendReferenceToScreen(reference) {
+  const card = currentDisplayCard?.querySelector(`[data-ref="${CSS.escape(reference)}"] .lvc-send-btn`);
+  if (card) { card.click(); return; }
+  fetch(`${SERVER}/api/search`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ query: reference }),
+  }).catch(err => console.warn('[KAIRO] Send failed:', err.message));
+}
 document.addEventListener('dblclick', (e) => {
+  if (e.target.closest?.('.transcript-sent-chip')) return;
   const line = e.target.closest?.('.transcript-final');
   if (!line || !scriptureSearchInput) return;
   const words = [...line.childNodes].filter(n => n.nodeType === Node.TEXT_NODE).map(n => n.textContent).join(' ')
