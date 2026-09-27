@@ -1564,6 +1564,31 @@ async function buildCaptureGraph(deviceId, existingStream = null) {
   if (ctx.state === 'suspended') await ctx.resume();
   if (ctx.state !== 'running') console.error('[KAIRO] AudioContext still not running after resume():', ctx.state);
   const source = ctx.createMediaStreamSource(stream);
+  // On the audio thread, sent by a worker — the page's main thread never
+  // handles the audio (see audio_capture_worklet.js for the live-test stalls
+  // this ends). The main-thread processor below is the fallback.
+  if (ctx.audioWorklet && typeof AudioWorkletNode === 'function') {
+    try {
+      await ctx.audioWorklet.addModule('audio_capture_worklet.js');
+      const node = new AudioWorkletNode(ctx, 'kairo-capture', { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [1] });
+      node.port.onmessage = (e) => {
+        const d = e.data;
+        if (d instanceof ArrayBuffer) sendAudioFrame(d);          // only until the worker's port is in place
+        else if (d && typeof d.peak === 'number') noteCaptureLevel(d.peak, 1024);
+      };
+      const worker = captureSenderWorker();
+      if (worker) {
+        const channel = new MessageChannel();
+        worker.postMessage({ type: 'port', port: channel.port2 }, [channel.port2]);
+        node.port.postMessage({ port: channel.port1 }, [channel.port1]);
+      }
+      source.connect(node);
+      node.connect(ctx.destination);   // keeps the graph pulling (the node outputs silence)
+      return { stream, ctx, proc: node };
+    } catch (err) {
+      console.warn('[KAIRO] Audio-thread capture unavailable, using the main-thread fallback:', err);
+    }
+  }
   const proc = ctx.createScriptProcessor(1024, 1, 1);
   proc.onaudioprocess = (e) => {
     const float32 = e.inputBuffer.getChannelData(0);
@@ -1575,25 +1600,46 @@ async function buildCaptureGraph(deviceId, existingStream = null) {
       const a = v < 0 ? -v : v;
       if (a > peak) peak = a;
     }
-    const now = Date.now();
-    if (peak > micMeterPeak) micMeterPeak = peak;
-    if (peak > 0) lastNonZeroAudioAt = now;
-    if (peak > AUDIO_PEAK_NOISE_FLOOR) lastRealAudioAt = now;
-    if (now - _lastLevelLogAt > 3000) {
-      _lastLevelLogAt = now;
-      fetch(`${SERVER}/api/debug-log`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ event: 'audio-peak', data: { peak, bufferLength: float32.length } }),
-      }).catch(() => {});
-    }
+    noteCaptureLevel(peak, float32.length);
     sendAudioFrame(int16.buffer);
   };
   source.connect(proc);
   proc.connect(ctx.destination);
   return { stream, ctx, proc };
 }
+
+// The capture level — the meter, the dead-device checks and a debug-log line
+// every 3 s. From the worklet ten times a second, or per fallback frame.
+function noteCaptureLevel(peak, bufferLength) {
+  const now = Date.now();
+  if (peak > micMeterPeak) micMeterPeak = peak;
+  if (peak > 0) lastNonZeroAudioAt = now;
+  if (peak > AUDIO_PEAK_NOISE_FLOOR) lastRealAudioAt = now;
+  if (now - _lastLevelLogAt > 3000) {
+    _lastLevelLogAt = now;
+    fetch(`${SERVER}/api/debug-log`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ event: 'audio-peak', data: { peak, bufferLength } }),
+    }).catch(() => {});
+  }
+}
+
+// One sender worker for the session (audio_sender_worker.js): its own
+// connection to the server, started when capture starts, stopped on Stop.
+let _captureWorker = null;
+function captureSenderWorker() {
+  try {
+    if (!_captureWorker) _captureWorker = new Worker('audio_sender_worker.js');
+    _captureWorker.postMessage({ type: 'start', url: authedWsUrl(`${WS_URL}/?audio=1`) });
+    return _captureWorker;
+  } catch (err) {
+    console.warn('[KAIRO] Audio sender worker unavailable:', err);
+    return null;
+  }
+}
+function stopCaptureSender() { try { _captureWorker?.postMessage({ type: 'stop' }); } catch {} }
 function teardownCaptureGraph(g) {
-  try { if (g.proc) { g.proc.disconnect(); g.proc.onaudioprocess = null; } } catch {}
+  try { if (g.proc) { g.proc.disconnect(); g.proc.onaudioprocess = null; if (g.proc.port) { g.proc.port.postMessage({ port: null }); g.proc.port.onmessage = null; } } } catch {}
   try { g.stream?.getTracks().forEach(t => t.stop()); } catch {}
   try { g.ctx?.close(); } catch {}
 }
@@ -1706,7 +1752,8 @@ async function stopListening() {
 
 function stopAudioCapture() {
   pendingAudioFrames = [];
-  if (audioProcessor) { try { audioProcessor.disconnect(); } catch {} audioProcessor = null; }
+  stopCaptureSender();
+  if (audioProcessor) { try { audioProcessor.disconnect(); if (audioProcessor.port) audioProcessor.port.onmessage = null; } catch {} audioProcessor = null; }
   if (audioContext)   { try { audioContext.close(); }       catch {} audioContext   = null; }
   if (mediaStream)    { mediaStream.getTracks().forEach(t => t.stop()); mediaStream = null; }
   clearInterval(audioSilenceWatchdog);

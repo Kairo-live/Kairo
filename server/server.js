@@ -579,7 +579,20 @@ server.on('upgrade', (req, socket, head) => {
 
 // ── WebSocket ─────────────────────────────────────────────────────────────
 const clients = new Set();
-wss.on('connection', (ws) => {
+wss.on('connection', (ws, req) => {
+  // The capture worker's own connection (audio_sender_worker.js): it only
+  // sends audio frames — no broadcasts, no state snapshots.
+  if (/[?&]audio=1(?:&|$)/.test(req?.url || '')) {
+    const noteFrame = audioFlowMonitor('capture worker');
+    ws.on('message', (data, isBinary) => {
+      if (!isBinary) return;
+      noteFrame();
+      ingestAudio(Buffer.isBuffer(data) ? data : Buffer.from(data));
+    });
+    ws.on('close', () => noteFrame.stop());
+    ws.on('error', () => {});
+    return;
+  }
   clients.add(ws);
   ws.on('close', () => clients.delete(ws));
   ws.on('error', () => clients.delete(ws));
@@ -635,9 +648,32 @@ wss.on('connection', (ws) => {
       } catch {}
       return;
     }
+    noteMainFrame();
     ingestAudio(Buffer.isBuffer(data) ? data : Buffer.from(data));
   });
+  const noteMainFrame = audioFlowMonitor('page');
+  ws.on('close', () => noteMainFrame.stop());
 });
+
+// How steadily audio is arriving, for server.log: every 30s of capture, the
+// frame count (a steady 16 kHz stream of 1024-sample frames is ~470) and the
+// longest gap between frames. A stall there is "the transcript does nothing,
+// then picks up again" (live test) — this says whether audio stopped coming.
+function audioFlowMonitor(source) {
+  let frames = 0, lastAt = 0, worstGap = 0;
+  const timer = setInterval(() => {
+    if (frames) console.log(`[Audio] ${source}: ${frames} frames in 30s (steady ≈ 470), longest gap ${worstGap} ms`);
+    frames = 0; worstGap = 0;
+  }, 30000);
+  timer.unref?.();
+  const note = () => {
+    const now = Date.now();
+    if (lastAt && now - lastAt < 30000) worstGap = Math.max(worstGap, now - lastAt);
+    lastAt = now; frames++;
+  };
+  note.stop = () => clearInterval(timer);
+  return note;
+}
 
 // Plain listener array alongside the WS `clients` set — lets the eval
 // harness (server/eval/run_eval.js) capture every broadcast({...}) call
