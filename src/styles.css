@@ -4143,12 +4143,14 @@ select {
   gap: 10px;
   padding: 8px 10px;
   margin-bottom: 0;
-  border-left: 3px solid transparent;
+  border: 1px solid var(--border);
   background: var(--bg-card);
   border-radius: var(--radius);
   overflow: hidden;
   cursor: default;
 }
+/* Hover stays neutral — orange is only ever the live verse (below). */
+.cs-live-queue-body .locked-verse-card:hover { border-color: var(--border-md); }
 
 /* Hide noisy elements inside queue cards */
 .cs-live-queue-body .locked-verse-card .lvc-status  { display: none; }
@@ -6795,12 +6797,13 @@ select {
 
 
 /* ── Live Queue: the one verse on screen now ─────────────────────────────── */
-/* The only accent in the queue: a thin orange edge, a slight lift and a small
-   outlined LIVE tag on the verse that's actually on screen. */
+/* The only accent in the queue: an orange outline all the way round (the same
+   as the selected Monitor tile), a slight lift and a small outlined LIVE tag on
+   the verse that's actually on screen. */
 .cs-live-queue-body .locked-verse-card:not(.is-live) { opacity: 0.78; }
 .cs-live-queue-body .locked-verse-card.is-live {
   opacity: 1;
-  border-left-color: var(--brand);
+  border-color: var(--brand);
   background: var(--bg-hover);
 }
 .cs-live-queue-body .locked-verse-card.is-live .lvc-ref::after {
