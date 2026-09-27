@@ -4149,8 +4149,10 @@ select {
   overflow: hidden;
   cursor: default;
 }
-/* Hover stays neutral — orange is only ever the live verse (below). */
-.cs-live-queue-body .locked-verse-card:hover { border-color: var(--border-md); }
+/* Hover: the card lifts and gets the same light outline as a hovered Monitor
+   tile — orange stays reserved for the live verse (below). */
+.cs-live-queue-body .locked-verse-card { transition: border-color var(--trans), background var(--trans), opacity var(--trans); }
+.cs-live-queue-body .locked-verse-card:hover { border-color: var(--selected-border); background: var(--bg-hover); }
 
 /* Hide noisy elements inside queue cards */
 .cs-live-queue-body .locked-verse-card .lvc-status  { display: none; }
@@ -6801,21 +6803,27 @@ select {
    as the selected Monitor tile), a slight lift and a small outlined LIVE tag on
    the verse that's actually on screen. */
 .cs-live-queue-body .locked-verse-card:not(.is-live) { opacity: 0.78; }
+.cs-live-queue-body .locked-verse-card:not(.is-live):hover { opacity: 1; }
 .cs-live-queue-body .locked-verse-card.is-live {
   opacity: 1;
   border-color: var(--brand);
   background: var(--bg-hover);
 }
+.cs-live-queue-body .locked-verse-card.is-live:hover { border-color: var(--brand); box-shadow: 0 0 0 2px rgba(245,48,26,0.25); }
+/* A filled pill with a white dot — the same badge the Monitor shows. */
 .cs-live-queue-body .locked-verse-card.is-live .lvc-ref::after {
   content: 'LIVE';
+  display: inline-block;
   margin-left: 8px;
-  padding: 0 5px;
-  border: 1px solid var(--brand);
+  padding: 2px 7px 2px 14px;
   border-radius: 999px;
-  color: var(--brand);
+  background: radial-gradient(circle at 7.5px 50%, #fff 2.2px, transparent 2.8px), var(--brand);
+  color: #fff;
+  font-family: var(--font-head);
   font-size: 8.5px;
-  font-weight: 700;
-  letter-spacing: 0.08em;
+  font-weight: 800;
+  line-height: 1.2;
+  letter-spacing: 0.12em;
   vertical-align: 1px;
 }
 
