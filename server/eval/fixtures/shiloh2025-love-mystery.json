@@ -3801,6 +3801,14 @@
       "unverified": true
     },
     {
+      "book": "Romans",
+      "chapter": 3,
+      "verse": 3,
+      "kind": "quote",
+      "startMs": 1885430,
+      "note": "2026-09-27 audit round 4: \"cannot make your faith of no effect.\" — paraphrase offer checked against the transcript and KJV by hand"
+    },
+    {
       "book": "Isaiah",
       "chapter": 38,
       "verse": 3,
@@ -3879,6 +3887,14 @@
       "kind": "quote",
       "startMs": 2650545,
       "bootstrapped": true
+    },
+    {
+      "book": "2 Corinthians",
+      "chapter": 5,
+      "verse": 17,
+      "kind": "quote",
+      "startMs": 2720930,
+      "note": "2026-09-27 audit round 4: \"Anyone being Christ a new creature, which is our past oh behold all things have become new\" — paraphrase offer checked against the transcript and KJV by hand"
     }
   ]
 }

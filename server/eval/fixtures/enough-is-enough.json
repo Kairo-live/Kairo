@@ -4354,6 +4354,14 @@
       "bootstrapped": true
     },
     {
+      "book": "Psalms",
+      "chapter": 81,
+      "verse": 14,
+      "kind": "quote",
+      "startMs": 2387775,
+      "note": "2026-09-27 audit round 4: \"Open your mouth wide. If you, you have open to me, I will have turned my hand against your\" — paraphrase offer checked against the transcript and KJV by hand"
+    },
+    {
       "book": "Habakkuk",
       "chapter": 3,
       "kind": "citation",
@@ -4431,6 +4439,14 @@
       "unverified": true
     },
     {
+      "book": "Hosea",
+      "chapter": 12,
+      "verse": 13,
+      "kind": "quote",
+      "startMs": 2663745,
+      "note": "2026-09-26 audit: real quote read aloud, verified against the transcript by hand"
+    },
+    {
       "book": "2 Corinthians",
       "chapter": 4,
       "kind": "citation",
@@ -4493,14 +4509,6 @@
       "kind": "quote",
       "startMs": 3722540,
       "unverified": true
-    },
-    {
-      "book": "Hosea",
-      "chapter": 12,
-      "verse": 13,
-      "kind": "quote",
-      "startMs": 2663745,
-      "note": "2026-09-26 audit: real quote read aloud, verified against the transcript by hand"
     }
   ]
 }

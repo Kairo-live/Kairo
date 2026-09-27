@@ -4437,6 +4437,14 @@
       "startMs": 1868000
     },
     {
+      "book": "Malachi",
+      "chapter": 3,
+      "verse": 10,
+      "kind": "quote",
+      "startMs": 2107000,
+      "note": "2026-09-27 audit round 4: \"windows of Heaven A blessings a blessing on there be not room enough to contain\" — paraphrase offer checked against the transcript and KJV by hand"
+    },
+    {
       "book": "Matthew",
       "chapter": 23,
       "verse": 23,
@@ -5136,6 +5144,14 @@
       "verseEnd": 30,
       "kind": "citation",
       "startMs": 7561000
+    },
+    {
+      "book": "Matthew",
+      "chapter": 26,
+      "verse": 28,
+      "kind": "quote",
+      "startMs": 7561000,
+      "note": "2026-09-27 audit round 4: \"Communion this is my blood which is shed for the remission of the sins of the\" — paraphrase offer checked against the transcript and KJV by hand"
     },
     {
       "book": "Hebrews",

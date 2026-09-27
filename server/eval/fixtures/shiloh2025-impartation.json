@@ -4330,6 +4330,14 @@
       "verse": null
     },
     {
+      "book": "Genesis",
+      "chapter": 12,
+      "verse": 2,
+      "kind": "quote",
+      "startMs": 421740,
+      "note": "2026-09-27 audit round 4: \"thy name great. It's not a thing you are looking for connection. It's the hand of God.\" — paraphrase offer checked against the transcript and KJV by hand"
+    },
+    {
       "book": "Daniel",
       "chapter": 11,
       "verse": 32,
@@ -4431,6 +4439,14 @@
       "anchorWordIndex": 2145,
       "verseStart": 21,
       "verseEnd": 26
+    },
+    {
+      "book": "Genesis",
+      "chapter": 14,
+      "verse": 23,
+      "kind": "quote",
+      "startMs": 1493735,
+      "note": "2026-09-27 audit round 4: \"lest you say you make Abraham rich.\" — paraphrase offer checked against the transcript and KJV by hand"
     },
     {
       "book": "Psalms",

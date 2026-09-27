@@ -5464,8 +5464,11 @@ async function runParaphrase() {
   const count = wordsHeard + interimCount;
   if (count - paraphraseLastCount < PARAPHRASE_EVERY_WORDS) return;
   paraphraseLastCount = count;
-  // A citation was just made — its own verse is already handled.
-  if (Date.now() - lastDirectRefTime < DIRECT_REF_SUPPRESS_MS) return;
+  // A citation was just made: its verse is up, so for a few seconds a
+  // paraphrase can only be offered, never replace it. Still searched — a quote
+  // said right after a citation ("…Matthew 11:28." "Whosoever call upon the
+  // name of Jesus shall be saved.") was otherwise never looked at.
+  const justCited = Date.now() - lastDirectRefTime < DIRECT_REF_SUPPRESS_MS;
   const recent = paraphraseRecentText();
   const windows = paraphraseWindows(recent);
   if (!windows.length) return;
@@ -5476,12 +5479,21 @@ async function runParaphrase() {
     if (process.env.KAIRO_DEBUG_PARAPHRASE) console.log('[DEBUG-PARAPHRASE]', JSON.stringify({ windows, top: results[0] && { ref: results[0].reference, cos: results[0].cos, rr: results[0].rerankScore, lex: results[0].lexIdf }, decision: decision && { ref: decision.verse.reference, target: decision.target }, prev: paraphrasePrevKey }));
     const repeated = decision && paraphrasePrevKey === decision.key;
     paraphrasePrevKey = decision ? decision.key : null;
-    if (repeated) {
+    // Nothing to offer when the citation already explains the words: the verse
+    // on screen, or — just after a citation — anywhere in the chapter it named
+    // (the preacher reading or restating it). Eval: 51 of 63 offers were these.
+    const onScreen = lastDetectedRef === decision?.key;
+    const inCitedChapter = justCited && decision && [recentCitations.findLast(c => c.cited), lastOutputVerse]
+      .some(p => p && p.book === decision.verse.book && p.chapter === decision.verse.chapter);
+    const target = decision && (justCited ? 'suggestions' : decision.target);
+    if (repeated && target === 'suggestions' && (onScreen || inCitedChapter)) {
+      // already explained — not offered
+    } else if (repeated) {
       const v = decision.verse;
-      const sent = await broadcastDetection([v], 'paraphrase', decision.score, decision.target, decision.target === 'suggestions' ? { capAtSuggestions: true } : {});
+      const sent = await broadcastDetection([v], 'paraphrase', decision.score, target, target === 'suggestions' ? { capAtSuggestions: true } : {});
       if (sent) console.log(`[Paraphrase] "${v.reference}" meaning ${(v.cos * 100).toFixed(0)}%, cross-encoder ${v.rerankScore == null ? 'n/a' : (v.rerankScore * 100).toFixed(0) + '%'}, shared wording ${v.lexIdf.toFixed(1)}${decision.why ? ` (${decision.why})` : ''} → ${sent}`);
     }
-    const scopeChapters = contextualSemanticScopeChapters();
+    const scopeChapters = justCited ? null : contextualSemanticScopeChapters();
     if (scopeChapters) {
       const scopedMsg = await workerCall('semanticSearchScoped', { text: windows[0], chapters: [...scopeChapters], limit: 5 }, 3000);
       const rawScoped = scopedMsg.results || [];
