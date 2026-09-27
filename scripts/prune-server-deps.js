@@ -4,7 +4,7 @@
 // directory in as a resource — see the "resources" key — so anything left in
 // node_modules ships in the installer verbatim).
 //
-// Three passes:
+// Passes:
 //   1. Whole-package removal for dependencies that are pulled in
 //      transitively (so `npm uninstall` isn't an option — they'd just come
 //      back on the next install) but are provably never require()'d by the
@@ -75,6 +75,38 @@ function pruneDeadPackages() {
 }
 
 // ── Pass 2: generic bloat sweep across every installed package ───────────
+// Native binaries for other platforms. onnxruntime-node ships prebuilt
+// libraries for every OS/arch it supports (bin/napi-v*/<platform>/<arch>) —
+// ~175MB of Linux and Windows DLLs in a Mac build. Keeps the platform/arch
+// being built: Tauri passes TAURI_ENV_PLATFORM/TAURI_ENV_ARCH to
+// beforeBuildCommand (so a cross-build keeps the target's, not this
+// machine's); with no recognizable arch (e.g. a universal Mac build) every
+// arch of the platform is kept.
+function buildTarget() {
+  const plat = { darwin: 'darwin', macos: 'darwin', windows: 'win32', win32: 'win32', linux: 'linux' }[process.env.TAURI_ENV_PLATFORM] || process.platform;
+  const envArch = process.env.TAURI_ENV_ARCH;
+  const arch = envArch ? ({ aarch64: 'arm64', arm64: 'arm64', x86_64: 'x64', x64: 'x64' }[envArch] || null) : process.arch;
+  return { plat, arch };
+}
+function pruneOtherPlatforms() {
+  const { plat, arch } = buildTarget();
+  let saved = 0;
+  const binRoot = path.join(NODE_MODULES, 'onnxruntime-node', 'bin');
+  let napiDirs = [];
+  try { napiDirs = fs.readdirSync(binRoot); } catch { return 0; }
+  for (const napi of napiDirs) {
+    const napiDir = path.join(binRoot, napi);
+    let plats = [];
+    try { plats = fs.readdirSync(napiDir); } catch { continue; }
+    for (const p of plats) {
+      if (p !== plat) { saved += rm(path.join(napiDir, p)); continue; }
+      if (!arch) continue;
+      for (const a of fs.readdirSync(path.join(napiDir, p))) if (a !== arch) saved += rm(path.join(napiDir, p, a));
+    }
+  }
+  return saved;
+}
+
 const PRUNE_DIR_NAMES = new Set([
   'test', 'tests', '__tests__', 'example', 'examples', 'docs', 'doc',
   '.github', '.circleci', '.vscode', '.idea', 'coverage',
@@ -124,10 +156,12 @@ function main() {
   }
   const before = duBytes(NODE_MODULES);
   const deadPackageSaved = pruneDeadPackages();
+  const platformSaved = pruneOtherPlatforms();
   const sweepSaved = sweep(NODE_MODULES);
   const after = duBytes(NODE_MODULES);
 
   console.log(`[prune] dead packages:      ${fmtMB(deadPackageSaved)}`);
+  console.log(`[prune] other platforms:    ${fmtMB(platformSaved)} (kept ${buildTarget().plat}/${buildTarget().arch || 'every arch'})`);
   console.log(`[prune] generic sweep:      ${fmtMB(sweepSaved)}`);
   console.log(`[prune] node_modules: ${fmtMB(before)} → ${fmtMB(after)} (saved ${fmtMB(before - after)})`);
 }
