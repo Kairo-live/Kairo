@@ -368,7 +368,11 @@ const TO_THE_END_RE = new RegExp(`\\b(\\d{1,3}|${Object.keys(WORD_TO_NUM).join('
 // then reorder them into book-first form).
 const ORDINAL_ALT = [...ORDINAL_TO_NUM.keys()].sort((a, b) => b.length - a.length).join('|');
 const ORDINAL_UNIT_RE = new RegExp(`\\b(?:the )?(?:(${ORDINAL_ALT})|(\\d{1,3})(?:st|nd|rd|th)) (chapter|verse) of\\b`, 'g');
+// "Psalm one twenty-five" is heard as "someone 25" — read as Psalm 125 only
+// when a verse/chapter word follows, so "someone 25 years ago" is untouched.
+const SOMEONE_PSALM_RE = /\bsome ?one (\d{2})(?= (?:verse|verses|vers|chapter)\b)/g;
 function normalizeOrdinalForms(lc) {
+  if (lc.includes('one ')) lc = lc.replace(SOMEONE_PSALM_RE, (_, n) => `psalm 1${n}`);
   if (lc.includes(' the end')) lc = lc.replace(TO_THE_END_RE, (_, n) => `${n} to 176`);
   if (/(?:chapter|verse) of /.test(lc)) {
     // Only when a passage follows ("…of Romans", "…of chapter 8") — never

@@ -64,12 +64,12 @@ function createChapterResolver({ workerCall, getRecentText }) {
   // it ("...me. 28, all you...") is far stronger evidence than word overlap, so
   // it is checked first, against the chapter's real verse list. Requiring the
   // trailing comma/period keeps "12 disciples went" from matching.
-  async function resolveChapterByKeywords(book, chapter, text) {
+  // The verse number called out on its own after the chapter, if any.
+  // Strict enough to run on speech still in progress (interim transcripts).
+  async function resolveChapterCallout(book, chapter, text, chapterVerses = null) {
     try {
-      const msg = await workerCall('chapterLookup', { book, chapter }, 5000);
-      const chapterVerses = msg.results || [];
+      if (!chapterVerses) chapterVerses = (await workerCall('chapterLookup', { book, chapter }, 5000)).results || [];
       if (!chapterVerses.length) return [];
-
       const afterMention = textAfterBookMention(text, book, chapter);
       const scanText = afterMention.split(RE_SPACES).filter(Boolean).slice(0, 40).join(' ');
       const callout = /(?:^|[.!?;,]\s+)(\d{1,3})\s*[,.](?=\s|$)/g;
@@ -80,11 +80,22 @@ function createChapterResolver({ workerCall, getRecentText }) {
         const exact = chapterVerses.find(v => v.verse === n);
         if (exact) return [exact];
       }
+      return [];
+    } catch { return []; }
+  }
+
+  async function resolveChapterByKeywords(book, chapter, text) {
+    try {
+      const msg = await workerCall('chapterLookup', { book, chapter }, 5000);
+      const chapterVerses = msg.results || [];
+      if (!chapterVerses.length) return [];
+      const called = await resolveChapterCallout(book, chapter, text, chapterVerses);
+      if (called.length) return called;
       return await pickChapterVerseByIdf(book, chapter, text);
     } catch { return []; }
   }
 
-  return { pickChapterVerseByIdf, resolveInvalidVerseByContext, resolveChapterByKeywords };
+  return { pickChapterVerseByIdf, resolveInvalidVerseByContext, resolveChapterByKeywords, resolveChapterCallout };
 }
 
 module.exports = { createChapterResolver, textAfterBookMention, CHAPTER_KEYWORD_MIN_IDF, CHAPTER_KEYWORD_MIN_MARGIN };

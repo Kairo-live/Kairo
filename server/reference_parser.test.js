@@ -382,3 +382,10 @@ test('a slow speaking pace widens the "verse N" window (up to double), never nar
   assert.equal(resolvePartialReference('verse 5'), null);
   referenceContext.setPaceFactor(1);
 });
+
+test('"Psalm one twenty-five" heard as "someone 25" is read as Psalm 125 when a verse word follows', () => {
+  const f = (t) => parseAllSpokenReferences(t).map(r => `${r.book} ${r.chapter}:${r.verse ?? r.verseStart}${r.verseEnd ? '-' + r.verseEnd : ''}`);
+  assert.deepEqual(f('Someone 25, verse one and two, he say'), ['Psalms 125:1-2']);
+  assert.deepEqual(f('someone 19 verse 105'), ['Psalms 119:105']);
+  assert.deepEqual(f('someone 25 years ago I was in Lagos'), []);
+});

@@ -4256,7 +4256,7 @@ async function resolveAmbiguousRefs(refs) {
 
 // Chapter-scoped verse recovery ("Matthew 11" with no verse; a verse number
 // that doesn't exist) — see chapter_resolver.js.
-const { resolveInvalidVerseByContext, resolveChapterByKeywords } = createChapterResolver({
+const { resolveInvalidVerseByContext, resolveChapterByKeywords, resolveChapterCallout } = createChapterResolver({
   workerCall,
   getRecentText: () => transcriptBuffer.map(t => t.text).join(' ').split(RE_SPACES).slice(-60).join(' '),
 });
@@ -4355,6 +4355,23 @@ const citationVoting = createCitationVoting({
   getSettings: () => settings,
 });
 
+// A chapter named with no verse, and the verse number then called out on its
+// own ("In Matthew 11, say, come to me. 28, all you…"): sent while the sentence
+// is still being spoken instead of waiting for it to end. Only the strict
+// number callout runs on speech in progress; word matching waits for the final.
+async function sendChapterCallout(book, chapter, text) {
+  const verses = await resolveChapterCallout(book, chapter, text);
+  if (!verses.length) return false;
+  const sent = await broadcastDetection(verses, 'chapter-keyword', DIRECT_PARTIAL_SCORE, 'viewer');
+  if (sent !== 'viewer') return false;
+  console.log(`[Direct] "${book} ${chapter}" named with no verse — verse ${verses[0].verse} called out → viewer`);
+  chapterKeywordResolvedFor = `${book}|${chapter}`;
+  chapterOnlyPending = null;
+  lastDirectRefTime = Date.now();
+  updateSermonContext({ book, chapter, verse: verses[0].verse });
+  return true;
+}
+
 async function processForReferences(transcript, isFinal) {
   if (!workerBasicReady) return false;
   let refs = await resolveAmbiguousRefs(parseAllSpokenReferences(transcript, inBibleMode));
@@ -4425,6 +4442,11 @@ async function processForReferences(transcript, isFinal) {
     // new citation at all — try the same chapter-scoped keyword match
     // against the buffer as it now stands (the reading may have continued
     // across the segment boundary).
+    if (!isFinal && chapterOnlyPending && referenceContext.isValid
+        && referenceContext.book === chapterOnlyPending.book
+        && referenceContext.chapter === chapterOnlyPending.chapter) {
+      return sendChapterCallout(chapterOnlyPending.book, chapterOnlyPending.chapter, `${chapterOnlyPending.text} ${transcript}`);
+    }
     if (isFinal && chapterOnlyPending && referenceContext.isValid
         && referenceContext.book === chapterOnlyPending.book
         && referenceContext.chapter === chapterOnlyPending.chapter) {
@@ -4512,6 +4534,9 @@ async function processForReferences(transcript, isFinal) {
       // Finals only: an interim can't send anything from here, and searching
       // (two worker round-trips) or recording pending text for every growing
       // interim prefix is wasted work that also pollutes the pending window.
+      if (chapter && !isFinal && !ref.ambiguousUnresolved) {
+        if (await sendChapterCallout(book, chapter, joinedText || transcript)) continue;
+      }
       if (chapter && isFinal && !ref.ambiguousUnresolved) {
         const bareChapterVerses = await resolveChapterByKeywords(book, chapter, joinedText || transcript);
         if (bareChapterVerses.length) {

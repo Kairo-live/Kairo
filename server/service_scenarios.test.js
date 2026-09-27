@@ -82,6 +82,15 @@ const fresh = () => { server.resetDetectionSession(); referenceContext.reset(); 
     assert.deepEqual(await server.clearLayer('bible'), { restored: false });
   });
 
+  await test('a verse number called out after a named chapter goes up while the sentence is still being spoken', async () => {
+    fresh(); server.clearRangeQueue(); await server.clearLayer('all');
+    await say('In Matthew 11, say, come to me.');
+    sent = [];
+    // interim only — the sentence isn't finished yet
+    await server.handleTranscriptSegment('28, all you', false, 0.9, false); await wait(300);
+    assert.ok(onScreen().includes('Matthew 11:28'), JSON.stringify(sent));
+  });
+
   // ── Citation forms added 2026-09-26 (see the "all the ways a scripture is called" list) ──
   await test('"the following verse" moves to the next verse', async () => {
     fresh(); server.clearRangeQueue(); await say('Romans 8 verse 28.'); await wait(4500); await say('And the following verse says this.');
