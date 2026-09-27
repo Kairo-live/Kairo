@@ -1,6 +1,6 @@
 {
   "productName": "Kairo",
-  "version": "3.0.2",
+  "version": "3.0.3",
   "identifier": "com.kairo.scripture",
   "build": {
     "beforeDevCommand": "npm run server",
