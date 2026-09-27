@@ -1573,15 +1573,14 @@ input[type="range"]:disabled { opacity: 0.4; cursor: default; }
   align-items: center;
   justify-content: center;
   gap: 6px;
-  font-size: 10px;
-  /* --text-4 (#333333) is nearly the same tone as the panel background
-     behind it — barely legible (owner feedback, live). --text-3 is this
-     app's own "muted but still readable" tier (see its own comment:
-     "kept the muted feel while staying legible" — same reasoning applies
-     here). */
-  color: var(--text-3);
+  font-size: 11px;
+  /* Still barely visible at --text-3 and a 70% mark (owner, again): the mark
+     at full strength, the wordmark in the main text colour, the version one
+     step down — readable on the near-black sidebar. */
+  color: var(--text-2);
 }
-.settings-nav-version-mark { flex-shrink: 0; opacity: 0.7; }
+.settings-nav-version-mark { flex-shrink: 0; width: 18px; height: 18px; }
+.settings-nav-wordmark { color: var(--text); font-weight: 700; letter-spacing: 0.12em; }
 
 .settings-nav-item {
   display: flex;

@@ -722,8 +722,11 @@ document.getElementById('monitor-grid-toggle-btn')?.addEventListener('click', ()
 const MONITOR_WINDOW_LABEL = 'kairo-monitor';
 async function openMonitorWindow() {
   const target = monitorTargets().find(t => t.id === livePreviewOutputId) || MONITOR_MAIN;
-  const { w, h } = monitorResolution(target);
-  const width = 960, height = Math.round(width * h / w);
+  // About the size of the Settings panel (880 wide, 78% of the app's height),
+  // resizable. It floats above the app without taking focus, so the operator
+  // keeps working in the main window while it's up.
+  const width = Math.min(880, Math.round(window.screen.availWidth * 0.9));
+  const height = Math.max(420, Math.round(window.innerHeight * 0.78));
   const path = `/display.html?output=${encodeURIComponent(target.type === 'main' ? 'main' : target.id)}&monitor=1`;
   const title = `KAIRO Monitor — ${target.name}`;
   const WebviewWindow = window.__TAURI__?.webviewWindow?.WebviewWindow;
@@ -732,8 +735,8 @@ async function openMonitorWindow() {
     const existing = await WebviewWindow.getByLabel(MONITOR_WINDOW_LABEL);
     if (existing) { await existing.close(); await new Promise(r => setTimeout(r, 150)); }
     new WebviewWindow(MONITOR_WINDOW_LABEL, {
-      url: location.origin + path, title, width, height,
-      resizable: true, decorations: true, alwaysOnTop: false, fullscreen: false,
+      url: location.origin + path, title, width, height, minWidth: 320, minHeight: 200, center: true,
+      resizable: true, decorations: true, alwaysOnTop: true, focus: false, fullscreen: false,
     });
   } catch (err) { console.warn('[KAIRO] Monitor window failed:', err); }
 }
@@ -2018,7 +2021,7 @@ async function loadSettings() {
     const r = await fetch(`${SERVER}/api/settings`);
     settings = await r.json();
     const versionEl = document.getElementById('settings-nav-version');
-    if (versionEl) versionEl.textContent = settings.appVersion ? `KAIRO v${settings.appVersion}` : '';
+    if (versionEl) versionEl.textContent = settings.appVersion ? `v${settings.appVersion}` : '';
     // Populate UI
     // The server sends deepgramApiKey MASKED ("abcd1234…") for display, never
     // the real key. It used to go straight into the input's editable .value —
