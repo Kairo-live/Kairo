@@ -168,6 +168,14 @@ const HIT_DEDUP_MS   = 12000;  // don't re-fire the same verse within 12s in-wor
 
 // Layer 2 tuning
 const ALIGN_CONFIRM_AT   = 6;     // words aligned to escalate from anchor → confirmed
+// …and the words past the anchor must add identifying weight of their own. An
+// anchor can already carry the whole IDF bar, and then a stray function word
+// made the count: "the other side of the sea" (in 4 verses) + "…amen the" put
+// Mark 5:1 on screen for an Exodus retelling; "hanging upon the trees" +
+// "that the" replaced a correct Galatians 3:13 with Joshua 10:26 (eval). Those
+// added 0–0.8. 1.5 was tried (to let "…the deep things of God", +1.9, through)
+// and brought back "…the goodness of the Lord" (+1.5) and others — 2.0 holds.
+const ALIGN_EXTENSION_MIN_IDF = 2.0;
 // IDF floor for confirmation, on top of the word-count floor above — found
 // necessary from a real false-positive: liturgical/prayer language ("in the
 // name of Jesus", "we give you the glory", "receive our thanks") is dense
@@ -899,6 +907,7 @@ function _advanceAnchor(node, depth, word, now, next, anchors) {
           // confirm time to test "would this have confirmed without it."
           backwardSeedMatched: back.matched,
           backwardSeedIdf:     back.matchedIdf,
+          seedIdf:             totalIdf,   // what the anchor itself carried — see ALIGN_EXTENSION_MIN_IDF
           contributedWords: seedSet,
           misses:     ALIGN_MISS_BUDGET,
           confirmed:  false,
@@ -983,7 +992,8 @@ function streamWord(raw) {
     // Lord" (said as filler, not read as scripture) cleared 8 against Psalms
     // 150:6 and auto-sent to the live screen.
     if (matchedThisTick && !cand.confirmed
-        && cand.matched >= ALIGN_CONFIRM_AT && cand.matchedIdf >= ANCHOR_CONFIRM_IDF) {
+        && cand.matched >= ALIGN_CONFIRM_AT && cand.matchedIdf >= ANCHOR_CONFIRM_IDF
+        && cand.matchedIdf - cand.seedIdf >= ALIGN_EXTENSION_MIN_IDF) {
       cand.confirmed = true;
       // Would this candidate have confirmed WITHOUT its backward-extension
       // seed? Subtract the fixed seed contribution and re-check the exact
@@ -1680,12 +1690,25 @@ async function paraphraseSearch(windows, limit = 8) {
   // The cross-encoder reads English; for a non-English service it has nothing to add.
   const englishText = !(workerData?.altTranslation || '').startsWith('pack:');
   if (englishText && rerankerEngine.isReady() && top.length) {
-    const scores = await rerankerEngine.scorePairs(top.map(c => windows[c.w]), top.map(c => verseMetadata[c.idx].kjv_text || ''));
-    top.forEach((c, i) => { c.rr = scores[i] ?? 0; });
+    // Scored against the KJV (rr — what every decision is calibrated on) and,
+    // separately, a modern wording (rrModern: the church's translation, else
+    // the NLT) — a preacher quoting from memory often uses modern words ("plans
+    // to prosper you": KJV 0.30, modern 0.999). Kept apart: folding the modern
+    // score into rr lifted runner-up verses too and cost screen sends on the
+    // benchmark; decideParaphrase uses rrModern only to offer.
+    const modern = (i) => altTextByIdx?.get(i) || verseMetadata[i].nlt_text || '';
+    const queries = [], passages = [];
+    for (const c of top) {
+      queries.push(windows[c.w], windows[c.w]);
+      passages.push(verseMetadata[c.idx].kjv_text || '', modern(c.idx) || verseMetadata[c.idx].kjv_text || '');
+    }
+    const scores = await rerankerEngine.scorePairs(queries, passages);
+    top.forEach((c, i) => { c.rr = scores[2 * i] ?? 0; c.rrModern = scores[2 * i + 1] ?? 0; });
   }
   return top.map(c => ({
     ...formatVerse(verseMetadata[c.idx], c.cos, 'semantic'),
-    cos: c.cos, rerankScore: typeof c.rr === 'number' ? c.rr : null, lexIdf: c.idfSum, lexHits: c.hits, window: c.w,
+    cos: c.cos, rerankScore: typeof c.rr === 'number' ? c.rr : null, rerankModern: typeof c.rrModern === 'number' ? c.rrModern : null,
+    lexIdf: c.idfSum, lexHits: c.hits, window: c.w,
   }));
 }
 
@@ -1892,20 +1915,30 @@ parentPort.on('message', async (msg) => {
         // How well a stretch of speech fits each of a few named verses: meaning
         // similarity (embeddings) and the cross-encoder's "does this passage say
         // what the speech says" — for choosing between verses a citation could be.
+        // texts: several windows of the same speech (last sentence, last few
+        // seconds…) — each verse keeps its best, since extra words around a
+        // quote dilute both scores.
+        const texts = (msg.texts && msg.texts.length ? msg.texts : [msg.text || '']).filter(Boolean);
         const idxs = (msg.keys || []).map(k => idxByKey.get(k));
         const cos = new Map();
         if (semanticEngine.isReady()) {
           const valid = idxs.filter(i => i != null);
-          for (const h of await semanticEngine.searchWithin(msg.text || '', valid, valid.length)) cos.set(h.idx, h.score);
+          for (const t of texts) for (const h of await semanticEngine.searchWithin(t, valid, valid.length)) cos.set(h.idx, Math.max(cos.get(h.idx) ?? -1, h.score));
         }
         let rr = null;
         const englishText = !(workerData?.altTranslation || '').startsWith('pack:');
-        if (englishText && rerankerEngine.isReady()) {
+        if (englishText && rerankerEngine.isReady() && texts.length) {
           // Scored against the KJV and a modern wording (the church's
           // translation, else the NLT) — preachers paraphrase in modern English.
           const wordings = idxs.flatMap(i => (i == null ? ['', ''] : [verseMetadata[i].kjv_text || '', altTextByIdx?.get(i) || verseMetadata[i].nlt_text || verseMetadata[i].kjv_text || '']));
-          const scores = await rerankerEngine.scorePairs(wordings.map(() => msg.text || ''), wordings);
-          rr = idxs.map((_, n) => Math.max(scores[2 * n] ?? 0, scores[2 * n + 1] ?? 0));
+          const queries = [], passages = [];
+          for (const t of texts) for (const w of wordings) { queries.push(t); passages.push(w); }
+          const scores = await rerankerEngine.scorePairs(queries, passages);
+          rr = idxs.map((_, n) => {
+            let best = 0;
+            for (let t = 0; t < texts.length; t++) best = Math.max(best, scores[t * wordings.length + 2 * n] ?? 0, scores[t * wordings.length + 2 * n + 1] ?? 0);
+            return best;
+          });
         }
         const results = idxs.map((i, n) => ({ cos: i == null ? null : (cos.get(i) ?? null), rr: rr ? rr[n] : null }));
         parentPort.postMessage({ type: 'compareVersesResult', id: msg.id, results });

@@ -1385,6 +1385,19 @@ async function setRangeQueue(verses) {
   broadcastRangeState();
   // Send all verses to UI so the full range is visible in history
   broadcast({ type: 'range-verses', verses: rangeAllVerses, activeRef: rangeCurrentVerse?.reference || null });
+  loadRangePrefixIdf(verses);
+}
+
+// How identifying each opening word of the range's verses is, for the
+// next-verse-prefix advance (a synchronous check; the worker owns the IDF map,
+// so it's fetched once when the range is set, in the background).
+let rangePrefixIdf = new Map();
+function loadRangePrefixIdf(verses) {
+  const words = [...new Set(verses.flatMap(v => meaningfulWords(getFirstMeaningfulWords(v.text || v.kjv_text || '', 4))))];
+  if (!words.length) return;
+  workerCall('getIdfScores', { words }, 3000)
+    .then(msg => { rangePrefixIdf = new Map(msg.words || []); })
+    .catch(() => {});
 }
 
 async function advanceRangeQueue() {
@@ -1538,6 +1551,13 @@ function maybeHandleBareVerseNumber(transcript) {
   }
   if (!num) return false;
   if (num.consumed === 1 && AMBIGUOUS_NUMBER_WORDS.has(tail[tail.length - 1])) return false;   // "...waiting for" is not verse 4
+  // The number is its own clause — "...so do you, 51" — with at most filler
+  // before it. A number that ends an ordinary sentence is counting, even when
+  // a segment break cuts off what it counts ("is one of the nine" | "seeds",
+  // "it took me 6" | "weeks" — both sent the next verse in the eval).
+  const clause = transcript.split(/[.!?;,]/).map(c => c.trim()).filter(Boolean).pop() || '';
+  const clauseContent = clause.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(RE_SPACES).filter(w => w && !BARE_NUMBER_FILLER.has(w));
+  if (clauseContent.length !== num.consumed) return false;
 
   const base = rangeCurrentVerse || lastOutputVerse;
   if (!base?.book || !base.chapter || base.verse == null) return false;
@@ -1709,6 +1729,7 @@ function maybeAdvanceRangeOnLastWords(transcript) {
 // most verse-opening words ("And", "For", "Then") are already in
 // SKIP_WORDS, so this naturally skips right past the generic openings
 // that would otherwise make it trigger-happy.
+const RANGE_PREFIX_MIN_IDF = 3.5;
 function maybeAdvanceRangeOnNextVersePrefix(transcript) {
   const now = Date.now();
   if (!(rangeCurrentVerse && rangeQueue.length && !rangeAdvancing
@@ -1746,12 +1767,21 @@ function maybeAdvanceRangeOnNextVersePrefix(transcript) {
   // check when the next verse's prefix has no word clearing both bars, so
   // a verse that genuinely opens on short/shared words isn't left
   // permanently unable to fast-advance.
+  // Once the words' IDF is known (loadRangePrefixIdf), "distinctive" means
+  // identifying, not just long: "Lord" (IDF 1.5) is four letters and in half
+  // the Bible — 2 Samuel 5:19's "David enquired of the LORD" advanced on the
+  // "Lord" in the next citation's quote ("I'm the Lord that leadeth…") in the
+  // eval. With no identifying word to go on, two of the opening words must be
+  // heard, not one.
+  const identifying = (w) => (rangePrefixIdf.has(w) ? rangePrefixIdf.get(w) >= RANGE_PREFIX_MIN_IDF : w.length >= 4);
   const currentVerseWords = new Set(meaningfulWords(rangeCurrentVerse.text || rangeCurrentVerse.kjv_text || ''));
   const distinctivePrefixWords = meaningfulWords(prefix4)
-    .filter(w => w.length >= 4 && !currentVerseWords.has(w));
+    .filter(w => identifying(w) && !currentVerseWords.has(w));
+  // A segment naming another book is a new citation, not the next verse.
+  if (detectBookMentions(transcript, true).some(b => b !== rangeCurrentVerse.book)) return;
   const matched = distinctivePrefixWords.length
     ? mostMeaningfulWordsPresent(distinctivePrefixWords.join(' '), transcript, 1)
-    : mostMeaningfulWordsPresent(prefix4, transcript, 1);
+    : mostMeaningfulWordsPresent(prefix4, transcript, 2);
   if (matched) {
     requestRangeAdvance(`Next-verse-prefix advance: "${prefix4}" (fuzzy match) detected`);
   }
@@ -3350,7 +3380,7 @@ async function handleTranscriptSegment(transcript, isFinal, confidence, speechFi
       .split(RE_SPACES).slice(-60).join(' ').trim();
     if (bufferText && bufferText !== textForExpensive) {
       await Promise.all([
-        processVerbatim(bufferText),
+        processVerbatim(bufferText, { rescan: true, latest: transcript }),
         runFingerprintSearch(bufferText, true),
       ]);
     }
@@ -3451,6 +3481,7 @@ function resetDetectionSession({ keepContinuity = false } = {}) {
   interimDetectedRef    = null;
   interimSeenAt.clear();
   citationCheck         = null;
+  recentStreamAnchors.clear();
   lastInterimVerbatim   = 0;
   lastDirectRefTime     = 0;
   streamWatermark       = 0;
@@ -3985,6 +4016,7 @@ async function processStreamText(text) {
     if (!results.length) return;
 
     const ranked = rankStreamHits(results);
+    noteStreamAnchors(ranked);
 
     const confirmed = ranked.filter(r => r.confirmed);
     const anchors   = ranked.filter(r => !r.confirmed);
@@ -4157,8 +4189,13 @@ async function processStreamText(text) {
         }
       }
 
+      const pointedAt = passagePointedAt(top[0].book, top[0].chapter, top[0].verse);   // before the send puts it on screen
       const sent = await broadcastDetection(top, 'stream', top[0].similarity || 0.90, streamTarget, { verbatimDisagreed });
       if (sent === 'viewer') console.log(`[Stream] "${top[0].reference}" confirmed-alignment (matchedIdf=${(top[0].matchedIdf ?? 0).toFixed(1)}) → viewer`);
+      if (sent === 'viewer' && !pointedAt) {
+        const relatives = streamAnchorsNear(top[0]);
+        if (relatives.length) await startCitationCheck(top[0], '', false, { siblings: relatives });
+      }
       else if (streamTarget === 'suggestions' && top[0].viaBackwardExtension) console.log(`[Stream] "${top[0].reference}" confirmed only via backward-extension credit, no independent corroboration yet — demoted to Candidates`);
     }
     if (anchors.length) {
@@ -4834,7 +4871,26 @@ async function cachedVerbatimSearch(texts) {
   return results;
 }
 
-async function processVerbatim(transcript) {
+// Does the segment just spoken carry this verse's words (two of them, or its
+// only meaningful word when it's that short — "…his only begotten" | "Son.")?
+function sharesWordsWith(verse, spoken) {
+  const said = new Set(meaningfulWords(spoken || '').map(stemLite));
+  const need = Math.min(2, said.size);
+  if (!need) return false;
+  let shared = 0;
+  for (const w of new Set(meaningfulWords(`${verse.text || ''} ${verse.nlt_text || ''}`).map(stemLite))) if (said.has(w) && ++shared >= need) return true;
+  return false;
+}
+
+// rescan: the text is the wide end-of-utterance buffer (last ~60 words), there
+// to catch a quote spread over several segments. A hit there goes up only when
+// the segment just spoken (`latest`) is part of it, and never steps back to an
+// earlier verse of the chapter on screen — otherwise it's offered. Eval: Mark
+// 11:23 went up 38s after its quote, mid-way through unrelated speech; Psalm
+// 1:2 and Galatians 3:13 were re-found in the buffer after the reading had
+// moved on to the next verse and flicked the screen back. A deliberate re-read
+// is a new utterance and is matched by the per-segment passes as usual.
+async function processVerbatim(transcript, { rescan = false, latest = '' } = {}) {
   try {
     const texts = buildClauseList(transcript, 6);
     if (!texts.length) return false;
@@ -4845,7 +4901,11 @@ async function processVerbatim(transcript) {
     const results = await cachedVerbatimSearch(texts);
     if (!results.length) return false;
     const viewer = results.filter(r => r.similarity >= VERBATIM_AUTOSEND_MIN || r.matchedIdf >= VERBATIM_CERTAIN_IDF);
-    if (viewer.length) {
+    const stepsBack = (v) => lastOutputVerse && v.book === lastOutputVerse.book && v.chapter === lastOutputVerse.chapter && v.verse < lastOutputVerse.verse;
+    if (viewer.length && rescan && (!sharesWordsWith(viewer[0], latest) || stepsBack(viewer[0]))) {
+      const sent = await broadcastDetection(viewer.slice(0, 1), 'verbatim', viewer[0].similarity, 'suggestions', { capAtSuggestions: true });
+      if (sent) console.log(`[Verbatim] "${viewer[0].reference}" found only in earlier speech — offered, not sent`);
+    } else if (viewer.length) {
       const top    = viewer[0];
       const corrected = maybeCorrectMiscitation(top, transcript, results.filter(r => r !== top));
       if (corrected) return true;   // replaced on-air, skip the normal viewer broadcast
@@ -5022,6 +5082,15 @@ function maybeCorrectMiscitation(topMatch, sourceText, alternates) {
   // actively erasing "Matthew 13:44" from the Live Queue's history anyway.
   const topKey = `${topMatch.book}|${topMatch.chapter}|${topMatch.verse}`;
   if (topKey === lastDetectedRef) return false;
+
+  // Never "correct" a citation to its own near-duplicate twin: the words can't
+  // tell the two apart, and the citation already did ("Matthew 11:11" was
+  // replaced by Luke 7:28 as it was read — eval).
+  const citedKey = `${lastDirectSentVerse.book}|${lastDirectSentVerse.chapter}|${lastDirectSentVerse.verse}`;
+  if ((twinMap.get(citedKey) || []).some(([k]) => k === topKey)) {
+    console.log(`[Correct] Not replacing "${lastDirectSentVerse.reference}" with its near-duplicate "${topMatch.reference}" — the citation decides between twins`);
+    return false;
+  }
 
   // If the text driving THIS match itself names the new book out loud, the
   // preacher is announcing a fresh citation, not silently misquoting one —
@@ -5474,7 +5543,11 @@ async function runParaphrase() {
   if (!windows.length) return;
   try {
     const results = (await workerCall('paraphraseSearch', { windows, limit: 8 }, 4000)).results || [];
-    const decision = decideParaphrase(results, { affinity: (v) => passageAffinity(v.book, v.chapter, v.verse) });
+    // A book named just now ("In Romans, whosoever call upon the name…") puts
+    // its verses in play for this decision, like a cited chapter does.
+    const namedBooks = new Set(detectBookMentions(recent.split(RE_SPACES).slice(-25).join(' ')));
+    const affinity = (v) => Math.max(passageAffinity(v.book, v.chapter, v.verse), namedBooks.has(v.book) ? 2 : 0);
+    const decision = decideParaphrase(results, { affinity });
     // Acted on only when the next window of speech agrees (see paraphrase.js).
     if (process.env.KAIRO_DEBUG_PARAPHRASE) console.log('[DEBUG-PARAPHRASE]', JSON.stringify({ windows, top: results[0] && { ref: results[0].reference, cos: results[0].cos, rr: results[0].rerankScore, lex: results[0].lexIdf }, decision: decision && { ref: decision.verse.reference, target: decision.target }, prev: paraphrasePrevKey }));
     const repeated = decision && paraphrasePrevKey === decision.key;
@@ -5536,9 +5609,22 @@ function noteStaleOverride(candidate, topKey, now) {
 // The words JUST spoken — the latest final segment plus the interim in
 // progress, nothing older: a wider window still holds the range verse read a
 // moment earlier and would outvote the quote actually being said now.
-function recentSpeechWords(maxWords = 30) {
-  const lastFinal = transcriptBuffer.length ? transcriptBuffer[transcriptBuffer.length - 1].text : '';
-  return meaningfulWords(`${lastFinal} ${currentInterimText}`).slice(-maxWords);
+// `seconds`: the last few seconds of finished segments instead — for telling
+// near-duplicate twins apart, where a transcript arriving in fragments
+// ("Because" | "Christ" | "has redeemed" | "us from the curse of the law")
+// left two or three words to decide by (Galatians 3:13 tied with 3:10, Mark
+// 11:23 with Matthew 21:21 — eval). Not for the range rule: it broke there.
+const RECENT_SPEECH_MS = 6000;
+function recentSpeechWords(maxWords = 30, { seconds = false } = {}) {
+  let recent;
+  if (seconds) {
+    const now = Date.now();
+    recent = transcriptBuffer.filter(t => now - t.time < RECENT_SPEECH_MS).map(t => t.text);
+    if (!recent.length && transcriptBuffer.length) recent.push(transcriptBuffer[transcriptBuffer.length - 1].text);
+  } else {
+    recent = transcriptBuffer.length ? [transcriptBuffer[transcriptBuffer.length - 1].text] : [];
+  }
+  return meaningfulWords(`${recent.join(' ')} ${currentInterimText}`).slice(-maxWords);
 }
 const stemLite = (w) => w.replace(/(eth|s)$/, '');
 
@@ -5671,6 +5757,21 @@ async function resolveTwin(candidate) {
   // for a twin on a word or two of speech.
   if (recentCitations.some(c => c.cited && c.book === candidate.book && c.chapter === candidate.chapter
       && c.verse === candidate.verse && now - c.time < CONTEXT_WINDOW_MS)) return null;
+  // …and the other way round: when the TWIN is the verse just named, the text
+  // match is that citation being read — Hebrews 8:11 quotes Jeremiah 31:34
+  // word for word, Luke 11:42 parallels Matthew 23:23, 2 Kings 20:3 tells
+  // Isaiah 38:3's prayer; each replaced its just-cited twin (eval).
+  const citedTwin = twins.find(([k]) => {
+    const [b, c, v] = k.split('|');
+    return recentCitations.some(r => r.cited && r.book === b && r.chapter === +c && r.verse === +v && now - r.time < CONTEXT_WINDOW_MS);
+  });
+  if (citedTwin) {
+    const [b, c, v] = citedTwin[0].split('|');
+    try {
+      const verse = (await workerCall('directLookup', { book: b, chapter: +c, verse: +v }, 2000)).result;
+      if (verse) return { kind: 'switch', verse, hits: 0, aff: 3, shared: citedTwin[1] };
+    } catch {}
+  }
   for (const [k, d] of twinDecisions) if (now - d.at > TWIN_DECISION_TTL_MS) twinDecisions.delete(k);
   const pending = decideTwin(candidate, key, twins).catch(() => null);
   twinDecisions.set(key, { pending, at: now });
@@ -5681,7 +5782,7 @@ async function resolveTwin(candidate) {
 }
 
 async function decideTwin(candidate, key, twins) {
-  const speech = new Set(recentSpeechWords().map(stemLite));
+  const speech = new Set(recentSpeechWords(30, { seconds: true }).map(stemLite));
   if (!speech.size) return null;
   // Compared on every wording the worker matched against (KJV + the church's
   // translation or the service language's Bible) — speech in Spanish or read
@@ -5747,6 +5848,20 @@ const CITATION_COS_LEAD = 0.1;
 const CITATION_WORD_MIN_IDF = 3.5;    // "world" 4.3, "greater" 5.5, "knee" 8.5; "God" 1.9, "Lord" 1.5
 let citationCheck = null;   // { verse, key, words, siblings, finals, inUtterance, at, meaningAt, meaningBusy }
 
+// The words before the last mention of the book in this segment, plus the
+// finished segments of the few seconds before it.
+function speechBeforeCitation(transcript, book, isFinal) {
+  const stem = String(book).toLowerCase().split(' ').pop().replace(/s$/, '');
+  let cut = -1, m;
+  const re = new RegExp(`\\b${stem}s?\\b`, 'gi');
+  while ((m = re.exec(transcript)) !== null) cut = m.index;
+  const here = cut > 0 ? transcript.slice(0, cut) : '';
+  const now = Date.now();
+  const earlier = transcriptBuffer.filter(t => now - t.time < 8000).map(t => t.text);
+  if (isFinal && earlier.length && earlier[earlier.length - 1] === transcript) earlier.pop();   // this segment itself
+  return `${earlier.join(' ')} ${here}`.split(RE_SPACES).filter(Boolean).slice(-30).join(' ');
+}
+
 function citationSiblingBooks(book) {
   const out = new Set();
   if (SOUND_ALIKE_BOOKS[book]) out.add(SOUND_ALIKE_BOOKS[book]);
@@ -5755,16 +5870,65 @@ function citationSiblingBooks(book) {
   return [...out];
 }
 
-async function startCitationCheck(verse, transcript, isFinal) {
+// The same check for a verse put up by the reading matcher: the other verses
+// that matched the same stretch of speech are its siblings. "This is my blood,
+// which is shed for" is continuous only in Luke 22:20, so it confirmed there —
+// then "…for the remission of sins" (Matthew 26:28 only) came next (eval).
+const STREAM_RELATIVE_MS = 10000;
+const recentStreamAnchors = new Map();   // verseKey -> { verse, at }
+function noteStreamAnchors(results) {
+  const now = Date.now();
+  for (const r of results) if (r.book) recentStreamAnchors.set(`${r.book}|${r.chapter}|${r.verse}`, { verse: r, at: now });
+  for (const [k, a] of recentStreamAnchors) if (now - a.at > STREAM_RELATIVE_MS) recentStreamAnchors.delete(k);
+}
+// The most specific first: a phrase few verses share ("this is my blood": 2)
+// says more than a common one ("remission of sins": 5); confirmed alignments
+// (no df) before anchors; then the most identifying, then the most recent.
+function streamAnchorsNear(verse) {
+  const key = `${verse.book}|${verse.chapter}|${verse.verse}`;
+  const df = (v) => (v.confirmed ? 0 : (v.df ?? 9));
+  const now = Date.now();
+  return [...recentStreamAnchors.entries()]
+    // …not a verse that was already on screen: that's the previous quote
+    // (Revelation 12:11 just before Luke 22:20), not a rival reading of this one.
+    // …nor a near-duplicate twin of it: twins have their own resolver
+    // (Luke 7:28 "corrected" Matthew 11:11 here — eval).
+    .filter(([k, a]) => k !== key && now - a.at <= STREAM_RELATIVE_MS && !(now - (recentDetections.get(k) ?? -Infinity) < 60000)
+      && !(twinMap.get(key) || []).some(([t]) => t === k))
+    .map(([, a]) => a)
+    .sort((x, y) => (df(x.verse) - df(y.verse)) || ((y.verse.matchedIdf ?? y.verse.idf ?? 0) - (x.verse.matchedIdf ?? x.verse.idf ?? 0)) || (y.at - x.at))
+    .slice(0, 5).map(a => a.verse);
+}
+
+// Verse numbers a quick delivery or an accent turns into each other: the tens
+// off by one ("fifty-three" / "sixty-three" — Genesis 24:63, the eval's Isaac
+// meditating, cited as 53), teen/-ty ("thirteen" / "thirty"), and a dropped or
+// extra "1" ("eight" / "eighteen" — Joshua 1:8 came through as 1:18).
+function soundAlikeVerseNumbers(v) {
+  const out = new Set([v - 10, v + 10]);
+  if (v < 10) out.add(v + 10);
+  if (v > 10 && v < 20) { out.add(v - 10); out.add((v - 10) * 10); }
+  if (v >= 20 && v <= 90 && v % 10 === 0) out.add(v / 10 + 10);
+  return [...out].filter(n => n >= 1 && n !== v);
+}
+
+async function startCitationCheck(verse, transcript, isFinal, { siblings: given = null } = {}) {
   const key = `${verse.book}|${verse.chapter}|${verse.verse}`;
   if (citationCheck?.key === key && Date.now() - citationCheck.at < CITATION_CHECK_MS) return;   // the same citation re-parsed
   citationCheck = null;
-  const siblings = [];
-  for (const book of citationSiblingBooks(verse.book)) {
-    const m = await workerCall('directLookup', { book, chapter: verse.chapter, verse: verse.verse }, 2000).catch(() => null);
-    if (m?.result) siblings.push(m.result);
+  const siblings = given ? given.slice() : [];
+  if (!given) {
+    const lookups = [
+      ...citationSiblingBooks(verse.book).map(book => ({ book, chapter: verse.chapter, verse: verse.verse })),
+      ...soundAlikeVerseNumbers(verse.verse).map(n => ({ book: verse.book, chapter: verse.chapter, verse: n })),
+    ];
+    for (const ref of lookups) {
+      const m = await workerCall('directLookup', ref, 2000).catch(() => null);
+      if (m?.result) siblings.push(m.result);
+    }
   }
   if (!siblings.length) return;
+  const numberSibling = (v) => v.book === verse.book && v.chapter === verse.chapter;
   const keys = [key, ...siblings.map(v => `${v.book}|${v.chapter}|${v.verse}`)];
   let texts, idf;
   try {
@@ -5777,7 +5941,21 @@ async function startCitationCheck(verse, transcript, isFinal) {
     verse, key, words: rareWords(texts[0]),
     siblings: siblings.map((v, i) => ({ verse: v, key: keys[i + 1], words: rareWords(texts[i + 1]) })),
     finals: '', inUtterance: !isFinal, at: Date.now(), meaningAt: 0, meaningBusy: false,
+    numberSibling,
   };
+  if (given) {
+    // A reading match, not a citation: the stretch that produced it (the last
+    // few seconds of finished speech) is where the two verses' words start.
+    citationCheck.reading = true;
+    const now = Date.now();
+    citationCheck.finals = transcriptBuffer.filter(t => now - t.time < 6000).map(t => t.text).join(' ');
+    citationCheck.inUtterance = false;
+    return;
+  }
+  // What was said just before the citation counts too — preachers often
+  // paraphrase first and cite after ("Isaac went to the field to meditate…
+  // Genesis 24:63").
+  citationCheck.before = speechBeforeCitation(transcript, verse.book, isFinal);
   if (isFinal) citationCheck.finals = textAfterBookMention(transcript, verse.book, verse.chapter);
   await checkCitationSiblings(transcript, isFinal, { justStarted: true });
 }
@@ -5790,13 +5968,15 @@ async function checkCitationSiblings(transcript, isFinal, { justStarted = false 
   if (now - c.at > CITATION_CHECK_MS || lastDetectedRef !== c.key) { citationCheck = null; return; }
   // Words after the citation: finished segments since, plus the one in
   // progress (only the part after the citation, while it's the same utterance).
-  let text = c.finals;
+  let after = c.finals;
   if (!(justStarted && isFinal)) {
     const part = c.inUtterance ? textAfterBookMention(transcript, c.verse.book, c.verse.chapter) : transcript;
-    text = `${c.finals} ${part}`;
-    if (isFinal) { c.finals = text; c.inUtterance = false; }
+    after = `${c.finals} ${part}`;
+    if (isFinal) { c.finals = after; c.inUtterance = false; }
   }
-  const spoken = text.split(RE_SPACES).filter(Boolean).length;
+  const text = `${c.before || ''} ${after}`.trim();
+  const spoken = after.split(RE_SPACES).filter(Boolean).length;   // since the citation — the budget
+  const judged = text.split(RE_SPACES).filter(Boolean).length;
 
   // Rare words only one of the two verses has, in the speech.
   const speech = new Set(meaningfulWords(text).map(stemLite));
@@ -5810,30 +5990,51 @@ async function checkCitationSiblings(transcript, isFinal, { justStarted = false 
   }
   if (heardReadAloud) { citationCheck = null; return; }   // the heard verse is being read: settled
 
-  if (spoken >= CITATION_MEANING_MIN_WORDS && !c.meaningBusy && (isFinal || spoken - c.meaningAt >= 4)) {
+  if (judged >= CITATION_MEANING_MIN_WORDS && !c.meaningBusy && (isFinal || justStarted || spoken - c.meaningAt >= 4)) {
     c.meaningBusy = true; c.meaningAt = spoken;
     let r = null;
-    try { r = (await workerCall('compareVerses', { text, keys: [c.key, ...c.siblings.map(s => s.key)] }, 3000)).results; } catch {}
+    const windows = [...new Set([text.trim(), ...paraphraseWindows(text)])].filter(Boolean);
+    try { r = (await workerCall('compareVerses', { texts: windows, keys: [c.key, ...c.siblings.map(s => s.key)] }, 3000)).results; } catch {}
     c.meaningBusy = false;
+    if (process.env.KAIRO_DEBUG_CITATION) console.log('[DEBUG-CITATION]', JSON.stringify({ heard: c.verse.reference, siblings: c.siblings.map(s => s.verse.reference), text, r }));
     if (citationCheck !== c || !r) return;
     const heard = r[0];
     if (heard.rr != null) {
-      if (heard.rr >= CITATION_RR_FITS) { citationCheck = null; return; }   // the heard verse is what's being said
       let pick = null;
       c.siblings.forEach((s, i) => {
         const m = r[i + 1];
         if (m?.rr >= CITATION_RR_FITS && heard.rr <= CITATION_RR_NOT && (m.cos ?? 0) >= (heard.cos ?? 0) + CITATION_COS_LEAD
             && (!pick || m.rr > pick.rr)) pick = { verse: s.verse, rr: m.rr };
       });
-      if (pick) return switchCitationToSibling(c, pick.verse, `the cross-encoder reads it as ${pick.verse.book} (${pick.rr.toFixed(2)} vs ${heard.rr.toFixed(2)})`);
+      if (pick) return switchCitationToSibling(c, pick.verse, `the cross-encoder reads it as ${pick.verse.book} (${pick.rr.toFixed(2)} vs ${heard.rr.toFixed(2)})`, text);
+      // Both read as what was said — a phrase they share ("this is my blood,
+      // which is shed for…": Luke 22:20 and Matthew 26:28 alike). Then the
+      // words only one of them has decide, as for near-duplicate twins
+      // ("…for the remission of sins" is Matthew's). Until those words come,
+      // keep listening rather than settle on the one that went up first.
+      const w = byWords && c.siblings.findIndex(s => s.verse === byWords.verse);
+      // Citation siblings only (a sound-alike book or verse number): the verses
+      // a reading match loosely shares a stretch with are too loose a set.
+      if (!c.reading && byWords && heard.rr >= CITATION_RR_FITS && r[w + 1]?.rr >= CITATION_RR_FITS) {
+        return switchCitationToSibling(c, byWords.verse, `both read as said; only ${byWords.verse.reference} has the words spoken (${byWords.hits} vs ${byWords.against})`, text);
+      }
     } else if (byWords) {
-      return switchCitationToSibling(c, byWords.verse, `${byWords.hits} vs ${byWords.against} of each verse's own rare words`);
+      return switchCitationToSibling(c, byWords.verse, `${byWords.hits} vs ${byWords.against} of each verse's own rare words`, text);
     }
   }
   if (spoken >= CITATION_CHECK_WORDS) citationCheck = null;   // long past the citation
 }
 
-async function switchCitationToSibling(c, verse, why) {
+async function switchCitationToSibling(c, verse, why, spokenText = '') {
+  // A sound-alike verse NUMBER (same chapter) must also be the chapter's best
+  // match for what was said — "2 Samuel 5:18" with 5:19's words around it
+  // ("David enquired… shall I go up") switched to the look-alike 5:8 (eval).
+  if (c.numberSibling?.(verse)) {
+    let best = null;
+    try { best = (await workerCall('scoreChapterText', { book: verse.book, chapter: verse.chapter, text: spokenText || `${c.before || ''} ${c.finals || ''}` }, 3000)).results?.[0]; } catch {}
+    if (!best || best.verse !== verse.verse) return;   // keep listening
+  }
+  if (citationCheck !== c) return;
   citationCheck = null;
   const from = c.verse.reference;
   console.log(`[Citation] "${from}" → "${verse.reference}" — ${why}`);

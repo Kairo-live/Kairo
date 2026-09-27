@@ -300,6 +300,135 @@ const fresh = () => { server.resetDetectionSession(); referenceContext.reset(); 
     assert.equal(onScreen().at(-1), 'Psalms 125:1', JSON.stringify(sent));
   });
 
+  // ── Wrong sends found in the eval (2026-09-27) ──
+  await test('"is one of the nine" | "seeds" after John 3:8 is counting, not John 3:9', async () => {
+    fresh(); server.clearRangeQueue(); await server.clearLayer('all');
+    await say('John 3 verse 8.');
+    await say('The seed of love comes alive in you after you are saved. Is one of the nine');
+    await say('seeds of your generous spirit.');
+    assert.ok(!onScreen().includes('John 3:9'), JSON.stringify(sent));
+  });
+
+  await test('a range read aloud with no "next verse" steps forward verse by verse and never flicks back', async () => {
+    fresh(); server.clearRangeQueue(); await server.clearLayer('all');
+    await say('Psalm 1 verse 1 to 3.');
+    await say('Blessed is the man that walketh not in the counsel of the ungodly, nor standeth in the way of sinners, nor sitteth in the seat of the scornful.');
+    await say('But his delight is in the law of the LORD; and in his law doth he meditate day and night.');
+    await say('And he shall be like a tree planted by the rivers of water, that bringeth forth his fruit in his season; his leaf also shall not wither; and whatsoever he doeth shall prosper.');
+    await wait(1500);
+    const seq = onScreen().filter((r, i, a) => r !== a[i - 1]);
+    assert.deepEqual(seq, ['Psalms 1:1', 'Psalms 1:2', 'Psalms 1:3'], JSON.stringify(sent));
+  });
+
+  await test('a common phrase shared by several verses doesn\'t put one of them up ("the other side of the sea")', async () => {
+    fresh(); server.clearRangeQueue(); await server.clearLayer('all');
+    await say('They head like dummies, the sea saw them, it fled, and then they sang a new song on the other side of the sea. Amen.');
+    assert.ok(!onScreen().includes('Mark 5:1'), JSON.stringify(sent));
+  });
+
+  await test('"hangeth upon the tree" after Galatians 3:13 doesn\'t replace it with Joshua 10:26', async () => {
+    fresh(); server.clearRangeQueue(); await server.clearLayer('all');
+    await say('Christ has redeemed us from the curse of the law, being made a curse for us, for it is written.');
+    await say('Cursed is every man that hangeth upon the tree. That the blessing of Abraham might come on the Gentiles.');
+    assert.ok(!onScreen().includes('Joshua 10:26'), JSON.stringify(sent));
+    assert.ok(onScreen().includes('Galatians 3:13'), JSON.stringify(sent));
+  });
+
+  await test('"my blood, shed for the remission of sins" ends on Matthew 26:28, not Luke 22:20', async () => {
+    fresh(); server.clearRangeQueue(); await server.clearLayer('all');
+    await say('Number two, we partake of the blood of Jesus in the Holy Communion.');
+    await say('This is my blood which is shed for the remission of the sins of the world.');
+    await say('My blood, my blood.');
+    await wait(1500);
+    assert.equal(onScreen().at(-1), 'Matthew 26:28', JSON.stringify(sent));
+  });
+
+  // ── Wrong verse numbers, misheard books, fragmented speech (2026-09-27) ──
+  await test('"Genesis 24 verse 53" right after "Isaac went to the field to meditate" is Genesis 24:63', async () => {
+    fresh(); server.clearRangeQueue(); await server.clearLayer('all');
+    await say('Scriptures in search of the way out of issues of concern in our lives, and Isaac went to the field to meditate');
+    await say('there. Genesis 24 and verse 53. And Isaac engaged, and the Philistines envied him.');
+    await wait(1500);
+    assert.equal(onScreen().at(-1), 'Genesis 24:63', JSON.stringify(sent));
+  });
+
+  await test('"Joshua 1:18" followed by 1:8\'s words ends on Joshua 1:8', async () => {
+    fresh(); server.clearRangeQueue(); await server.clearLayer('all');
+    await say('Joshua 1 verse 18. This book of the law shall not depart from your mouth, but you shall meditate therein day and night.');
+    await wait(1500);
+    assert.equal(onScreen().at(-1), 'Joshua 1:8', JSON.stringify(sent));
+  });
+
+  await test('a correct citation with number look-alikes stays (Genesis 24:63, John 3:16)', async () => {
+    fresh(); server.clearRangeQueue(); await server.clearLayer('all');
+    await say('Genesis 24 verse 63. And Isaac went out to meditate in the field at the eventide.');
+    await wait(1200);
+    assert.deepEqual(onScreen().filter((r, i, a) => r !== a[i - 1]), ['Genesis 24:63'], JSON.stringify(sent));
+    fresh(); server.clearRangeQueue(); await server.clearLayer('all');
+    await say('John 3 verse 16. God loved you so much, church, that he gave everything for you.');
+    await wait(1200);
+    assert.deepEqual(onScreen().filter((r, i, a) => r !== a[i - 1]), ['John 3:16'], JSON.stringify(sent));
+  });
+
+  await test('"Proverbate him" — the righteous run to it and are safe — finds Proverbs 18:10', async () => {
+    fresh(); server.clearRangeQueue(); await server.clearLayer('all');
+    await say('Proverbate him, the name of the Lord is a strong tower, the righteous run into it and they are safe and protected.');
+    await wait(2000);
+    assert.ok(sent.some(s => s.ref === 'Proverbs 18:10'), JSON.stringify(sent));
+  });
+
+  await test('"In Romans\', whosoever call upon the name of Jesus shall be saved" finds Romans 10:13, not Acts 2:21', async () => {
+    fresh(); server.clearRangeQueue(); await server.clearLayer('all');
+    await say("In Romans' whosoever shall call upon the name of the Lord shall be saved. That is the promise.");
+    await say('Nobody who calls on him is turned away, church.');
+    await wait(2000);
+    assert.ok(sent.some(s => s.ref === 'Romans 10:13'), JSON.stringify(sent));
+    assert.ok(!onScreen().includes('Acts 2:21'), JSON.stringify(sent));
+  });
+
+  await test('a cited verse stays when its word-for-word twin is read (Jeremiah 31:34, not Hebrews 8:11)', async () => {
+    fresh(); server.clearRangeQueue(); await server.clearLayer('all');
+    await say('Jeremiah 31 verse 34.');
+    await say('He said, and they shall teach no more every man his neighbour, and every man his brother, saying, Know the Lord: for they shall all know me.');
+    await wait(1500);
+    assert.ok(!onScreen().includes('Hebrews 8:11'), JSON.stringify(sent));
+    assert.equal(onScreen().at(-1), 'Jeremiah 31:34', JSON.stringify(sent));
+  });
+
+  await test('a cited verse isn\'t "corrected" to its near-duplicate as it\'s read (Matthew 11:11, not Luke 7:28)', async () => {
+    fresh(); server.clearRangeQueue(); await server.clearLayer('all');
+    await say('Matthew 11 verse 11.');
+    await say('He said, among them that are born of women, there are not risen a greater than John the Baptist.');
+    await say('But he that is least in the kingdom of heaven is greater than he.');
+    await wait(1500);
+    assert.ok(!onScreen().includes('Luke 7:28'), JSON.stringify(sent));
+    assert.equal(onScreen().at(-1), 'Matthew 11:11', JSON.stringify(sent));
+  });
+
+  await test('"2 Samuel 5:18 to 20" with 5:19\'s words around it doesn\'t become the look-alike number 5:8', async () => {
+    fresh(); server.clearRangeQueue(); await server.clearLayer('all');
+    await say('Walk through scriptures with your meditation in search of answers. Shall I go up, David said, 2 Samuel chapter 5:18');
+    await say('to 20. Will you deliver the Philistines into my hand, and the Lord said go up.');
+    await wait(1500);
+    assert.ok(!onScreen().includes('2 Samuel 5:8'), JSON.stringify(sent));
+  });
+
+  await test('a verse quoted from memory in NIV words is offered ("plans to prosper you" = Jeremiah 29:11)', async () => {
+    fresh(); server.clearRangeQueue(); await server.clearLayer('all');
+    await say('God has not forgotten you church. For I know the plans I have for you, plans to prosper you and not to harm you, plans to give you hope and a future.');
+    await say('That is his word over your life this morning.');
+    await wait(2000);
+    assert.ok(sent.some(s => s.ref === 'Jeremiah 29:11'), JSON.stringify(sent));
+  });
+
+  await test('a quote said in fragments is told from its near-duplicate (Mark 11:23, not Matthew 21:21)', async () => {
+    fresh(); server.clearRangeQueue(); await server.clearLayer('all');
+    for (const piece of ['If you will say', 'to this mountain,', 'be thou removed,', 'and be thou cast into the sea,', 'and shall not doubt in your heart,', 'but shall believe that those things you say shall come to pass,', 'you shall have whatsoever you say.']) await say(piece);
+    await wait(1500);
+    assert.ok(!onScreen().includes('Matthew 21:21'), JSON.stringify(sent));
+    assert.ok(sent.some(s => s.ref === 'Mark 11:23'), JSON.stringify(sent));
+  });
+
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 })();

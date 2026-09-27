@@ -412,3 +412,12 @@ test('a one-chapter book said with another chapter number is a misheard ordinal 
   assert.ok(refs[0].ambiguousGroup && refs[0].ambiguousGroup === refs[1].ambiguousGroup);
   assert.deepEqual(parseAllSpokenReferences('3 John 4').map(r => `${r.book} ${r.chapter}:${r.verse}`), ['3 John 1:4']);
 });
+
+test('a book name one letter off before "verse N" names another passage — not a verse of the chapter on screen', () => {
+  referenceContext.update('Genesis', 13);
+  assert.equal(resolvePartialReference('in the name of Jesus dude verse one it is only one chapter'), null);   // Jude, misheard
+  referenceContext.update('Genesis', 13);
+  assert.deepEqual(resolvePartialReference('like verse 12 says'), { book: 'Genesis', chapter: 13, verse: 12, partial: true });
+  referenceContext.update('Genesis', 13);
+  assert.deepEqual(resolvePartialReference('the truth verse 4'), { book: 'Genesis', chapter: 13, verse: 4, partial: true });
+});

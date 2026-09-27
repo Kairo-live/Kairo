@@ -4535,6 +4535,14 @@
     },
     {
       "book": "Proverbs",
+      "chapter": 12,
+      "verse": 14,
+      "kind": "quote",
+      "startMs": 2591000,
+      "note": "2026-09-27 audit round 5: \"watch Proverbs 12:14… a man shall be satisfied with good by the fruit of his lips and the recompense of a man's hand shall be rendered\" — verified against the transcript and KJV by hand"
+    },
+    {
+      "book": "Proverbs",
       "chapter": 13,
       "verse": 2,
       "kind": "citation",

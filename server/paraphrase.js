@@ -94,6 +94,7 @@ const PARAPHRASE_THRESHOLDS = {
   offer:         { rr: 0.98, cos: 0.8, lex: 10 },              // Possible Matches
   offerInPlay:   { rr: 0.95, cos: 0.78, lex: 8 },              // …when the passage is already in play
   offerNoRerank: { cos: 0.82, lex: 10 },                       // non-English service: no cross-encoder
+  offerModern:   { rr: 0.98, cos: 0.75, lex: 15, margin: 0.2 }, // read by the cross-encoder in modern wording (NIV-style quotes)
   send:          { rr: 0.99, cos: 0.84, lex: 15, margin: 0.2 }, // the screen
 };
 const OFFER_SCORE = 0.7, SEND_SCORE = 0.9;
@@ -115,11 +116,27 @@ function decideParaphrase(results, ctx = {}, T = PARAPHRASE_THRESHOLDS) {
 
   if (rr != null) {
     const S = T.send;
+    const aff = (v) => (ctx.affinity ? ctx.affinity(v) : 0);
     const margin = second ? rr - Math.max(0, rrOf(second)) : 1;
-    if (rr >= S.rr && top.cos >= S.cos && top.lexIdf >= S.lex && margin >= S.margin) return out('viewer', SEND_SCORE);
-    const inPlay = (ctx.affinity ? ctx.affinity(top) : 0) >= 2;
+    const sendable = rr >= S.rr && top.cos >= S.cos && top.lexIdf >= S.lex;
+    if (sendable && margin >= S.margin) return out('viewer', SEND_SCORE);
+    // Two verses that say the same thing ("whosoever shall call upon the name
+    // of the Lord shall be saved": Romans 10:13 / Acts 2:21) can't be told
+    // apart by meaning — the passage the preacher named or is reading can.
+    if (sendable && second && aff(top) >= 2 && aff(second) < 2) return out('viewer', SEND_SCORE, 'the passage in play decides');
+    const inPlay = aff(top) >= 2;
     const O = inPlay ? T.offerInPlay : T.offer;
     if (rr >= O.rr && top.cos >= O.cos && top.lexIdf >= O.lex) return out('suggestions', OFFER_SCORE, inPlay ? 'passage in play' : null);
+    // Quoted from memory in modern words ("plans to prosper you and not to
+    // harm you"): the KJV-calibrated scores fall short, the cross-encoder on a
+    // modern wording doesn't. Offered only — never sent on this alone.
+    const M = T.offerModern;
+    const byModern = results.filter(r => typeof r.rerankModern === 'number').sort((a, b) => b.rerankModern - a.rerankModern);
+    const mTop = byModern[0], mSecond = byModern.find(r => r.reference !== mTop?.reference);
+    if (mTop && mTop.rerankModern >= M.rr && mTop.cos >= M.cos && mTop.lexIdf >= M.lex
+        && mTop.rerankModern - Math.max(0, mSecond?.rerankModern ?? 0) >= M.margin) {
+      return { verse: { ...mTop, paraphraseScore: OFFER_SCORE }, key: `${mTop.book}|${mTop.chapter}|${mTop.verse}`, target: 'suggestions', score: OFFER_SCORE, why: 'modern wording' };
+    }
     return null;
   }
   const N = T.offerNoRerank;

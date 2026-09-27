@@ -268,6 +268,7 @@ const PARSER_HEALING_PAIRS = [
   ['colossian chapter','colossians chapter'],['colossian verse','colossians verse'],['colossian','colossians'],
   ['thessalonian','1 thessalonians'],
   ['profit chapter','proverbs chapter'],['profit verse','proverbs verse'],
+  ['proverbate','proverbs'],   // "Proverbs eighteen" heard as "Proverbate him" (live run)
   ['first chronic','1 chronicles'],['second chronic','2 chronicles'],
   // Song of Solomon — all spoken variants collapse to the single token
   // "songofsolomon" so it flows through the single-word book machinery.
@@ -457,9 +458,16 @@ function applySelfCorrections(lc) {
   return lc;
 }
 
+// "In Romans' whosoever…", "John's gospel": the apostrophe kept the book name
+// from being recognised at all.
+function dropPossessives(text) { return text.replace(/([a-z])['’]s\b/gi, '$1').replace(/([a-z])['’](?=\s|$)/gi, '$1'); }
+
 function cleanReferenceText(text) {
   if (typeof text !== 'string') return '';
   if (citationLanguage !== 'en') text = localizeCitationText(text, citationLanguage);
+  text = dropPossessives(text)
+    // Captions split a two-digit verse: "Proverbs 3:2 7" is 3:27.
+    .replace(/\b(\d{1,3}):(\d) (\d)(?![\d:])(?!\s+\d)/g, '$1:$2$3');
   text = text.replace(/([\w-]+)\s*,\s*(?=([\w-]+))/g, (m, a, b) => isListNumber(a) && isListNumber(b) ? `${a} and ` : m);
   return applySelfCorrections(normalizeOrdinalForms(text
     .replace(/[.,!?;]/g, ' ')
@@ -1165,7 +1173,7 @@ const BIBLE_TRIGGER_PHRASES = [
 function detectBookMentions(text, inBibleMode = false) {
   if (typeof text !== 'string') return [];
   if (citationLanguage !== 'en') text = localizeCitationText(text, citationLanguage);
-  const lowered = text.toLowerCase().replace(/[.,!?;:]/g, ' ').replace(/\s+/g, ' ').trim();
+  const lowered = dropPossessives(text).toLowerCase().replace(/[.,!?;:]/g, ' ').replace(/\s+/g, ' ').trim();
   const books = [];
   const seen  = new Set();
 
@@ -1326,6 +1334,17 @@ const referenceContext = new ReferenceContext();
 // verse eleven") or another book ("Genesis verse twelve") means a different
 // passage is being named — its verse is not a verse of the current chapter.
 const LOOKBACK_SKIP = new Set(['and', 'i', 'mean', 'sorry', 'uh', 'um', 'so', 'now', 'the', 'in']);
+// A book name one letter off, heard where a book name goes ("…in the name of
+// Jesus, dude verse one — it's only one chapter", i.e. Jude): some passage is
+// being named, just not one we can read, so "verse N" isn't a verse of the
+// chapter on screen (eval: it put up Genesis 13:1). Ordinary words that are
+// one letter off a book and often come before "verse" are left alone.
+const NOT_BOOK_NAMES = new Set(['like', 'lake', 'luck', 'lure', 'duke', 'truth', 'join', 'joy', 'jobs', 'rob', 'mob', 'act', 'facts', 'arts', 'park', 'dark', 'mask', 'marks', 'games', 'palm', 'june', 'ester']);
+function soundsLikeABook(w) {
+  if (w.length < 4 || NOT_BOOK_NAMES.has(w) || SINGLE_WORD_BOOKS.has(w)) return false;
+  for (const b of SINGLE_WORD_BOOKS) if (Math.abs(b.length - w.length) <= 1 && cachedLevenshtein(w, b) === 1) return true;
+  return false;
+}
 function namesOtherPassageBefore(words, i) {
   for (let k = i - 1, looked = 0; k >= 0 && looked < 4; k--, looked++) {
     const w = words[k];
@@ -1333,6 +1352,7 @@ function namesOtherPassageBefore(words, i) {
     if (['verse', 'verses', 'vers'].includes(w)) return false;
     const alias = (k > 0 && BOOK_ALIASES[`${words[k - 1]} ${w}`]) || BOOK_ALIASES[w];
     if (alias) return (Array.isArray(alias) ? alias[0] : alias) !== referenceContext.book;
+    if (soundsLikeABook(w)) return true;
     for (let st = Math.max(0, k - 2); st <= k; st++) {
       const n = consumeNumber(words, st);
       if (!n || st + n.consumed !== k + 1) continue;

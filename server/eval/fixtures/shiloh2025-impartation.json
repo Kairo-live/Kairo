@@ -4765,12 +4765,12 @@
       "bootstrapped": true
     },
     {
-      "book": "Romans",
-      "chapter": 10,
-      "verse": 13,
+      "book": "Acts",
+      "chapter": 2,
+      "verse": 21,
       "kind": "quote",
-      "startMs": 3777600,
-      "unverified": true
+      "startMs": 3750210,
+      "note": "2026-09-27 audit round 5: \"It shall come to pass. That was our call upon the name of the Lord shall be saved.\" — Acts 2:21 wording (\"it shall come to pass… shall be saved\"); replaces an unverified Romans 10:13 at 3777s, which was a prayer"
     }
   ]
 }

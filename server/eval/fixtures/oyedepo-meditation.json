@@ -2211,6 +2211,14 @@
       "startMs": 75000
     },
     {
+      "book": "Genesis",
+      "chapter": 24,
+      "verse": 63,
+      "kind": "quote",
+      "startMs": 257000,
+      "note": "2026-09-27 audit round 5: \"Isaac went to the field to meditate there Genesis 24 and verse 53\" — the story is 24:63 (the cited 53 is a mis-said/misheard number); verified against the transcript and KJV by hand"
+    },
+    {
       "book": "Psalms",
       "chapter": 119,
       "ranges": [
