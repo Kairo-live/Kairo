@@ -545,6 +545,18 @@ const fresh = () => { server.resetDetectionSession(); referenceContext.reset(); 
     assert.ok(sent.some(s => s.ref === 'Mark 11:23'), JSON.stringify(sent));
   });
 
+  await test('two citations in one growing interim go up once each, in order — no alternating on every update', async () => {
+    fresh(); server.clearRangeQueue(); await server.clearLayer('all');
+    const text = 'Romans eight verse twenty eight says all things work together for good, and Romans five verse eight God commended his love toward us, while we were yet sinners Christ died for us church';
+    const w = text.split(' ');
+    for (let i = 3; i < w.length; i++) { await server.handleTranscriptSegment(w.slice(0, i).join(' '), false, 0.9, false); await wait(15); }
+    await wait(300);
+    const beforeFinal = onScreen();
+    assert.deepEqual(beforeFinal, ['Romans 8:28', 'Romans 5:8'], JSON.stringify(sent));
+    await server.handleTranscriptSegment(text, true, 0.9, true); await wait(800);
+    assert.deepEqual(onScreen(), ['Romans 8:28', 'Romans 5:8'], JSON.stringify(sent));
+  });
+
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 })();

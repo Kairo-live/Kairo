@@ -1004,8 +1004,11 @@ const recentSuggestions = new Map();   // verseKey → last suggestion broadcast
 // the same interim — each overwrote the other every update).
 const interimSeenAt = new Map();
 const INTERIM_STABLE_WINDOW_MS = 3000;
-let interimDetectedRef  = null;
-let interimDetectedTime = 0;
+// Citations already sent from the current interim (cleared at each final): a
+// growing interim is re-parsed on every update, and a single "last sent" slot
+// let two citations in one interim alternate on screen every update (live,
+// offline engine: John 5:19 / John 3:31 four times in 3 s).
+const interimSentKeys = new Set();
 
 // Throttle verbatim search on interim — don't hammer the worker on every word
 let lastInterimVerbatim = 0;
@@ -3286,7 +3289,7 @@ app.post('/api/reranker-model/install', async (_req, res) => {
 // service.js's onTranscript hands it to LyricsFollower.ingest as meta.words
 // for real audio-time-based rate tracking instead of wall-clock estimation.
 // Nothing downstream of this function uses it — purely a pass-through.
-async function handleTranscriptSegment(transcript, isFinal, confidence, speechFinal, words) {
+async function handleTranscriptSegment(transcript, isFinal, confidence, speechFinal, words, continuesLive = false) {
   broadcast({ type: 'transcript', text: transcript, isFinal, confidence, ...(words ? { words } : {}) });
   // Detection sees accent-folded text ("João"→"joao"), the same folding the
   // worker applies to its Bible text; the operator's transcript above keeps them.
@@ -3433,7 +3436,9 @@ async function handleTranscriptSegment(transcript, isFinal, confidence, speechFi
   referenceContext.setPaceFactor(paceFactor());
   hasNewTranscript = true;
 
-  streamNewWords(transcript, true);
+  streamNewWords(transcript, true, continuesLive);
+  const sentFromInterim = new Set(interimSentKeys);
+  interimSentKeys.clear();
   maybeHandleNextVerseTrigger(transcript).catch(() => {});
   markVerseEndIfJustFinished(transcript);
 
@@ -3447,7 +3452,7 @@ async function handleTranscriptSegment(transcript, isFinal, confidence, speechFi
   // Snapshot BEFORE processForReferences replaces prevFinalTranscript with this
   // segment — announcesDifferentBook below needs the real previous segment.
   const prevFinalBefore = { text: prevFinalTranscript, at: prevFinalTranscriptAt };
-  let foundRef = await processForReferences(transcript, true);
+  let foundRef = await processForReferences(transcript, true, sentFromInterim);
   await checkCitationSiblings(transcript, true);
   if (!foundRef) offerNamedPassages(transcript).catch(() => {});
 
@@ -3658,10 +3663,10 @@ async function startOffline() {
         offlineLastPartial = t;
         handleTranscriptSegment(t, false, 0.85, false).catch(() => {});
       },
-      onFinal: (text) => {
+      onFinal: (text, { speechFinal = true } = {}) => {
         const t = (text || '').trim();
         offlineLastPartial = '';
-        if (t) handleTranscriptSegment(t, true, 0.9, true).catch(() => {});
+        if (t) handleTranscriptSegment(t, true, 0.9, speechFinal, undefined, !speechFinal).catch(() => {});
       },
       onError: (err) => console.warn('[Offline]', err.message),
     });
@@ -3712,7 +3717,7 @@ function resetDetectionSession({ keepContinuity = false } = {}) {
   // always restarts with the connection.
   lastFingerprintSearch = 0;
   hasNewTranscript      = false;
-  interimDetectedRef    = null;
+  interimSentKeys.clear();
   interimSeenAt.clear();
   citationCheck         = null;
   recentStreamAnchors.clear();
@@ -4188,13 +4193,20 @@ function tryChapterAdvanceByDetection(verses, topScore, method) {
 // watermark and feed only the suffix that hasn't been streamed yet. This gets
 // each word into the trie the moment STT hears it (~1-3s before the final
 // lands) without double-feeding when the final repeats the same words. The
-// watermark resets on each final, matching how STT utterance boundaries work.
+// watermark resets on each final, matching how STT utterance boundaries work —
+// except when the live text continues right after the final (the offline
+// engine locks words as they arrive): whatever was fed beyond the final is
+// already in, so the watermark carries over.
 let streamWatermark = 0;
 
-function streamNewWords(transcript, isFinal) {
-  const words = transcript.split(RE_SPACES).filter(Boolean);
+function streamNewWords(transcript, isFinal, continuesLive = false) {
+  let words = transcript.split(RE_SPACES).filter(Boolean);
+  // The offline engine's newest interim word may still be growing ("accid" →
+  // "accident"); feed it once the next word shows it's complete.
+  if (!isFinal && offlineActive) words = words.slice(0, -1);
   const fresh = words.slice(streamWatermark);
-  streamWatermark = isFinal ? 0 : words.length;
+  streamWatermark = !isFinal ? words.length
+    : continuesLive ? Math.max(0, streamWatermark - words.length) : 0;
   if (fresh.length && workerBasicReady) {
     processStreamText(fresh.join(' ')).catch(() => {});
   }
@@ -4749,7 +4761,7 @@ function endsMidCitation(text) {
   return /\d$/.test(t) || !!consumeNumber([tail], 0);
 }
 
-async function processForReferences(transcript, isFinal) {
+async function processForReferences(transcript, isFinal, sentFromInterim = null) {
   if (!workerBasicReady) return false;
   let refs = await resolveAmbiguousRefs(parseAllSpokenReferences(transcript, inBibleMode));
 
@@ -5075,6 +5087,11 @@ async function processForReferences(transcript, isFinal) {
         // For ranges: first verse goes to viewer immediately, rest queue for operator
         if (verses.length > 1) setRangeQueue(verses);
         else clearRangeQueue();
+        // Already put up from this segment's interim: sending it again now
+        // would flash it back over whatever was cited after it in the same
+        // breath (live: John 5:19 and John 3:31 re-sent back to back when the
+        // line locked).
+        if (verses.length === 1 && sentFromInterim?.has(`${verses[0].book}|${verses[0].chapter}|${verses[0].verse}`)) continue;
         const sent = await broadcastDetection(verses, 'direct', 1.0, 'viewer');
         if (sent === 'viewer') console.log(`[Direct] "${verses[0].reference}"${verses.length > 1 ? ` (+${verses.length - 1} more in range)` : ''} → viewer`);
         if (sent === 'viewer' && verses.length === 1) await startCitationCheck(verses[0], transcript, true);
@@ -5089,10 +5106,8 @@ async function processForReferences(transcript, isFinal) {
         // to the fastest route. The light interim dedup below only stops the
         // same growing interim from re-entering on every update.
         const topKey = `${verses[0].book}|${verses[0].chapter}|${verses[0].verse}`;
-        const now = Date.now();
-        if (topKey === interimDetectedRef && now - interimDetectedTime < DIRECT_DEDUP_MS) continue;
-        interimDetectedRef  = topKey;
-        interimDetectedTime = now;
+        if (interimSentKeys.has(topKey)) continue;
+        interimSentKeys.add(topKey);
         const sent = await broadcastDetection(verses, 'direct', 1.0, 'viewer');
         if (sent === 'viewer') console.log(`[Direct] "${verses[0].reference}" (interim) → viewer`);
         if (sent === 'viewer' && verses.length === 1) await startCitationCheck(verses[0], transcript, false);
@@ -6921,6 +6936,8 @@ if (require.main === module) {
     startDeepgram,
     sendServiceSlide,
     stopDeepgram,
+    startOffline,
+    stopOffline,
     ingestAudio,
     handleSecondaryFinal: (...a) => citationVoting.handleSecondaryFinal(...a),
     recordPrimaryCitation: (...a) => citationVoting.recordPrimaryCitation(...a),

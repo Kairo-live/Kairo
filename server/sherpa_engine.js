@@ -42,6 +42,26 @@ const SAMPLE_RATE = 16000;
 // spinning the event loop.
 const POLL_INTERVAL_MS = 120;
 
+// Text rolls in and locks in the order it was said, not at pauses: in a
+// service there is rarely real silence (organ, congregation, a fast
+// preacher), and locking only after a pause let one line grow to 72 words /
+// 25 s, whose citations and quotes then all fired at once when it locked.
+// The model never revises a word once it has emitted it (measured: 0 of 502
+// updates over 10 min of sermon audio changed an earlier word), so all but
+// the newest few words lock as soon as they arrive. The newest words stay
+// live — the last one may still be growing ("indefati" → "indefatigable") —
+// and only that short tail waits for the endpoint.
+const LIVE_TAIL_WORDS = 4;   // newest words kept live (interim)
+const MIN_LOCK_WORDS  = 3;   // lock in runs of at least this many words
+
+// Resetting the stream costs the model its context: the words right after a
+// reset come out wrong or go missing. Resetting at every 1.2 s pause (10 min
+// of sermon audio) lost 107 words — 28.6% word difference from Deepgram's
+// transcript of the same audio vs 22.0% with no resets. A pause now only
+// locks the live tail; the stream is reset at a pause once it has run this
+// many words, which keeps its text bounded at no measurable cost (22.3%).
+const RESET_AFTER_WORDS = 300;
+
 // ── PCM s16le (mono) → Float32 [-1, 1] ──────────────────────────────────────
 function pcm16ToFloat32(buf) {
   const n   = Math.floor(buf.length / 2);
@@ -103,13 +123,14 @@ function recognizerConfig(modelDir, { utteranceEndMs = 1200 } = {}) {
       debug: 0,
     },
     decodingMethod: 'greedy_search',
-    // Endpoint = the utterance is over: emit onFinal() and reset the stream.
-    // rule2 (a pause after words) is the common case and uses the same pause
-    // Deepgram's utterance_end_ms does.
+    // Endpoint = a pause: lock the live tail (words otherwise lock as they
+    // arrive, see LIVE_TAIL_WORDS) and maybe reset (RESET_AFTER_WORDS). rule2
+    // uses the same pause Deepgram's utterance_end_ms does. No length cap
+    // (rule3): it would reset the model mid-sentence.
     enableEndpoint: 1,
     rule1MinTrailingSilence: 2.4,  // silence after nothing decoded yet
     rule2MinTrailingSilence: utteranceEndMs / 1000,
-    rule3MinUtteranceLength: 25,   // hard cap in seconds, mirrors MAX_UTTERANCE
+    rule3MinUtteranceLength: 1e6,
   };
 }
 
@@ -117,8 +138,10 @@ class SherpaEngine {
   // opts:
   //   modelDir  — dir holding the extracted streaming-zipformer model files
   //   language  — accepted for parity; the en model is monolingual so unused
-  //   onPartial(text)  — evolving transcript of the current utterance
-  //   onFinal(text)    — once per utterance, at the endpoint
+  //   onPartial(text)  — the live tail: words not locked yet
+  //   onFinal(text, { speechFinal })
+  //                    — words locked, in the order they were said; without
+  //                      speechFinal the live tail continues right after them
   //   onError(err)
   constructor(opts = {}) {
     // `modelPath` accepted as an alias so server.js's
@@ -135,6 +158,7 @@ class SherpaEngine {
     this._timer      = null;
     this._running    = false;
     this._lastPartial = '';
+    this._locked     = 0;   // words of the current utterance already locked
   }
 
   async start() {
@@ -155,6 +179,7 @@ class SherpaEngine {
     this._recognizer = new OnlineRecognizer(recognizerConfig(this.modelDir, { utteranceEndMs: this.utteranceEndMs }));
     this._stream = this._recognizer.createStream();
     this._lastPartial = '';
+    this._locked = 0;
     this._running = true;
     this._timer = setInterval(() => this._pump(), POLL_INTERVAL_MS);
   }
@@ -175,19 +200,32 @@ class SherpaEngine {
       while (rec.isReady(st)) rec.decode(st);
 
       const text = (rec.getResult(st).text || '').trim();
+      const words = text ? text.split(/\s+/) : [];
+      if (words.length < this._locked) this._locked = words.length;   // never expected; stay consistent
 
       if (rec.isEndpoint(st)) {
-        // Utterance boundary — commit whatever we have as a final, then reset
-        // the stream so the encoder state cache starts clean for the next one.
-        if (text) this.onFinal(text);
-        rec.reset(st);
+        // A pause — lock the live tail; reset only a long-running stream.
+        const rest = words.slice(this._locked).join(' ');
+        if (rest) this.onFinal(rest, { speechFinal: true });
         this._lastPartial = '';
+        this._locked = words.length;
+        if (words.length >= RESET_AFTER_WORDS) {
+          rec.reset(st);
+          this._locked = 0;
+        }
         return;
       }
 
-      if (text && text !== this._lastPartial) {
-        this._lastPartial = text;
-        this.onPartial(text);
+      const upTo = words.length - LIVE_TAIL_WORDS;
+      if (upTo - this._locked >= MIN_LOCK_WORDS) {
+        this.onFinal(words.slice(this._locked, upTo).join(' '), { speechFinal: false });
+        this._locked = upTo;
+      }
+
+      const live = words.slice(this._locked).join(' ');
+      if (live && live !== this._lastPartial) {
+        this._lastPartial = live;
+        this.onPartial(live);
       }
     } catch (err) {
       this.onError(err);
@@ -205,12 +243,14 @@ class SherpaEngine {
         this._stream.inputFinished?.();
         while (rec.isReady(st)) rec.decode(st);
         const text = (rec.getResult(st).text || '').trim();
-        if (text) this.onFinal(text);
+        const rest = (text ? text.split(/\s+/) : []).slice(this._locked).join(' ');
+        if (rest) this.onFinal(rest, { speechFinal: true });
       }
     } catch {}
     this._recognizer = null;
     this._stream = null;
     this._lastPartial = '';
+    this._locked = 0;
   }
 }
 
