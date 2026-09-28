@@ -2531,6 +2531,125 @@ document.getElementById('replay-onboarding-btn')?.addEventListener('click', () =
   openOnboardingWizard();
 });
 
+// Settings → Help's search: only the sections that mention every word typed
+// stay, opened, with the words marked. Words like "how" or "the" don't have to
+// appear ("how do I clear the screen" looks for clear + screen). Enter steps
+// through the marks (Shift+Enter back); Escape clears. Clearing puts every
+// section back open or closed the way it was.
+(function initHelpSearch() {
+  const input = document.getElementById('help-search');
+  const groupsEl = document.querySelector('.help-groups');
+  if (!input || !groupsEl) return;
+  const countEl = document.getElementById('help-search-count');
+  const noneEl = document.getElementById('help-no-results');
+  const groups = [...groupsEl.querySelectorAll('.help-group')];
+  // A summary is a flex row: its title goes in one span so marked words stay
+  // inline with the rest of it.
+  groups.forEach(g => {
+    const s = g.querySelector('summary');
+    if (s && !s.querySelector('.help-summary-text')) {
+      const span = document.createElement('span');
+      span.className = 'help-summary-text';
+      while (s.firstChild) span.appendChild(s.firstChild);
+      s.appendChild(span);
+    }
+  });
+  const STOP = new Set(['a', 'an', 'and', 'are', 'be', 'can', 'do', 'does', 'for', 'how', 'i', 'if', 'in',
+    'is', 'it', 'me', 'my', 'of', 'on', 'or', 'the', 'to', 'what', 'when', 'where', 'why', 'with', 'you', 'your']);
+  const openBefore = new Map();
+  let marks = [], current = -1, timer = 0;
+
+  function unmark() {
+    groupsEl.querySelectorAll('mark.help-hit').forEach(m => {
+      const parent = m.parentNode;
+      parent.replaceChild(document.createTextNode(m.textContent), m);
+      parent.normalize();
+    });
+    marks = []; current = -1;
+  }
+  function mark(root, re) {
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    const nodes = [];
+    while (walker.nextNode()) nodes.push(walker.currentNode);
+    for (const node of nodes) {
+      const text = node.nodeValue;
+      re.lastIndex = 0;
+      if (!re.test(text)) continue;
+      re.lastIndex = 0;
+      const frag = document.createDocumentFragment();
+      let last = 0, m;
+      while ((m = re.exec(text))) {
+        if (m.index > last) frag.appendChild(document.createTextNode(text.slice(last, m.index)));
+        const el = document.createElement('mark');
+        el.className = 'help-hit';
+        el.textContent = m[0];
+        frag.appendChild(el);
+        last = m.index + m[0].length;
+      }
+      if (last < text.length) frag.appendChild(document.createTextNode(text.slice(last)));
+      node.parentNode.replaceChild(frag, node);
+    }
+  }
+  function search() {
+    const q = input.value.trim().toLowerCase().replace(/\s+/g, ' ');
+    unmark();
+    if (!q) {
+      groups.forEach(g => { g.hidden = false; if (openBefore.has(g)) g.open = openBefore.get(g); });
+      openBefore.clear();
+      countEl.textContent = '';
+      noneEl.hidden = true;
+      return;
+    }
+    if (!openBefore.size) groups.forEach(g => openBefore.set(g, g.open));
+    // Words match from their start ("clip" finds clipping, "ndi" finds NDI but
+    // not "finding").
+    const esc = (w) => (/^\w/.test(w) ? '\\b' : '') + w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const textOf = new Map(groups.map(g => [g, g.textContent.replace(/\s+/g, ' ')]));
+    const words = q.split(' ');
+    const terms = words.filter(w => !STOP.has(w));
+    const find = terms.length ? terms : words;
+    // Several words said as a phrase somewhere ("next verse", "clear bible")
+    // find just that phrase; otherwise every word, anywhere in the section.
+    const phraseRe = new RegExp(words.map(esc).join('\\s+'), 'i');
+    const phrase = words.length > 1 && groups.some(g => phraseRe.test(textOf.get(g)));
+    const termRes = find.map(w => new RegExp(esc(w), 'i'));
+    const re = phrase
+      ? new RegExp(words.map(esc).join('\\s+'), 'gi')
+      : new RegExp(find.map(esc).sort((a, b) => b.length - a.length).join('|'), 'gi');
+    let shown = 0;
+    for (const g of groups) {
+      const text = textOf.get(g);
+      const hit = phrase ? phraseRe.test(text) : termRes.every(r => r.test(text));
+      g.hidden = !hit;
+      g.open = hit;
+      if (hit) { shown++; mark(g, re); }
+    }
+    marks = [...groupsEl.querySelectorAll('mark.help-hit')];
+    countEl.textContent = shown ? `${shown} ${shown === 1 ? 'section' : 'sections'}` : '';
+    noneEl.hidden = shown > 0;
+  }
+  function step(dir) {
+    if (!marks.length) return;
+    marks[current]?.classList.remove('is-current');
+    current = (current + dir + marks.length) % marks.length;
+    marks[current].classList.add('is-current');
+    marks[current].scrollIntoView({ block: 'center', behavior: 'smooth' });
+  }
+  input.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(() => { timer = 0; search(); }, 120); });
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      if (timer) { clearTimeout(timer); timer = 0; search(); }
+      step(e.shiftKey ? -1 : 1);
+    } else if (e.key === 'Escape' && input.value) {
+      e.preventDefault();
+      e.stopPropagation();
+      input.value = '';
+      search();
+    }
+  });
+})();
+
 // Called from the OBS detail panel's own Test button (renderObsDetail,
 // built dynamically now — see the Outputs master-detail redesign) — takes
 // the status element + button to update directly rather than assuming a

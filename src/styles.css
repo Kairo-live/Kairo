@@ -2991,6 +2991,14 @@ select {
   font-family: ui-monospace, monospace;
 }
 
+/* Help search — monochrome marks, like the rest of the interactive UI. */
+.help-search-row { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+.help-search { flex: 1; min-width: 0; }
+.help-search-count { flex: 0 0 auto; font-size: 11px; color: var(--text-3); white-space: nowrap; }
+mark.help-hit { background: rgba(255,255,255,0.16); color: var(--text); border-radius: 2px; padding: 0 1px; }
+mark.help-hit.is-current { background: rgba(255,255,255,0.38); }
+.help-no-results { margin-top: 10px; }
+
 /* ══════════════════════════════════════
    SETTINGS SECTIONS & OUTPUT CARDS
 ══════════════════════════════════════ */

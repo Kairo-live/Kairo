@@ -1410,8 +1410,15 @@
                      the thing"), not an exhaustive feature dump. -->
                 <div class="settings-section">
                     <div class="settings-section-label">Help &amp; Guide</div>
-                    <p class="setting-hint" style="margin:-4px 0 4px;">How Kairo works, start to finish. Click a section to expand it.</p>
+                    <p class="setting-hint" style="margin:-4px 0 4px;">How Kairo works, start to finish. Click a section to expand it, or search for a word.</p>
                     <button id="replay-onboarding-btn" class="modal-btn secondary" style="margin-bottom:14px;">Take the tour again</button>
+
+                    <!-- Search: shows only the sections that mention every word typed,
+                         opened, with the words marked. Enter steps through them. -->
+                    <div class="help-search-row">
+                        <input type="search" id="help-search" class="setting-input help-search" placeholder="Search help, e.g. clipping, next verse, NDI" autocomplete="off" spellcheck="false" aria-label="Search help">
+                        <span class="help-search-count" id="help-search-count" aria-live="polite"></span>
+                    </div>
 
                     <div class="help-groups">
                         <details class="help-group" open>
@@ -1535,6 +1542,7 @@
                             <div class="help-body">
                                 <ul>
                                     <li><strong>Nothing is being detected</strong> — confirm the right microphone/audio device is selected under Settings → Audio and that Live Status shows Listening, not Idle.</li>
+                                    <li><strong>The transcript skips words or stops while the preacher is talking</strong> — open Settings → Audio and read the line beside the level bar. <em>Clipping</em>: the source is too loud before it reaches Kairo; turn it down at the desk or player. <em>Silent</em>: nothing is reaching that input (wrong input selected, or the source is muted). A quiet feed is raised automatically. When testing with a video on this computer through BlackHole, the player's own volume sets Kairo's input level.</li>
                                     <li><strong>A verse is correct but never appears live</strong> — check Possible Matches; a lower-confidence detection waits there for a manual click rather than auto-sending.</li>
                                     <li><strong>The output window is blank or on the wrong screen</strong> — reselect it under Settings → Outputs → External Display.</li>
                                     <li><strong>An NDI output won't turn on</strong> — install the free NDI Tools runtime (ndi.video/tools) and try the toggle again; Kairo doesn't bundle it. The output's own status line shows the exact reason when it fails.</li>
@@ -1548,6 +1556,7 @@
                             </div>
                         </details>
                     </div>
+                    <p class="setting-hint help-no-results" id="help-no-results" hidden>Nothing in Help mentions that. Try another word.</p>
                 </div>
             </section>
 
