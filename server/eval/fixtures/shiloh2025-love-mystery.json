@@ -3593,26 +3593,6 @@
   ],
   "groundTruth": [
     {
-      "book": "Mark",
-      "chapter": 4,
-      "verse": 11,
-      "kind": "quote",
-      "startMs": 56295,
-      "unverified": true,
-      "matchedIdf": 18.966468595786843,
-      "similarity": 0.5534892634770525
-    },
-    {
-      "book": "Luke",
-      "chapter": 8,
-      "verse": 10,
-      "kind": "quote",
-      "startMs": 56295,
-      "unverified": true,
-      "matchedIdf": 20.025075549841247,
-      "similarity": 0.5097364159418342
-    },
-    {
       "book": "Matthew",
       "chapter": 13,
       "verse": 11,
@@ -3755,16 +3735,6 @@
       "kind": "quote",
       "startMs": 783775,
       "unverified": true
-    },
-    {
-      "book": "Deuteronomy",
-      "chapter": 7,
-      "verse": 24,
-      "kind": "quote",
-      "startMs": 796790,
-      "unverified": true,
-      "matchedIdf": 18.156659608854373,
-      "similarity": 0.4692846602256331
     },
     {
       "book": "Deuteronomy",
