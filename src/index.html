@@ -172,13 +172,16 @@
         <span id="elapsed-time" style="display:none;"></span>
 
         <div class="top-bar-right">
-            <span class="mic-label" id="mic-display">No mic selected</span>
+            <!-- Live input level while listening, drawn over the selected mic's
+                 name and exactly as wide as it — is it actually hearing the preacher? -->
+            <span class="tb-mic-stack">
+                <span class="tb-mic-meter" id="mic-meter" title="Input level" hidden><i></i></span>
+                <span class="mic-label" id="mic-display">No mic selected</span>
+            </span>
             <button id="listen-btn" class="tb-listen-btn">
                 <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor"><rect x="1" y="1" width="8" height="8" rx="1.5"/></svg>
                 <span class="listen-text">Start Listening</span>
             </button>
-            <!-- Live input level while listening — is it actually hearing the preacher? -->
-            <span class="tb-mic-meter" id="mic-meter" title="Input level" hidden><i></i></span>
             <div class="tb-divider"></div>
             <div class="tb-download-wrap">
                 <button id="export-btn" class="tb-studio-btn tb-icon-only" title="Export" aria-label="Export" aria-haspopup="menu" aria-expanded="false">

@@ -6843,17 +6843,24 @@ select {
 /* ── Back button ─────────────────────────────────────────────────────────── */
 .rs-layer-clear-btn.rs-layer-back:hover { color: var(--text); border-color: var(--selected-border); }
 
-/* ── Input level meter next to Start Listening ───────────────────────────── */
+/* ── Input level meter over the selected mic's name ──────────────────────── */
+/* The stack shrink-wraps the name; the meter stretches to that width. */
+.tb-mic-stack {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 3px;
+  min-width: 0;
+}
 .tb-mic-meter {
-  display: inline-block;
-  width: 38px; height: 5px;
-  border-radius: 3px;
+  display: block;
+  height: 3px;
+  border-radius: 2px;
   background: var(--bg-hover);
   overflow: hidden;
-  margin-left: 6px;
-  vertical-align: middle;
 }
-.tb-mic-meter[hidden] { display: none; }
+/* Keep its row when idle so the name doesn't shift when listening starts. */
+.tb-mic-meter[hidden] { display: block; visibility: hidden; }
 .tb-mic-meter i { display: block; height: 100%; width: 0%; background: var(--green); transition: width 90ms linear; }
 .tb-mic-meter.is-silent i { background: var(--text-3); }
 .tb-mic-meter.is-hot i { background: var(--red); }
