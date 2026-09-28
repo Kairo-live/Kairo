@@ -2972,18 +2972,42 @@ app.post('/api/test-transcript', async (req, res) => {
 // local sherpa-onnx engine, reached via 'offline' or 'browser' (the
 // Settings toggle's data-engine value). Default is deepgram for backward
 // compatibility.
+// ── Keep the Mac awake while listening ───────────────────────────────────
+// A morning test lost ~16 minutes of a sermon to the Mac going to sleep
+// (server.log: "rebuilding audio capture (woke-from-sleep)" at the start of the
+// gap, "audio capture rebuilt" at the end) — it was set to sleep after a minute
+// idle and nothing said a service was running. caffeinate holds the assertion
+// presentation and video-call apps hold (no idle sleep, no display sleep, so
+// output screens stay lit) for exactly the listening session, and exits on its
+// own if this process dies (-w).
+let keepAwakeProc = null;
+function holdKeepAwake() {
+  if (process.platform !== 'darwin' || keepAwakeProc || process.env.KAIRO_EVAL_MODE) return;
+  try {
+    const proc = require('child_process').spawn('caffeinate', ['-di', '-w', String(process.pid)], { stdio: 'ignore' });
+    proc.on('exit', () => { if (keepAwakeProc === proc) keepAwakeProc = null; });
+    proc.on('error', () => { if (keepAwakeProc === proc) keepAwakeProc = null; });
+    keepAwakeProc = proc;
+  } catch { keepAwakeProc = null; }
+}
+function releaseKeepAwake() {
+  const proc = keepAwakeProc;
+  keepAwakeProc = null;
+  try { proc?.kill(); } catch {}
+}
+
 app.post('/api/start-listening', async (req, res) => {
   const engine = String(req.body?.engine || 'deepgram').toLowerCase();
-  if (['offline', 'browser'].includes(engine)) {
-    return res.json(await startOffline());
-  }
-  return res.json(await startDeepgram(req.body || {}));
+  const result = ['offline', 'browser'].includes(engine) ? await startOffline() : await startDeepgram(req.body || {});
+  if (result?.ok) holdKeepAwake();
+  return res.json(result);
 });
 
 app.post('/api/stop-listening', async (_, res) => {
   // Stop whichever engine is active. Both calls are idempotent / no-op if inactive.
   if (offlineActive) await stopOffline();
   if (deepgramConnection) await stopDeepgram();
+  releaseKeepAwake();
   res.json({ ok: true });
 });
 
@@ -3968,6 +3992,7 @@ function reconnectDeepgram(conn, reason) {
 
 // End the session without reconnecting (fatal error or first-connect failure).
 function endDeepgramSession(conn) {
+  releaseKeepAwake();
   deepgramUserStopped = true;
   clearInterval(deepgramKeepAliveTimer);
   clearInterval(deepgramSilenceWatchdog);
