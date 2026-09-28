@@ -2487,6 +2487,14 @@
       "startMs": 3053000
     },
     {
+      "book": "2 Samuel",
+      "chapter": 5,
+      "verse": 19,
+      "kind": "quote",
+      "startMs": 3087000,
+      "audit": "2026-09-28: cited \"2 Samuel 5:18 to 20\" and quoted 5:19 (\"shall I go up... will you deliver [them into] my hand and the Lord said go up\"); checked against the KJV."
+    },
+    {
       "book": "Isaiah",
       "chapter": 48,
       "verse": 17,
