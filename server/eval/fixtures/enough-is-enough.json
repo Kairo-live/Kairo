@@ -4493,14 +4493,6 @@
       "kind": "quote",
       "startMs": 3716445,
       "bootstrapped": true
-    },
-    {
-      "book": "Luke",
-      "chapter": 1,
-      "verse": 75,
-      "kind": "quote",
-      "startMs": 3722540,
-      "unverified": true
     }
   ]
 }
