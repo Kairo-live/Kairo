@@ -23,7 +23,7 @@ const TITLE_CUE = /\b(?:speaking|preaching|teaching|ministering|talking|sharing)
 // Sermon filler that repeats without being a point.
 // "…chapter four verse 20…": a citation, listed under the scriptures instead.
 const CITATION_WORDS = /\b(?:chapter|verses?)\s+(?:\d|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty)/i;
-const FILLER = /^(?:amen|praise the lord|hallelujah|thank you(?: jesus| lord)?|glory to god|are you (?:with|listening to) me|give (?:the lord|god|him) (?:a|the biggest|a big) (?:hand|shout|clap)|yes sir|somebody (?:say|shout)|can i get an amen|in (?:the|jesus) name|lift up your hands?|look at your neighbou?r)\b/i;
+const FILLER = /^(?:amen|praise the lord|hallelujah|thank you(?: jesus| lord)?|glory to god|are you (?:with|listening to) me|give (?:the lord|god|him) (?:a|the biggest|a big) (?:hand|shout|clap)|yes sir|somebody (?:say|shout)|can i get an amen|in (?:the|jesus) name|lift up your hands?|look at your neighbou?r|i can tell you|let me tell you|i want to tell you|i tell you|listen to me|you know what|watch this|look at this|hear me|mark this|note this)\b/i;
 
 const words = (t) => String(t || '').split(/\s+/).filter(Boolean);
 const norm = (t) => String(t || '').toLowerCase().replace(/[^a-z0-9\s']/g, ' ').replace(/\s+/g, ' ').trim();
@@ -153,26 +153,32 @@ function detectKeyLines(sentences, max = 6, verseTexts = []) {
     .sort((a, b) => a.at - b.at);
 }
 
-// Verses in order of first appearance; consecutive verses of one chapter merge
-// into a passage ("Psalms 29:3-5").
+// Passages in order of first appearance. Verses of one chapter merge into
+// runs of consecutive verses whatever order they were shown in (22:22, 22:21,
+// 22:24 is "Job 22:21-24"); a run is placed at its earliest verse.
 function groupScriptures(verses) {
-  const seen = new Set(), list = [];
+  const chapters = new Map();
   for (const v of verses) {
     const m = String(v.ref || '').match(/^(.+) (\d+):(\d+)$/);
-    if (!m || seen.has(v.ref)) continue;
-    seen.add(v.ref);
-    list.push({ book: m[1], chapter: +m[2], verse: +m[3], text: v.text || '', at: v.at });
+    if (!m) continue;
+    const key = `${m[1]}|${m[2]}`;
+    if (!chapters.has(key)) chapters.set(key, { book: m[1], chapter: +m[2], verses: new Map() });
+    const ch = chapters.get(key), n = +m[3];
+    if (!ch.verses.has(n)) ch.verses.set(n, { verse: n, text: v.text || '', at: v.at });
   }
   const passages = [];
-  for (const v of list) {
-    const last = passages[passages.length - 1];
-    if (last && last.book === v.book && last.chapter === v.chapter && v.verse === last.end + 1) {
-      last.end = v.verse; last.texts.push(v.text);
-    } else {
-      passages.push({ book: v.book, chapter: v.chapter, start: v.verse, end: v.verse, texts: [v.text], at: v.at });
+  for (const ch of chapters.values()) {
+    const sorted = [...ch.verses.values()].sort((x, y) => x.verse - y.verse);
+    let run = null;
+    for (const v of sorted) {
+      if (run && v.verse === run.end + 1) { run.end = v.verse; run.texts.push(v.text); run.at = Math.min(run.at, v.at); continue; }
+      run = { book: ch.book, chapter: ch.chapter, start: v.verse, end: v.verse, texts: [v.text], at: v.at };
+      passages.push(run);
     }
   }
-  return passages.map(p => ({ ...p, ref: `${p.book} ${p.chapter}:${p.start}${p.end > p.start ? '-' + p.end : ''}` }));
+  return passages
+    .sort((x, y) => x.at - y.at)
+    .map(p => ({ ...p, ref: `${p.book} ${p.chapter}:${p.start}${p.end > p.start ? '-' + p.end : ''}` }));
 }
 
 // The notes, in the shape asked for: the sermon's name, the key things said
