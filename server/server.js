@@ -44,7 +44,7 @@ const { Worker } = require('worker_threads');
 const axios      = require('axios');
 const OBSWebSocket = require('obs-websocket-js/json').default;
 
-const { createChapterResolver, textAfterBookMention, CHAPTER_KEYWORD_MIN_IDF } = require('./chapter_resolver');
+const { createChapterResolver, textAfterBookMention, CHAPTER_KEYWORD_MIN_IDF, CHAPTER_KEYWORD_MIN_MARGIN } = require('./chapter_resolver');
 const { createCitationVoting, citationKey } = require('./citation_voting');
 const { setCitationLanguage, BARE_NUMBER_FILLER, AMBIGUOUS_NUMBER_WORDS, parseSpokenReference, parseAllSpokenReferences, resolvePartialReference, detectBookMentions, referenceContext, SINGLE_WORD_BOOKS, consumeNumber, MAX_CHAPTERS, SOUND_ALIKE_BOOKS, WORD_TO_NUM } = require('./reference_parser');
 const { localizeCitationText, stripAccents } = require('./citation_i18n');
@@ -1415,6 +1415,7 @@ let rangeAllVerses    = [];   // all verses in range (sent + queued) — for UI 
 let rangeCurrentVerse = null; // the verse currently on the live screen
 let rangeAdvancing      = false;
 let rangeLastAdvanceAt  = 0;   // timestamp of last advance — prevents rapid re-fires
+let rangeMovedAt        = 0;   // when the range's current verse last changed (advance or jump)
 const RANGE_ADVANCE_COOLDOWN_MS = 1200;  // min gap between advances (fast readers)
 
 // ── Last-2-words end-of-verse detection ──────────────────────────────────────
@@ -1487,6 +1488,7 @@ async function advanceRangeQueue() {
   if (!rangeQueue.length) return null;
   const next = rangeQueue.shift();
   rangeCurrentVerse   = next;
+  rangeMovedAt        = Date.now();
   broadcastRangeState();
   await sendToOutputs(next);
   broadcast({ type: 'detection', verses: [next], method: 'direct', topScore: 1.0, target: 'viewer', timestamp: Date.now() });
@@ -2763,11 +2765,38 @@ app.post('/api/range/clear', (_, res) => {
 // own real incident comment where it's called, TWENTY-SEVENTH bug) so a
 // spoken verse number repositions an active range the same way a manual
 // click does, instead of either ignoring it or destroying the range.
+// A cited range read in the preacher's own words. The range names every verse
+// in play, so its later verses are the only candidates: distinctive words of
+// one of them ("they fell backward" is John 18:6) show it is being read even
+// when the opening words the next-verse-prefix check needs were paraphrased
+// away. Scored by the worker's IDF ranking over the last two segments, with the
+// chapter resolver's own floor and margin; the winner must beat the verse on
+// screen, and any verse it jumps over is left out.
+const RANGE_CONTENT_LOOKAHEAD = 3;
+async function maybeAdvanceRangeByContent() {
+  const current = rangeCurrentVerse;
+  if (!(current && rangeQueue.length && !rangeAdvancing && workerBasicReady
+      && Date.now() - rangeLastAdvanceAt >= RANGE_ADVANCE_COOLDOWN_MS)) return;
+  const ahead = rangeQueue.slice(0, RANGE_CONTENT_LOOKAHEAD)
+    .filter(v => v.book === current.book && v.chapter === current.chapter);
+  if (!ahead.length) return;
+  const text = transcriptBuffer.slice(-2).map(t => t.text).join(' ');
+  if (detectBookMentions(text, true).some(b => b !== current.book)) return;   // a new citation, not the reading
+  const scored = (await workerCall('scoreChapterText', { book: current.book, chapter: current.chapter, text }, 3000)).results || [];
+  if (rangeCurrentVerse !== current || rangeAdvancing) return;                 // moved on while scoring
+  const idf = (v) => scored.find(s => s.verse === v.verse)?.idfSum || 0;
+  const best = ahead.reduce((a, b) => (idf(b) > idf(a) ? b : a));
+  if (idf(best) < CHAPTER_KEYWORD_MIN_IDF || idf(best) - idf(current) < CHAPTER_KEYWORD_MIN_MARGIN) return;
+  rangeQueue = rangeQueue.slice(rangeQueue.indexOf(best));
+  requestRangeAdvance(`Reading follows "${best.reference}" (distinctive words ${idf(best).toFixed(1)} vs ${idf(current).toFixed(1)} for the verse on screen)`);
+}
+
 function jumpRangeTo(book, chapter, verse) {
   if (!rangeAllVerses.length) return false;
   const idx = rangeAllVerses.findIndex(v => v.book === book && v.chapter === chapter && v.verse === verse);
   if (idx === -1) return false;
   rangeCurrentVerse = rangeAllVerses[idx];
+  rangeMovedAt      = Date.now();
   rangeQueue        = rangeAllVerses.slice(idx + 1);
   rangeAdvancing     = false;
   broadcastRangeState();
@@ -3342,6 +3371,7 @@ async function handleTranscriptSegment(transcript, isFinal, confidence, speechFi
 
   maybeAdvanceRangeOnLastWords(transcript);
   maybeAdvanceRangeOnNextVersePrefix(transcript);
+  maybeAdvanceRangeByContent().catch(() => {});
 
   // Snapshot BEFORE processForReferences replaces prevFinalTranscript with this
   // segment — announcesDifferentBook below needs the real previous segment.
@@ -4111,6 +4141,21 @@ function streamNewWords(transcript, isFinal) {
 //   2. Topic library membership (sermon's active theme)
 //   3. Chapter proximity to recent citations (±5 chapters, decaying with age)
 //   4. Longer match beats shorter
+// Two near-duplicate verses tied on the words aligned so far: when one of them
+// is the passage in play and the other isn't (Deuteronomy 11:24 just quoted
+// makes the tied 11:25 the next verse, not 7:24), that decides it — the same
+// affinity test decideTwin uses. Words that only one of the pair contains are
+// deliberately NOT used here: unlike a known twin group, a stream tie is two
+// verses that happen to share a phrase, and the preacher is often quoting a
+// third (eval: Deuteronomy 12:14 was sent as 12:11, Genesis 24:17 picked as
+// 1 Kings 19:20). Null: hold both.
+function settleStreamTie(a, b) {
+  const affA = passageAffinity(a.book, a.chapter, a.verse), affB = passageAffinity(b.book, b.chapter, b.verse);
+  if (affA >= 2 && affA > affB && passagePointedAt(a.book, a.chapter, a.verse)) return { winner: a, loser: b, why: 'the passage in play' };
+  if (affB >= 2 && affB > affA && passagePointedAt(b.book, b.chapter, b.verse)) return { winner: b, loser: a, why: 'the passage in play' };
+  return null;
+}
+
 async function processStreamText(text) {
   if (!workerBasicReady || !text) return;
   try {
@@ -4182,8 +4227,13 @@ async function processStreamText(text) {
           console.log(`[Stream] Tie broken by active-book continuity: "${winnerRef}" (${lastOutputVerse.book} active) over "${loserRef}"`);
           top = top.filter(r => r.reference === winnerRef);
         } else {
-          console.log(`[Stream] Ambiguous — "${top[0].reference}" and "${runnerUp.reference}" tied at matched=${top[0].matched} (near-duplicate wording), holding both back`);
-          return;
+          const settled = settleStreamTie(top[0], runnerUp);
+          if (!settled) {
+            console.log(`[Stream] Ambiguous — "${top[0].reference}" and "${runnerUp.reference}" tied at matched=${top[0].matched} (near-duplicate wording), holding both back`);
+            return;
+          }
+          console.log(`[Stream] Tie broken by ${settled.why}: "${settled.winner.reference}" over "${settled.loser.reference}"`);
+          top = top.filter(r => r.reference === settled.winner.reference);
         }
       }
 
@@ -5604,9 +5654,22 @@ const SCOPED_SEMANTIC_MARGIN = 0.03;
 // book/chapter (±1, for a preacher who's drifted slightly) if one was sent
 // within SAME_BOOK_WINDOW_MS. Returns null when neither source has anything
 // current, so the caller can skip the scoped pass entirely.
+// Books named in the last few seconds of speech ("In Romans, whosoever…",
+// "the book of Proverbs says…"). A bare common noun ("revelation") isn't one —
+// see AMBIGUOUS_BOOKS.
+function recentlyNamedBooks() {
+  return detectBookMentions(paraphraseRecentText().split(RE_SPACES).slice(-25).join(' '));
+}
+
 function contextualSemanticScopeChapters() {
   const chapters = new Set();
   const now = Date.now();
+  // The book just named is where the words that follow come from, even when
+  // the chapter was left out or misheard — "Isaiah chapter five, buy wine and
+  // buy milk" is Isaiah 55:1, which a search of chapter 5 can never find.
+  for (const book of recentlyNamedBooks()) {
+    for (let c = 1; c <= (MAX_CHAPTERS[book] || 0); c++) chapters.add(`${book}|${c}`);
+  }
   if (recentlyMentionedName && now - recentlyMentionedNameAt < NAMED_ENTITY_WINDOW_MS) {
     const named = nameChapterIndex.get(recentlyMentionedName);
     if (named) for (const key of named) chapters.add(key);
@@ -5679,7 +5742,7 @@ async function runParaphrase() {
     const results = (await workerCall('paraphraseSearch', { windows, limit: 8 }, 4000)).results || [];
     // A book named just now ("In Romans, whosoever call upon the name…") puts
     // its verses in play for this decision, like a cited chapter does.
-    const namedBooks = new Set(detectBookMentions(recent.split(RE_SPACES).slice(-25).join(' ')));
+    const namedBooks = new Set(recentlyNamedBooks());
     const affinity = (v) => Math.max(passageAffinity(v.book, v.chapter, v.verse), namedBooks.has(v.book) ? 2 : 0);
     const decision = decideParaphrase(results, { affinity });
     // Acted on only when the next window of speech agrees (see paraphrase.js).
@@ -5762,6 +5825,16 @@ function recentSpeechWords(maxWords = 30, { seconds = false } = {}) {
 }
 const stemLite = (w) => w.replace(/(eth|s)$/, '');
 
+// Words that can tell one verse from another. Pronouns and helper verbs occur
+// in nearly every verse and every sentence of preaching, so they're never
+// evidence for either: a lone "them" ("burn them" / "receiveth them") once kept
+// Hebrews 7:8 on screen over a clearly quoted Malachi 3:18.
+const NON_EVIDENCE_WORDS = new Set(['them','they','him','you','me','us','who','whom','which','what','when',
+  'then','there','shall','will','have','hath','had','did','all','said','saith','say','upon','into','also','even']);
+function evidenceWords(text) {
+  return new Set(meaningfulWords(text).filter(w => !NON_EVIDENCE_WORDS.has(w)).map(stemLite));
+}
+
 // During an active range a candidate outside it is usually the range's own
 // text being matched to a near-duplicate verse elsewhere (Jeremiah 17:8 /
 // Romans 7:22 while Psalm 1 is read; Exodus 10:16 while a cited Exodus
@@ -5790,6 +5863,27 @@ let liveNonScriptureSlideAt = 0;
 // Most of a verse's own words just heard in order means it is being quoted —
 // the on-screen comparison (which only sees the newest words) doesn't apply.
 const ON_SCREEN_GUARD_MAX_COVERAGE = 0.8;
+// A range verse the range has already moved past goes back up only on new
+// evidence: the latest words said AFTER the range moved on fit it better than the
+// verse now current. The words that just finished it don't count — a late match
+// of the segment that advanced the range ("…meditate day and night" → 1:3) used
+// to put 1:2 straight back up. A real re-read brings its own new words.
+function rangeVerseBehindWithoutNewEvidence(candidate) {
+  const current = rangeCurrentVerse;
+  if (!current) return false;
+  const idx = (v) => rangeAllVerses.findIndex(r => r.book === v.book && r.chapter === v.chapter && r.verse === v.verse);
+  const ci = idx(candidate);
+  if (ci < 0 || ci >= idx(current)) return false;
+  const lastSince = transcriptBuffer.filter(t => t.time > rangeMovedAt).at(-1)?.text || '';
+  const speech = evidenceWords(`${lastSince} ${currentInterimText}`);
+  const candWords = evidenceWords(candidate.text || candidate.kjv_text || '');
+  const curWords = evidenceWords(current.text || current.kjv_text || '');
+  let candOnly = 0, curOnly = 0;
+  for (const w of candWords) if (!curWords.has(w) && speech.has(w)) candOnly++;
+  for (const w of curWords) if (!candWords.has(w) && speech.has(w)) curOnly++;
+  return candOnly === 0 || candOnly <= curOnly;
+}
+
 function onScreenExplainsSpeechBetter(candidate) {
   const shown = lastOutputVerse;
   if (!shown?.book || !(shown.text || shown.kjv_text)) return false;
@@ -5797,10 +5891,10 @@ function onScreenExplainsSpeechBetter(candidate) {
   if (shown.book === candidate.book && shown.chapter === candidate.chapter && shown.verse === candidate.verse) return false;
   if (rangeAllVerses.some(v => v.book === candidate.book && v.chapter === candidate.chapter && v.verse === candidate.verse)) return false;
   const nowText = currentInterimText || (transcriptBuffer.length ? transcriptBuffer[transcriptBuffer.length - 1].text : '');
-  const speech = new Set(meaningfulWords(nowText).map(stemLite));
+  const speech = evidenceWords(nowText);
   if (!speech.size) return false;
-  const shownWords = new Set(meaningfulWords(shown.text || shown.kjv_text).map(stemLite));
-  const candWords  = new Set(meaningfulWords(candidate.text || candidate.kjv_text || '').map(stemLite));
+  const shownWords = evidenceWords(shown.text || shown.kjv_text);
+  const candWords  = evidenceWords(candidate.text || candidate.kjv_text || '');
   let shownOnly = 0, candOnly = 0;
   for (const w of shownWords) if (!candWords.has(w) && speech.has(w)) shownOnly++;
   for (const w of candWords) if (!shownWords.has(w) && speech.has(w)) candOnly++;
@@ -6413,6 +6507,9 @@ async function broadcastDetection(verses, method, topScore, target, opts = {}) {
   if (target === 'viewer' && verses[0] && TEXT_MATCH_METHODS.has(method)) {
     if (liveNonScriptureSlideAt) {
       console.log(`[Guard] "${verses[0].reference}" (${method}) held for the operator — a song/slide is live`);
+      target = 'suggestions';
+    } else if (rangeVerseBehindWithoutNewEvidence(verses[0])) {
+      console.log(`[Range] "${verses[0].reference}" (${method}) is behind the range's "${rangeCurrentVerse.reference}", and nothing said since the range moved on points back to it — held for the operator`);
       target = 'suggestions';
     } else if (!(method === 'verbatim' && verses[0].similarity >= ON_SCREEN_GUARD_MAX_COVERAGE) && onScreenExplainsSpeechBetter(verses[0])) {
       console.log(`[Guard] "${verses[0].reference}" would replace "${lastOutputVerse.reference}", but what's being said fits the verse on screen at least as well — held for the operator`);

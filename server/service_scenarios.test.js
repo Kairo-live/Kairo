@@ -46,6 +46,51 @@ const fresh = () => { server.resetDetectionSession(); referenceContext.reset(); 
     assert.deepEqual(sent.filter(s => s.method === 'paraphrase'), [], JSON.stringify(sent));
   });
 
+  await test('a named book with a misheard chapter still finds the quote in that book (Isaiah 55:1, said as "chapter five")', async () => {
+    fresh(); server.clearRangeQueue(); await server.clearLayer('all');
+    await say('The power of God came out and landed on the people.');
+    await say('And he said in Isaiah chapter five buy wine and buy milk.');
+    await say('Without money and without price, he said come.');
+    await wait(1500);
+    assert.ok(sent.some(s => s.ref === 'Isaiah 55:1'), JSON.stringify(sent));
+    assert.ok(!onScreen().some(r => r.startsWith('Isaiah 5:')), JSON.stringify(sent));
+  });
+
+  await test('a cited range read in the preacher\'s own words follows the verse being read (John 18:6: "they fell backward")', async () => {
+    fresh(); server.clearRangeQueue(); await server.clearLayer('all');
+    await say('When Jesus opened his mouth, John eighteen four to six. Whom seek ye? They said Jesus.');
+    await say('They said, I am here.');
+    await say('And they fell backward.');
+    await wait(1500);
+    assert.equal(onScreen().at(-1), 'John 18:6', JSON.stringify(sent));
+  });
+
+  await test('commentary during a cited range does not move it', async () => {
+    fresh(); server.clearRangeQueue(); await server.clearLayer('all');
+    await say('Turn with me to Psalm 23 verses 1 to 3.');
+    await say('Now church, some of you have been worried about your jobs this week, about your children and your future.');
+    await say('God has not forgotten you, he knows exactly where you are right now.');
+    await wait(1500);
+    assert.equal(onScreen().at(-1), 'Psalms 23:1', JSON.stringify(sent));
+  });
+
+  await test('two near-identical verses tied on the words so far are settled by the passage being read (Deuteronomy 11:25 after 11:24, not 7:24)', async () => {
+    fresh(); server.clearRangeQueue(); await server.clearLayer('all');
+    await say('He said from the wilderness of Lebanon, from the river, the great Euphrates, even unto the uttermost sea shall your coast be.');
+    await say('There shall no man be able to stand before you.');
+    await wait(1500);
+    assert.ok(!onScreen().includes('Deuteronomy 7:24'), JSON.stringify(sent));
+    assert.equal(onScreen().at(-1), 'Deuteronomy 11:25', JSON.stringify(sent));
+  });
+
+  await test('"revelation" as a sermon noun does not bring the book of Revelation into play', async () => {
+    fresh(); server.clearRangeQueue(); await server.clearLayer('all');
+    await say('You must graduate from information to revelation.');
+    await say('So there is a revelation price, pay the revelation price and the power will come.');
+    await wait(1500);
+    assert.ok(!sent.some(s => s.ref.startsWith('Revelation')), JSON.stringify(sent));
+  });
+
   // ── Back: undo the last change to the screen ──
   await test('Back puts the previous verse back up, and the undone verse is not re-sent by detection', async () => {
     fresh(); server.clearRangeQueue(); await server.clearLayer('all');
