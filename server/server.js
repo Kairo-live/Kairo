@@ -4138,19 +4138,25 @@ function streamNewWords(transcript, isFinal) {
 //   2. Topic library membership (sermon's active theme)
 //   3. Chapter proximity to recent citations (±5 chapters, decaying with age)
 //   4. Longer match beats shorter
-// Two near-duplicate verses tied on the words aligned so far: when one of them
-// is the passage in play and the other isn't (Deuteronomy 11:24 just quoted
-// makes the tied 11:25 the next verse, not 7:24), that decides it — the same
-// affinity test decideTwin uses. Words that only one of the pair contains are
-// deliberately NOT used here: unlike a known twin group, a stream tie is two
-// verses that happen to share a phrase, and the preacher is often quoting a
-// third (eval: Deuteronomy 12:14 was sent as 12:11, Genesis 24:17 picked as
-// 1 Kings 19:20). Null: hold both.
-function settleStreamTie(a, b) {
-  const affA = passageAffinity(a.book, a.chapter, a.verse), affB = passageAffinity(b.book, b.chapter, b.verse);
-  if (affA >= 2 && affA > affB && passagePointedAt(a.book, a.chapter, a.verse)) return { winner: a, loser: b, why: 'the passage in play' };
-  if (affB >= 2 && affB > affA && passagePointedAt(b.book, b.chapter, b.verse)) return { winner: b, loser: a, why: 'the passage in play' };
-  return null;
+// Verses tied on the words aligned so far: when exactly one of them is the
+// passage in play (Deuteronomy 11:24 just quoted makes the tied 11:25 the next
+// verse, not 7:24), that decides it — the same affinity test decideTwin uses.
+// Every verse within the tie counts, not just the top two: live, "Abraham rose
+// up early in the morning" after Genesis 22:2 tied Exodus 24:4 with Job 1:5,
+// with 22:3 among the rest. Words only one candidate contains are deliberately
+// NOT used: unlike a known twin group, a stream tie is verses that happen to
+// share a phrase, and the preacher is often quoting another one (eval: Deut
+// 12:14 was sent as 12:11, Genesis 24:17 picked as 1 Kings 19:20). Null: hold.
+function settleStreamTie(tied) {
+  // Behind the verse on screen in its own chapter is reading already passed, not
+  // the passage in play — the same exclusion the active-book tie-break makes.
+  const passed = (r) => lastOutputVerse && r.book === lastOutputVerse.book
+    && r.chapter === lastOutputVerse.chapter && r.verse < lastOutputVerse.verse;
+  const scored = tied.map(r => ({ r, aff: !passed(r) && passagePointedAt(r.book, r.chapter, r.verse) ? passageAffinity(r.book, r.chapter, r.verse) : 0 }));
+  const best = Math.max(...scored.map(x => x.aff));
+  const top = scored.filter(x => x.aff === best);
+  if (best < 2 || top.length !== 1) return null;
+  return { winner: top[0].r, losers: tied.filter(r => r !== top[0].r), why: 'the passage in play' };
 }
 
 async function processStreamText(text) {
@@ -4164,6 +4170,7 @@ async function processStreamText(text) {
     noteStreamAnchors(ranked);
 
     const confirmed = ranked.filter(r => r.confirmed);
+    if (process.env.KAIRO_DEBUG_STREAM && confirmed.length) console.log('[DEBUG-STREAM]', JSON.stringify(confirmed.slice(0, 6).map(r => `${r.reference} m=${r.matched} idf=${(r.matchedIdf || 0).toFixed(1)}`)));
     const anchors   = ranked.filter(r => !r.confirmed);
 
     if (confirmed.length) {
@@ -4224,12 +4231,12 @@ async function processStreamText(text) {
           console.log(`[Stream] Tie broken by active-book continuity: "${winnerRef}" (${lastOutputVerse.book} active) over "${loserRef}"`);
           top = top.filter(r => r.reference === winnerRef);
         } else {
-          const settled = settleStreamTie(top[0], runnerUp);
+          const settled = settleStreamTie(top.filter(r => Math.abs((top[0].matched || 0) - (r.matched || 0)) < 2));
           if (!settled) {
             console.log(`[Stream] Ambiguous — "${top[0].reference}" and "${runnerUp.reference}" tied at matched=${top[0].matched} (near-duplicate wording), holding both back`);
             return;
           }
-          console.log(`[Stream] Tie broken by ${settled.why}: "${settled.winner.reference}" over "${settled.loser.reference}"`);
+          console.log(`[Stream] Tie broken by ${settled.why}: "${settled.winner.reference}" over ${settled.losers.map(r => `"${r.reference}"`).join(', ')}`);
           top = top.filter(r => r.reference === settled.winner.reference);
         }
       }
