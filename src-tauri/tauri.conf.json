@@ -56,6 +56,7 @@
       "../databases/bibles/map.json": "databases/bibles/map.json",
       "../databases/bibles/kjv.json": "databases/bibles/kjv.json",
       "../databases/bibles/model": "databases/bibles/model",
+      "../databases/bibles/reranker_model": "databases/bibles/reranker_model",
       "../databases/bibles/verse_embeddings.f32": "databases/bibles/verse_embeddings.f32",
       "../databases/bibles/verse_embeddings.json": "databases/bibles/verse_embeddings.json",
       "../databases/bibles/packs": "databases/bibles/packs",

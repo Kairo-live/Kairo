@@ -405,7 +405,23 @@ function matchingTranslation() {
 function spawnDetectionWorker() {
   detectionWorker = new Worker(path.join(__dirname, 'detection_worker.js'), {
     workerData: { dataDir: DATA_DIR, altTranslation: matchingTranslation() },
+    // Captured (not left to pass through to the real fd) so its own
+    // console.log/warn/error — a separate console from this thread's, see
+    // teeConsoleToFile's comment — reaches server.log too. Still re-emitted to
+    // this process's real stdout/stderr line for line, so `npm run dev`'s
+    // terminal is unaffected.
+    stdout: true, stderr: true,
   });
+  for (const [stream, sink] of [[detectionWorker.stdout, process.stdout], [detectionWorker.stderr, process.stderr]]) {
+    let carry = '';
+    stream.on('data', (chunk) => {
+      sink.write(chunk);
+      carry += chunk.toString('utf8');
+      const lines = carry.split('\n');
+      carry = lines.pop();
+      for (const line of lines) if (line) _logWorkerLine?.(line);
+    });
+  }
 
   detectionWorker.on('message', (msg) => {
     if (msg.type === 'ready') {
@@ -6665,6 +6681,15 @@ server.on('error', (err) => {
 // prints (detections, transcripts, guards) used to go nowhere — a live test
 // couldn't be read back afterwards. Copied to server.log beside settings.json,
 // timestamped; over 10 MB it rolls to server.log.1 (one kept).
+// Also wired to the detection worker's OWN stdout/stderr (see
+// spawnDetectionWorker) — a worker_thread has its own separate `console`, so
+// patching only the main thread's misses everything the worker logs, INCLUDING
+// its own failures (real incident: the reranker model was missing from a
+// packaged build's bundle — the worker's own \`console.warn('[DetectionWorker]
+// Reranker unavailable: ...')\` explained exactly why, but with no terminal in
+// the packaged app and no capture of the worker's console, that line was never
+// seen anywhere — four releases shipped before a live test caught it).
+let _logWorkerLine = null;   // (text) => void — set once teeConsoleToFile runs; null in eval mode
 function teeConsoleToFile() {
   if (!process.env.KAIRO_APP_DATA_DIR || process.env.KAIRO_EVAL_MODE) return;
   const logPath = path.join(process.env.KAIRO_APP_DATA_DIR, 'server.log');
@@ -6673,16 +6698,20 @@ function teeConsoleToFile() {
   try { out = fs.createWriteStream(logPath, { flags: 'a' }); } catch { return; }
   out.on('error', () => {});
   let written = 0;
+  const writeLine = (text) => {
+    if (written > 10 * 1024 * 1024) return;   // this run's share; the next start rolls the file
+    const line = `${new Date().toISOString()} ${text}\n`;
+    written += line.length;
+    out.write(line);
+  };
   for (const level of ['log', 'warn', 'error']) {
     const original = console[level].bind(console);
     console[level] = (...args) => {
       original(...args);
-      if (written > 10 * 1024 * 1024) return;   // this run's share; the next start rolls the file
-      const line = `${new Date().toISOString()} ${args.map(a => (typeof a === 'string' ? a : (() => { try { return JSON.stringify(a); } catch { return String(a); } })())).join(' ')}\n`;
-      written += line.length;
-      out.write(line);
+      writeLine(args.map(a => (typeof a === 'string' ? a : (() => { try { return JSON.stringify(a); } catch { return String(a); } })())).join(' '));
     };
   }
+  _logWorkerLine = writeLine;
   console.log(`[Server] Logging to ${logPath}`);
   // A stalled main loop is what "audio buffering, the transcript isn't real
   // time" looks like from here: note it whenever it happens.
