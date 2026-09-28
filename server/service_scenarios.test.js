@@ -415,6 +415,16 @@ const fresh = () => { server.resetDetectionSession(); referenceContext.reset(); 
     assert.equal(onScreen().at(-1), 'Matthew 11:11', JSON.stringify(sent));
   });
 
+  await test('a verse inside an actively-cited range isn\'t traded for its twin (Matthew 24:46, not Luke 12:37)', async () => {
+    fresh(); server.clearRangeQueue(); await server.clearLayer('all');
+    await say('Matthew 24:45 to 47.');
+    await say('Who then is a faithful and wise servant, whom his lord hath made ruler over his household, to give them meat in due season?');
+    await say('Blessed is that servant, whom his lord when he cometh shall find so doing.');
+    await wait(1500);
+    assert.ok(!onScreen().includes('Luke 12:37'), JSON.stringify(sent));
+    assert.equal(onScreen().at(-1), 'Matthew 24:46', JSON.stringify(sent));
+  });
+
   await test('"2 Samuel 5:18 to 20" with 5:19\'s words around it doesn\'t become the look-alike number 5:8', async () => {
     fresh(); server.clearRangeQueue(); await server.clearLayer('all');
     await say('Walk through scriptures with your meditation in search of answers. Shall I go up, David said, 2 Samuel chapter 5:18');

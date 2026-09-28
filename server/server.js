@@ -5900,9 +5900,14 @@ async function resolveTwin(candidate) {
   const prior = twinDecisions.get(key);
   if (prior && now - prior.at < TWIN_DECISION_TTL_MS) return prior.pending;   // in flight or decided
   // The verse the preacher just named is the one being read — never trade it
-  // for a twin on a word or two of speech.
+  // for a twin on a word or two of speech. Also true for every verse of a
+  // formally-cited RANGE, not just the range's own first (literally spoken)
+  // verse: "Matthew 24:45" (+2 more) named 46 and 47 just as surely as 45 —
+  // real incident, live: Matthew 24:46 flip-flopped to its twin Luke 12:37
+  // seven times in nine seconds while the range was actively being read.
   if (recentCitations.some(c => c.cited && c.book === candidate.book && c.chapter === candidate.chapter
       && c.verse === candidate.verse && now - c.time < CONTEXT_WINDOW_MS)) return null;
+  if (rangeAllVerses.some(v => v.book === candidate.book && v.chapter === candidate.chapter && v.verse === candidate.verse)) return null;
   // …and the other way round: when the TWIN is the verse just named, the text
   // match is that citation being read — Hebrews 8:11 quotes Jeremiah 31:34
   // word for word, Luke 11:42 parallels Matthew 23:23, 2 Kings 20:3 tells
