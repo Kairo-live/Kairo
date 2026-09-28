@@ -2633,7 +2633,13 @@ document.getElementById('replay-onboarding-btn')?.addEventListener('click', () =
     marks[current]?.classList.remove('is-current');
     current = (current + dir + marks.length) % marks.length;
     marks[current].classList.add('is-current');
-    marks[current].scrollIntoView({ block: 'center', behavior: 'smooth' });
+    // Scroll the Settings pane itself — scrollIntoView() can shift the whole
+    // page in WebKit and fold the top bar away (see focusInStack in service.js).
+    const pane = document.getElementById('settings-panes');
+    if (pane) {
+      const p = pane.getBoundingClientRect(), m = marks[current].getBoundingClientRect();
+      pane.scrollTo({ top: pane.scrollTop + (m.top - p.top) - p.height / 2, behavior: 'smooth' });
+    }
   }
   input.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(() => { timer = 0; search(); }, 120); });
   input.addEventListener('keydown', (e) => {

@@ -110,6 +110,8 @@
   window.__TAURI__.event.listen('menu-export-theme',  () => clickWhenReady('export-look-btn'));
   // KAIRO > Settings… (Cmd+,) — same panel the toolbar gear icon opens.
   window.__TAURI__.event.listen('menu-settings',      () => { settingsModal?.classList.remove('hidden'); showFirstSettingsPane(); });
+  // Edit > Find… (Cmd+F) — the global search overlay (global_search.js).
+  window.__TAURI__.event.listen('menu-find',          () => window.KairoGlobalSearch?.open());
 
   // Controls menu — every item here is just a click on an existing
   // dashboard button (see src-tauri/src/lib.rs's controls_menu), no modal

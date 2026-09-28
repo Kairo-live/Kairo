@@ -2168,6 +2168,7 @@
     const isLive = liveSlideKey === `${item.id}:${i}`;
     const isMatch = !!slideSearchQuery && (s.text || '').toLowerCase().includes(slideSearchQuery);
     card.className = 'svc-slide' + (isLive ? ' live' : '') + (isSlideSelected(i) ? ' selected' : '') + (isMatch ? ' search-match' : '');
+    card.dataset.index = i;
     card.title = 'Send to all outputs';
 
     const preview = document.createElement('div');
@@ -4246,6 +4247,20 @@
     });
   }
 
+  // A song from the bank, through the same "add to playlist" confirm the
+  // Songs list opens on click (also the global search's Add).
+  function addHymnViaConfirm(h) {
+    const item = {
+      id: uid('song'), type: 'song', songBank: true,
+      title: h.title, author: h.author, year: h.year,
+      linesPerSlide: DEFAULT_LINES_PER_SLIDE,
+      blocks: h.blocks.map(b => ({ label: b.label, lines: [...(b.lines || [])] })),
+    };
+    if (h.themeId) item.themeId = h.themeId;
+    pushRecent('song', h.id, { title: h.title, author: h.author, year: h.year });
+    openAddConfirm(item, { showDelimiter: true });
+  }
+
   function buildHymnRow(h) {
     const isLib = isLibrarySong(h.id);
     const row = document.createElement('button');
@@ -4262,17 +4277,7 @@
     // Default action for the whole row (matches the pre-existing
     // whole-row-is-clickable behavior) — Edit/Delete below stop
     // propagation so they override this instead of also triggering it.
-    row.addEventListener('click', () => {
-      const item = {
-        id: uid('song'), type: 'song', songBank: true,
-        title: h.title, author: h.author, year: h.year,
-        linesPerSlide: DEFAULT_LINES_PER_SLIDE,
-        blocks: h.blocks.map(b => ({ label: b.label, lines: [...(b.lines || [])] })),
-      };
-      if (h.themeId) item.themeId = h.themeId;
-      pushRecent('song', h.id, { title: h.title, author: h.author, year: h.year });
-      openAddConfirm(item, { showDelimiter: true });
-    });
+    row.addEventListener('click', () => addHymnViaConfirm(h));
     if (isLib) {
       row.querySelector('.hymn-edit')?.addEventListener('click', (e) => {
         e.stopPropagation();
@@ -4565,6 +4570,7 @@
   function buildMediaCard(item, { isRecent } = {}) {
     const card = document.createElement('button');
     card.className = 'media-card';
+    card.dataset.url = item.url;
     card.appendChild(buildMediaThumb(item));
     if (item.kind === 'video') {
       const badge = document.createElement('span');
@@ -5167,6 +5173,7 @@
   function buildSegmentCard(seg) {
     const card = document.createElement('div');
     card.className = 'timer-card' + (seg.status === 'live' ? ' is-live' : seg.status === 'done' ? ' is-done' : '');
+    card.dataset.id = seg.id;
 
     const preview = document.createElement('div');
     preview.className = 'timer-card-preview' + (seg.status !== 'live' ? ' is-pending' : '');
@@ -6276,6 +6283,175 @@
   document.addEventListener('DOMContentLoaded', init);
   if (document.readyState !== 'loading') init();
 
+  // ── Global search (⌘F, global_search.js) ─────────────────────────────────
+  // What this file owns — every playlist and its slides, the song bank, media
+  // and timer segments — searched and opened for the global search, so a
+  // result opens exactly the way it would from its own tab.
+  let searchMedia = null;   // { at, items } — the media listing, refreshed per search session
+  let searchSegmentsAt = 0;
+  async function fetchMediaForSearch() {
+    const items = [];
+    const bin = fetchWithTimeout(`${SERVER}/api/media/bin`).then(r => r.json())
+      .then(d => (d.items || []).forEach(it => items.push({ ...it, folderId: null, folder: 'Media Bin' })))
+      .catch(() => {});
+    const folders = fetchWithTimeout(`${SERVER}/api/media/folders`).then(r => r.json())
+      .then(d => Promise.all((d.folders || []).map(f =>
+        fetchWithTimeout(`${SERVER}/api/media/folders/${f.id}/items`).then(r => r.json())
+          .then(r => (r.items || []).forEach(it => items.push({ ...it, folderId: f.id, folder: f.name })))
+          .catch(() => {}))))
+      .catch(() => {});
+    await Promise.all([bin, folders]);
+    return items;
+  }
+  // Called when the search opens: media and timers live on the server.
+  async function prefetchForSearch() {
+    const tasks = [];
+    if (!searchMedia || Date.now() - searchMedia.at > 5000) {
+      tasks.push(fetchMediaForSearch().then(items => { searchMedia = { at: Date.now(), items }; }));
+    }
+    if (Date.now() - searchSegmentsAt > 5000) { searchSegmentsAt = Date.now(); tasks.push(loadSegments()); }
+    await Promise.all(tasks);
+  }
+
+  // Everything matching `query`, best matches first in each kind. A text
+  // matches on the whole phrase, or on every word in any order ("friday 7pm"
+  // finds "Friday at 7pm"; words match from their start, and ones like "the"
+  // or "is" needn't appear); the phrase ranks first. Songs rank by title, then
+  // author, then lyrics; playlist items by title; slides keep playlist order.
+  const SEARCH_STOP = new Set(['a', 'an', 'and', 'are', 'be', 'can', 'do', 'does', 'for', 'how', 'i', 'if', 'in',
+    'is', 'it', 'me', 'my', 'of', 'on', 'or', 'the', 'to', 'what', 'when', 'where', 'why', 'with', 'you', 'your']);
+  function searchContent(query) {
+    const q = String(query || '').trim().toLowerCase().replace(/\s+/g, ' ');
+    const out = { songs: [], items: [], slides: [], media: [], timers: [] };
+    if (!q) return out;
+    const words = q.split(' ');
+    const kept = words.filter(w => !SEARCH_STOP.has(w));
+    const termRes = (kept.length ? kept : words)
+      .map(w => new RegExp((/^\w/.test(w) ? '\\b' : '') + w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i'));
+    // 2 = the whole phrase, 1 = every word, 0 = no match
+    const score = (text) => {
+      const t = String(text || '');
+      if (!t) return 0;
+      if (t.toLowerCase().includes(q)) return 2;
+      return words.length > 1 && termRes.every(r => r.test(t)) ? 1 : 0;
+    };
+
+    if (typeof searchHymns === 'function') {
+      for (const h of searchHymns('')) {
+        const title = String(h.title || '');
+        const t = title.toLowerCase();
+        const lines = (h.blocks || []).flatMap(b => b.lines || []);
+        const ts = score(title);
+        let rank;
+        if (ts === 2) rank = t === q ? 0 : t.startsWith(q) ? 1 : 2;
+        else if (ts === 1) rank = 3;
+        else if (score(h.author)) rank = 4;
+        else {
+          const ls = score(lines.join(' '));
+          if (!ls) continue;
+          rank = ls === 2 ? 5 : 6;
+        }
+        const line = rank >= 5 ? (lines.find(l => score(l) === 2) || lines.find(l => termRes.some(r => r.test(l))) || '') : '';
+        out.songs.push({ kind: 'song', id: h.id, title, author: h.author || '', year: h.year || '',
+          line, library: isLibrarySong(h.id), rank });
+      }
+      out.songs.sort((a, b) => a.rank - b.rank);
+    }
+
+    for (const p of playlists) {
+      for (const item of p.items || []) {
+        const title = item.title || '(untitled)';
+        const slides = slidesFor(item);
+        const ts = score(item.title);
+        if (ts) {
+          out.items.push({ kind: 'item', playlistId: p.id, playlist: p.name, itemId: item.id, title,
+            type: typeLabel(item), slides: slides.length, rank: String(item.title).toLowerCase().startsWith(q) ? 0 : 3 - ts });
+        }
+        slides.forEach((s, index) => {
+          const ss = score(s.text);
+          if (ss) {
+            out.slides.push({ kind: 'slide', playlistId: p.id, playlist: p.name, itemId: item.id, item: title,
+              index, text: s.text, label: s.label || '', rank: 2 - ss });
+          }
+        });
+      }
+    }
+    out.items.sort((a, b) => a.rank - b.rank);
+    out.slides.sort((a, b) => a.rank - b.rank);
+
+    // A file name's words are split by _ - . as often as by spaces.
+    for (const m of searchMedia?.items || []) {
+      const ms = score(String(m.name || '').replace(/[_\-.]+/g, ' ')) || score(m.name);
+      if (ms) out.media.push({ kind: 'media', name: m.name, url: m.url, mediaKind: m.kind, folderId: m.folderId, folder: m.folder, rank: 2 - ms });
+    }
+    out.media.sort((a, b) => a.rank - b.rank);
+    for (const s of segmentList) {
+      if (score(s.name)) out.timers.push({ kind: 'timer', id: s.id, title: s.name, status: s.status });
+    }
+    return out;
+  }
+
+  // Briefly ring what a search result pointed at, once it's on screen.
+  // Scrolls only the given container (see focusInStack on scrollIntoView).
+  function flashFound(selector, containerId, tries = 30) {
+    const el = document.querySelector(selector);
+    const box = document.getElementById(containerId);
+    if (!el || !box) {
+      if (tries > 0) setTimeout(() => flashFound(selector, containerId, tries - 1), 70);
+      return;
+    }
+    const b = box.getBoundingClientRect(), r = el.getBoundingClientRect();
+    if (r.top < b.top || r.bottom > b.bottom) box.scrollTop += (r.top - b.top) - (b.height - r.height) / 2;
+    el.classList.remove('search-found');
+    void el.offsetWidth;   // restart the animation
+    el.classList.add('search-found');
+    setTimeout(() => el.classList.remove('search-found'), 1600);
+  }
+
+  // Opens a search result where it lives; with send, also does what clicking
+  // it there does (a slide or media goes live, a song opens Add to playlist).
+  // Timers only open — starting one is a deliberate act in the Timer tab.
+  async function openFound(r, { send = false } = {}) {
+    if (r.kind === 'item' || r.kind === 'slide') {
+      const p = playlists.find(x => x.id === r.playlistId);
+      const item = p?.items?.find(i => i.id === r.itemId);
+      if (!item) return false;
+      if (activePlaylistId !== p.id) switchPlaylist(p.id);
+      focusInStack(item.id);
+      const index = r.kind === 'slide' ? r.index : 0;
+      if (r.kind === 'slide') {
+        requestAnimationFrame(() => requestAnimationFrame(() =>
+          flashFound(`.svc-card[data-id="${CSS.escape(item.id)}"] .svc-slide[data-index="${index}"]`, 'svc-stack-list')));
+      }
+      if (send && slidesFor(item).length) sendSlide(item, index);
+      return true;
+    }
+    if (r.kind === 'song') {
+      const h = typeof searchHymns === 'function' ? searchHymns('').find(x => x.id === r.id) : null;
+      if (!h) return false;
+      if (send) { addHymnViaConfirm(h); return true; }
+      showSongsLibrary();
+      const input = document.getElementById('hymn-search');
+      if (input) input.value = h.title;
+      renderHymnList(h.title);
+      return true;
+    }
+    if (r.kind === 'media') {
+      if (send) { await sendMediaItem({ name: r.name, url: r.url, kind: r.mediaKind }); return true; }
+      activeMediaFolderId = r.folderId || null;
+      showCenterView('media');
+      await loadMediaFolders();
+      flashFound(`.media-card[data-url="${CSS.escape(r.url)}"]`, 'media-dropzone');
+      return true;
+    }
+    if (r.kind === 'timer') {
+      showTimerLibrary();
+      flashFound(`.timer-card[data-id="${CSS.escape(r.id)}"]`, 'timer-grid');
+      return true;
+    }
+    return false;
+  }
+
   // Song auto-detection will want the playlist's lyrics to build its index.
   // paintLookLayers is also used by app.js to render the top-bar live preview
   // with the same theme a sent slide actually carries, instead of plain text.
@@ -6305,5 +6481,7 @@
     // this same "Paste from clipboard" flow the Slides/Songs add-menus
     // already use, rather than a second implementation of clipboard import.
     quickImportClipboard,
+    // The global search overlay (global_search.js).
+    prefetchForSearch, searchContent, openFound,
   };
 })();

@@ -2838,44 +2838,51 @@ app.post('/api/lookup', async (req, res) => {
   }
 });
 
+// A reference typed into a search box ("John 3:16", "Genesis 1", "ps 23 1-3"),
+// or null. Shared by the Bible search (which sends what it finds) and the
+// global search's lookup (which only lists it).
+function parseTypedReference(query) {
+  // Normalise for typed input: lowercase, strip sentence punctuation
+  const normQuery = String(query || '').trim().toLowerCase().replace(/[.,!?;]/g, ' ');
+
+  // Parse — inBibleMode=true so ambiguous book names (John, Mark, Luke, Acts…)
+  // resolve correctly when typed explicitly rather than spoken mid-sermon
+  let ref = parseSpokenReference(normQuery, true);
+
+  // ── Bare "<book> <chapter>" with no "chapter" keyword ───────────────────
+  // parseSpokenReference requires the literal word "chapter" between an
+  // AMBIGUOUS_BOOKS book (Genesis, John, Mark, Acts, James, Exodus,
+  // Numbers, Job… ~24 books) and a bare number before it'll trust the
+  // number as a chapter — that guard exists to stop live speech
+  // ("...he owes me thirty dollars...") from hallucinating a citation out
+  // of an unrelated stray number near a mis-heard book name (see the
+  // comment above that guard in reference_parser.js). None of that risk
+  // applies here — this is deliberate, typed input, not overheard
+  // fragments — so "Genesis 1" or "John 3:16" typed into search silently
+  // fell through to keyword text search and came back empty, while the
+  // exact same reference for a non-ambiguous book ("Matthew 5") worked
+  // fine. Retry with "chapter" spliced in at every position and accept
+  // the first one parseSpokenReference itself resolves — this can't
+  // invent a reference the parser wouldn't otherwise accept, it just
+  // supplies the one keyword the guard was waiting to see. Bounded to
+  // short queries since a real reference is never more than a handful of
+  // words.
+  if (!ref) {
+    const words = normQuery.split(/\s+/).filter(Boolean);
+    if (words.length <= 8 && !words.includes('chapter')) {
+      for (let i = 1; i < words.length && !ref; i++) {
+        ref = parseSpokenReference([...words.slice(0, i), 'chapter', ...words.slice(i)].join(' '), true);
+      }
+    }
+  }
+  return ref;
+}
+
 app.post('/api/search', async (req, res) => {
   try {
     const { query, limit } = req.body;
     if (!query) return res.status(400).json({ error: 'query required' });
-
-    // Normalise for typed input: lowercase, strip sentence punctuation
-    const normQuery = query.trim().toLowerCase().replace(/[.,!?;]/g, ' ');
-
-    // Parse — inBibleMode=true so ambiguous book names (John, Mark, Luke, Acts…)
-    // resolve correctly when typed explicitly rather than spoken mid-sermon
-    let ref = parseSpokenReference(normQuery, true);
-
-    // ── Bare "<book> <chapter>" with no "chapter" keyword ───────────────────
-    // parseSpokenReference requires the literal word "chapter" between an
-    // AMBIGUOUS_BOOKS book (Genesis, John, Mark, Acts, James, Exodus,
-    // Numbers, Job… ~24 books) and a bare number before it'll trust the
-    // number as a chapter — that guard exists to stop live speech
-    // ("...he owes me thirty dollars...") from hallucinating a citation out
-    // of an unrelated stray number near a mis-heard book name (see the
-    // comment above that guard in reference_parser.js). None of that risk
-    // applies here — this is deliberate, typed input, not overheard
-    // fragments — so "Genesis 1" or "John 3:16" typed into search silently
-    // fell through to keyword text search and came back empty, while the
-    // exact same reference for a non-ambiguous book ("Matthew 5") worked
-    // fine. Retry with "chapter" spliced in at every position and accept
-    // the first one parseSpokenReference itself resolves — this can't
-    // invent a reference the parser wouldn't otherwise accept, it just
-    // supplies the one keyword the guard was waiting to see. Bounded to
-    // short queries since a real reference is never more than a handful of
-    // words.
-    if (!ref) {
-      const words = normQuery.split(/\s+/).filter(Boolean);
-      if (words.length <= 8 && !words.includes('chapter')) {
-        for (let i = 1; i < words.length && !ref; i++) {
-          ref = parseSpokenReference([...words.slice(0, i), 'chapter', ...words.slice(i)].join(' '), true);
-        }
-      }
-    }
+    const ref = parseTypedReference(query);
 
     if (ref && ref.book) {
       // ── Range (verseStart / verseEnd) ──────────────────────────────────────
@@ -2962,6 +2969,52 @@ app.post('/api/search/suggest', async (req, res) => {
   } catch {
     res.json({ results: [] });
   }
+});
+
+// Global search (⌘F): the verses a typed query names or contains — listed,
+// never sent (the operator's pick sends). A reference comes first, a range or
+// chapter as its verses; otherwise verses containing the typed words, then
+// (3+ words) verses the phrase identifies even out of order or reworded, the
+// same suggestions the Bible search shows. `reference` says the query named
+// a passage, so the Bible group leads the results.
+app.post('/api/search/lookup', async (req, res) => {
+  const query = String(req.body?.query || '').trim();
+  const limit = Math.max(1, Math.min(60, Number(req.body?.limit) || 30));
+  if (!query || !workerBasicReady) return res.json({ results: [], reference: false });
+  const out = [], seen = new Set();
+  const add = (v, match) => {
+    if (v?.reference && !seen.has(v.reference)) { seen.add(v.reference); out.push({ ...v, match }); }
+  };
+  let reference = false;
+  try {
+    const ref = parseTypedReference(query);
+    if (ref?.book) {
+      let verses = [];
+      if (ref.verseStart != null && ref.verseEnd != null) {
+        verses = (await workerCall('rangeLookup', { book: ref.book, chapter: ref.chapter, verseStart: ref.verseStart, verseEnd: ref.verseEnd }, 3000)).results || [];
+      } else if (ref.ranges?.length) {
+        for (const { verseStart, verseEnd } of ref.ranges) {
+          verses.push(...((await workerCall('rangeLookup', { book: ref.book, chapter: ref.chapter, verseStart, verseEnd }, 3000)).results || []));
+        }
+      } else if (ref.verse != null) {
+        const m = await workerCall('directLookup', { book: ref.book, chapter: ref.chapter, verse: ref.verse }, 3000);
+        if (m.result) verses = [m.result];
+      } else if (ref.chapter != null) {
+        verses = (await workerCall('chapterLookup', { book: ref.book, chapter: ref.chapter }, 3000)).results || [];
+      }
+      verses.slice(0, limit).forEach(v => add(v, 'reference'));
+      reference = out.length > 0;
+    }
+    if (!reference) {
+      const text = await workerCall('textSearch', { query, limit }, 3000);
+      (text.results || []).forEach(v => add(v, 'words'));
+      if (query.split(/\s+/).filter(Boolean).length >= 3 && out.length < limit) {
+        const s = await workerCall('suggestPhrase', { query, limit: 8 }, 3000);
+        (s.results || []).forEach(v => add(v, 'phrase'));
+      }
+    }
+  } catch {}
+  res.json({ results: applyScriptureLanguage(applyTranslation(out.slice(0, limit))), reference });
 });
 
 // Routes straight through the SAME pipeline a live mic segment hits

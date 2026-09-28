@@ -75,6 +75,11 @@ fn build_app_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry
     // Standard Cut/Copy/Paste/Select All/Undo/Redo — see the file-level
     // comment above for why this menu existing at all (not just its
     // contents) is the actual fix.
+    // Find… opens the frontend's global search (global_search.js) — the menu
+    // accelerator also makes Cmd+F work while focus sits in a text field.
+    let find_item = MenuItemBuilder::with_id("menu-find", "Find…")
+        .accelerator("CmdOrCtrl+F")
+        .build(app)?;
     let edit_menu = SubmenuBuilder::new(app, "Edit")
         .undo()
         .redo()
@@ -83,6 +88,8 @@ fn build_app_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry
         .copy()
         .paste()
         .select_all()
+        .separator()
+        .item(&find_item)
         .build()?;
 
     let view_menu = SubmenuBuilder::new(app, "View")
@@ -877,7 +884,7 @@ pub fn run() {
             match id {
                 "menu-check-updates" => check_for_updates(app.clone(), true),
                 "menu-learn-more" => { let _ = app.shell().open("https://github.com/Kairo-live/Kairo", None); }
-                "menu-new-theme" | "menu-import" | "menu-export-theme" | "menu-settings"
+                "menu-new-theme" | "menu-import" | "menu-export-theme" | "menu-settings" | "menu-find"
                 | "menu-toggle-listening" | "menu-range-next" | "menu-range-end"
                 | "menu-clear-slide" | "menu-clear-bible" | "menu-output-back"
                 | "menu-clear-media" | "menu-clear-timer" | "menu-clear-all" => {
