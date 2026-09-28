@@ -176,9 +176,11 @@ function churchVocabulary() {
 
 // ── Shared speech-engine treatments ──────────────────────────────────────
 // The vocabulary recognition is steered toward and the pause that ends an
-// utterance, defined once and given to whichever engine is live (Deepgram or
-// the on-device model) — swapping the model should change accuracy, not how
-// the transcript behaves.
+// utterance, defined once for whichever engine is live — swapping the model
+// should change accuracy, not how the transcript behaves. The on-device engine
+// takes the pause but can't take the vocabulary (its decoder has no biasing;
+// see sherpa_engine.js), so for it the reference parser's text-side mishearing
+// fixes carry that role.
 const UTTERANCE_END_MS = 1200;
 const SCRIPTURE_KEYTERMS = [
   'Genesis','Exodus','Leviticus','Numbers','Deuteronomy',
@@ -3577,7 +3579,6 @@ async function startOffline() {
       modelPath: process.env.KAIRO_OFFLINE_MODEL || defaultModelPath(),
       gpu: true,
       language: 'en',
-      vocabulary: sttVocabulary(),
       utteranceEndMs: UTTERANCE_END_MS,
       onPartial: (text) => {
         const t = (text || '').trim();

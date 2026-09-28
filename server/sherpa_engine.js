@@ -59,11 +59,6 @@ const MODEL_FILES = {
   tokens:  'tokens.txt',
 };
 
-// Optional: the model's word-piece vocabulary. sherpa-onnx needs it to turn
-// plain vocabulary terms ("Habakkuk") into the model's own tokens; without it
-// the vocabulary boost stays off rather than guessing a tokenization.
-const BPE_VOCAB_FILE = 'bpe.vocab';
-
 // Nemotron's feature frontend is 128-dim mel (the zipformer's was 80) — a
 // mismatch here silently feeds the encoder garbage, so it's load-bearing.
 const FEATURE_DIM = 128;
@@ -90,13 +85,15 @@ function isModelPresent(dir = defaultModelDir()) {
   }
 }
 
-// The recognizer config, from the shared treatments server.js hands every
-// engine. Beam search is what makes vocabulary biasing possible at all
-// (greedy decoding has no alternatives to steer between), so it's only paid
-// for when there's a vocabulary to apply.
-function recognizerConfig(modelDir, { hotwordsFile = null, utteranceEndMs = 1200 } = {}) {
+// The recognizer config. The utterance-end pause comes from the treatments
+// server.js shares with every engine. Decoding stays greedy: sherpa-onnx
+// supports only greedy_search for NeMo transducers like Nemotron, and asking for
+// modified_beam_search (which vocabulary hotwords require) makes the native
+// library exit the whole process — so vocabulary for this engine is applied on
+// the text side, by the reference parser's own mishearing fixes.
+function recognizerConfig(modelDir, { utteranceEndMs = 1200 } = {}) {
   const p = (f) => path.join(modelDir, MODEL_FILES[f]);
-  const cfg = {
+  return {
     featConfig: { sampleRate: SAMPLE_RATE, featureDim: FEATURE_DIM },
     modelConfig: {
       transducer: { encoder: p('encoder'), decoder: p('decoder'), joiner: p('joiner') },
@@ -114,24 +111,6 @@ function recognizerConfig(modelDir, { hotwordsFile = null, utteranceEndMs = 1200
     rule2MinTrailingSilence: utteranceEndMs / 1000,
     rule3MinUtteranceLength: 25,   // hard cap in seconds, mirrors MAX_UTTERANCE
   };
-  if (hotwordsFile) {
-    cfg.decodingMethod = 'modified_beam_search';
-    cfg.maxActivePaths = 4;
-    cfg.hotwordsFile = hotwordsFile;
-    cfg.hotwordsScore = 1.5;
-    cfg.modelConfig.modelingUnit = 'bpe';
-    cfg.modelConfig.bpeVocab = path.join(modelDir, BPE_VOCAB_FILE);
-  }
-  return cfg;
-}
-
-// Writes the vocabulary as a sherpa-onnx hotwords file (one term per line),
-// or returns null when there's nothing to boost or the model can't tokenize it.
-function writeHotwordsFile(modelDir, vocabulary) {
-  if (!vocabulary?.length || !fs.existsSync(path.join(modelDir, BPE_VOCAB_FILE))) return null;
-  const file = path.join(os.tmpdir(), 'kairo-offline-hotwords.txt');
-  fs.writeFileSync(file, vocabulary.join('\n') + '\n');
-  return file;
 }
 
 class SherpaEngine {
@@ -146,7 +125,6 @@ class SherpaEngine {
     // `new OfflineEngine({ modelPath, ... })` call needs no further change.
     this.modelDir = opts.modelDir || opts.modelPath || defaultModelDir();
     this.language = opts.language || 'en';
-    this.vocabulary = opts.vocabulary || [];
     this.utteranceEndMs = opts.utteranceEndMs || 1200;
     this.onPartial = opts.onPartial || (() => {});
     this.onFinal   = opts.onFinal   || (() => {});
@@ -174,12 +152,7 @@ class SherpaEngine {
       throw e;
     }
 
-    const hotwordsFile = writeHotwordsFile(this.modelDir, this.vocabulary);
-    console.log(hotwordsFile
-      ? `[Offline] Vocabulary boost on — ${this.vocabulary.length} terms`
-      : `[Offline] Vocabulary boost off — ${this.vocabulary.length ? `model has no ${BPE_VOCAB_FILE}` : 'no terms for this language'}`);
-    this._recognizer = new OnlineRecognizer(
-      recognizerConfig(this.modelDir, { hotwordsFile, utteranceEndMs: this.utteranceEndMs }));
+    this._recognizer = new OnlineRecognizer(recognizerConfig(this.modelDir, { utteranceEndMs: this.utteranceEndMs }));
     this._stream = this._recognizer.createStream();
     this._lastPartial = '';
     this._running = true;
@@ -251,6 +224,5 @@ module.exports = {
   isModelPresent,
   pcm16ToFloat32,
   recognizerConfig,
-  writeHotwordsFile,
   MODEL_FILES,
 };
