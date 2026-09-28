@@ -186,6 +186,10 @@
                 </button>
                 <div id="download-menu" class="tb-menu hidden" role="menu">
                     <div class="tb-menu-label">Live session</div>
+                    <button class="tb-menu-item" data-download="notes" role="menuitem">
+                        <span class="tb-menu-item-name">Sermon notes</span>
+                        <span class="tb-menu-item-fmt">PDF</span>
+                    </button>
                     <button class="tb-menu-item" data-download="transcript" role="menuitem">
                         <span class="tb-menu-item-name">Transcript</span>
                         <span class="tb-menu-item-fmt">TXT</span>
@@ -760,6 +764,29 @@
     <!-- Add / import confirmation — every new section passes through here so
          the operator picks which playlist it lands in, which theme it renders
          with, and (for lyric/text content) how it splits into slides. -->
+    <div id="sermon-notes-modal" class="modal hidden">
+        <div class="modal-overlay"></div>
+        <div class="modal-content" style="width:420px;">
+            <div class="modal-header">
+                <h2>Sermon notes</h2>
+                <button id="close-sermon-notes" class="modal-close-btn">
+                    <svg width="16" height="16" viewBox="0 0 16 16"><path d="M3 3l10 10M13 3L3 13" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+                    <span>Close</span>
+                </button>
+            </div>
+            <div class="modal-body" style="display:block;padding:16px 20px;">
+                <div class="setting-group">
+                    <label class="setting-label" for="sn-name">Sermon name</label>
+                    <input type="text" id="sn-name" class="setting-input" placeholder="e.g. Unveiling the Stronghold of Faith" autocomplete="off">
+                </div>
+                <p id="sn-status" class="setting-hint" style="margin-top:8px;">The key things said, each point of the sermon and the scriptures under it — saved as a PDF in Downloads.</p>
+            </div>
+            <div class="modal-footer">
+                <button id="sn-cancel" class="modal-btn secondary">Cancel</button>
+                <button id="sn-download" class="modal-btn primary">Download PDF</button>
+            </div>
+        </div>
+    </div>
     <div id="add-confirm-modal" class="modal hidden">
         <div class="modal-overlay"></div>
         <div class="modal-content" style="width:460px;">

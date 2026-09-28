@@ -469,7 +469,7 @@ function handleTranscript(msg) {
       for (let i = 0; i < finals.length - TRANSCRIPT_LOG_MAX_SPANS; i++) finals[i].remove();
     }
     // Capture for Content Studio — finals only, never interim drafts.
-    sessionTranscriptParts.push({ time: new Date().toLocaleTimeString(), text: msg.text });
+    sessionTranscriptParts.push({ time: new Date().toLocaleTimeString(), at: Date.now(), text: msg.text });
     wordCount += msg.text.split(/\s+/).length;
     if (wordCountEl) wordCountEl.textContent = wordCount.toLocaleString();
     // Auto-scroll — only if the operator was already following along.
@@ -1081,6 +1081,8 @@ function showInViewer(verses, method, topScore, correctedFrom = null, look = nul
     stale?.remove();
     const staleCand = queueList?.querySelector(`[data-ref="${CSS.escape(correctedFrom)}"]`);
     staleCand?.remove();
+    // A corrected-away verse was never really part of the message.
+    sessionVerses = sessionVerses.filter(x => x.ref !== correctedFrom);
   }
 
   // ── Live Queue — the single list of sent + queued verses ──
@@ -1125,7 +1127,9 @@ function showInViewer(verses, method, topScore, correctedFrom = null, look = nul
     const avg = confidenceSum / confidenceCount;
     if (avgConfidenceEl) avgConfidenceEl.textContent = (avg * 100).toFixed(0) + '%';
   }
-  sessionVerses.push({ ref: v.reference, text: v.text, time: new Date().toLocaleTimeString() });
+  // A cited range counts as every verse of it (the notes list "Matthew 6:6-8").
+  const sentAt = Date.now(), sentTime = new Date().toLocaleTimeString();
+  for (const x of (verses.length > 1 ? verses : [v])) sessionVerses.push({ ref: x.reference, text: x.text, time: sentTime, at: sentAt });
 
   // ── Candidates panel stays candidates-only — auto-sent verses don't get
   // logged there. Previously every sent verse ALSO got written into the
@@ -3291,35 +3295,64 @@ navigator.mediaDevices?.addEventListener?.('devicechange', () => {
     closeMenu();
     const kind = item.dataset.download;
     try {
-      if      (kind === 'verses')      downloadVersesTxt();
-      else if (kind === 'transcript')  downloadTranscriptTxt();
+      if (kind === 'notes') openSermonNotesDialog();
+      else if (kind === 'verses' || kind === 'transcript') await exportSession(kind);
     } catch (err) {
       toast('Download failed: ' + (err.message || err), 'error');
     }
   });
 })();
 
-function downloadAsFile(content, filename, mime = 'text/plain') {
-  const blob = new Blob([content], { type: mime });
-  const url  = URL.createObjectURL(blob);
-  const a    = document.createElement('a');
-  a.href     = url;
-  a.download = filename;
-  a.click();
-  URL.revokeObjectURL(url);
+// Exports are written to Downloads by the server and opened there — the app's
+// webview can't save a page-side download (see /api/export).
+async function exportSession(kind, name = '') {
+  const res = await fetch(`${SERVER}/api/export`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ kind, name, transcript: sessionTranscriptParts, verses: sessionVerses }),
+  });
+  const out = await res.json().catch(() => ({}));
+  if (!res.ok || !out.ok) throw new Error(out.error || `HTTP ${res.status}`);
+  return out;
 }
 
-function downloadVersesTxt() {
-  if (!sessionVerses.length) { toast('No verses captured yet — start listening first', 'info'); return; }
-  const lines = sessionVerses.map(v => `${v.time}  ${v.ref}\n${v.text}\n`).join('\n');
-  downloadAsFile(lines, `KAIRO_verses_${new Date().toISOString().slice(0, 10)}.txt`);
+// Export → Sermon notes: ask for the sermon's name, then build the PDF.
+function openSermonNotesDialog() {
+  const modal = document.getElementById('sermon-notes-modal');
+  const input = document.getElementById('sn-name');
+  const status = document.getElementById('sn-status');
+  const btn = document.getElementById('sn-download');
+  if (!modal) return;
+  const hint = 'The key things said, each point of the sermon and the scriptures under it — saved as a PDF in Downloads.';
+  status.textContent = sessionTranscriptParts.length ? hint : 'Nothing captured yet — start listening first, then come back here.';
+  btn.disabled = !sessionTranscriptParts.length;
+  modal.classList.remove('hidden');
+  setTimeout(() => input.focus(), 0);
 }
-
-function downloadTranscriptTxt() {
-  if (!sessionTranscriptParts.length) { toast('No transcript captured yet — start listening first', 'info'); return; }
-  const lines = sessionTranscriptParts.map(p => `[${p.time}] ${p.text}`).join('\n');
-  downloadAsFile(lines, `KAIRO_transcript_${new Date().toISOString().slice(0, 10)}.txt`);
-}
+(function wireSermonNotesDialog() {
+  const modal = document.getElementById('sermon-notes-modal');
+  if (!modal) return;
+  const input = document.getElementById('sn-name');
+  const status = document.getElementById('sn-status');
+  const btn = document.getElementById('sn-download');
+  const close = () => { modal.classList.add('hidden'); btn.textContent = 'Download PDF'; };
+  document.getElementById('close-sermon-notes')?.addEventListener('click', close);
+  document.getElementById('sn-cancel')?.addEventListener('click', close);
+  modal.querySelector('.modal-overlay')?.addEventListener('click', close);
+  input.addEventListener('keydown', (e) => { if (e.key === 'Enter') btn.click(); if (e.key === 'Escape') close(); });
+  btn.addEventListener('click', async () => {
+    btn.disabled = true; btn.textContent = 'Preparing…';
+    try {
+      const out = await exportSession('notes', input.value.trim());
+      status.textContent = `Saved to Downloads: ${out.file}`;
+      setTimeout(close, 1400);
+    } catch (err) {
+      status.textContent = `Couldn't create the notes: ${err.message}`;
+      btn.textContent = 'Download PDF';
+    } finally {
+      btn.disabled = false;
+    }
+  });
+})();
 
 // ── Elapsed timer ──────────────────────────────────────────────────────────
 function updateElapsed() {

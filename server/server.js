@@ -3011,6 +3011,54 @@ app.post('/api/stop-listening', async (_, res) => {
   res.json({ ok: true });
 });
 
+// ── Exports (Export menu) ─────────────────────────────────────────────────
+// Saved to ~/Downloads by the server and opened, not downloaded by the page:
+// the app's webview has no download handler, so a page-side blob download saved
+// nothing in the native app (only in a plain browser tab). Sermon notes: see
+// sermon_notes.js.
+function uniqueFilePath(dir, filename) {
+  const ext = path.extname(filename), base = filename.slice(0, filename.length - ext.length);
+  let candidate = path.join(dir, filename);
+  for (let i = 2; fs.existsSync(candidate); i++) candidate = path.join(dir, `${base} (${i})${ext}`);
+  return candidate;
+}
+const safeFileName = (t) => String(t || '').replace(/[\\/:*?"<>|\u0000-\u001f]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 80);
+
+app.post('/api/export', async (req, res) => {
+  try {
+    const { kind, name = '' } = req.body || {};
+    const transcript = Array.isArray(req.body?.transcript) ? req.body.transcript : [];
+    const verses = Array.isArray(req.body?.verses) ? req.body.verses : [];
+    const date = new Date().toISOString().slice(0, 10);
+    let filename, data;
+    if (kind === 'notes') {
+      const sermonNotes = require('./sermon_notes');
+      const notes = sermonNotes.buildNotes({ name, transcript, verses });
+      data = await sermonNotes.renderNotesPdf(notes);
+      filename = `${safeFileName(notes.title) || 'Sermon Notes'} — ${date}.pdf`;
+    } else if (kind === 'transcript') {
+      data = transcript.map(p => `[${p.time || ''}] ${p.text || ''}`).join('\n') + '\n';
+      filename = `KAIRO transcript — ${date}.txt`;
+    } else if (kind === 'verses') {
+      data = verses.map(v => `${v.time || ''}  ${v.ref || ''}\n${v.text || ''}\n`).join('\n');
+      filename = `KAIRO verses — ${date}.txt`;
+    } else {
+      return res.status(400).json({ error: 'Unknown export' });
+    }
+    const dir = path.join(require('os').homedir(), 'Downloads');
+    await fs.promises.mkdir(dir, { recursive: true });
+    const file = uniqueFilePath(dir, filename);
+    await fs.promises.writeFile(file, data);
+    if (process.platform === 'darwin' && !process.env.KAIRO_EVAL_MODE) {
+      require('child_process').spawn('open', [file], { stdio: 'ignore', detached: true }).unref();
+    }
+    res.json({ ok: true, path: file, file: path.basename(file) });
+  } catch (err) {
+    console.warn('[Export] failed:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ── Shared NDJSON progress-stream helper ─────────────────────────────────
 // Used by the offline-model installer, translate-model installer, and
 // Ollama pull routes below — all three stream install/download progress to
