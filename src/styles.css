@@ -4961,6 +4961,8 @@ select {
 .ls-transcript-body .transcript-text   { font-size: 12.5px; font-weight: 400; line-height: 1.65; color: var(--text); -webkit-user-select: text; user-select: text; }
 .ls-transcript-body .transcript-final  { font-size: 12.5px; font-weight: 400; line-height: 1.65; color: var(--text-2); -webkit-user-select: text; user-select: text; }
 .ls-transcript-body .transcript-interim{ font-size: 12.5px; font-weight: 300; line-height: 1.65; color: var(--text-3); font-style: italic; -webkit-user-select: text; user-select: text; }
+/* A scripture reference spotted inline in the live words — see highlightScriptureRefs() in app.js */
+.ls-transcript-body .transcript-ref { color: var(--brand); font-weight: 600; }
 
 /* ── Range navigation bar — docked below the live screen ──────── */
 .range-nav-bar {

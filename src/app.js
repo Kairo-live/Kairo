@@ -370,6 +370,39 @@ function handleConnectionState(state, error) {
 let transcriptDiv = null;
 let interimSpan   = null;
 
+// Brand-color highlighting for scripture references inside the raw transcript
+// text — "so users can see in one glance the scripture called" (owner). Deliberately
+// a lightweight client-side pattern match on digit-form citations ("John 3:16",
+// "Genesis 24"), not a call into the real spoken-reference parser (server-side
+// only, and tuned for noisy ASR word forms like "chapter three verse sixteen") —
+// this is a glanceable visual aid over the live words, not a second detection
+// path; the actual detection/auto-send pipeline is entirely unaffected by it.
+const SCRIPTURE_NUMBERED_BOOKS = ['Samuel', 'Kings', 'Chronicles', 'Corinthians', 'Thessalonians', 'Timothy', 'Peter'];
+const SCRIPTURE_PLAIN_BOOKS = [
+  'Song of Solomon',
+  'Genesis', 'Exodus', 'Leviticus', 'Numbers', 'Deuteronomy', 'Joshua', 'Judges', 'Ruth',
+  'Ezra', 'Nehemiah', 'Esther', 'Job', 'Psalms', 'Psalm', 'Proverbs', 'Ecclesiastes',
+  'Isaiah', 'Jeremiah', 'Lamentations', 'Ezekiel', 'Daniel', 'Hosea', 'Joel', 'Amos',
+  'Obadiah', 'Jonah', 'Micah', 'Nahum', 'Habakkuk', 'Zephaniah', 'Haggai', 'Zechariah', 'Malachi',
+  'Matthew', 'Mark', 'Luke', 'John', 'Acts', 'Romans', 'Galatians', 'Ephesians',
+  'Philippians', 'Colossians', 'Titus', 'Philemon', 'Hebrews', 'James',
+  'Jude', 'Revelation', 'Revelations',
+];
+const SCRIPTURE_REF_RE = new RegExp(
+  `\\b(?:(?:1st|2nd|3rd|First|Second|Third|[123])\\s+(?:${SCRIPTURE_NUMBERED_BOOKS.join('|')}|John)|${SCRIPTURE_PLAIN_BOOKS.join('|')})` +
+  `\\s+\\d{1,3}(?::\\d{1,3}(?:[-–]\\d{1,3})?)?\\b`,
+  'g'
+);
+function escapeHtml(s) {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+// Escape FIRST, then match/wrap on the escaped string — book names and digits
+// are untouched by HTML-escaping, so matches are identical either way, and this
+// ordering means the highlight spans are never built from unescaped raw text.
+function highlightScriptureRefs(text) {
+  return escapeHtml(text).replace(SCRIPTURE_REF_RE, (m) => `<span class="transcript-ref">${m}</span>`);
+}
+
 function showEmptyTranscript(show) {
   if (!transcriptContent) return;
   if (show) {
@@ -427,7 +460,7 @@ function handleTranscript(msg) {
   if (msg.isFinal) {
     const span = document.createElement('span');
     span.className = 'transcript-final';
-    span.textContent = msg.text + ' ';
+    span.innerHTML = highlightScriptureRefs(msg.text) + ' ';
     if (interimSpan) transcriptDiv.insertBefore(span, interimSpan);
     else transcriptDiv.appendChild(span);
     if (interimSpan) interimSpan.textContent = '';
@@ -442,7 +475,7 @@ function handleTranscript(msg) {
     // Auto-scroll — only if the operator was already following along.
     if (wasAtBottom) scheduleTranscriptScroll();
   } else {
-    if (interimSpan) { interimSpan.textContent = msg.text; interimSpan.style.opacity = '0.5'; }
+    if (interimSpan) { interimSpan.innerHTML = highlightScriptureRefs(msg.text); interimSpan.style.opacity = '0.5'; }
     if (wasAtBottom) scheduleTranscriptScroll();
   }
   // Lyric follower (service.js) — every transcript segment, final or interim,
@@ -509,7 +542,13 @@ document.addEventListener('dblclick', (e) => {
   if (e.target.closest?.('.transcript-sent-chip')) return;
   const line = e.target.closest?.('.transcript-final');
   if (!line || !scriptureSearchInput) return;
-  const words = [...line.childNodes].filter(n => n.nodeType === Node.TEXT_NODE).map(n => n.textContent).join(' ')
+  // textContent alone would also pull in the sent-chip's "→ Reference" label;
+  // strip it from a clone rather than filtering to text nodes only, since a
+  // highlighted .transcript-ref span (see highlightScriptureRefs) is itself an
+  // element node and would otherwise be silently dropped from the search text.
+  const clone = line.cloneNode(true);
+  clone.querySelectorAll('.transcript-sent-chip').forEach(el => el.remove());
+  const words = clone.textContent
     .split(/\s+/).filter(Boolean).slice(-14).join(' ');
   if (!words) return;
   window.getSelection?.()?.removeAllRanges();
