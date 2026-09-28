@@ -14,5 +14,18 @@
         <key>NSAllowsLocalNetworking</key>
         <true/>
     </dict>
+
+    <!-- Without this, macOS App Nap throttles the webview's JS timers and
+         real-time audio processing once the window sits unfocused/occluded
+         for a while — exactly the normal state during a live service, where
+         the operator isn't clicking the app while it's meant to keep
+         listening. Confirmed live: the AudioWorklet capture graph went
+         completely silent for minutes at a time with no error, recovering
+         on its own later — not a crash, App Nap suspending a background
+         process that was never told it's allowed to keep running at full
+         throttle. Capturing microphone input doesn't earn the automatic
+         "this app is making sound" exemption the way audio OUTPUT does. -->
+    <key>NSAppSleepDisabled</key>
+    <true/>
 </dict>
 </plist>
