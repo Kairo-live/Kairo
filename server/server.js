@@ -6963,20 +6963,30 @@ process.on('SIGHUP',  () => gracefulShutdown('SIGHUP'));   // terminal window cl
 // When CMD+Q closes the Tauri app in dev mode, the Tauri CLI (our parent)
 // dies but doesn't always send SIGTERM to children. Poll every 3s and exit
 // if the parent is gone — prevents orphan servers holding port 7777.
-// Only activate when running under a long-lived parent (Tauri CLI / nodemon).
-// Short-lived parents (nohup shell, background &) die immediately — skip those.
+// Spawned by the Kairo app (it passes KAIRO_AUTH_TOKEN), the server exists
+// only for that app, so watch from the start — an app that crashes during
+// launch must not leave its server holding the port. Otherwise, only activate
+// under a long-lived parent (Tauri CLI / nodemon); short-lived parents (nohup
+// shell, background &) die immediately — skip those.
 const _startPpid = process.ppid;
-setTimeout(() => {
-  try {
-    process.kill(_startPpid, 0); // parent still alive after 5s → long-lived
-    setInterval(() => {
-      try { process.kill(_startPpid, 0); }
-      catch {
-        console.log('[KAIRO] Parent process gone — shutting down…');
-        gracefulShutdown('PARENT_GONE');
-      }
-    }, 3000).unref();
-  } catch {
-    // Parent already dead after 5s → we were launched standalone, skip watchdog
-  }
-}, 5000);
+function watchParent() {
+  setInterval(() => {
+    try { process.kill(_startPpid, 0); }
+    catch {
+      console.log('[KAIRO] Parent process gone — shutting down…');
+      gracefulShutdown('PARENT_GONE');
+    }
+  }, 3000).unref();
+}
+if (AUTH_TOKEN) {
+  watchParent();
+} else {
+  setTimeout(() => {
+    try {
+      process.kill(_startPpid, 0); // parent still alive after 5s → long-lived
+      watchParent();
+    } catch {
+      // Parent already dead after 5s → we were launched standalone, skip watchdog
+    }
+  }, 5000);
+}

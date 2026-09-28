@@ -762,8 +762,9 @@ const MONITOR_WINDOW_LABEL = 'kairo-monitor';
 async function openMonitorWindow() {
   const target = monitorTargets().find(t => t.id === livePreviewOutputId) || MONITOR_MAIN;
   // About the size of the Settings panel (880 wide, 78% of the app's height),
-  // resizable. It floats above the app without taking focus, so the operator
-  // keeps working in the main window while it's up.
+  // resizable. It opens in front without taking focus, so the operator keeps
+  // working in the main window; it's a normal window, not always-on-top, so
+  // clicking the app brings the app forward.
   const width = Math.min(880, Math.round(window.screen.availWidth * 0.9));
   const height = Math.max(420, Math.round(window.innerHeight * 0.78));
   // The grid pops out as the grid (monitor.html: every output that's on, plus
@@ -780,7 +781,7 @@ async function openMonitorWindow() {
     if (existing) { await existing.close(); await new Promise(r => setTimeout(r, 150)); }
     new WebviewWindow(MONITOR_WINDOW_LABEL, {
       url: location.origin + path, title, width, height, minWidth: 320, minHeight: 200, center: true,
-      resizable: true, decorations: true, alwaysOnTop: true, focus: false, fullscreen: false,
+      resizable: true, decorations: true, focus: false, fullscreen: false,
     });
   } catch (err) { console.warn('[KAIRO] Monitor window failed:', err); }
 }

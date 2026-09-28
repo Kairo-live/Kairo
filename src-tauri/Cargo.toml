@@ -1,6 +1,6 @@
 [package]
 name = "kairo"
-version = "3.0.13"
+version = "3.0.14"
 description = "Kairo — AI Scripture Assistant"
 authors = ["Kairo"]
 edition = "2021"
@@ -91,8 +91,12 @@ gl               = "0.14"
 [target.'cfg(windows)'.dependencies]
 spout2-rs = "0.1"
 
+# No `panic = "abort"`: WebKit reports a stopped request by raising an
+# Objective-C exception, which wry catches with objc2::exception::catch —
+# that only works if the exception may unwind through Rust frames. Under
+# panic = "abort" it aborts instead. Real crash: 3.0.13 died 8s after launch
+# when the startup navigate() stopped IPC requests still waiting on a reply.
 [profile.release]
-panic = "abort"
 codegen-units = 1
 lto = true
 opt-level = "s"
