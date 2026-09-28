@@ -174,6 +174,37 @@ function churchVocabulary() {
     .slice(0, CHURCH_VOCAB_MAX);
 }
 
+// ── Shared speech-engine treatments ──────────────────────────────────────
+// The vocabulary recognition is steered toward and the pause that ends an
+// utterance, defined once and given to whichever engine is live (Deepgram or
+// the on-device model) — swapping the model should change accuracy, not how
+// the transcript behaves.
+const UTTERANCE_END_MS = 1200;
+const SCRIPTURE_KEYTERMS = [
+  'Genesis','Exodus','Leviticus','Numbers','Deuteronomy',
+  'Joshua','Judges','Ruth','Samuel','Kings','Chronicles',
+  'Ezra','Nehemiah','Esther','Job','Psalms','Psalm','Proverbs',
+  'Ecclesiastes','Isaiah','Jeremiah','Lamentations','Ezekiel','Daniel',
+  'Hosea','Joel','Amos','Obadiah','Jonah','Micah',
+  'Nahum','Habakkuk','Zephaniah','Haggai','Zechariah','Malachi',
+  'Matthew','Mark','Luke','John','Acts','Romans',
+  'Corinthians','Galatians','Ephesians','Philippians','Colossians',
+  'Thessalonians','Timothy','Titus','Philemon',
+  'Hebrews','James','Peter','Jude','Revelation',
+  'Chapter','Verse','Scripture',
+  'brethren','righteous','salvation','covenant',
+];
+// English (and 'multi', which may include English) only: these are the
+// literal English words, so for another spoken language they'd never match
+// and would only be noise. The church's own terms come first; person names
+// are there because general models mangle proper names most (a live "Isaac"
+// came through as "Ezekiel" when only book names were boosted).
+function sttVocabulary() {
+  const lang = settings.sttLanguage || 'en-US';
+  if (!lang.startsWith('en') && lang !== 'multi') return [];
+  return [...new Set([...churchVocabulary(), ...SCRIPTURE_KEYTERMS, ...BIBLE_PERSON_NAMES])];
+}
+
 // ── Debug log ─────────────────────────────────────────────────────────────
 // Temporary diagnostic aid, added at the operator's request: a persistent,
 // file-backed trail of what actually happened (theme resolution, what got
@@ -3519,6 +3550,8 @@ async function startOffline() {
       modelPath: process.env.KAIRO_OFFLINE_MODEL || defaultModelPath(),
       gpu: true,
       language: 'en',
+      vocabulary: sttVocabulary(),
+      utteranceEndMs: UTTERANCE_END_MS,
       onPartial: (text) => {
         const t = (text || '').trim();
         if (!t || t === offlineLastPartial) return;
@@ -3694,63 +3727,15 @@ async function startDeepgram(config = {}, { reconnect = false } = {}) {
       // Spoken language comes from Settings → Language. 'multi' asks Deepgram
       // to auto-detect, for services that code-switch mid-sentence.
       model: 'nova-3', language: (settings.sttLanguage || 'en-US'), smart_format: true, punctuate: true,
-      interim_results: true, utterance_end_ms: 1200, endpointing: 300,
+      interim_results: true, utterance_end_ms: UTTERANCE_END_MS, endpointing: 300,
       encoding: 'linear16', sample_rate: 16000, channels: 1,
       no_delay: true, filler_words: false, diarize: false,
     };
-    // Real gap found while wiring the scripture-language packs: this list
-    // used to be sent unconditionally regardless of settings.sttLanguage —
-    // harmless for a French/Spanish/etc. service (Deepgram just never
-    // matches these against audio that doesn't contain the literal English
-    // words), but it also means non-English services get NONE of the real
-    // accuracy boost this gives English ones on words a general ASR model
-    // tends to mangle ("Habakkuk", "Nehemiah", "Zephaniah"). Scoped to
-    // English (+ 'multi', since a code-switching service may include
-    // English) rather than guessing translations for the other 15+
-    // languages in the Spoken Language dropdown — a wrong translated term
-    // would be worse than no boost at all. Real localized lists for the
-    // languages that already have verified scripture-pack data (es/fr/pt/de)
-    // are a legitimate follow-up, sourced from real data, not guessed.
-    const sttLang = settings.sttLanguage || 'en-US';
-    if (sttLang.startsWith('en') || sttLang === 'multi') {
-      // 'keywords' (KEYWORD:INTENSIFIER) only works on Nova-2/1/Enhanced/Base —
-      // Nova-3 replaced it with 'keyterm' (Keyterm Prompting): plain terms,
-      // no weight syntax. Deepgram does NOT reject a leftover ":N" suffix on
-      // a keyterm — it silently treats the whole "Genesis:2" string as one
-      // literal term to boost, which would never match real speech. Weights
-      // dropped outright rather than translated to anything, since keyterm
-      // has no equivalent concept.
-      dgConfig.keyterm = [
-        'Genesis','Exodus','Leviticus','Numbers','Deuteronomy',
-        'Joshua','Judges','Ruth','Samuel','Kings','Chronicles',
-        'Ezra','Nehemiah','Esther','Job','Psalms','Psalm','Proverbs',
-        'Ecclesiastes','Isaiah','Jeremiah','Lamentations','Ezekiel','Daniel',
-        'Hosea','Joel','Amos','Obadiah','Jonah','Micah',
-        'Nahum','Habakkuk','Zephaniah','Haggai','Zechariah','Malachi',
-        'Matthew','Mark','Luke','John','Acts','Romans',
-        'Corinthians','Galatians','Ephesians','Philippians','Colossians',
-        'Thessalonians','Timothy','Titus','Philemon',
-        'Hebrews','James','Peter','Jude','Revelation',
-        'Chapter','Verse','Scripture',
-        'brethren','righteous','salvation','covenant',
-        // Major biblical PERSON names — book names above double as person
-        // names for several of these already (John, Mark, Luke, James,
-        // Peter, Joshua, Ruth, Samuel, Nehemiah, Esther, Job, Timothy,
-        // Titus), so only genuinely new names are added here. Real
-        // incident this targets: a live sermon's "Isaac" was transcribed
-        // as "Ezekiel" (Ezekiel was already boosted as a book, Isaac
-        // wasn't boosted as anything) — nothing in the model's config gave
-        // it a reason to prefer the correct, less-common word. General ASR
-        // models tend to mangle proper names most, the same reasoning the
-        // existing book-name list is already built on. Shared with
-        // nameChapterIndex below — one source of truth.
-        ...BIBLE_PERSON_NAMES,
-      ];
-      // The church's own vocabulary first (Settings → Language): the pastor's
-      // name, the church, local places — words a general model mishears.
-      const own = churchVocabulary();
-      if (own.length) dgConfig.keyterm = [...new Set([...own, ...dgConfig.keyterm])];
-    }
+    // Nova-3 takes 'keyterm' (plain terms). The older 'keywords' KEYWORD:N
+    // syntax is Nova-2-and-earlier only, and Deepgram would take a leftover
+    // ":N" literally as part of the term, silently killing the boost.
+    const vocab = sttVocabulary();
+    if (vocab.length) dgConfig.keyterm = vocab;
     const myConnection = deepgramConnection = dg.listen.live(dgConfig);
 
     return await new Promise((resolve) => {
@@ -3939,7 +3924,10 @@ function reconnectDeepgram(conn, reason) {
   try { conn.requestClose(); } catch {}
   connectionState = 'reconnecting';
   broadcast({ type: 'connection-state', state: 'reconnecting' });
-  const delay = Math.min(1000 * 2 ** deepgramReconnectAttempts, 15000);
+  // Every second waiting here is speech that only survives in the 30s gap
+  // buffer, so retry almost at once and never wait more than 2s — the old
+  // 15s ceiling kept a live service silent long after the network was back.
+  const delay = deepgramReconnectAttempts === 0 ? 250 : Math.min(1000 * deepgramReconnectAttempts, 2000);
   deepgramReconnectAttempts++;
   console.log(`[Deepgram] Connection ${reason} — reconnecting in ${(delay / 1000).toFixed(1)}s (session stays on)`);
   setTimeout(() => {

@@ -59,6 +59,11 @@ const MODEL_FILES = {
   tokens:  'tokens.txt',
 };
 
+// Optional: the model's word-piece vocabulary. sherpa-onnx needs it to turn
+// plain vocabulary terms ("Habakkuk") into the model's own tokens; without it
+// the vocabulary boost stays off rather than guessing a tokenization.
+const BPE_VOCAB_FILE = 'bpe.vocab';
+
 // Nemotron's feature frontend is 128-dim mel (the zipformer's was 80) — a
 // mismatch here silently feeds the encoder garbage, so it's load-bearing.
 const FEATURE_DIM = 128;
@@ -85,6 +90,50 @@ function isModelPresent(dir = defaultModelDir()) {
   }
 }
 
+// The recognizer config, from the shared treatments server.js hands every
+// engine. Beam search is what makes vocabulary biasing possible at all
+// (greedy decoding has no alternatives to steer between), so it's only paid
+// for when there's a vocabulary to apply.
+function recognizerConfig(modelDir, { hotwordsFile = null, utteranceEndMs = 1200 } = {}) {
+  const p = (f) => path.join(modelDir, MODEL_FILES[f]);
+  const cfg = {
+    featConfig: { sampleRate: SAMPLE_RATE, featureDim: FEATURE_DIM },
+    modelConfig: {
+      transducer: { encoder: p('encoder'), decoder: p('decoder'), joiner: p('joiner') },
+      tokens: p('tokens'),
+      numThreads: Math.max(1, Math.min(4, (os.cpus().length || 4) - 2)),
+      provider: 'cpu',
+      debug: 0,
+    },
+    decodingMethod: 'greedy_search',
+    // Endpoint = the utterance is over: emit onFinal() and reset the stream.
+    // rule2 (a pause after words) is the common case and uses the same pause
+    // Deepgram's utterance_end_ms does.
+    enableEndpoint: 1,
+    rule1MinTrailingSilence: 2.4,  // silence after nothing decoded yet
+    rule2MinTrailingSilence: utteranceEndMs / 1000,
+    rule3MinUtteranceLength: 25,   // hard cap in seconds, mirrors MAX_UTTERANCE
+  };
+  if (hotwordsFile) {
+    cfg.decodingMethod = 'modified_beam_search';
+    cfg.maxActivePaths = 4;
+    cfg.hotwordsFile = hotwordsFile;
+    cfg.hotwordsScore = 1.5;
+    cfg.modelConfig.modelingUnit = 'bpe';
+    cfg.modelConfig.bpeVocab = path.join(modelDir, BPE_VOCAB_FILE);
+  }
+  return cfg;
+}
+
+// Writes the vocabulary as a sherpa-onnx hotwords file (one term per line),
+// or returns null when there's nothing to boost or the model can't tokenize it.
+function writeHotwordsFile(modelDir, vocabulary) {
+  if (!vocabulary?.length || !fs.existsSync(path.join(modelDir, BPE_VOCAB_FILE))) return null;
+  const file = path.join(os.tmpdir(), 'kairo-offline-hotwords.txt');
+  fs.writeFileSync(file, vocabulary.join('\n') + '\n');
+  return file;
+}
+
 class SherpaEngine {
   // opts:
   //   modelDir  — dir holding the extracted streaming-zipformer model files
@@ -97,6 +146,8 @@ class SherpaEngine {
     // `new OfflineEngine({ modelPath, ... })` call needs no further change.
     this.modelDir = opts.modelDir || opts.modelPath || defaultModelDir();
     this.language = opts.language || 'en';
+    this.vocabulary = opts.vocabulary || [];
+    this.utteranceEndMs = opts.utteranceEndMs || 1200;
     this.onPartial = opts.onPartial || (() => {});
     this.onFinal   = opts.onFinal   || (() => {});
     this.onError   = opts.onError   || (() => {});
@@ -123,26 +174,12 @@ class SherpaEngine {
       throw e;
     }
 
-    const p = (f) => path.join(this.modelDir, MODEL_FILES[f]);
-    this._recognizer = new OnlineRecognizer({
-      featConfig: { sampleRate: SAMPLE_RATE, featureDim: FEATURE_DIM },
-      modelConfig: {
-        transducer: { encoder: p('encoder'), decoder: p('decoder'), joiner: p('joiner') },
-        tokens: p('tokens'),
-        numThreads: Math.max(1, Math.min(4, (os.cpus().length || 4) - 2)),
-        provider: 'cpu',
-        debug: 0,
-      },
-      decodingMethod: 'greedy_search',
-      // Endpoint rules — when the model decides an utterance has ended, which
-      // is our cue to emit onFinal() and reset the stream. Tuned close to
-      // Deepgram's endpointing feel: ~1.4s of trailing silence ends a normal
-      // utterance, faster (0.8s) if a decode already produced text.
-      enableEndpoint: 1,
-      rule1MinTrailingSilence: 2.4,  // silence after nothing decoded yet
-      rule2MinTrailingSilence: 1.4,  // silence after some text — the common case
-      rule3MinUtteranceLength: 25,   // hard cap in seconds, mirrors MAX_UTTERANCE
-    });
+    const hotwordsFile = writeHotwordsFile(this.modelDir, this.vocabulary);
+    console.log(hotwordsFile
+      ? `[Offline] Vocabulary boost on — ${this.vocabulary.length} terms`
+      : `[Offline] Vocabulary boost off — ${this.vocabulary.length ? `model has no ${BPE_VOCAB_FILE}` : 'no terms for this language'}`);
+    this._recognizer = new OnlineRecognizer(
+      recognizerConfig(this.modelDir, { hotwordsFile, utteranceEndMs: this.utteranceEndMs }));
     this._stream = this._recognizer.createStream();
     this._lastPartial = '';
     this._running = true;
@@ -213,5 +250,7 @@ module.exports = {
   defaultModelDir,
   isModelPresent,
   pcm16ToFloat32,
+  recognizerConfig,
+  writeHotwordsFile,
   MODEL_FILES,
 };
