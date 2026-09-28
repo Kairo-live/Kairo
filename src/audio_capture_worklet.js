@@ -9,12 +9,32 @@
 // up, and hands each 1024-sample frame straight to the sender worker
 // (audio_sender_worker.js) through a MessagePort — the main thread never
 // touches the audio. Until that port arrives, frames go to the page as before.
+//
+// Each block passes through the automatic level control (audio_level.js,
+// loaded into this scope first) before the 16-bit conversion, so a quiet feed
+// is raised and a hot one never clips there.
+function passThrough(input, out) {
+  let peak = 0;
+  for (let i = 0; i < input.length; i++) {
+    const v = input[i];
+    const a = v < 0 ? -v : v;
+    if (a > peak) peak = a;
+    out[i] = v > 1 ? 1 : v < -1 ? -1 : v;
+  }
+  return { peak, clipped: peak >= 0.999 };
+}
+
 class KairoCapture extends AudioWorkletProcessor {
   constructor() {
     super();
     this.frame = new Int16Array(1024);   // 64 ms at 16 kHz, what the server expects
     this.filled = 0;
-    this.peak = 0;
+    // Never let a missing level control stop the capture: without it the
+    // audio passes through as before.
+    this.level = globalThis.KairoLevel ? new globalThis.KairoLevel.LevelControl(sampleRate) : null;
+    this.block = new Float32Array(128);
+    this.peak = 0;                       // raw input, before the level control
+    this.clipped = false;
     this.out = null;                     // the sender worker's port
     this.lastLevelAt = 0;
     this.port.onmessage = (e) => { if (e.data && 'port' in e.data) this.out = e.data.port; };
@@ -23,11 +43,13 @@ class KairoCapture extends AudioWorkletProcessor {
   process(inputs) {
     const samples = inputs[0] && inputs[0][0];
     if (samples) {
-      for (let i = 0; i < samples.length; i++) {
-        const v = Math.max(-32768, Math.min(32767, samples[i] * 32768));
-        this.frame[this.filled++] = v;
-        const a = v < 0 ? -v : v;
-        if (a > this.peak) this.peak = a;
+      if (this.block.length !== samples.length) this.block = new Float32Array(samples.length);
+      const { peak, clipped } = this.level ? this.level.apply(samples, this.block) : passThrough(samples, this.block);
+      if (peak > this.peak) this.peak = peak;
+      if (clipped) this.clipped = true;
+      const out = this.block;
+      for (let i = 0; i < out.length; i++) {
+        this.frame[this.filled++] = out[i] * 32767;
         if (this.filled === this.frame.length) {
           const buf = this.frame.buffer;
           (this.out || this.port).postMessage(buf, [buf]);
@@ -36,10 +58,12 @@ class KairoCapture extends AudioWorkletProcessor {
         }
       }
     }
-    // The level, ten times a second, for the meter and the dead-device checks.
+    // The level, ten times a second, for the meter and the dead-device checks:
+    // the raw input peak (int16 scale), the gain in use, and any clipping.
     if (currentTime - this.lastLevelAt >= 0.1) {
-      this.port.postMessage({ peak: this.peak });
+      this.port.postMessage({ peak: this.peak * 32768, gain: this.level ? this.level.gain : 1, clipped: this.clipped });
       this.peak = 0;
+      this.clipped = false;
       this.lastLevelAt = currentTime;
     }
     return true;

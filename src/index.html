@@ -172,12 +172,7 @@
         <span id="elapsed-time" style="display:none;"></span>
 
         <div class="top-bar-right">
-            <!-- Live input level while listening, drawn over the selected mic's
-                 name and exactly as wide as it — is it actually hearing the preacher? -->
-            <span class="tb-mic-stack">
-                <span class="tb-mic-meter" id="mic-meter" title="Input level" hidden><i></i></span>
-                <span class="mic-label" id="mic-display">No mic selected</span>
-            </span>
+            <span class="mic-label" id="mic-display">No mic selected</span>
             <button id="listen-btn" class="tb-listen-btn">
                 <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor"><rect x="1" y="1" width="8" height="8" rx="1.5"/></svg>
                 <span class="listen-text">Start Listening</span>
@@ -1292,6 +1287,14 @@
                                 </select>
                                 <button id="refresh-devices-settings" class="modal-btn secondary audio-refresh-btn" title="Refresh device list">↻</button>
                             </div>
+                            <!-- What this input is delivering: live while listening, a preview
+                                 while Settings is open otherwise. Kairo evens out the level
+                                 itself; the line says when the source is too quiet or clipping. -->
+                            <div class="input-level" id="input-level" data-state="idle">
+                                <span class="input-level-meter" title="Input level"><i></i></span>
+                                <span class="input-level-status" id="input-level-status"></span>
+                            </div>
+                            <p class="setting-hint input-missing" id="audio-input-missing" hidden></p>
                             <p class="setting-hint">The line-in or interface feed the app listens to.</p>
                         </div>
 
@@ -1416,10 +1419,10 @@
                             <div class="help-body">
                                 <p>Kairo listens to whoever's preaching, matches what's said against the Bible in real time, and puts the right verse on screen automatically — the same way a slide operator would, without someone driving it live.</p>
                                 <ol>
-                                    <li>Open <strong>Settings → Audio</strong> and pick the microphone (or audio-routing device, e.g. BlackHole) capturing the preacher.</li>
+                                    <li>Open <strong>Settings → Audio</strong> and pick the microphone (or audio-routing device, e.g. BlackHole) capturing the preacher. The level bar under it shows what that input is delivering; play something through it to check. Kairo evens out a quiet or loud feed on its own, and the line beside the bar says if the source is clipping.</li>
                                     <li>Open <strong>Settings → Outputs</strong> and turn on at least one destination — usually External Display for the projector/screen.</li>
                                     <li>Set the spoken language under <strong>Settings → Language</strong> if it isn't English.</li>
-                                    <li>Press <strong>Start Listening</strong>. Live Status switches from Idle to Listening, and the Live Transcript Log starts filling in as words are heard. <strong>Stop</strong> ends the session — nothing else does: if the internet drops, the status shows <em>Reconnecting…</em> and Kairo keeps listening; the words said meanwhile are caught up when it's back. The small level bar beside the button shows the preacher is actually being heard.</li>
+                                    <li>Press <strong>Start Listening</strong>. Live Status switches from Idle to Listening, and the Live Transcript Log starts filling in as words are heard. <strong>Stop</strong> ends the session — nothing else does: if the internet drops, the status shows <em>Reconnecting…</em> and Kairo keeps listening; the words said meanwhile are caught up when it's back.</li>
                                 </ol>
                                 <p>Everything else — playlists, slides, songs, themes — can be prepared before or during the service; detection runs independently in the background the whole time.</p>
                             </div>
@@ -2156,6 +2159,7 @@
     <script src="sermon_follow.js"></script>
     <script src="content_lookup.js"></script>
     <script src="service.js"></script>
+    <script src="audio_level.js"></script>
     <script src="app.js"></script>
     <script src="app_theme_studio.js"></script>
     <script src="app_outputs.js"></script>

@@ -2310,6 +2310,14 @@ app.post('/api/debug-log', (req, res) => {
     // they mark a real recovery from a dead capture track and are worth
     // seeing without opening the webview devtools.
     if (event === 'audio-heal') console.warn(`[Audio] ${data?.msg || 'heal'}${data?.reason ? ` (${data.reason})` : ''}`);
+    // The capture's 30 s summary of what the input delivered — next to the
+    // frame counts, it tells a feed problem (wrong input, too quiet,
+    // clipping) apart from anything else in the pipeline.
+    if (event === 'audio-input' && data) {
+      const gain = Number(data.gainDb) || 0;
+      console.log(`[Audio] input "${String(data.device || '?').slice(0, 60)}": typical peak ${data.typicalPeakDb ?? '—'} dBFS, `
+        + `silent ${data.silentPct}%, clipped ${data.clippedPct}%, level control ${gain > 0 ? '+' : ''}${gain} dB`);
+    }
   }
   res.json({ ok: true });
 });

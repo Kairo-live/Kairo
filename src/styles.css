@@ -6843,27 +6843,39 @@ select {
 /* ── Back button ─────────────────────────────────────────────────────────── */
 .rs-layer-clear-btn.rs-layer-back:hover { color: var(--text); border-color: var(--selected-border); }
 
-/* ── Input level meter over the selected mic's name ──────────────────────── */
-/* The stack shrink-wraps the name; the meter stretches to that width. */
-.tb-mic-stack {
-  display: inline-flex;
-  flex-direction: column;
-  align-items: stretch;
-  gap: 3px;
-  min-width: 0;
+/* ── Settings → Audio Input: the input's level ───────────────────────────── */
+/* A bar on a dB scale and a one-line verdict. Green is a usable level; orange
+   is a quiet feed Kairo is raising; red is a source clipping before it
+   reaches Kairo. */
+.input-level {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+  min-height: 16px;
 }
-.tb-mic-meter {
-  display: block;
-  height: 3px;
-  border-radius: 2px;
+.input-level-meter {
+  flex: 1;
+  min-width: 0;
+  height: 6px;
+  border-radius: 3px;
   background: var(--bg-hover);
   overflow: hidden;
 }
-/* Keep its row when idle so the name doesn't shift when listening starts. */
-.tb-mic-meter[hidden] { display: block; visibility: hidden; }
-.tb-mic-meter i { display: block; height: 100%; width: 0%; background: var(--green); transition: width 90ms linear; }
-.tb-mic-meter.is-silent i { background: var(--text-3); }
-.tb-mic-meter.is-hot i { background: var(--red); }
+.input-level-meter i { display: block; height: 100%; width: 0%; background: var(--green); transition: width 90ms linear; }
+.input-level[data-state="quiet"] .input-level-meter i { background: var(--orange); }
+.input-level[data-state="hot"] .input-level-meter i { background: var(--red); }
+.input-level[data-state="silent"] .input-level-meter i,
+.input-level[data-state="idle"] .input-level-meter i { background: var(--text-3); }
+.input-level-status {
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: var(--text-3);
+  white-space: nowrap;
+}
+.input-level[data-state="quiet"] .input-level-status { color: var(--orange); }
+.input-level[data-state="hot"] .input-level-status { color: var(--red); }
+.input-missing { color: var(--orange); }
 
 /* ── Transcript: which words sent which verse ───────────────────────────── */
 /* Click a chip to send that verse to the screen again. */

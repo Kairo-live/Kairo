@@ -1578,21 +1578,104 @@ function captureIsVirtualInput() {
   return VIRTUAL_INPUT_RE.test(mediaStream?.getAudioTracks?.()[0]?.label || '');
 }
 
-// Input level meter beside Start Listening — the loudest sample since the
-// last paint, on a dB scale so ordinary speech sits mid-bar.
-let micMeterPeak = 0;
+// ── Input level, in Settings → Audio ───────────────────────────────────────
+// What the selected input is delivering: its raw level (before the automatic
+// level control, audio_level.js) on a dB scale so ordinary speech sits
+// mid-bar, and a one-line verdict. While listening it reads the live capture;
+// with Settings open on Audio and not listening, it previews the selected
+// input on its own, so the feed can be checked before a service.
+const inputLevel = { recent: [], clippedAt: 0, gain: null, meterPeak: 0 };
+function noteInputLevel(peak, clipped, gain) {
+  const now = Date.now();
+  inputLevel.recent.push({ at: now, peak });
+  while (inputLevel.recent.length && inputLevel.recent[0].at < now - 3000) inputLevel.recent.shift();
+  if (clipped) inputLevel.clippedAt = now;
+  inputLevel.gain = gain;
+  if (peak > inputLevel.meterPeak) inputLevel.meterPeak = peak;
+}
 setInterval(() => {
-  const meter = document.getElementById('mic-meter');
-  if (!meter) return;
-  meter.hidden = !isListening;
-  if (!isListening) { micMeterPeak = 0; return; }
-  const db = micMeterPeak > 0 ? 20 * Math.log10(micMeterPeak / 32768) : -90;
-  const pct = Math.max(0, Math.min(100, ((db + 60) / 60) * 100));
-  meter.firstElementChild.style.width = `${pct}%`;
-  meter.classList.toggle('is-silent', micMeterPeak === 0);
-  meter.classList.toggle('is-hot', db > -1);
-  micMeterPeak = 0;
+  const wrap = document.getElementById('input-level');
+  if (!wrap || settingsModal?.classList.contains('hidden')) { inputLevel.meterPeak = 0; return; }
+  const bar = wrap.querySelector('.input-level-meter i');
+  const status = document.getElementById('input-level-status');
+  if (!isListening && !inputPreview?.ctx) {
+    bar.style.width = '0%';
+    wrap.dataset.state = 'idle';
+    status.textContent = inputPreviewFailed ? 'This input isn’t available' : '';
+    return;
+  }
+  const p = Math.min(1, inputLevel.meterPeak);
+  inputLevel.meterPeak = 0;
+  const db = p > 0 ? 20 * Math.log10(p) : -90;
+  bar.style.width = `${Math.max(0, Math.min(100, ((db + 60) / 60) * 100))}%`;
+  const recentPeak = inputLevel.recent.reduce((m, x) => Math.max(m, x.peak), 0);
+  const verdict = window.KairoLevel.describeLevel({
+    peak: recentPeak, clipped: Date.now() - inputLevel.clippedAt < 2000, gain: inputLevel.gain,
+  });
+  wrap.dataset.state = verdict.state;
+  status.textContent = verdict.text;
 }, 100);
+
+// The Settings preview: its own short-lived capture of the selected input,
+// only while Settings shows Audio and nothing is listening.
+let inputPreview = null;         // { deviceId, stream, ctx, timer }
+let inputPreviewFailed = null;   // { deviceId, at } — retried after 3 s
+async function startInputPreview(deviceId) {
+  stopInputPreview();
+  const p = { deviceId };
+  inputPreview = p;
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        ...(deviceId ? { deviceId: { exact: deviceId } } : {}),
+        echoCancellation: false, noiseSuppression: false, autoGainControl: false,
+      },
+    });
+    if (inputPreview !== p) { stream.getTracks().forEach(t => t.stop()); return; }
+    const ctx = new AudioContext();
+    if (ctx.state === 'suspended') await ctx.resume().catch(() => {});
+    const analyser = ctx.createAnalyser();
+    analyser.fftSize = 2048;
+    ctx.createMediaStreamSource(stream).connect(analyser);
+    const buf = new Float32Array(analyser.fftSize);
+    p.timer = setInterval(() => {
+      analyser.getFloatTimeDomainData(buf);
+      let peak = 0;
+      for (let i = 0; i < buf.length; i++) { const a = buf[i] < 0 ? -buf[i] : buf[i]; if (a > peak) peak = a; }
+      noteInputLevel(peak, peak >= 0.999, null);
+    }, 100);
+    p.stream = stream; p.ctx = ctx;
+    inputPreviewFailed = null;
+    if (inputPreview !== p) stopPreviewCapture(p);
+  } catch (err) {
+    console.warn('[KAIRO] Input level preview unavailable:', err.name, err.message);
+    if (inputPreview === p) { inputPreview = null; inputPreviewFailed = { deviceId, at: Date.now() }; }
+  }
+}
+function stopPreviewCapture(p) {
+  clearInterval(p.timer);
+  try { p.stream?.getTracks().forEach(t => t.stop()); } catch {}
+  try { p.ctx?.close(); } catch {}
+}
+function stopInputPreview() {
+  const p = inputPreview;
+  inputPreview = null;
+  if (p) stopPreviewCapture(p);
+}
+setInterval(() => {
+  const showing = settingsModal && !settingsModal.classList.contains('hidden')
+    && document.querySelector('.settings-pane[data-pane="audio"]')?.classList.contains('active');
+  if (!showing || isListening || mediaStream) {
+    stopInputPreview();
+    inputPreviewFailed = null;
+    return;
+  }
+  const deviceId = audioSourceSettings?.value || '';
+  if (inputPreview?.deviceId === deviceId) return;
+  if (inputPreviewFailed?.deviceId === deviceId && Date.now() - inputPreviewFailed.at < 3000) return;
+  startInputPreview(deviceId);
+}, 500);
+
 let lastNonZeroAudioAt = 0;   // any non-zero sample at all (a real mic always has some noise)
 let _lastLevelLogAt = 0;
 // One capture graph: getUserMedia stream -> 16 kHz AudioContext -> frames to
@@ -1613,12 +1696,13 @@ async function buildCaptureGraph(deviceId, existingStream = null) {
   // this ends). The main-thread processor below is the fallback.
   if (ctx.audioWorklet && typeof AudioWorkletNode === 'function') {
     try {
+      await ctx.audioWorklet.addModule('audio_level.js');   // the level control, shared into the worklet's scope
       await ctx.audioWorklet.addModule('audio_capture_worklet.js');
       const node = new AudioWorkletNode(ctx, 'kairo-capture', { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [1] });
       node.port.onmessage = (e) => {
         const d = e.data;
         if (d instanceof ArrayBuffer) sendAudioFrame(d);          // only until the worker's port is in place
-        else if (d && typeof d.peak === 'number') noteCaptureLevel(d.peak, 1024);
+        else if (d && typeof d.peak === 'number') noteCaptureLevel(d.peak, 1024, d.gain, d.clipped);
       };
       const worker = captureSenderWorker();
       if (worker) {
@@ -1634,17 +1718,24 @@ async function buildCaptureGraph(deviceId, existingStream = null) {
     }
   }
   const proc = ctx.createScriptProcessor(1024, 1, 1);
+  const level = window.KairoLevel ? new window.KairoLevel.LevelControl(ctx.sampleRate) : null;
+  const block = new Float32Array(1024);
   proc.onaudioprocess = (e) => {
     const float32 = e.inputBuffer.getChannelData(0);
-    const int16 = new Int16Array(float32.length);
-    let peak = 0;
-    for (let i = 0; i < float32.length; i++) {
-      const v = Math.max(-32768, Math.min(32767, float32[i] * 32768));
-      int16[i] = v;
-      const a = v < 0 ? -v : v;
-      if (a > peak) peak = a;
+    const out = block.length === float32.length ? block : new Float32Array(float32.length);
+    let peak = 0, clipped = false;
+    if (level) ({ peak, clipped } = level.apply(float32, out));
+    else {
+      for (let i = 0; i < float32.length; i++) {
+        const v = float32[i], a = v < 0 ? -v : v;
+        if (a > peak) peak = a;
+        out[i] = v > 1 ? 1 : v < -1 ? -1 : v;
+      }
+      clipped = peak >= 0.999;
     }
-    noteCaptureLevel(peak, float32.length);
+    const int16 = new Int16Array(out.length);
+    for (let i = 0; i < out.length; i++) int16[i] = out[i] * 32767;
+    noteCaptureLevel(peak * 32768, float32.length, level ? level.gain : 1, clipped);
     sendAudioFrame(int16.buffer);
   };
   source.connect(proc);
@@ -1653,19 +1744,52 @@ async function buildCaptureGraph(deviceId, existingStream = null) {
 }
 
 // The capture level — the meter, the dead-device checks and a debug-log line
-// every 3 s. From the worklet ten times a second, or per fallback frame.
-function noteCaptureLevel(peak, bufferLength) {
+// every 3 s. From the worklet ten times a second, or per fallback frame. The
+// peak is the raw input (int16 scale, before the level control); gain is what
+// the level control applied.
+function noteCaptureLevel(peak, bufferLength, gain = 1, clipped = false) {
   const now = Date.now();
-  if (peak > micMeterPeak) micMeterPeak = peak;
+  noteInputLevel(peak / 32768, clipped, gain);
+  noteInputSummary(peak / 32768, clipped, gain);
   if (peak > 0) lastNonZeroAudioAt = now;
   if (peak > AUDIO_PEAK_NOISE_FLOOR) lastRealAudioAt = now;
   if (now - _lastLevelLogAt > 3000) {
     _lastLevelLogAt = now;
     fetch(`${SERVER}/api/debug-log`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ event: 'audio-peak', data: { peak, bufferLength } }),
+      body: JSON.stringify({ event: 'audio-peak', data: { peak, bufferLength, gain: Math.round(gain * 100) / 100, clipped } }),
     }).catch(() => {});
   }
+}
+
+// Every 30 s of listening, one line in server.log on what the input delivered
+// (next to the server's own frame counts): which input, its typical level,
+// how much of it was silent or clipped, and the gain the level control used.
+// Enough to tell a feed problem from anything else without a re-test.
+const inputSummary = { since: 0, reports: 0, silent: 0, clipped: 0, peaks: [], gainDbSum: 0 };
+function noteInputSummary(peak, clipped, gain) {
+  const now = Date.now();
+  const s = inputSummary;
+  if (!s.since) s.since = now;
+  s.reports++;
+  if (clipped) s.clipped++;
+  if (peak <= 0.001) s.silent++;
+  else { s.peaks.push(peak); s.gainDbSum += 20 * Math.log10(gain || 1); }
+  if (now - s.since < 30000) return;
+  const sorted = s.peaks.sort((a, b) => a - b);
+  const typical = sorted.length ? sorted[sorted.length >> 1] : 0;
+  const data = {
+    device: mediaStream?.getAudioTracks?.()[0]?.label || '',
+    typicalPeakDb: typical > 0 ? Math.round(20 * Math.log10(typical)) : null,
+    silentPct: Math.round((s.silent / s.reports) * 100),
+    clippedPct: Math.round((s.clipped / s.reports) * 1000) / 10,
+    gainDb: sorted.length ? Math.round(s.gainDbSum / sorted.length) : 0,
+  };
+  Object.assign(s, { since: now, reports: 0, silent: 0, clipped: 0, peaks: [], gainDbSum: 0 });
+  fetch(`${SERVER}/api/debug-log`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ event: 'audio-input', data }),
+  }).catch(() => {});
 }
 
 // One sender worker for the session (audio_sender_worker.js): its own
@@ -1705,6 +1829,7 @@ async function startListening() {
   // Settings toggle's data-engine, kept as an alias for anyone with an old
   // saved setting) route to the server's sherpa-onnx offline engine.
   const serverEngine = (engine === 'offline' || engine === 'browser') ? 'offline' : 'deepgram';
+  stopInputPreview();   // the Settings meter's own capture of the same input
   try {
     const deviceId = audioSourceSettings?.value || '';
     // echoCancellation/noiseSuppression/autoGainControl are voice-call DSP
@@ -1796,6 +1921,7 @@ async function stopListening() {
 
 function stopAudioCapture() {
   pendingAudioFrames = [];
+  Object.assign(inputSummary, { since: 0, reports: 0, silent: 0, clipped: 0, peaks: [], gainDbSum: 0 });
   stopCaptureSender();
   if (audioProcessor) { try { audioProcessor.disconnect(); if (audioProcessor.port) audioProcessor.port.onmessage = null; } catch {} audioProcessor = null; }
   if (audioContext)   { try { audioContext.close(); }       catch {} audioContext   = null; }
@@ -2729,6 +2855,7 @@ clearTranscriptBtn?.addEventListener('click', () => {
 // dropdown never visibly indicating anything changed, and the transcript
 // picked up ambient room audio instead of the intended source.
 const AUDIO_INPUT_KEY = 'kairo-audio-input-device';
+const AUDIO_INPUT_LABEL_KEY = 'kairo-audio-input-label';
 async function populateAudioDevices() {
   if (!audioSourceSettings) return;
   try {
@@ -2736,18 +2863,34 @@ async function populateAudioDevices() {
     const devices = await navigator.mediaDevices.enumerateDevices();
     const mics    = devices.filter(d => d.kind === 'audioinput');
     const saved   = localStorage.getItem(AUDIO_INPUT_KEY) || '';
+    const savedLabel = localStorage.getItem(AUDIO_INPUT_LABEL_KEY) || '';
+    // A device's id can change (a reinstall, the app's web data reset) while
+    // its name doesn't: find the operator's input by id, then by name, rather
+    // than falling back to whichever device happens to be listed first —
+    // that is how a service ends up transcribing the room mic.
+    const chosen = mics.find(d => d.deviceId === saved)
+      || (savedLabel ? mics.find(d => d.label === savedLabel) : null);
     audioSourceSettings.innerHTML = '';
     mics.forEach(d => {
       const o = document.createElement('option');
       o.value = d.deviceId;
       o.textContent = d.label || `Microphone ${d.deviceId.slice(0, 6)}`;
-      if (d.deviceId === saved) o.selected = true;
+      o.dataset.label = d.label || '';
+      if (d === chosen) o.selected = true;
       audioSourceSettings.appendChild(o);
     });
-    // The saved device may no longer be present (unplugged, driver
-    // reinstalled — BlackHole's own deviceId can change across a reinstall)
-    // — flag it loudly instead of silently capturing the wrong source.
-    if (saved && !mics.some(d => d.deviceId === saved)) {
+    if (chosen) {
+      localStorage.setItem(AUDIO_INPUT_KEY, chosen.deviceId);
+      if (chosen.label) localStorage.setItem(AUDIO_INPUT_LABEL_KEY, chosen.label);
+    }
+    // The saved input isn't connected at all — say so under the picker
+    // instead of silently capturing something else.
+    const missing = document.getElementById('audio-input-missing');
+    if (missing) {
+      missing.hidden = !!chosen || !(saved || savedLabel);
+      missing.textContent = `${savedLabel || 'Your saved input'} isn’t connected. Listening uses the input selected above.`;
+    }
+    if ((saved || savedLabel) && !chosen) {
       console.error('[KAIRO] Saved audio input device not found among current devices — falling back to', audioSourceSettings.value);
     }
   } catch {}
@@ -2755,6 +2898,10 @@ async function populateAudioDevices() {
 
 audioSourceSettings?.addEventListener('change', () => {
   localStorage.setItem(AUDIO_INPUT_KEY, audioSourceSettings.value || '');
+  const label = audioSourceSettings.selectedOptions?.[0]?.dataset.label || '';
+  if (label) localStorage.setItem(AUDIO_INPUT_LABEL_KEY, label);
+  const missing = document.getElementById('audio-input-missing');
+  if (missing) missing.hidden = true;
   // A fresh explicit choice always wins over a stale fallback from before.
   capturingFallbackDevice = false;
   // Picking a different source while a service is already live used to only
