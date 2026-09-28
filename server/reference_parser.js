@@ -217,6 +217,9 @@ const AMBIGUOUS_BOOKS = new Set([
   'numbers','ruth','mark','john','james','acts','judges','job',
   'joel','amos','micah','nahum','titus','jude','luke','hebrews',
   'esther','hosea','jonah','genesis','exodus','philemon','obadiah','haggai',
+  // A sermon noun far more often than the book ("revelation knowledge", "by
+  // revelation") — a bare one mustn't put the book of Revelation in play.
+  'revelation',
 ]);
 
 const MAX_CHAPTERS = {
@@ -462,12 +465,39 @@ function applySelfCorrections(lc) {
 // from being recognised at all.
 function dropPossessives(text) { return text.replace(/([a-z])['’]s\b/gi, '$1').replace(/([a-z])['’](?=\s|$)/gi, '$1'); }
 
+// Real number words only — WORD_TO_NUM also maps sound-alikes ("for" is 4),
+// which must never be read as a colon or hyphen citation.
+const PLAIN_NUMBER_WORD = /^(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)$/i;
+const plainNumber = (w) => (/^\d+$/.test(w) ? +w : PLAIN_NUMBER_WORD.test(w) ? WORD_TO_NUM[w.toLowerCase()] : null);
+
+// Speech-to-text number formatting inside a spoken citation: "sixty-six, five
+// to seven" can arrive as "60 six:five-seven". A colon ends the chapter, so a
+// tens figure and a units word right before one are a single number ("60 six:"
+// is 66); a colon between numbers is the chapter/verse break ("three:sixteen");
+// and a hyphen between two number words that don't compound into one number
+// (unlike "twenty-four") and ascend is a verse range ("five-seven" is 5 to 7).
+function splitNumberPunctuation(text) {
+  return text
+    .replace(/\b([2-9])0 ([a-z]+)(?=\s*:)/gi, (m, tens, unit) => {
+      const u = plainNumber(unit);
+      return u >= 1 && u <= 9 ? `${tens}${u}` : m;
+    })
+    .replace(/\b([a-z0-9]+)\s*:\s*([a-z0-9]+)\b/gi, (m, a, b) => (plainNumber(a) != null && plainNumber(b) != null ? `${a} ${b}` : m))
+    .replace(/\b([a-z]+)-([a-z]+)\b/gi, (m, a, b) => {
+      const x = plainNumber(a), y = plainNumber(b);
+      if (x == null || y == null) return m;
+      if (x >= 20 && x % 10 === 0 && y >= 1 && y <= 9) return m;   // "twenty-four" is one number
+      return y > x ? `${a} to ${b}` : m;
+    });
+}
+
 function cleanReferenceText(text) {
   if (typeof text !== 'string') return '';
   if (citationLanguage !== 'en') text = localizeCitationText(text, citationLanguage);
   text = dropPossessives(text)
     // Captions split a two-digit verse: "Proverbs 3:2 7" is 3:27.
     .replace(/\b(\d{1,3}):(\d) (\d)(?![\d:])(?!\s+\d)/g, '$1:$2$3');
+  text = splitNumberPunctuation(text);
   text = text.replace(/([\w-]+)\s*,\s*(?=([\w-]+))/g, (m, a, b) => isListNumber(a) && isListNumber(b) ? `${a} and ` : m);
   return applySelfCorrections(normalizeOrdinalForms(text
     .replace(/[.,!?;]/g, ' ')

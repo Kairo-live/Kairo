@@ -421,3 +421,21 @@ test('a book name one letter off before "verse N" names another passage — not 
   referenceContext.update('Genesis', 13);
   assert.deepEqual(resolvePartialReference('the truth verse 4'), { book: 'Genesis', chapter: 13, verse: 4, partial: true });
 });
+
+test('number punctuation from speech-to-text formatting inside a citation: a colon ends the chapter, a hyphen between ascending number words is a range', () => {
+  const fmt = (t) => parseAllSpokenReferences(t).map(r => `${r.book} ${r.chapter}:${r.verse ?? r.verseStart}${r.verseEnd ? '-' + r.verseEnd : ''}`);
+  // Real live transcript: "sixty-six, five to seven" arrived as "60 six:five-seven".
+  assert.deepEqual(fmt('Psalm 60 six:five-seven.'), ['Psalms 66:5-7']);
+  assert.deepEqual(fmt('John three:sixteen'), ['John 3:16']);
+  assert.deepEqual(fmt('Hebrews eleven one-three'), ['Hebrews 11:1-3']);
+  // Unchanged: a compound number word, a chapter and verse said as two numbers, a descending pair.
+  assert.deepEqual(fmt('Matthew twenty-four verse fourteen'), ['Matthew 24:14']);
+  assert.deepEqual(fmt('Exodus 20 five'), ['Exodus 20:5']);
+  assert.deepEqual(fmt('Romans eight twenty-eight'), ['Romans 8:28']);
+});
+
+test('"revelation" as a common noun is not a mention of the book; a cued one still is', () => {
+  assert.deepEqual(detectBookMentions('So there is a revelation price'), []);
+  assert.deepEqual(detectBookMentions('the book of Revelation says'), ['Revelation']);
+  assert.deepEqual(parseAllSpokenReferences('Revelation 3:20').map(r => `${r.book} ${r.chapter}:${r.verse}`), ['Revelation 3:20']);
+});
