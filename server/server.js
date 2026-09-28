@@ -1415,7 +1415,6 @@ let rangeAllVerses    = [];   // all verses in range (sent + queued) — for UI 
 let rangeCurrentVerse = null; // the verse currently on the live screen
 let rangeAdvancing      = false;
 let rangeLastAdvanceAt  = 0;   // timestamp of last advance — prevents rapid re-fires
-let rangeMovedAt        = 0;   // when the range's current verse last changed (advance or jump)
 const RANGE_ADVANCE_COOLDOWN_MS = 1200;  // min gap between advances (fast readers)
 
 // ── Last-2-words end-of-verse detection ──────────────────────────────────────
@@ -1488,7 +1487,6 @@ async function advanceRangeQueue() {
   if (!rangeQueue.length) return null;
   const next = rangeQueue.shift();
   rangeCurrentVerse   = next;
-  rangeMovedAt        = Date.now();
   broadcastRangeState();
   await sendToOutputs(next);
   broadcast({ type: 'detection', verses: [next], method: 'direct', topScore: 1.0, target: 'viewer', timestamp: Date.now() });
@@ -2796,7 +2794,6 @@ function jumpRangeTo(book, chapter, verse) {
   const idx = rangeAllVerses.findIndex(v => v.book === book && v.chapter === chapter && v.verse === verse);
   if (idx === -1) return false;
   rangeCurrentVerse = rangeAllVerses[idx];
-  rangeMovedAt      = Date.now();
   rangeQueue        = rangeAllVerses.slice(idx + 1);
   rangeAdvancing     = false;
   broadcastRangeState();
@@ -5863,18 +5860,21 @@ let liveNonScriptureSlideAt = 0;
 // Most of a verse's own words just heard in order means it is being quoted —
 // the on-screen comparison (which only sees the newest words) doesn't apply.
 const ON_SCREEN_GUARD_MAX_COVERAGE = 0.8;
-// A range verse the range has already moved past goes back up only on new
-// evidence: the latest words said AFTER the range moved on fit it better than the
-// verse now current. The words that just finished it don't count — a late match
-// of the segment that advanced the range ("…meditate day and night" → 1:3) used
-// to put 1:2 straight back up. A real re-read brings its own new words.
-function rangeVerseBehindWithoutNewEvidence(candidate) {
-  const current = rangeCurrentVerse;
-  if (!current) return false;
-  const idx = (v) => rangeAllVerses.findIndex(r => r.book === v.book && r.chapter === v.chapter && r.verse === v.verse);
-  const ci = idx(candidate);
-  if (ci < 0 || ci >= idx(current)) return false;
-  const lastSince = transcriptBuffer.filter(t => t.time > rangeMovedAt).at(-1)?.text || '';
+// A verse that was already on screen and got replaced goes back up only on new
+// evidence: the latest words said AFTER the verse now showing went up fit it
+// better than they fit that verse. The words that were already heard don't
+// count — a re-scan of the last sentence or two keeps re-finding the verse just
+// read (live: Mark 10:27 was up for two seconds before a re-match of the Mark
+// 9:23 quote heard a moment earlier flicked it back; inside a range, the late
+// verbatim result for the segment that advanced 1:2 → 1:3 put 1:2 back). A real
+// return to it — "if thou canst believe…" said again — brings its own words.
+function shownVerseReturnsWithoutNewEvidence(candidate) {
+  const current = lastOutputVerse;
+  if (!current?.book) return false;
+  const key = `${candidate.book}|${candidate.chapter}|${candidate.verse}`;
+  if (key === `${current.book}|${current.chapter}|${current.verse}`) return false;
+  if (!sentVerseKeysThisBook.has(key) && !recentDetections.has(key)) return false;
+  const lastSince = transcriptBuffer.filter(t => t.time > lastOutputVerseAt).at(-1)?.text || '';
   const speech = evidenceWords(`${lastSince} ${currentInterimText}`);
   const candWords = evidenceWords(candidate.text || candidate.kjv_text || '');
   const curWords = evidenceWords(current.text || current.kjv_text || '');
@@ -6508,8 +6508,8 @@ async function broadcastDetection(verses, method, topScore, target, opts = {}) {
     if (liveNonScriptureSlideAt) {
       console.log(`[Guard] "${verses[0].reference}" (${method}) held for the operator — a song/slide is live`);
       target = 'suggestions';
-    } else if (rangeVerseBehindWithoutNewEvidence(verses[0])) {
-      console.log(`[Range] "${verses[0].reference}" (${method}) is behind the range's "${rangeCurrentVerse.reference}", and nothing said since the range moved on points back to it — held for the operator`);
+    } else if (shownVerseReturnsWithoutNewEvidence(verses[0])) {
+      console.log(`[Guard] "${verses[0].reference}" (${method}) was already shown and replaced by "${lastOutputVerse.reference}"; nothing said since points back to it — held for the operator`);
       target = 'suggestions';
     } else if (!(method === 'verbatim' && verses[0].similarity >= ON_SCREEN_GUARD_MAX_COVERAGE) && onScreenExplainsSpeechBetter(verses[0])) {
       console.log(`[Guard] "${verses[0].reference}" would replace "${lastOutputVerse.reference}", but what's being said fits the verse on screen at least as well — held for the operator`);

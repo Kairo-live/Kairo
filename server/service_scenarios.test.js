@@ -83,6 +83,18 @@ const fresh = () => { server.resetDetectionSession(); referenceContext.reset(); 
     assert.equal(onScreen().at(-1), 'Deuteronomy 11:25', JSON.stringify(sent));
   });
 
+  await test('a verse replaced on screen comes back only on new words, not a re-match of what was already heard (Mark 9:23 / 10:27, live)', async () => {
+    fresh(); server.clearRangeQueue(); await server.clearLayer('all');
+    await say('Faith is the most potent force in the universe. Why? If thou canst believe, how many things? All. All things are possible to him that believeth.');
+    await say('How is faith the most potent force in the universe? Because it confers divinity on humanity. Jesus said,');
+    await say('unto man this is impossible, but not with God. For with God all things are possible.');
+    await wait(1500);
+    assert.equal(onScreen().at(-1), 'Mark 10:27', JSON.stringify(sent));
+    await say('And he said, if thou canst believe, all things are possible to him that believes.');
+    await wait(1500);
+    assert.equal(onScreen().at(-1), 'Mark 9:23', JSON.stringify(sent));
+  });
+
   await test('"revelation" as a sermon noun does not bring the book of Revelation into play', async () => {
     fresh(); server.clearRangeQueue(); await server.clearLayer('all');
     await say('You must graduate from information to revelation.');
