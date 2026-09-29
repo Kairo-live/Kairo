@@ -55,6 +55,15 @@ test('a slide\'s fill changes merge over the theme\'s without touching it', () =
   assert.equal(theme.fill, 'gradient', 'the theme layer is untouched');
 });
 
+test('an end time reads however it is typed, "9:30 a.m." included', () => {
+  const { resolveFlexibleTime } = sandbox.window;
+  assert.equal(resolveFlexibleTime('9:30 a.m.'), '09:30');
+  assert.equal(resolveFlexibleTime('11:45 PM'), '23:45');
+  assert.equal(resolveFlexibleTime('21:30'), '21:30');
+  assert.equal(resolveFlexibleTime('9.30pm'), '21:30');
+  assert.equal(resolveFlexibleTime('25:00'), null);
+});
+
 test('a slide\'s rotation, accent and photo look merge over the theme\'s; null takes one away', () => {
   const { withLayerOverride, animOverride } = sandbox.window;
   const theme = { id: 'photo', type: 'image', rotation: 0, grayscale: 100, fade: { side: 'left', amount: 60 }, build: { type: 'fade' } };

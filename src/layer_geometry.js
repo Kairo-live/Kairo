@@ -69,7 +69,9 @@ function applyLayerOrder(layers, orderIds) {
 // the common case ("set the timer to end at 9:30") almost always means the
 // next such time, not one that already passed twelve hours ago today.
 function resolveFlexibleTime(raw) {
-  const s = (raw || '').trim().toLowerCase().replace(/\s+/g, '');
+  // "9:30 a.m." (how some locales write it, and the editor shows it) reads
+  // as "9:30am".
+  const s = (raw || '').trim().toLowerCase().replace(/[\s.]+/g, '');
   const m = s.match(/^(\d{1,2}):?(\d{2})(am|pm)?$/);
   if (!m) return null;
   let h = parseInt(m[1], 10);

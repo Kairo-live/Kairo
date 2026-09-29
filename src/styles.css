@@ -6245,14 +6245,25 @@ mark.help-hit.is-current { background: rgba(255,255,255,0.38); }
 .ts-effect-header { justify-content: space-between; }
 .ts-effect-details { display: flex; flex-direction: column; gap: 10px; }
 
+/* Row labels read as plain words ("Opacity", "Highlight words"), a step
+   brighter and larger than the small-caps section titles above them, so a
+   section and its rows never look like two headings ("COLOR / COLOR"). */
 .ts-prop-label {
-  font-size: 10px;
-  font-weight: 600;
-  color: var(--text-3);
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-2);
   min-width: 52px;
   flex-shrink: 0;
-  text-transform: uppercase;
-  letter-spacing: 0.4px;
+}
+/* A value's unit after its field ("10 minutes"). */
+.ts-prop-unit {
+  font-size: 11px;
+  color: var(--text-3);
+}
+#ts-item-timer-header .ts-prop-number {
+  width: 64px;
+  font-family: inherit;
+  font-size: 12px;
 }
 
 .ts-prop-input {

@@ -1730,7 +1730,7 @@ function layerTextContent(layer) {
     if (s) {
       if (layer.binding === 'verse') return s.text || '(empty slide)';
       if (layer.binding === 'reference') return s.reference || '';
-      if (layer.binding === 'timer') return s.timerText || PREVIEW_TIMER_SAMPLE;
+      if (layer.binding === 'timer') return s.timerText || configuredTimerText(tsItemCtx.item) || PREVIEW_TIMER_SAMPLE;
       if (layer.binding === 'timer-h') return '00';
       if (layer.binding === 'timer-m') return '12';
       if (layer.binding === 'timer-s') return '34';
@@ -1738,7 +1738,7 @@ function layerTextContent(layer) {
         return TS_TRANSLATE_SAMPLES[tsItemCtx.item.translateTo] || '[No translation language set for this item]';
       }
       if (layer.binding === 'custom' && typeof layer.customText === 'string' && layer.customText.includes('{timer}')) {
-        return layer.customText.replace('{timer}', s.timerText || PREVIEW_TIMER_SAMPLE);
+        return layer.customText.replace('{timer}', s.timerText || configuredTimerText(tsItemCtx.item) || PREVIEW_TIMER_SAMPLE);
       }
       return layer.customText || '[Custom Text]';
     }
@@ -4200,37 +4200,37 @@ function renderBgProps(panel, layer) {
       { label: 'Diamond',   value: 'diamond' },
     ], layer.shape || 'rect', v => { layer.shape = v; radiusRow.style.display = v === 'rect' ? '' : 'none'; up(); })
   );
-  const radiusRow = section('style', 'Corner Radius',
+  const radiusRow = section('style', 'Corners',
     prop('Radius', makeSlider(layer.radius || 0, 0, 200, v => { layer.radius = v; up(); }))
   );
   if ((layer.shape || 'rect') !== 'rect') radiusRow.style.display = 'none';
   if (layer.pos) { panel.appendChild(shapeRow); panel.appendChild(radiusRow); }
 
-  // Fill type. Picking Image with no picture yet starts on the first bundled
-  // background, so the canvas changes the moment it's clicked.
-  panel.appendChild(section('style', 'Fill',
-    makeFillChips(layer.fill, v => {
-      layer.fill = v;
-      if (v === 'image' && !layer.src && (window.KairoBackgrounds || []).length) useBackground(layer, window.KairoBackgrounds[0]);
-      up(); renderProps();
-    })
-  ));
-
-  // Color + opacity
-  const colorRow = section('style', 'Color',
-    prop('Color', makeColor(layer.color, v => { layer.color = v; up(); })),
-    prop('Opacity', makeSlider(layer.opacity, 0, 100, v => { layer.opacity = v; up(); }))
-  );
-  if (layer.fill === 'transparent' || layer.fill === 'image') colorRow.style.display = 'none';
-  panel.appendChild(colorRow);
-
-  // Gradient color 2
-  const grad2Row = section('style', 'Gradient',
-    prop('Color 2', makeColor(layer.color2 || '#1a1a2e', v => { layer.color2 = v; up(); })),
-    prop('Angle', makeNumber(layer.angle || 160, 0, 360, 5, v => { layer.angle = v; up(); }))
-  );
-  if (layer.fill !== 'gradient') grad2Row.style.display = 'none';
-  panel.appendChild(grad2Row);
+  // Fill: its kind, then its colour (a gradient's two and their angle) and
+  // opacity. Picking Image with no picture yet starts on the first bundled
+  // background, so the canvas changes the moment it's clicked. Changing the
+  // kind rebuilds the panel, so only the rows it uses are here.
+  const fillRows = [makeFillChips(layer.fill, v => {
+    layer.fill = v;
+    if (v === 'image' && !layer.src && (window.KairoBackgrounds || []).length) useBackground(layer, window.KairoBackgrounds[0]);
+    up(); renderProps();
+  })];
+  if (layer.fill === 'gradient') {
+    const colors = document.createElement('div');
+    colors.className = 'ts-prop-row';
+    const lbl = document.createElement('span');
+    lbl.className = 'ts-prop-label'; lbl.textContent = 'Colors';
+    colors.appendChild(lbl);
+    colors.appendChild(makeColor(layer.color, v => { layer.color = v; up(); }));
+    colors.appendChild(makeColor(layer.color2 || '#1a1a2e', v => { layer.color2 = v; up(); }));
+    fillRows.push(colors, prop('Angle', makeNumber(layer.angle || 160, 0, 360, 5, v => { layer.angle = v; up(); })));
+  } else if (layer.fill !== 'transparent' && layer.fill !== 'image') {
+    fillRows.push(prop('Color', makeColor(layer.color, v => { layer.color = v; up(); })));
+  }
+  if (layer.fill !== 'transparent' && layer.fill !== 'image') {
+    fillRows.push(prop('Opacity', makeSlider(layer.opacity, 0, 100, v => { layer.opacity = v; up(); })));
+  }
+  panel.appendChild(section('style', 'Fill', ...fillRows));
 
   // Picture: the bundled backgrounds, or the operator's own image.
   if (layer.fill === 'image') {
@@ -4629,7 +4629,7 @@ function renderMotionProps(panel, layer) {
     });
     colors.appendChild(add);
   }
-  if (kind.colors.max > 0) panel.appendChild(section('style', 'Colours', colors));
+  if (kind.colors.max > 0) panel.appendChild(section('style', 'Colors', colors));
 
   // The kind's own controls. makeSlider steps in whole numbers, so a range
   // with a fractional step (Speed) runs in hundredths underneath.
@@ -4905,7 +4905,8 @@ function renderTextProps(panel, layer) {
       row.appendChild(itLabel); row.appendChild(itToggle);
       row.appendChild(trLabel); row.appendChild(trSelect);
       return row;
-    })()
+    })(),
+    prop('Align', makeAlignBtns(layer.align, v => { layer.align = v; up(); }))
   ));
 
   // Spacing — both as plain number entries, same row (mirrors the
@@ -4918,9 +4919,11 @@ function renderTextProps(panel, layer) {
     (() => {
       const row = document.createElement('div');
       row.className = 'ts-prop-row'; row.style.gap = '8px';
-      const lhLabel = document.createElement('span'); lhLabel.className = 'ts-prop-label'; lhLabel.textContent = 'Line H';
+      const lhLabel = document.createElement('span'); lhLabel.className = 'ts-prop-label'; lhLabel.textContent = 'Lines';
+      lhLabel.title = 'Space between lines';
       const lhInp = makeNumber(layer.font.lineHeight, 0.5, 4, 0.05, v => { layer.font.lineHeight = parseFloat(v.toFixed(2)); up(); });
-      const ltLabel = document.createElement('span'); ltLabel.className = 'ts-prop-label'; ltLabel.textContent = 'Letter';
+      const ltLabel = document.createElement('span'); ltLabel.className = 'ts-prop-label'; ltLabel.textContent = 'Letters';
+      ltLabel.title = 'Space between letters';
       const ltInp = makeNumber(layer.font.letterSpacing, -5, 30, 0.5, v => { layer.font.letterSpacing = parseFloat(v.toFixed(1)); up(); });
       row.appendChild(lhLabel); row.appendChild(lhInp);
       row.appendChild(ltLabel); row.appendChild(ltInp);
@@ -4928,27 +4931,34 @@ function renderTextProps(panel, layer) {
     })()
   ));
 
-  // Color
-  panel.appendChild(section('style', 'Color',
-    prop('Color', makeColor(layer.color, v => { layer.color = v; up(); })),
+  // Color — the text's own, and (for text typed in, not a verse or the
+  // countdown) highlighted words: words wrapped in *asterisks* show in the
+  // highlight colour, a two-tone headline ("*FIRST TIME* / WITH US?") in one
+  // layer.
+  const colorRows = [
+    prop('Text', makeColor(layer.color, v => { layer.color = v; up(); })),
     prop('Opacity', makeSlider(layer.opacity, 0, 100, v => { layer.opacity = v; up(); })),
-    prop('Align', makeAlignBtns(layer.align, v => { layer.align = v; up(); }))
-  ));
-
-  // Accent — words wrapped in *asterisks* show in this colour: a two-tone
-  // headline ("*FIRST TIME* / WITH US?") in one layer.
-  const accentRows = [prop('Accent', makeToggle(!!layer.accentColor, v => {
-    if (v) layer.accentColor = layer.accentColor || '#e3cf6c'; else delete layer.accentColor;
-    up(); renderProps();
-  }))];
-  if (layer.accentColor) {
-    accentRows.push(prop('Accent colour', makeColor(layer.accentColor, v => { layer.accentColor = v; up(); })));
-    const hint = document.createElement('div');
-    hint.className = 'ts-motion-blurb';
-    hint.textContent = 'Wrap words in *asterisks* to colour them.';
-    accentRows.push(hint);
+  ];
+  if (layer.binding === 'custom') {
+    const hl = document.createElement('div');
+    hl.className = 'ts-prop-row';
+    const hlLabel = document.createElement('span');
+    hlLabel.className = 'ts-prop-label'; hlLabel.textContent = 'Highlight words';
+    hl.appendChild(hlLabel);
+    hl.appendChild(makeToggle(!!layer.accentColor, v => {
+      if (v) layer.accentColor = layer.accentColor || '#e3cf6c'; else delete layer.accentColor;
+      up(); renderProps();
+    }));
+    if (layer.accentColor) hl.appendChild(makeColor(layer.accentColor, v => { layer.accentColor = v; up(); }));
+    colorRows.push(hl);
+    if (layer.accentColor) {
+      const hint = document.createElement('div');
+      hint.className = 'ts-motion-blurb';
+      hint.textContent = 'Put *asterisks* around the words to highlight.';
+      colorRows.push(hint);
+    }
   }
-  panel.appendChild(section('style', 'Accent', ...accentRows));
+  panel.appendChild(section('style', 'Color', ...colorRows));
 
   // Effects (Shadow/Outline/Scroll) — each one used to be TWO separate
   // .ts-props-section blocks (a header-only section, then a second section
@@ -5110,6 +5120,30 @@ function updateItemThemeLabel() {
 // index.html before this script) — was a byte-identical copy-paste shared
 // with service.js's openSegmentTimePopover.
 
+// "HH:MM" (24-hour, as stored) the way this computer shows a time.
+function clockTime(hhmm) {
+  const [h, m] = String(hhmm).split(':').map(Number);
+  const d = new Date(); d.setHours(h, m, 0, 0);
+  return d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+}
+
+// The countdown a timer segment will start from — its length, or the time
+// left until its end time — formatted as the output shows it, so the editor
+// shows the real number rather than a sample. '' when nothing is set yet.
+function configuredTimerText(item) {
+  const p = item?.trigger?.params || {};
+  let sec = 0;
+  if (p.mode === 'duration') sec = p.durationSec || 0;
+  else if (/^\d{2}:\d{2}$/.test(p.endAtTime || '')) {
+    const [h, m] = p.endAtTime.split(':').map(Number);
+    const end = new Date(); end.setHours(h, m, 0, 0);
+    sec = Math.max(0, Math.ceil((end.getTime() - Date.now()) / 1000));
+  }
+  if (!(sec > 0)) return '';
+  const hh = Math.floor(sec / 3600), mm = Math.floor((sec % 3600) / 60), ss = sec % 60;
+  return hh > 0 ? `${hh}:${String(mm).padStart(2, '0')}:${String(ss).padStart(2, '0')}` : `${mm}:${String(ss).padStart(2, '0')}`;
+}
+
 // The countdown's actual target — this is the thing that makes a timer
 // segment a timer, and it used to live ONLY behind the separate Quick-edit
 // popover on the card, with nothing about it visible from inside Edit
@@ -5139,25 +5173,43 @@ function renderItemTimerControls() {
   modeRow.appendChild(makeChips([
     { label: 'Ends at', value: 'endAt' },
     { label: 'Duration', value: 'duration' },
-  ], mode, (v) => { save({ mode: v }); renderItemTimerControls(); }));
+  ], mode, (v) => {
+    // A countdown with no length yet starts at ten minutes, so choosing
+    // Duration always leaves a timer that runs.
+    const unset = !(item.trigger?.params?.durationSec > 0);
+    save(v === 'duration' && unset ? { mode: v, durationSec: 600 } : { mode: v });
+    renderItemTimerControls(); renderPreview();
+  }));
   host.appendChild(modeRow);
 
   const fieldRow = document.createElement('div');
   fieldRow.className = 'ts-prop-row';
   if (mode === 'duration') {
+    const setMinutes = (min) => {
+      save({ mode: 'duration', durationSec: Math.round(min * 60) });
+      renderItemTimerControls(); renderPreview();
+    };
     const minutes = document.createElement('input');
-    minutes.type = 'number'; minutes.min = '1'; minutes.className = 'ts-prop-number';
-    minutes.placeholder = 'Minutes';
-    minutes.value = params.durationSec ? Math.round(params.durationSec / 60) : '';
+    minutes.type = 'number'; minutes.min = '1'; minutes.max = '600'; minutes.className = 'ts-prop-number';
+    minutes.placeholder = '10';
+    minutes.setAttribute('aria-label', 'Minutes');
+    minutes.value = params.durationSec ? String(Math.round(params.durationSec / 60)) : '';
     minutes.addEventListener('change', () => {
       const min = parseFloat(minutes.value);
-      if (min > 0) save({ mode: 'duration', durationSec: Math.round(min * 60) });
+      if (min > 0) setMinutes(min);
     });
+    const unit = document.createElement('span');
+    unit.className = 'ts-prop-unit';
+    unit.textContent = 'minutes';
     fieldRow.appendChild(minutes);
-    const suffix = document.createElement('span');
-    suffix.className = 'ts-prop-label';
-    suffix.textContent = 'minutes';
-    fieldRow.appendChild(suffix);
+    fieldRow.appendChild(unit);
+    host.appendChild(fieldRow);
+    // The usual lengths, one click each.
+    const presetRow = document.createElement('div');
+    presetRow.className = 'ts-prop-row';
+    presetRow.appendChild(makeChips([5, 10, 15, 30].map(n => ({ label: `${n} min`, value: n })),
+      params.durationSec ? params.durationSec / 60 : null, setMinutes));
+    host.appendChild(presetRow);
   } else {
     // Plain validated text, not <input type="time"> — WebKit's native time
     // control (Tauri's real webview on macOS) can show a complete-looking
@@ -5168,9 +5220,11 @@ function renderItemTimerControls() {
     // duplicated here rather than imported, per this codebase's usual
     // per-file convention.
     const timeInp = document.createElement('input');
-    timeInp.type = 'text'; timeInp.inputMode = 'numeric'; timeInp.placeholder = 'HH:MM or H:MM AM/PM'; timeInp.maxLength = 8;
+    timeInp.type = 'text'; timeInp.placeholder = 'e.g. 9:30 AM'; timeInp.maxLength = 11;
     timeInp.className = 'ts-prop-input';
-    timeInp.value = params.endAtTime || '';
+    timeInp.setAttribute('aria-label', 'Ends at');
+    // Shown the way this computer shows times ("9:30 AM", or "09:30").
+    timeInp.value = params.endAtTime ? clockTime(params.endAtTime) : '';
     timeInp.addEventListener('input', () => {
       if (/^[0-9:]*$/.test(timeInp.value)) {
         const digits = timeInp.value.replace(/\D/g, '').slice(0, 4);
@@ -5179,11 +5233,11 @@ function renderItemTimerControls() {
     });
     timeInp.addEventListener('change', () => {
       const resolved = resolveFlexibleTime(timeInp.value);
-      if (resolved) save({ mode: 'endAt', endAtTime: resolved });
+      if (resolved) { save({ mode: 'endAt', endAtTime: resolved }); timeInp.value = clockTime(resolved); renderPreview(); }
     });
     fieldRow.appendChild(timeInp);
+    host.appendChild(fieldRow);
   }
-  host.appendChild(fieldRow);
 
   // Warning / overtime colours — the countdown recolours through these as it
   // runs down (last minute → warning, past zero → overtime). The base colour
@@ -5192,12 +5246,14 @@ function renderItemTimerControls() {
   const colorRow = document.createElement('div');
   colorRow.className = 'ts-prop-row';
   const warnLbl = document.createElement('span');
-  warnLbl.className = 'ts-prop-label'; warnLbl.textContent = 'Warning';
+  warnLbl.className = 'ts-prop-label'; warnLbl.textContent = 'Last minute';
+  warnLbl.title = 'The countdown turns this colour for its final minute';
   colorRow.appendChild(warnLbl);
   colorRow.appendChild(makeColor(params.warnColor || timerLayer?.warnColor || '#e8a64a',
     (v) => save({ warnColor: v })));
   const otLbl = document.createElement('span');
   otLbl.className = 'ts-prop-label'; otLbl.textContent = 'Overtime';
+  otLbl.title = 'The colour once it passes zero and counts up';
   otLbl.style.marginLeft = '10px';
   colorRow.appendChild(otLbl);
   colorRow.appendChild(makeColor(params.overtimeColor || timerLayer?.overtimeColor || '#e8404a',

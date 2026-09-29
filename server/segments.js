@@ -22,6 +22,22 @@ const SEGMENTS_FILE = path.join(APP_DATA, 'segments', 'segments.json');
 
 const DEFAULT_SEGMENTS = ['Preservice', 'Prayer', 'Worship', 'The Word', 'Testimony', 'Ministration'];
 
+// The built-in Preservice segment is the pre-service loop: Welcome to Church
+// and the pack's other ready-to-run slides, each carrying the countdown, paced
+// by it, ending on Service Begins (src/announcement_pack.js — the same loop
+// the Timer tab's "+ Pre-service loop" makes, less the slides that need the
+// church's own details). null if the pack can't be read: a plain countdown.
+function preserviceLoop() {
+  try {
+    const pack = require(path.join(__dirname, '..', 'src', 'announcement_pack.js'));
+    return { scenes: pack.preserviceScenes({ ready: true }), scenePace: { ...pack.PACE } };
+  } catch (err) {
+    console.warn('[Segments] Pre-service loop unavailable:', err.message);
+    return null;
+  }
+}
+const isPreservice = (name) => /^pre-?\s?service$/i.test(String(name || '').trim());
+
 let segments = []; // [{ id, name, order, triggerId, status }] status: 'pending'|'live'|'done'
 
 function ensureDirs() { fs.mkdirSync(path.dirname(SEGMENTS_FILE), { recursive: true }); }
@@ -56,8 +72,23 @@ function init() {
   segments.forEach(s => {
     if (s.status === 'live' && !triggers.isActive(s.triggerId)) { s.status = 'pending'; changed = true; }
   });
+  // Installs from before the Preservice default was the loop: an untouched
+  // Preservice (no slides of its own, no theme) becomes it, once — a
+  // Preservice someone has since made plain again stays plain.
+  segments.forEach(s => {
+    if (!isPreservice(s.name) || s.loopSeeded || s.scenes.length || s.themeId) return;
+    const loop = preserviceLoop();
+    if (!loop) return;
+    Object.assign(s, loop, { loopSeeded: true });
+    changed = true;
+  });
   if (changed) saveSegments();
-  if (!segments.length) DEFAULT_SEGMENTS.forEach(name => addSegment(name));
+  if (!segments.length) {
+    DEFAULT_SEGMENTS.forEach(name => {
+      const loop = isPreservice(name) && preserviceLoop();
+      addSegment(name, loop ? { ...loop, loopSeeded: true } : {});
+    });
+  }
 }
 
 // `opts.themeId`/`opts.slideStyles` let a caller seed a new segment with an
@@ -94,6 +125,9 @@ function addSegment(name, opts = {}) {
     // maxSec, finaleSec, transition }, see KairoMotion.sceneAt. null keeps
     // the original behaviour: each scene's own durationSec, then hold.
     scenePace: opts.scenePace ?? null,
+    // Set on a Preservice given the pre-service loop by default (init), so it
+    // is only ever given once.
+    ...(opts.loopSeeded ? { loopSeeded: true } : {}),
   };
   segments.push(segment);
   saveSegments();

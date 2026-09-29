@@ -117,7 +117,10 @@
 
   // ── The slides ────────────────────────────────────────────────────────────
   // 1920×1080; copy starts 140 in from the left. The right edge is kept
-  // clear enough for the pre-service countdown.
+  // clear enough for the pre-service countdown. `own: true` marks a slide
+  // carrying stand-in details the church replaces with its own (a QR code,
+  // bank details, meeting days and times, its mission): left out of the
+  // ready-to-run loop, so none reaches a screen before someone fills it in.
   const SLIDES = [
     { id: 'welcome', name: 'Welcome to Church', layers: [
       canvas(), light(3),
@@ -152,7 +155,7 @@
       flowLine('line', 'underline', box(760, 810, 420, 50), PAL.pink, 2.6),
       grain(),
     ] },
-    { id: 'mission', name: 'Our Mission', layers: [
+    { id: 'mission', name: 'Our Mission', own: true, layers: [
       canvas(), light(34),
       headline('*Our*\nmission', box(140, 260, 700, 420), 200),
       support('To reach out and make *disciples* for Christ.', box(820, 420, 700, 200), 0.95, 56),
@@ -167,7 +170,7 @@
       arrow('arrow', 'curl', box(760, 820, 200, 200), 1.6),
       grain(),
     ] },
-    { id: 'discipleship', name: 'Join Our Discipleship Group', layers: [
+    { id: 'discipleship', name: 'Join Our Discipleship Group', own: true, layers: [
       canvas(), light(89),
       photo(PHOTO_WORSHIP, box(1000, 0, 920, H), 'left', 58),
       kicker('Join our', box(146, 230, 600, 50)),
@@ -175,7 +178,7 @@
       support("Meeting weekly to study God's word together and grow in *fellowship*.", box(146, 700, 820, 140), 0.95, 42),
       grain(),
     ] },
-    { id: 'bible-study', name: 'Join Our Bible Study', layers: [
+    { id: 'bible-study', name: 'Join Our Bible Study', own: true, layers: [
       canvas(), light(144),
       photo(PHOTO_BOOK, box(980, 0, 940, H), 'left', 60),
       kicker('Join our', box(146, 250, 600, 50)),
@@ -184,7 +187,7 @@
         { accentColor: PAL.gold, build: { type: 'rise', delay: 1, duration: 0.8 } }),
       grain(),
     ] },
-    { id: 'missed', name: 'Missed a Sunday?', layers: [
+    { id: 'missed', name: 'Missed a Sunday?', own: true, layers: [
       canvas(), light(233),
       headline('Missed a\n*Sunday?*', box(140, 240, 1000, 400), 190),
       support('All past sermons are streaming on our *YouTube*.', box(146, 690, 800, 130), 0.95, 44),
@@ -192,7 +195,7 @@
       arrow('arrow', 'curve', box(820, 150, 300, 220), 1.7, 'none', 18),
       grain(),
     ] },
-    { id: 'weekly', name: 'Weekly Service', layers: [
+    { id: 'weekly', name: 'Weekly Service', own: true, layers: [
       canvas(), light(377),
       headline('Weekly *service*', box(140, 150, 1360, 190), 150, 0.25),
       card('card1', box(140, 420, 440, 400), 0.8),
@@ -206,7 +209,7 @@
       cardText('card3-body', 'Card 3 details', 'Every Saturday\n6:00 AM', box(1106, 660, 350, 110), { size: 32, weight: 600, lineHeight: 1.3 }, 1.45, { opacity: 75 }),
       grain(),
     ] },
-    { id: 'give', name: 'Ways to Give', layers: [
+    { id: 'give', name: 'Ways to Give', own: true, layers: [
       canvas(), light(610),
       headline('Ways to\n*give*', box(140, 200, 800, 400), 196),
       qr(box(146, 640, 300, 300), 1),
@@ -262,8 +265,10 @@
 
   // Scenes for a timer segment: the slides in order, Service Begins last (the
   // finale), each with its countdown layered just under the film grain.
-  function preserviceScenes() {
-    return SLIDES.map((s, i) => {
+  // `{ ready: true }`: only the slides that need nothing filled in — the
+  // Timer tab's own Preservice segment.
+  function preserviceScenes({ ready = false } = {}) {
+    return SLIDES.filter(s => !(ready && s.own)).map((s, i) => {
       const layers = clone(s.layers);
       const grainAt = layers.findIndex(l => l.id === 'grain');
       const count = s.finale ? finaleCountdown() : [sideCountdown()];
