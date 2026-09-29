@@ -25,13 +25,17 @@ function passThrough(input, out) {
 }
 
 class KairoCapture extends AudioWorkletProcessor {
-  constructor() {
+  // processorOptions: { digital, initialGain } — see audio_level.js.
+  constructor(options) {
     super();
     this.frame = new Int16Array(1024);   // 64 ms at 16 kHz, what the server expects
     this.filled = 0;
     // Never let a missing level control stop the capture: without it the
     // audio passes through as before.
-    this.level = globalThis.KairoLevel ? new globalThis.KairoLevel.LevelControl(sampleRate) : null;
+    const o = (options && options.processorOptions) || {};
+    this.level = globalThis.KairoLevel
+      ? new globalThis.KairoLevel.LevelControl(sampleRate, { digital: !!o.digital, initialGain: o.initialGain })
+      : null;
     this.block = new Float32Array(128);
     this.peak = 0;                       // raw input, before the level control
     this.clipped = false;

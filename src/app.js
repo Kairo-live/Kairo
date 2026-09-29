@@ -1574,6 +1574,10 @@ function flushPendingAudio() {
 // silence whenever nothing is playing — for them "all zeros" is normal, not a
 // dead device, and must never trigger a rebuild or a fallback to another mic.
 const VIRTUAL_INPUT_RE = /blackhole|loopback|soundflower|vb-?cable|virtual|aggregate|ishowu/i;
+// Pure digital loopbacks, with nothing analog in the path: no hiss for the
+// level control to raise, so it may go further for them (audio_level.js).
+// Narrower than the above: an aggregate or "virtual" device can include a mic.
+const LOOPBACK_INPUT_RE = /blackhole|loopback|soundflower|vb-?cable|ishowu/i;
 function captureIsVirtualInput() {
   return VIRTUAL_INPUT_RE.test(mediaStream?.getAudioTracks?.()[0]?.label || '');
 }
@@ -1691,6 +1695,11 @@ async function buildCaptureGraph(deviceId, existingStream = null) {
   if (ctx.state === 'suspended') await ctx.resume();
   if (ctx.state !== 'running') console.error('[KAIRO] AudioContext still not running after resume():', ctx.state);
   const source = ctx.createMediaStreamSource(stream);
+  // The level control's settings for this input: how far it may raise
+  // (further for a digital loopback) and where it starts (what this input
+  // needed last time — see audio_level.js).
+  const inputLabel = stream.getAudioTracks?.()[0]?.label || '';
+  const levelOptions = { digital: LOOPBACK_INPUT_RE.test(inputLabel), initialGain: rememberedInputGain(inputLabel) };
   // On the audio thread, sent by a worker — the page's main thread never
   // handles the audio (see audio_capture_worklet.js for the live-test stalls
   // this ends). The main-thread processor below is the fallback.
@@ -1698,7 +1707,7 @@ async function buildCaptureGraph(deviceId, existingStream = null) {
     try {
       await ctx.audioWorklet.addModule('audio_level.js');   // the level control, shared into the worklet's scope
       await ctx.audioWorklet.addModule('audio_capture_worklet.js');
-      const node = new AudioWorkletNode(ctx, 'kairo-capture', { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [1] });
+      const node = new AudioWorkletNode(ctx, 'kairo-capture', { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [1], processorOptions: levelOptions });
       node.port.onmessage = (e) => {
         const d = e.data;
         if (d instanceof ArrayBuffer) sendAudioFrame(d);          // only until the worker's port is in place
@@ -1718,7 +1727,7 @@ async function buildCaptureGraph(deviceId, existingStream = null) {
     }
   }
   const proc = ctx.createScriptProcessor(1024, 1, 1);
-  const level = window.KairoLevel ? new window.KairoLevel.LevelControl(ctx.sampleRate) : null;
+  const level = window.KairoLevel ? new window.KairoLevel.LevelControl(ctx.sampleRate, levelOptions) : null;
   const block = new Float32Array(1024);
   proc.onaudioprocess = (e) => {
     const float32 = e.inputBuffer.getChannelData(0);
@@ -1751,6 +1760,7 @@ function noteCaptureLevel(peak, bufferLength, gain = 1, clipped = false) {
   const now = Date.now();
   noteInputLevel(peak / 32768, clipped, gain);
   noteInputSummary(peak / 32768, clipped, gain);
+  if (peak > 0) rememberInputGain(mediaStream?.getAudioTracks?.()[0]?.label || '', gain);
   if (peak > 0) lastNonZeroAudioAt = now;
   if (peak > AUDIO_PEAK_NOISE_FLOOR) lastRealAudioAt = now;
   if (now - _lastLevelLogAt > 3000) {
@@ -1760,6 +1770,27 @@ function noteCaptureLevel(peak, bufferLength, gain = 1, clipped = false) {
       body: JSON.stringify({ event: 'audio-peak', data: { peak, bufferLength, gain: Math.round(gain * 100) / 100, clipped } }),
     }).catch(() => {});
   }
+}
+
+// The gain the level control settled on, per input, so the next session — or
+// a rebuilt capture — starts there instead of catching up from scratch (a
+// quiet feed used to lose the first seconds of every session to the ramp).
+const INPUT_GAIN_KEY = 'kairo-input-gain';
+const inputGains = (() => {
+  try { return JSON.parse(localStorage.getItem(INPUT_GAIN_KEY) || '{}') || {}; } catch { return {}; }
+})();
+let _inputGainSavedAt = 0;
+function rememberedInputGain(label) {
+  const g = Number(inputGains[label]);
+  return g > 0 ? g : 1;
+}
+function rememberInputGain(label, gain) {
+  if (!label || !(gain > 0)) return;
+  inputGains[label] = Math.round(gain * 100) / 100;
+  const now = Date.now();
+  if (now - _inputGainSavedAt < 5000) return;
+  _inputGainSavedAt = now;
+  try { localStorage.setItem(INPUT_GAIN_KEY, JSON.stringify(inputGains)); } catch {}
 }
 
 // Every 30 s of listening, one line in server.log on what the input delivered
@@ -1899,6 +1930,7 @@ async function startListening() {
     lastRealAudioAt = lastNonZeroAudioAt = Date.now(); // don't warn before real audio has had a chance to arrive at all
     audioSilenceWarning = false;
     clearInterval(audioSilenceWatchdog);
+    resetSleepCheck();
     audioSilenceWatchdog = setInterval(checkAudioSilence, 5000);
 
     showEmptyTranscript(false);
@@ -1928,6 +1960,7 @@ function stopAudioCapture() {
   if (mediaStream)    { mediaStream.getTracks().forEach(t => t.stop()); mediaStream = null; }
   clearInterval(audioSilenceWatchdog);
   audioSilenceWatchdog = null;
+  resetSleepCheck();
   setAudioSilenceWarning(false);
 }
 
@@ -1949,9 +1982,15 @@ function setAudioSilenceWarning(on) {
     dot?.classList.add('warning');
     if (lbl) { lbl.classList.remove('broadcasting'); lbl.classList.add('warning'); lbl.textContent = 'No audio!'; }
   } else {
+    // Back to the listening state — or Idle when this clears because
+    // listening just stopped (it used to leave "Broadcasting" up after Stop).
     dot?.classList.remove('warning');
-    dot?.classList.add('broadcasting');
-    if (lbl) { lbl.classList.remove('warning'); lbl.classList.add('broadcasting'); lbl.textContent = 'Broadcasting'; }
+    dot?.classList.toggle('broadcasting', isListening);
+    if (lbl) {
+      lbl.classList.remove('warning');
+      lbl.classList.toggle('broadcasting', isListening);
+      lbl.textContent = isListening ? 'Broadcasting' : 'Idle';
+    }
   }
 }
 
@@ -1981,13 +2020,27 @@ function _healLog(msg, extra) {
 }
 
 let _lastSilenceCheckAt = 0;
+let _lastSilenceCheckAudioTime = 0;
+// A new session or a rebuilt capture brings a new audio clock: start over.
+function resetSleepCheck() { _lastSilenceCheckAt = 0; _lastSilenceCheckAudioTime = 0; }
 function checkAudioSilence() {
   if (!isListening) return;
   const now = Date.now();
-  // This runs every 5s — a much longer gap means the machine was asleep, and
-  // waking from sleep is what leaves a WKWebView capture delivering zeros.
-  const wokeFromSleep = _lastSilenceCheckAt && now - _lastSilenceCheckAt > 20000;
+  // This runs every 5s — a much longer gap can mean the machine was asleep,
+  // and waking from sleep is what leaves a WKWebView capture delivering zeros.
+  // But a long gap alone isn't sleep: the page's timers are throttled while
+  // Kairo sits behind another window, and the previous session's last check
+  // is long past when listening starts again — both rebuilt the capture for
+  // nothing (live: a "woke-from-sleep" rebuild with no sleep in the Mac's
+  // power log), resetting the level control mid-sermon. During real sleep the
+  // audio clock stops too, so it counts as sleep only when the audio clock
+  // fell well behind the wall clock.
+  const audioTime = audioContext?.currentTime ?? 0;
+  const wallGap = (now - _lastSilenceCheckAt) / 1000;
+  const audioGap = audioTime - _lastSilenceCheckAudioTime;
+  const wokeFromSleep = _lastSilenceCheckAt > 0 && wallGap > 20 && audioGap < wallGap - 10;
   _lastSilenceCheckAt = now;
+  _lastSilenceCheckAudioTime = audioTime;
   if (audioContext && audioContext.state !== 'running') {
     audioContext.resume().catch(() => {});
   }
@@ -2056,6 +2109,7 @@ async function restartAudioCapture(reason, allowDeviceFallback = true) {
     const next = await buildCaptureGraph(deviceId);
     const prev = { stream: mediaStream, ctx: audioContext, proc: audioProcessor };
     mediaStream = next.stream; audioContext = next.ctx; audioProcessor = next.proc;
+    resetSleepCheck();
     teardownCaptureGraph(prev);
     watchAudioTrackHealth();
     lastRealAudioAt = lastNonZeroAudioAt = Date.now();

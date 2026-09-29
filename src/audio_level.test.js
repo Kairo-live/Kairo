@@ -48,9 +48,13 @@ test('a feed 26 dB down is raised to a normal level within a few seconds', () =>
   const { out, gains } = run(audio);
   const settled = peakOf(out, 8 * SR);    // after 8 s
   assert.ok(settled > 0.2 && settled <= CEILING, `settled peak ${dB(settled).toFixed(1)} dBFS`);
-  // It rises gradually, no faster than 6 dB/s
-  const perBlockMaxRise = Math.max(...gains.slice(1).map((g, i) => dB(g) - dB(gains[i])));
-  assert.ok(perBlockMaxRise <= 6 * 128 / SR + 1e-9, `rise per 8 ms block ${perBlockMaxRise.toFixed(4)} dB`);
+  // It rises gradually: up to 24 dB/s while more than 12 dB short, then 6 dB/s
+  const final = dB(gains[gains.length - 1]);
+  const rises = gains.slice(1).map((g, i) => ({ rise: dB(g) - dB(gains[i]), short: final - dB(gains[i]) }));
+  const fast = Math.max(...rises.map(r => r.rise));
+  const near = Math.max(...rises.filter(r => r.short < 11).map(r => r.rise));
+  assert.ok(fast <= 24 * 128 / SR + 1e-9, `fastest rise per 8 ms block ${fast.toFixed(4)} dB`);
+  assert.ok(near <= 6 * 128 / SR + 1e-9, `rise near the settled level ${near.toFixed(4)} dB per block`);
 });
 
 test('a hot feed never clips, and a burst after a quiet stretch is caught at once', () => {
@@ -74,6 +78,22 @@ test('silence and a low noise floor are never raised', () => {
   assert.ok(run(noise).gains.every(g => g === 1));
 });
 
+test('quiet speech below the fixed gate is still raised; a steady hiss or hum there never is', () => {
+  // A mic feed whose speech peaks at −56 dBFS over a −75 dBFS noise floor
+  // (the level at which the offline engine dropped whole stretches, unraised)
+  const floor = () => (Math.random() * 2 - 1) * Math.pow(10, -75 / 20);
+  const quiet = speech(15, Math.pow(10, -56 / 20)).map((v) => v + floor());
+  const mic = run(quiet);
+  assert.ok(dB(mic.gains[mic.gains.length - 1]) > 29, `raised to +${dB(mic.gains[mic.gains.length - 1]).toFixed(1)} dB`);
+  assert.ok(mic.gains.every(g => g <= 31.7), 'a microphone still stops at +30 dB');
+
+  // Steady hiss at −55 dBFS and a −50 dBFS hum: no speech in them, never raised
+  const hiss = new Float32Array(30 * SR).map(() => (Math.random() * 2 - 1) * Math.pow(10, -55 / 20));
+  assert.ok(run(hiss).gains.every(g => g === 1), 'hiss');
+  const hum = new Float32Array(30 * SR).map((_, i) => Math.pow(10, -50 / 20) * Math.sin(2 * Math.PI * 60 * i / SR));
+  assert.ok(run(hum).gains.every(g => g === 1), 'hum');
+});
+
 test('an ordinary pause keeps the gain where it is', () => {
   // Quiet speech (raised), then a 3 s pause, then the same speech again
   const lc = new LevelControl(SR);
@@ -89,6 +109,31 @@ test('the fallback path’s 1024-sample blocks behave the same', () => {
   const b = run(audio, new LevelControl(SR), 1024).out;
   const pa = peakOf(a, 10 * SR), pb = peakOf(b, 10 * SR);
   assert.ok(Math.abs(dB(pa) - dB(pb)) < 1, `${dB(pa).toFixed(2)} vs ${dB(pb).toFixed(2)} dBFS`);
+});
+
+test('a digital loopback turned down 50 dB comes back to a normal level; a mic stops at +30 dB', () => {
+  const audio = speech(20, 0.5 * Math.pow(10, -50 / 20));   // BlackHole at a low volume
+  const digital = run(audio, new LevelControl(SR, { digital: true }));
+  const settled = peakOf(digital.out, 8 * SR);
+  assert.ok(settled > 0.2 && settled <= CEILING, `digital settled at ${dB(settled).toFixed(1)} dBFS`);
+  const mic = run(audio, new LevelControl(SR));
+  assert.ok(Math.max(...mic.gains) <= 31.7, 'a microphone is never raised past +30 dB');
+});
+
+test('far too quiet catches up within a few seconds, not tens', () => {
+  const audio = speech(10, 0.5 * Math.pow(10, -45 / 20));
+  const { gains } = run(audio, new LevelControl(SR, { digital: true }));
+  const at4s = dB(gains[Math.floor(4 * SR / 128)]);
+  assert.ok(at4s > 35, `gain after 4 s: +${at4s.toFixed(1)} dB`);
+});
+
+test('a remembered gain applies from the first sample, and still never clips', () => {
+  const quiet = speech(2, 0.01);
+  const { out } = run(quiet, new LevelControl(SR, { digital: true, initialGain: 30 }));
+  assert.ok(peakOf(out, 0, SR) > 0.2, 'the first second is already at a normal level');
+  const loud = speech(2, 0.8);   // the source was turned back up since last time
+  const r = run(loud, new LevelControl(SR, { digital: true, initialGain: 30 }));
+  assert.ok(peakOf(r.out) <= CEILING + 1e-6, `peak ${peakOf(r.out)}`);
 });
 
 test('the Settings line names the problem', () => {
