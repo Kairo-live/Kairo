@@ -7,7 +7,7 @@
 //   1. directLookup      — explicit reference ("1 John 1:10"), O(1)
 //   2. verbatimSearch    — exact phrase match across translations, ~5ms
 //   3. fingerprintSearch — verse signature coverage for paraphrases, ~2ms
-//   4. streaming anchor trie — word-by-word quote detection, sub-ms/word
+//   4. streaming 4-gram anchors — word-by-word quote detection, sub-ms/word
 //   5. semanticSearch    — meaning-based Candidates via embeddinggemma-300m,
 //      loaded in the background after {type:'ready'} (see semantic_engine.js)
 //      so its ~1-2s model load never delays the fast lexical layers coming
@@ -21,6 +21,7 @@ const fs   = require('fs');
 const semanticEngine = require('./semantic_engine');
 const { longestWindow } = require('./verse_window');
 const rerankerEngine = require('./reranker_engine');
+const { collectGarbage } = require('./collect_garbage');
 
 const DATA_DIR = workerData?.dataDir || path.join(__dirname, '..', 'databases', 'bibles');
 const MAP_PATH = path.join(DATA_DIR, 'map.json');
@@ -136,15 +137,16 @@ let verseNormNltWords    = null;   // Map<idx, string[]> — verseNormNlt pre-sp
 let verseStemWords       = null;   // Map<idx, string[]> — verseStemText pre-split
 let verseStemNltWords    = null;   // Map<idx, string[]> — verseStemNlt pre-split
 
-// ── Streaming 4-gram anchor trie ─────────────────────────────────────────
-// Word-level prefix trie over distinctive verse 4-grams.
-// As STT words arrive one by one, we advance a set of active nodes through
-// the trie. When depth 4 is reached, the terminal yields the matching verse(s).
-// Per-word cost: O(active states) — no polling, no similarity math.
-let anchorTrie       = null;   // root Map<word, node> where node is Map<word, node>
-let anchorTerminals  = null;   // Map<node, Array<{idx, pos}>> at depth ≥ ANCHOR_N
+// ── Streaming 4-gram anchors ─────────────────────────────────────────────
+// Every distinctive verse 4-gram, keyed by its words. As STT words arrive one
+// by one, the last four heard are looked up; a hit yields the matching
+// verse(s). Per-word cost: one lookup — no polling, no similarity math.
+//   grams: Map<"w1 w2 w3 w4", gram id>; df[gram]: verses it occurs in;
+//   first[gram] → an entry, next[entry] → the gram's next entry (-1 ends);
+//   idx[entry]/pos[entry]: the verse slot and the 4-gram's word position.
+let anchorIndex      = null;
 let verseHealedWords = null;   // Map<idx, string[]> — pre-healed word list per verse (Layer 2)
-let activeStates     = [];     // Array<{ node, depth }> — persists across streamText calls
+let recentGram       = [];     // the last (up to) ANCHOR_N words since a reset — persists across streamText calls
 let recentHitVerses  = new Map();   // Map<verseIdx, lastFireTime> — local dedupe
 
 // Rolling history of recently-streamed (healed) words, oldest first — feeds
@@ -197,8 +199,8 @@ const ALIGN_AGE_MS       = 20000; // drop candidates older than 20s without conf
 // Applied to BOTH verse n-grams at build time AND transcript words at stream
 // time, so morphological variants of any word in the Bible collapse to the
 // same canonical token. Symmetric application is what matters — the stem
-// doesn't need to be a real English word, only consistent between the trie
-// and the transcript.
+// doesn't need to be a real English word, only consistent between the anchor
+// index and the transcript.
 //
 // The algorithm is a scoped Porter-style suffix stripper tuned for the
 // English of the KJV and modern spoken paraphrases. Rules in priority order:
@@ -212,7 +214,7 @@ const ALIGN_AGE_MS       = 20000; // drop candidates older than 20s without conf
 //   5. Double-consonant collapse (runn→run, putt→put)
 //
 // Stops-words and very short words (≤ 2 chars) are left alone. The DF ≤ 5
-// filter on the 4-gram trie naturally self-prunes any combination that
+// filter on the 4-gram anchors naturally self-prunes any combination that
 // becomes too common after stemming, so aggressive stripping is safe.
 
 // STT artifacts the speech-to-text layer produces. Applied before stemming.
@@ -519,24 +521,29 @@ async function init() {
   // windows want the array by position) and re-splitting the same static
   // per-verse string on every single search call, for every candidate verse,
   // was showing up as real repeated work on the detection hot path.
+  //
+  // Every array holds one shared copy of each distinct word (see
+  // sharedWords): split() and healWord() would otherwise leave a separate
+  // little string behind for each of the ~3 million word occurrences.
   verseStemText     = new Map();
   verseStemNlt      = new Map();
   verseNormWords    = new Map();
   verseNormNltWords = new Map();
   verseStemWords    = new Map();
   verseStemNltWords = new Map();
+  const words = sharedWords();
   for (let i = 0; i < verseMetadata.length; i++) {
-    const normWords = verseNormText.get(i).split(' ').filter(Boolean);
+    const normWords = words.split(verseNormText.get(i));
     verseNormWords.set(i, normWords);
-    const stemWords = normWords.map(healWord);
+    const stemWords = normWords.map(words.heal);
     verseStemWords.set(i, stemWords);
     verseStemText.set(i, stemWords.join(' '));
 
     const nltN = verseNormNlt.get(i);
     if (nltN) {
-      const nltNormWords = nltN.split(' ').filter(Boolean);
+      const nltNormWords = words.split(nltN);
       verseNormNltWords.set(i, nltNormWords);
-      const nltStemWords = nltNormWords.map(healWord);
+      const nltStemWords = nltNormWords.map(words.heal);
       verseStemNltWords.set(i, nltStemWords);
       verseStemNlt.set(i, nltStemWords.join(' '));
     }
@@ -616,7 +623,7 @@ async function init() {
   }
   console.log(`[DetectionWorker] Verse fingerprints built (${SIGNATURE_SIZE} words/verse max).`);
 
-  buildAnchorTrie();
+  buildAnchorIndex(words);
 
   parentPort.postMessage({ type: 'ready' });
   console.log('[DetectionWorker] Ready — all four detection layers active.');
@@ -625,80 +632,149 @@ async function init() {
   // header comment. Failure is non-fatal (missing/not-yet-built embeddings
   // file, e.g. a fresh install before build_verse_embeddings.mjs has run) —
   // semanticSearch calls just no-op via isReady() until this succeeds.
-  semanticEngine.ensureLoaded()
+  const semantic = semanticEngine.ensureLoaded()
     .then(() => parentPort.postMessage({ type: 'semanticReady' }))
     .catch(err => console.warn('[DetectionWorker] Semantic layer unavailable:', err.message));
 
   // Reranker loads in the background too, same non-fatal-failure shape —
   // missing/not-yet-installed model just means rerank() calls no-op via
   // isReady() until a fresh install runs (see reranker_installer.js).
-  rerankerEngine.ensureLoaded()
+  const reranker = rerankerEngine.ensureLoaded()
     .then(() => parentPort.postMessage({ type: 'rerankerReady' }))
     .catch(err => console.warn('[DetectionWorker] Reranker unavailable:', err.message));
+
+  // Building the indexes grew the heap well past what they keep (~130 MB),
+  // and the model loads leave their files' read buffers behind; V8 would
+  // hold all of it until its heap next fills. One collection once
+  // everything is in.
+  Promise.allSettled([semantic, reranker]).then(() => collectGarbage());
 }
 
-// ── Anchor trie build ─────────────────────────────────────────────────────
-// Pass 1: extract every 4-gram from every verse, count document frequency.
-// Pass 2: insert into trie only those with DF ≤ ANCHOR_DF_MAX. Common phrases
-// ("and it came to pass") are skipped — they'd fire on every sentence.
-// Rare phrases ("lift up your heads", "meditate day and night") become anchors
-// that fire the moment the 4th word lands.
-function buildAnchorTrie() {
+// One shared copy of each distinct word for the per-verse word arrays built
+// at init: split() makes a new string for every word of every verse, and so
+// does healWord() once its bounded cache has moved on. Equal strings, so
+// nothing that compares or looks them up can tell the difference.
+function sharedWords() {
+  const pool = new Map();
+  const healed = new Map();
+  const share = (w) => {
+    const c = pool.get(w);
+    if (c !== undefined) return c;
+    pool.set(w, w);
+    return w;
+  };
+  return {
+    split: (text) => text.split(' ').filter(Boolean).map(share),
+    heal: (w) => {
+      let h = healed.get(w);
+      if (h === undefined) { h = share(healWord(w)); healed.set(w, h); }
+      return h;
+    },
+  };
+}
+
+// ── Anchor index build ────────────────────────────────────────────────────
+// Every distinctive 4-gram → the verses (and word positions) it occurs at.
+// Pass 1 counts each 4-gram's document frequency; pass 2 keeps those in at
+// most ANCHOR_DF_MAX verses. Common phrases ("and it came to pass") are
+// skipped — they'd fire on every sentence. Rare phrases ("lift up your
+// heads", "meditate day and night") become anchors that fire the moment the
+// 4th word lands.
+//
+// Kept flat — one Map from the 4-gram to its entry list, the entries in typed
+// arrays — rather than as a word-by-word trie of Maps: ~650k 4-grams made
+// that about 1.4 million Maps and 650k entry objects, ~450 MB of this
+// worker's heap. Streaming only ever asks whether the last four words form a
+// kept 4-gram (see streamWord), which one lookup answers the same way.
+function buildAnchorIndex(words) {
   const t0 = Date.now();
   verseHealedWords = new Map();
-  const dfCounts   = new Map();   // Map<"w1 w2 w3 w4", Set<verseIdx>>
 
-  // Pass 1 — cache healed word list per verse + count 4-gram DF. The church's
-  // translation (if any) is indexed too, under slot ids; DF always counts REAL
-  // verses, so a verse's two wordings never make its own 4-grams look shared.
+  // The church's translation (if any) is indexed too, under slot ids; DF
+  // always counts REAL verses, so a verse's two wordings never make its own
+  // 4-grams look shared.
   const slots = [];
   for (let i = 0; i < verseMetadata.length; i++) slots.push(i);
   if (altTextByIdx) for (const i of altTextByIdx.keys()) slots.push(i + ALT_SLOT_BASE);
   for (const slot of slots) {
     const i = slotToVerse(slot);
-    const raw = slot === i
-      ? (verseNormText.get(i) || '')
-      : norm(altTextByIdx.get(i).replace(/\[[^\]]*\]/g, ' '));
-    const words = raw.split(' ').filter(Boolean).map(healWord);
-    verseHealedWords.set(slot, words);
-    if (slot !== i) verseNormWords.set(slot, raw.split(' ').filter(Boolean));   // IDF lookups during alignment
-    for (let k = 0; k + ANCHOR_N <= words.length; k++) {
-      const key = words.slice(k, k + ANCHOR_N).join(' ');
-      let set = dfCounts.get(key);
-      if (!set) { set = new Set(); dfCounts.set(key, set); }
-      set.add(i);
+    if (slot === i) {
+      // The KJV's healed words are exactly its stemmed words (both are
+      // healWord over verseNormText's words), so the two share one array.
+      verseHealedWords.set(slot, verseStemWords.get(i));
+      continue;
     }
+    const raw = norm(altTextByIdx.get(i).replace(/\[[^\]]*\]/g, ' '));
+    const normWords = words.split(raw);
+    verseHealedWords.set(slot, normWords.map(words.heal));
+    verseNormWords.set(slot, normWords);   // IDF lookups during alignment
+  }
+  const gramsOf = (slot, each) => {
+    const w = verseHealedWords.get(slot);
+    for (let k = 0; k + ANCHOR_N <= w.length; k++) each(w.slice(k, k + ANCHOR_N).join(' '), k);
+  };
+
+  // Pass 1 — document frequency: the distinct real verses each 4-gram occurs
+  // in. A verse's second wording only adds the 4-grams its KJV wording lacks.
+  const df = new Map();   // 4-gram -> df
+  for (const slot of slots) {
+    const i = slotToVerse(slot);
+    const counted = new Set();
+    if (slot !== i) gramsOf(i, key => counted.add(key));
+    gramsOf(slot, key => {
+      if (counted.has(key)) return;
+      counted.add(key);
+      df.set(key, (df.get(key) || 0) + 1);
+    });
   }
 
-  // Pass 2 — insert each distinctive 4-gram into trie, tagging with position.
-  // Terminals store df (document frequency) so anchor fires can be scored by
-  // distinctiveness. A df=1 4-gram is unique to one verse; df=5 is shared.
-  anchorTrie      = new Map();
-  anchorTerminals = new Map();
+  // The near-duplicate table needs, for each 4-gram shared by a handful of
+  // verses, which verses — in first-occurrence order, as it always has.
+  const sharedBy = new Map();   // 4-gram -> [verseIdx, ...]
+  for (const slot of slots) {
+    const i = slotToVerse(slot);
+    gramsOf(slot, key => {
+      const d = df.get(key);
+      if (d < 2 || d > TWIN_GRAM_DF_MAX) return;
+      let list = sharedBy.get(key);
+      if (!list) { list = []; sharedBy.set(key, list); }
+      if (!list.includes(i)) list.push(i);
+    });
+  }
+
+  // Pass 2 — each distinctive 4-gram's entries, in verse then position order.
+  // The df Map becomes the index: kept 4-grams map to their id, the rest go.
+  let gramCount = 0;
+  for (const d of df.values()) if (d <= ANCHOR_DF_MAX) gramCount++;
+  const gramDf = new Uint8Array(gramCount);
+  let id = 0;
+  for (const [key, d] of df) {
+    if (d > ANCHOR_DF_MAX) { df.delete(key); continue; }
+    gramDf[id] = d;
+    df.set(key, id++);
+  }
+  let total = 0;
+  for (const slot of slots) total += Math.max(0, verseHealedWords.get(slot).length - ANCHOR_N + 1);
+  const first  = new Int32Array(gramCount).fill(-1);
+  const last   = new Int32Array(gramCount);
+  const next   = new Int32Array(total);
+  const idx    = new Uint32Array(total);
+  const pos    = new Uint16Array(total);
   let kept = 0, skipped = 0;
-
-  for (const i of slots) {   // slot id: verse index, or verse index + ALT_SLOT_BASE
-    const words = verseHealedWords.get(i) || [];
-    for (let k = 0; k + ANCHOR_N <= words.length; k++) {
-      const gram = words.slice(k, k + ANCHOR_N);
-      const key  = gram.join(' ');
-      const df   = dfCounts.get(key).size;
-      if (df > ANCHOR_DF_MAX) { skipped++; continue; }
-      let node = anchorTrie;
-      for (let d = 0; d < ANCHOR_N; d++) {
-        let child = node.get(gram[d]);
-        if (!child) { child = new Map(); node.set(gram[d], child); }
-        node = child;
-      }
-      let terminal = anchorTerminals.get(node);
-      if (!terminal) { terminal = { df, entries: [] }; anchorTerminals.set(node, terminal); }
-      terminal.entries.push({ idx: i, pos: k });
-      kept++;
-    }
+  for (const slot of slots) {   // slot id: verse index, or verse index + ALT_SLOT_BASE
+    gramsOf(slot, (key, k) => {
+      const g = df.get(key);
+      if (g === undefined) { skipped++; return; }
+      const e = kept++;
+      idx[e] = slot; pos[e] = k; next[e] = -1;
+      if (first[g] === -1) first[g] = e; else next[last[g]] = e;
+      last[g] = e;
+    });
   }
+  anchorIndex = { grams: df, df: gramDf, first, next: next.subarray(0, kept), idx: idx.subarray(0, kept), pos: pos.subarray(0, kept) };
 
-  console.log(`[Anchor] Trie built in ${Date.now() - t0}ms — ${kept} distinctive 4-grams kept, ${skipped} common skipped.`);
-  buildTwinTable(dfCounts);
+  console.log(`[Anchor] Index built in ${Date.now() - t0}ms — ${kept} distinctive 4-grams kept, ${skipped} common skipped.`);
+  buildTwinTable(sharedBy.values());
 }
 
 // ── Near-duplicate verse pairs ("twins") ────────────────────────────────────
@@ -711,12 +787,11 @@ function buildAnchorTrie() {
 const TWIN_GRAM_DF_MAX = 6;     // a 4-gram shared by 2..6 verses is distinctive-but-shared
 const TWIN_MIN_SHARED  = 2;     // ...and a pair needs at least this many of them
 let twinTable = new Map();      // verseIdx -> [{ idx, shared }]
-function buildTwinTable(dfCounts) {
+function buildTwinTable(sharedBy) {   // iterable of each shared 4-gram's verse list
   const t0 = Date.now();
   const pairs = new Map();      // a*40000+b (a<b) -> shared 4-gram count
-  for (const set of dfCounts.values()) {
-    if (set.size < 2 || set.size > TWIN_GRAM_DF_MAX) continue;
-    const ids = [...set];
+  for (const ids of sharedBy) {
+    if (ids.length < 2 || ids.length > TWIN_GRAM_DF_MAX) continue;
     for (let x = 0; x < ids.length; x++) for (let y = x + 1; y < ids.length; y++) {
       const a = Math.min(ids[x], ids[y]), b = Math.max(ids[x], ids[y]);
       const k = a * 40000 + b;
@@ -828,104 +903,98 @@ function extendBackward(verseIdx, versePos) {
   return { matched, matchedIdf, contributedWords };
 }
 
-// Hoisted out of streamWord so V8 doesn't re-allocate a fresh closure on
-// every spoken word — streamWord runs at audio-tick rate (~3-5×/s during
-// speech) so the GC churn was non-trivial. `next` and `anchors` are passed
-// in by reference; alignmentCandidates / recentHitVerses are module-scoped.
-function _advanceAnchor(node, depth, word, now, next, anchors) {
-  const child = node.get(word);
-  if (!child) return;
-  const newDepth = depth + 1;
-  if (newDepth >= ANCHOR_N) {
-    const terminal = anchorTerminals.get(child);
-    if (terminal) {
-      for (const { idx, pos } of terminal.entries) {
-        const last = recentHitVerses.get(idx) || 0;
-        if (now - last < HIT_DEDUP_MS) continue;
-        recentHitVerses.set(idx, now);
-        // IDF weight of the matched 4-gram itself — a df=1 4-gram is unique
-        // to one verse across the whole Bible, but "unique combination"
-        // doesn't guarantee the individual words are meaningfully rare
-        // ("our father in the" is 4 ordinary words that only HAPPEN to
-        // combine uniquely in Genesis 42:32 — a preacher saying "our father
-        // in the Lord" in an ordinary prayer isn't quoting it). Carried
-        // through to server.js's df=1 fast-share gate for the same reason
-        // ALIGN_CONFIRM_AT got an IDF floor above.
-        const idf = idfWeightedSpan(verseNormWords.get(idx), pos, ANCHOR_N);
+// Fires one kept 4-gram's anchors — every verse it occurs in. Hoisted out of
+// streamWord so V8 doesn't re-allocate a fresh closure on every spoken word —
+// streamWord runs at audio-tick rate (~3-5×/s during speech) so the GC churn
+// was non-trivial. `anchors` is passed in by reference; alignmentCandidates /
+// recentHitVerses are module-scoped.
+function _fireAnchor(gram, now, anchors) {
+  const ix = anchorIndex;
+  for (let e = ix.first[gram]; e !== -1; e = ix.next[e]) {
+    const idx = ix.idx[e], pos = ix.pos[e];
+    const last = recentHitVerses.get(idx) || 0;
+    if (now - last < HIT_DEDUP_MS) continue;
+    recentHitVerses.set(idx, now);
+    // IDF weight of the matched 4-gram itself — a df=1 4-gram is unique
+    // to one verse across the whole Bible, but "unique combination"
+    // doesn't guarantee the individual words are meaningfully rare
+    // ("our father in the" is 4 ordinary words that only HAPPEN to
+    // combine uniquely in Genesis 42:32 — a preacher saying "our father
+    // in the Lord" in an ordinary prayer isn't quoting it). Carried
+    // through to server.js's df=1 fast-share gate for the same reason
+    // ALIGN_CONFIRM_AT got an IDF floor above.
+    const idf = idfWeightedSpan(verseNormWords.get(idx), pos, ANCHOR_N);
 
-        // Backward extension (see extendBackward's own comment for the
-        // real "come and let us reason together" incident) — credit
-        // whatever the preacher said immediately before this anchor that
-        // also matches the verse's own preceding words, tolerating the
-        // same kind of gap the forward loop already tolerates.
-        // ALWAYS COMPUTED now (previously disabled by default entirely —
-        // see git history / BACKWARD_EXTENSION_MAX_WORDS's comment for the
-        // full story: unconditionally trusting a backward-extended
-        // confirmation the same as a purely-forward one traded +14 to +22
-        // wrong auto-sends for only +1 true positive against the real
-        // 191-item ground truth). Re-enabled with the owner's own suggested
-        // fix from that writeup: don't trust it ALONE — `viaBackwardExtension`
-        // below tags exactly which confirmations only happened BECAUSE of
-        // this seed (would never have reached ALIGN_CONFIRM_AT/
-        // ANCHOR_CONFIRM_IDF from forward words alone); server.js only lets
-        // those auto-send when a second, independent method has also,
-        // separately hit the exact same verse (EvidenceLedger corroboration)
-        // — otherwise they're demoted to the same Candidates-only "moderate"
-        // tier bug #30/#31 already built for exactly this shape of evidence.
-        // A confirmation that WOULD have happened from forward words alone
-        // is untouched either way — `viaBackwardExtension` is only ever true
-        // for the genuinely backward-dependent case, so nothing already-safe
-        // gets slower or stricter; it can only ever reach confirmation a
-        // word or two SOONER now, never later.
-        const back = extendBackward(idx, pos);
-        const totalMatched = ANCHOR_N + back.matched;
-        const totalIdf     = idf + back.matchedIdf;
+    // Backward extension (see extendBackward's own comment for the
+    // real "come and let us reason together" incident) — credit
+    // whatever the preacher said immediately before this anchor that
+    // also matches the verse's own preceding words, tolerating the
+    // same kind of gap the forward loop already tolerates.
+    // ALWAYS COMPUTED now (previously disabled by default entirely —
+    // see git history / BACKWARD_EXTENSION_MAX_WORDS's comment for the
+    // full story: unconditionally trusting a backward-extended
+    // confirmation the same as a purely-forward one traded +14 to +22
+    // wrong auto-sends for only +1 true positive against the real
+    // 191-item ground truth). Re-enabled with the owner's own suggested
+    // fix from that writeup: don't trust it ALONE — `viaBackwardExtension`
+    // below tags exactly which confirmations only happened BECAUSE of
+    // this seed (would never have reached ALIGN_CONFIRM_AT/
+    // ANCHOR_CONFIRM_IDF from forward words alone); server.js only lets
+    // those auto-send when a second, independent method has also,
+    // separately hit the exact same verse (EvidenceLedger corroboration)
+    // — otherwise they're demoted to the same Candidates-only "moderate"
+    // tier bug #30/#31 already built for exactly this shape of evidence.
+    // A confirmation that WOULD have happened from forward words alone
+    // is untouched either way — `viaBackwardExtension` is only ever true
+    // for the genuinely backward-dependent case, so nothing already-safe
+    // gets slower or stricter; it can only ever reach confirmation a
+    // word or two SOONER now, never later.
+    const back = extendBackward(idx, pos);
+    const totalMatched = ANCHOR_N + back.matched;
+    const totalIdf     = idf + back.matchedIdf;
 
-        anchors.push({ verseIdx: idx, depth: newDepth, df: terminal.df, idf: totalIdf });
+    anchors.push({ verseIdx: idx, depth: ANCHOR_N, df: ix.df[gram], idf: totalIdf });
 
-        // Open an alignment candidate so subsequent words can promote this
-        // anchor to confirmed. Starts already at ANCHOR_N (+ any backward-
-        // extended) words matched — matchedIdf seeded the same way.
-        // contributedWords tracks which distinct verse-words have already
-        // paid into matchedIdf — without it, a verse built from a couple of
-        // repeated common words ("praise... the LORD... Praise ye the
-        // LORD") can double-count the same word each time it recurs and
-        // walk matchedIdf up to a "certain" score on repetition alone, not
-        // genuine vocabulary diversity. Real incident: "praise the Lord"
-        // (filler, not a citation) cleared the confirm bar against Psalms
-        // 150:6 this way even after the bar itself was raised twice.
-        const seedWords = (verseNormWords.get(idx) || []).slice(pos, pos + ANCHOR_N);
-        const seedSet = new Set(seedWords);
-        for (const w of back.contributedWords) seedSet.add(w);
-        alignmentCandidates.push({
-          idx,
-          cursor:     pos + ANCHOR_N,
-          matched:    totalMatched,
-          matchedIdf: totalIdf,
-          // Fixed seed contribution from this anchor's own backward
-          // extension — never changes after candidate creation, used at
-          // confirm time to test "would this have confirmed without it."
-          backwardSeedMatched: back.matched,
-          backwardSeedIdf:     back.matchedIdf,
-          seedIdf:             totalIdf,   // what the anchor itself carried — see ALIGN_EXTENSION_MIN_IDF
-          contributedWords: seedSet,
-          misses:     ALIGN_MISS_BUDGET,
-          confirmed:  false,
-          firedAt:    now,
-        });
-      }
-    }
+    // Open an alignment candidate so subsequent words can promote this
+    // anchor to confirmed. Starts already at ANCHOR_N (+ any backward-
+    // extended) words matched — matchedIdf seeded the same way.
+    // contributedWords tracks which distinct verse-words have already
+    // paid into matchedIdf — without it, a verse built from a couple of
+    // repeated common words ("praise... the LORD... Praise ye the
+    // LORD") can double-count the same word each time it recurs and
+    // walk matchedIdf up to a "certain" score on repetition alone, not
+    // genuine vocabulary diversity. Real incident: "praise the Lord"
+    // (filler, not a citation) cleared the confirm bar against Psalms
+    // 150:6 this way even after the bar itself was raised twice.
+    const seedWords = (verseNormWords.get(idx) || []).slice(pos, pos + ANCHOR_N);
+    const seedSet = new Set(seedWords);
+    for (const w of back.contributedWords) seedSet.add(w);
+    alignmentCandidates.push({
+      idx,
+      cursor:     pos + ANCHOR_N,
+      matched:    totalMatched,
+      matchedIdf: totalIdf,
+      // Fixed seed contribution from this anchor's own backward
+      // extension — never changes after candidate creation, used at
+      // confirm time to test "would this have confirmed without it."
+      backwardSeedMatched: back.matched,
+      backwardSeedIdf:     back.matchedIdf,
+      seedIdf:             totalIdf,   // what the anchor itself carried — see ALIGN_EXTENSION_MIN_IDF
+      contributedWords: seedSet,
+      misses:     ALIGN_MISS_BUDGET,
+      confirmed:  false,
+      firedAt:    now,
+    });
   }
-  if (newDepth < ANCHOR_N) next.push({ node: child, depth: newDepth });
 }
 
 // ── Streaming advance ────────────────────────────────────────────────────
-// Called once per incoming word. Advances every active state one step and
-// opens a new state from the root. Returns any verse indexes that fired
-// (reached depth ANCHOR_N at a terminal node) at this tick, with local
-// dedupe so the same verse can't re-fire within HIT_DEDUP_MS.
+// Called once per incoming word. Advances the alignment candidates, then
+// looks up the last ANCHOR_N words as a 4-gram. Returns any verse indexes
+// that fired at this tick, with local dedupe so the same verse can't
+// re-fire within HIT_DEDUP_MS.
 function streamWord(raw) {
-  if (!anchorTrie) return { anchors: [], confirmed: [] };
+  if (!anchorIndex) return { anchors: [], confirmed: [] };
   const word = healWord(
     String(raw || '').toLowerCase().replace(/[^a-z0-9]/g, '')
   );
@@ -1010,12 +1079,14 @@ function streamWord(raw) {
   }
   alignmentCandidates = kept;
 
-  // ── Layer 1: advance trie, open new anchor fires ────────────────────────
-  const next = [];
-  for (const s of activeStates) _advanceAnchor(s.node, s.depth, word, now, next, anchors);
-  _advanceAnchor(anchorTrie, 0, word, now, next, anchors);
-
-  activeStates = next.length > 50 ? next.slice(-50) : next;
+  // ── Layer 1: open new anchor fires ──────────────────────────────────────
+  // The last ANCHOR_N words heard since the last reset, as one 4-gram.
+  recentGram.push(word);
+  if (recentGram.length > ANCHOR_N) recentGram.shift();
+  if (recentGram.length === ANCHOR_N) {
+    const gram = anchorIndex.grams.get(recentGram.join(' '));
+    if (gram !== undefined) _fireAnchor(gram, now, anchors);
+  }
 
   // Bound alignment candidate set too — keep the most recent
   if (alignmentCandidates.length > 40) {
@@ -1026,7 +1097,7 @@ function streamWord(raw) {
 }
 
 function streamReset() {
-  activeStates         = [];
+  recentGram           = [];
   alignmentCandidates  = [];
   recentHitVerses.clear();
   recentWordHistory    = []; // a new session must not credit backward extension from a previous, unrelated sermon's tail words
@@ -2047,7 +2118,7 @@ parentPort.on('message', async (msg) => {
         break;
       }
       case 'streamText': {
-        // Word-by-word streaming into the anchor trie + alignment candidates.
+        // Word-by-word streaming into the anchor index + alignment candidates.
         // No buffering, no throttle — every word is processed the instant it arrives.
         const words = String(msg.text || '').toLowerCase().split(/\s+/).filter(Boolean);
         const anchorsByVerse   = new Map();   // idx → { depth, df, idf }

@@ -121,6 +121,7 @@ function ensureLoaded() {
       local_files_only: true,
       session_options: ORT_SESSION_OPTIONS,
     });
+    releaseTokenizerInputs(_extractor.tokenizer);
     console.log(`[Semantic] Ready — ${_count} verse embeddings (${_dims}d) + model loaded.`);
   })();
   return _loadPromise;
@@ -145,8 +146,28 @@ function isReady() { return !!(_extractor && _corpus); }
 // Half the cores for inference, not all of them (the runtime's default): the
 // audio capture, the transcript and the outputs run on this same machine, and
 // back-to-back model calls on every core starved them — "audio buffering, no
-// real-time text" in a live test. Shared with the reranker.
-const ORT_SESSION_OPTIONS = { intraOpNumThreads: Math.max(1, Math.floor(require('os').cpus().length / 2)), interOpNumThreads: 1 };
+// real-time text" in a live test. No memory arena: it holds on to the most
+// any call ever needed (~40 MB here) for the rest of the session, and a
+// search plus rerank takes the same ~70 ms without it. Shared with the
+// reranker.
+const ORT_SESSION_OPTIONS = {
+  intraOpNumThreads: Math.max(1, Math.floor(require('os').cpus().length / 2)),
+  interOpNumThreads: 1,
+  enableCpuMemArena: false,
+  enableMemPattern: false,
+};
+
+// The Gemma tokenizer's raw vocabulary object and its 514,906 merge rules
+// are only inputs to the lookup tables it builds from them, but
+// transformers.js keeps both — ~48 MB. Token ids are unchanged without them
+// (checked over the whole KJV and NLT). Left alone unless the tokenizer is
+// the BPE shape this was checked against.
+function releaseTokenizerInputs(tokenizer) {
+  const model = tokenizer?._tokenizer?.model;
+  if (!model || !(model.bpe_ranks instanceof Map) || !(model.tokens_to_ids instanceof Map)) return;
+  if (model.config) { model.config.vocab = null; model.config.merges = null; }
+  model.merges = null;
+}
 
 // Embeds arbitrary text into the same space as the corpus. Returns a plain
 // Float32Array (already unit-normalized — pooling:'mean', normalize:true,

@@ -74,6 +74,31 @@ function pruneDeadPackages() {
   return saved;
 }
 
+// ── Pass 1b: sharp (image processing) → a stub ──────────────────────────
+// @huggingface/transformers imports sharp when it loads (a top-level
+// `import sharp from "sharp"`, and it throws if that comes back empty), but
+// only ever calls it for image models — Kairo runs text models only. The
+// real package loads its native libvips (the @img/* platform packages,
+// ~16MB) the moment it's required, so it's swapped for a stub that only
+// fails if something actually asks it to process an image.
+function stubImageLibrary() {
+  const dir = path.join(NODE_MODULES, 'sharp');
+  if (!fs.existsSync(dir)) return 0;
+  if (fs.existsSync(path.join(dir, 'kairo-stub'))) return 0;
+  const before = duBytes(dir) + (fs.existsSync(path.join(NODE_MODULES, '@img')) ? duBytes(path.join(NODE_MODULES, '@img')) : 0);
+  rm(dir);
+  rm(path.join(NODE_MODULES, '@img'));
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'kairo-stub'), '');
+  fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: 'sharp', version: '0.0.0-kairo-stub', main: 'index.js' }, null, 2) + '\n');
+  fs.writeFileSync(path.join(dir, 'index.js'),
+    "// Stand-in for sharp — see scripts/prune-server-deps.js. Kairo runs text\n"
+    + "// models only; nothing should ever get here.\n"
+    + "'use strict';\n"
+    + "module.exports = function sharp() { throw new Error('Image processing is not included in Kairo'); };\n");
+  return before - duBytes(dir);
+}
+
 // ── Pass 2: generic bloat sweep across every installed package ───────────
 // Native binaries for other platforms. onnxruntime-node ships prebuilt
 // libraries for every OS/arch it supports (bin/napi-v*/<platform>/<arch>) —
@@ -156,11 +181,13 @@ function main() {
   }
   const before = duBytes(NODE_MODULES);
   const deadPackageSaved = pruneDeadPackages();
+  const imageSaved = stubImageLibrary();
   const platformSaved = pruneOtherPlatforms();
   const sweepSaved = sweep(NODE_MODULES);
   const after = duBytes(NODE_MODULES);
 
   console.log(`[prune] dead packages:      ${fmtMB(deadPackageSaved)}`);
+  console.log(`[prune] sharp → stub:       ${fmtMB(imageSaved)}`);
   console.log(`[prune] other platforms:    ${fmtMB(platformSaved)} (kept ${buildTarget().plat}/${buildTarget().arch || 'every arch'})`);
   console.log(`[prune] generic sweep:      ${fmtMB(sweepSaved)}`);
   console.log(`[prune] node_modules: ${fmtMB(before)} → ${fmtMB(after)} (saved ${fmtMB(before - after)})`);

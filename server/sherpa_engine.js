@@ -31,6 +31,7 @@
 'use strict';
 
 const path = require('path');
+const { collectGarbage } = require('./collect_garbage');
 const fs   = require('fs');
 const os   = require('os');
 
@@ -134,6 +135,40 @@ function recognizerConfig(modelDir, { utteranceEndMs = 1200 } = {}) {
   };
 }
 
+// ── The loaded model, shared ──────────────────────────────────────────────
+// A recognizer holds the loaded model: ~1.1 GB of native memory, 1.2 s to
+// load. That memory is only freed when its JS handle is garbage-collected,
+// and V8 has no reason to collect a handle that small — measured: a stopped
+// engine kept all of it, and each Start after a Stop loaded another copy
+// beside the last (1.9 GB after two). So one recognizer serves every session
+// (each gets its own stream): a restart is instant and never doubles up, and
+// it's released RELEASE_AFTER_MS after the last session stops, with a
+// collection so the memory actually goes back.
+const RELEASE_AFTER_MS = 2 * 60 * 1000;
+let sharedRecognizer = null;   // { key, recognizer }
+let releaseTimer = null;
+
+function acquireRecognizer(OnlineRecognizer, modelDir, opts) {
+  clearTimeout(releaseTimer);
+  releaseTimer = null;
+  const key = JSON.stringify([modelDir, opts]);
+  if (sharedRecognizer?.key !== key) {
+    if (sharedRecognizer) { sharedRecognizer = null; collectGarbage(); }   // settings changed: free the old model before loading
+    sharedRecognizer = { key, recognizer: new OnlineRecognizer(recognizerConfig(modelDir, opts)) };
+  }
+  return sharedRecognizer.recognizer;
+}
+
+function releaseRecognizerSoon() {
+  clearTimeout(releaseTimer);
+  releaseTimer = setTimeout(() => {
+    releaseTimer = null;
+    sharedRecognizer = null;
+    collectGarbage();
+  }, RELEASE_AFTER_MS);
+  releaseTimer.unref?.();
+}
+
 class SherpaEngine {
   // opts:
   //   modelDir  — dir holding the extracted streaming-zipformer model files
@@ -176,7 +211,7 @@ class SherpaEngine {
       throw e;
     }
 
-    this._recognizer = new OnlineRecognizer(recognizerConfig(this.modelDir, { utteranceEndMs: this.utteranceEndMs }));
+    this._recognizer = acquireRecognizer(OnlineRecognizer, this.modelDir, { utteranceEndMs: this.utteranceEndMs });
     this._stream = this._recognizer.createStream();
     this._lastPartial = '';
     this._locked = 0;
@@ -247,10 +282,12 @@ class SherpaEngine {
         if (rest) this.onFinal(rest, { speechFinal: true });
       }
     } catch {}
+    const hadRecognizer = !!this._recognizer;
     this._recognizer = null;
     this._stream = null;
     this._lastPartial = '';
     this._locked = 0;
+    if (hadRecognizer) releaseRecognizerSoon();
   }
 }
 
