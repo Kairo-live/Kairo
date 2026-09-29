@@ -118,6 +118,79 @@ function outlineShadows(width, color) {
   return shadows;
 }
 
+// A text layer with an accent colour shows "*word*" in that colour, without
+// the asterisks — how a two-tone headline ("FIRST TIME / *WITH US?*") is
+// written as one editable layer. Only when the layer has an accent colour
+// and the text actually carries the markup; otherwise text renders as-is.
+function hasAccentMarkup(text, color) {
+  return !!color && typeof text === 'string' && /\*[^*\n]+\*/.test(text);
+}
+// One wrapping span: a text layer's box is a flex column, where loose runs of
+// text and spans would each become a row of their own.
+function accentHtml(text, color) {
+  const esc = String(text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const safe = /^#[0-9a-f]{3,8}$/i.test(color || '') ? color : '#e3cf6c';
+  return '<span class="kairo-rich" style="white-space:pre-line">'
+    + esc.replace(/\*([^*\n]+)\*/g, (_, w) => `<span class="kairo-accent" style="color:${safe}">${w}</span>`)
+    + '</span>';
+}
+
+// Photo treatments for image and image-cycle layers: black & white
+// (layer.grayscale, 0-100) and a soft fade into whatever is behind it from
+// one edge (layer.fade: { side: 'left'|'right'|'top'|'bottom', amount: 0-100,
+// the share of the image the fade covers}) — the washed-back photo half of an
+// announcement slide.
+function applyImageLook(el, layer) {
+  if (!el || !layer) return;
+  const gs = Math.max(0, Math.min(100, Number(layer.grayscale) || 0));
+  if (gs > 0) el.style.filter = `grayscale(${gs}%)`;
+  const f = layer.fade;
+  const dir = f && { left: 'to right', right: 'to left', top: 'to bottom', bottom: 'to top' }[f.side];
+  const amount = Math.max(0, Math.min(100, Number(f && f.amount) || 0));
+  if (dir && amount > 0) {
+    const mask = `linear-gradient(${dir}, rgba(0,0,0,0) 0%, #000 ${amount}%)`;
+    el.style.webkitMaskImage = mask;
+    el.style.maskImage = mask;
+  }
+}
+
+// A background layer (the canvas fill or a shape) can be filled with a
+// picture: one of the bundled backgrounds (src 'backgrounds/<id>.jpg', listed
+// in backgrounds/backgrounds.js) or the operator's own. `dim` (0-90) darkens
+// it so white text stays legible; `color` shows while it loads. Small renders
+// (theme cards, slide lists) take the bundled picture's thumbnail — WebKit
+// decodes an image at full size however small it's drawn.
+function imageFillCss(layer, opts = {}) {
+  let src = String(layer.src || '');
+  if (opts.small) src = src.replace(/^backgrounds\/([\w-]+)\.jpg$/, 'backgrounds/thumbs/$1.jpg');
+  const url = 'url("' + src.replace(/["\\\n\r]/g, c => encodeURIComponent(c)) + '")';
+  const dim = Math.max(0, Math.min(90, Number(layer.dim) || 0)) / 100;
+  const shade = dim > 0 ? `linear-gradient(rgba(0,0,0,${dim}), rgba(0,0,0,${dim})), ` : '';
+  const base = /^#[0-9a-f]{3,8}$/i.test(layer.color || '') ? layer.color : '#000';
+  return `${shade}${url} center / cover no-repeat ${base}`;
+}
+
+// A slide's own changes to a background layer's fill (Full-scale edit stores
+// them per slide, by layer id) — the same fields the editor merges into its
+// canvas, so the output and previews paint what the editor shows.
+const FILL_OVERRIDE_KEYS = ['fill', 'color', 'color2', 'angle', 'opacity', 'src', 'dim'];
+function withFillOverride(layer, ov) {
+  if (!ov) return layer;
+  let out = layer;
+  FILL_OVERRIDE_KEYS.forEach(k => {
+    if (ov[k] === undefined || ov[k] === layer[k]) return;
+    if (out === layer) out = { ...layer };
+    out[k] = ov[k];
+  });
+  return out;
+}
+
+window.imageFillCss      = imageFillCss;
+window.withFillOverride  = withFillOverride;
+window.FILL_OVERRIDE_KEYS = FILL_OVERRIDE_KEYS;
+window.hasAccentMarkup   = hasAccentMarkup;
+window.accentHtml        = accentHtml;
+window.applyImageLook    = applyImageLook;
 window.isVideoLayerSrc   = isVideoLayerSrc;
 window.applyShapeGeometry = applyShapeGeometry;
 window.applyLayerOrder    = applyLayerOrder;

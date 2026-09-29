@@ -15,6 +15,8 @@ const FONTS = [
   { label: 'EB Garamond',        value: 'EB Garamond',        google: true  },
   { label: 'Cinzel',             value: 'Cinzel',             google: true  },
   { label: 'Bebas Neue',         value: 'Bebas Neue',         google: true  },
+  { label: 'Anton',              value: 'Anton',              google: true  },
+  { label: 'Archivo Black',      value: 'Archivo Black',      google: true  },
   { label: 'System UI',          value: 'system-ui',          google: false },
 ];
 
@@ -127,13 +129,24 @@ const SAMPLE_CYCLE_IMAGES = [
   'data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxOTIwIiBoZWlnaHQ9IjEwODAiIHZpZXdCb3g9IjAgMCAxOTIwIDEwODAiPgogIDxkZWZzPgogICAgPGxpbmVhckdyYWRpZW50IGlkPSJnIiB4MT0iMCIgeTE9IjAiIHgyPSIxIiB5Mj0iMSI+CiAgICAgIDxzdG9wIG9mZnNldD0iMCIgc3RvcC1jb2xvcj0iIzNhMWYyZSIvPgogICAgICA8c3RvcCBvZmZzZXQ9IjEiIHN0b3AtY29sb3I9IiM1YzJmNDciLz4KICAgIDwvbGluZWFyR3JhZGllbnQ+CiAgPC9kZWZzPgogIDxyZWN0IHdpZHRoPSIxOTIwIiBoZWlnaHQ9IjEwODAiIGZpbGw9InVybCgjZykiLz4KICA8Y2lyY2xlIGN4PSIxNjUwIiBjeT0iMTgwIiByPSIyNjAiIGZpbGw9IiNmMGM5YTAiIG9wYWNpdHk9IjAuMDgiLz4KICA8Y2lyY2xlIGN4PSIyMjAiIGN5PSI5MjAiIHI9IjM0MCIgZmlsbD0iI2YwYzlhMCIgb3BhY2l0eT0iMC4wNiIvPgogIDx0ZXh0IHg9Ijk2MCIgeT0iNTAwIiBmb250LWZhbWlseT0iR2VvcmdpYSwgc2VyaWYiIGZvbnQtc2l6ZT0iMTUwIiBmaWxsPSIjZjBjOWEwIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXdlaWdodD0iNzAwIj5BTE1PU1QgVElNRTwvdGV4dD4KICA8dGV4dCB4PSI5NjAiIHk9IjYwMCIgZm9udC1mYW1pbHk9IkFyaWFsLCBzYW5zLXNlcmlmIiBmb250LXNpemU9IjQyIiBmaWxsPSIjZmZmZmZmY2MiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGxldHRlci1zcGFjaW5nPSIyIj5TaWxlbmNlIHlvdXIgcGhvbmVzPC90ZXh0PgogIDxyZWN0IHg9Ijg2MCIgeT0iNjYwIiB3aWR0aD0iMjAwIiBoZWlnaHQ9IjQiIGZpbGw9IiNmMGM5YTAiLz4KPC9zdmc+',
 ];
 
+// A built-in theme's canvas filled with one of the bundled backgrounds
+// (src/backgrounds, see backgrounds/backgrounds.js). Its colour is the
+// picture's average — shown while it loads, and kept if the fill is switched
+// to Solid; color2/angle are the old default gradient, there for Gradient.
+function poolColor(id) {
+  return (window.KairoBackgrounds || []).find(b => b.id === id)?.color || '#0b0b0f';
+}
+function poolCanvas(id) {
+  return { id: 'bg', type: 'background', name: 'Canvas', visible: true,
+    fill: 'image', src: `backgrounds/${id}.jpg`, color: poolColor(id), opacity: 100, color2: '#1c1c30', angle: 160 };
+}
+
 const DEFAULT_LOOKS = [
   {
     id: 'full-bg', name: 'Full — Background', layout: 'fullscreen', animation: 'fade',
     groupId: 'grp-bible', groupName: 'Bible',
     layers: [
-      { id: 'bg', type: 'background', name: 'Canvas', visible: true,
-        fill: 'gradient', color: '#0b0b0f', opacity: 100, color2: '#1c1c30', angle: 160 },
+      poolCanvas('midnight'),
       // h bumped 440 -> 700 (y unchanged) — owner: "for full screen or block
       // themes, the text area should use a sizable height by default so
       // that text don't cut off due to the constraint." A fixed-height text
@@ -242,7 +255,7 @@ const DEFAULT_LOOKS = [
       { id: 'bg', type: 'background', name: 'Canvas', visible: true,
         fill: 'transparent', fillBefore: 'solid', color: '#000000', opacity: 100, color2: '#000000', angle: 0 },
       { id: 'panel', type: 'background', name: 'Filled Half', visible: true,
-        fill: 'gradient', color: '#0b0b0f', opacity: 100, color2: '#1c1c30', angle: 160, radius: 0,
+        fill: 'image', src: 'backgrounds/midnight.jpg', color: poolColor('midnight'), opacity: 100, color2: '#1c1c30', angle: 160, radius: 0,
         pos: { x: 0, y: 0, w: 960, h: 1080 } },
       { id: 'verse', type: 'text', name: 'Verse', visible: true, binding: 'verse', customText: '',
         pos: { x: 88, y: 300, w: 784, h: 430 },
@@ -264,7 +277,7 @@ const DEFAULT_LOOKS = [
       { id: 'bg', type: 'background', name: 'Canvas', visible: true,
         fill: 'transparent', fillBefore: 'solid', color: '#000000', opacity: 100, color2: '#000000', angle: 0 },
       { id: 'panel', type: 'background', name: 'Filled Half', visible: true,
-        fill: 'gradient', color: '#0b0b0f', opacity: 100, color2: '#1c1c30', angle: 160, radius: 0,
+        fill: 'image', src: 'backgrounds/midnight.jpg', color: poolColor('midnight'), opacity: 100, color2: '#1c1c30', angle: 160, radius: 0,
         pos: { x: 960, y: 0, w: 960, h: 1080 } },
       { id: 'verse', type: 'text', name: 'Verse', visible: true, binding: 'verse', customText: '',
         pos: { x: 1048, y: 300, w: 784, h: 430 },
@@ -281,7 +294,7 @@ const DEFAULT_LOOKS = [
   {
     // Same left/right split geometry as Split — Left/Right, but both halves
     // are filled (one screen, two languages) instead of one side keying out.
-    // The right panel is a visibly darker version of the same gradient —
+    // One picture runs across the screen; the right panel darkens it more —
     // that's the only visual difference between the two sides, by design —
     // so the source language (left) and translation (right) read as two
     // distinct panels at a glance. Right side text uses the 'verse_translated'
@@ -291,13 +304,12 @@ const DEFAULT_LOOKS = [
     id: 'multi-language', name: 'Multi-Language', layout: 'multi-language', animation: 'fade',
     groupId: 'grp-bible', groupName: 'Bible',
     layers: [
-      { id: 'bg', type: 'background', name: 'Canvas', visible: true,
-        fill: 'gradient', color: '#0b0b0f', opacity: 100, color2: '#1c1c30', angle: 160 },
+      poolCanvas('midnight'),
       { id: 'panel-left', type: 'background', name: 'Left Panel', visible: true,
-        fill: 'gradient', color: '#0b0b0f', opacity: 100, color2: '#1c1c30', angle: 160, radius: 0,
+        fill: 'solid', color: '#000000', opacity: 10, color2: '#1c1c30', angle: 160, radius: 0,
         pos: { x: 0, y: 0, w: 960, h: 1080 } },
       { id: 'panel-right', type: 'background', name: 'Right Panel (darker)', visible: true,
-        fill: 'gradient', color: '#020203', opacity: 100, color2: '#0a0a12', angle: 160, radius: 0,
+        fill: 'solid', color: '#000000', opacity: 45, color2: '#0a0a12', angle: 160, radius: 0,
         pos: { x: 960, y: 0, w: 960, h: 1080 } },
       { id: 'verse', type: 'text', name: 'Verse (source)', visible: true, binding: 'verse', customText: '',
         pos: { x: 88, y: 300, w: 784, h: 430 },
@@ -380,8 +392,7 @@ const DEFAULT_LOOKS = [
     id: 'scroll-fill', name: 'Scroll — Fill Screen', layout: 'scroll-fill', animation: 'cut',
     groupId: 'grp-slides', groupName: 'Slides',
     layers: [
-      { id: 'bg', type: 'background', name: 'Canvas', visible: true,
-        fill: 'gradient', color: '#0b0b0f', opacity: 100, color2: '#1c1c30', angle: 160 },
+      poolCanvas('charcoal'),
       { id: 'text', type: 'text', name: 'Scroll Text', visible: true, binding: 'custom', customText: 'Type your announcement here…',
         font: { family: 'Manrope', size: 140, weight: 800, italic: false, lineHeight: 1, letterSpacing: 0, transform: 'none' },
         color: '#ffffff', opacity: 100, align: 'left',
@@ -571,8 +582,7 @@ const DEFAULT_LOOKS = [
     id: 'timer-big', name: 'Timer — Big Countdown', layout: 'fullscreen', animation: 'cut',
     groupId: 'grp-timer', groupName: 'Timer',
     layers: [
-      { id: 'bg', type: 'background', name: 'Canvas', visible: true,
-        fill: 'gradient', color: '#0b0b0f', opacity: 100, color2: '#1c1c30', angle: 160 },
+      poolCanvas('stage'),
       { id: 'timer', type: 'text', name: 'Countdown', visible: true, binding: 'timer', customText: '',
         pos: { x: 160, y: 380, w: 1600, h: 320 },
         font: { family: 'Manrope', size: 180, weight: 800, italic: false, lineHeight: 1, letterSpacing: 0, transform: 'none' },
@@ -594,8 +604,7 @@ const DEFAULT_LOOKS = [
     id: 'timer-preservice-split', name: 'Timer — Pre-Service Split', layout: 'fullscreen', animation: 'cut',
     groupId: 'grp-timer', groupName: 'Timer',
     layers: [
-      { id: 'bg', type: 'background', name: 'Canvas', visible: true,
-        fill: 'gradient', color: '#0b0b0f', opacity: 100, color2: '#1c1c30', angle: 160 },
+      poolCanvas('midnight'),
       { id: 'cycle', type: 'image-cycle', name: 'Image Cycle', visible: true,
         sources: [...SAMPLE_CYCLE_IMAGES], fit: 'cover', opacity: 100, radius: 0,
         pos: { x: 0, y: 0, w: 1440, h: 1080 } },
@@ -616,8 +625,7 @@ const DEFAULT_LOOKS = [
     id: 'timer-stacked-min-sec', name: 'Timer — Stacked Minute/Second', layout: 'fullscreen', animation: 'cut',
     groupId: 'grp-timer', groupName: 'Timer',
     layers: [
-      { id: 'bg', type: 'background', name: 'Canvas', visible: true,
-        fill: 'gradient', color: '#0b0b0f', opacity: 100, color2: '#1c1c30', angle: 160 },
+      poolCanvas('ember'),
       { id: 'minute', type: 'text', name: 'Minute', visible: true, binding: 'timer-m', customText: '',
         pos: { x: 760, y: 340, w: 400, h: 220 },
         font: { family: 'Manrope', size: 180, weight: 800, italic: false, lineHeight: 1, letterSpacing: 0, transform: 'none' },
@@ -636,7 +644,134 @@ const DEFAULT_LOOKS = [
         color: '#ffffff', opacity: 100, align: 'center',
         shadow: { ...TXT_SHADOW_SOFT }, outline: { ...NO_OUTLINE } },
     ],
+  },  // ── Motion themes (motion_graphics.js) ────────────────────────────────
+  // Every moving part is a 'motion' layer, so its colours, count, speed and
+  // placement are editable like anything else on the canvas.
+  {
+    // The countdown inside a ring that runs down with it, over slow light.
+    id: 'timer-ring', name: 'Timer — Progress Ring', layout: 'fullscreen', animation: 'cut',
+    groupId: 'grp-timer', groupName: 'Timer',
+    layers: [
+      poolCanvas('ocean'),
+      { id: 'light', type: 'motion', name: 'Aurora', visible: true, opacity: 100, pos: { x: 0, y: 0, w: 1920, h: 1080 },
+        graphic: { kind: 'aurora', colors: ['#4f46e5', '#0ea5e9', '#a855f7'], count: 3, size: 90, intensity: 38, speed: 0.5, blend: 'glow', seed: 42 } },
+      { id: 'ring', type: 'motion', name: 'Progress Ring', visible: true, opacity: 100, pos: { x: 600, y: 180, w: 720, h: 720 },
+        graphic: { kind: 'ring', colors: ['#ffffff', '#ffffff', '#e8a64a', '#e8404a'], thickness: 3, trackOpacity: 14, direction: 'deplete', caps: 'round', glow: 40, stateColors: true, seed: 1 } },
+      { id: 'timer', type: 'text', name: 'Countdown', visible: true, binding: 'timer', customText: '',
+        pos: { x: 600, y: 440, w: 720, h: 200 },
+        font: { family: 'Manrope', size: 150, weight: 800, italic: false, lineHeight: 1, letterSpacing: 0, transform: 'none' },
+        color: '#ffffff', opacity: 100, align: 'center',
+        shadow: { ...TXT_SHADOW_SOFT }, outline: { ...NO_OUTLINE } },
+    ],
   },
+  {
+    // A broadcast studio clock: sixty dots, one going dark each second.
+    id: 'timer-studio-clock', name: 'Timer — Studio Clock', layout: 'fullscreen', animation: 'cut',
+    groupId: 'grp-timer', groupName: 'Timer',
+    layers: [
+      { id: 'bg', type: 'background', name: 'Canvas', visible: true,
+        fill: 'solid', color: '#050507', opacity: 100, color2: '#050507', angle: 0 },
+      { id: 'dots', type: 'motion', name: 'Seconds Dots', visible: true, opacity: 100, pos: { x: 540, y: 120, w: 840, h: 840 },
+        graphic: { kind: 'dots', colors: ['#ff453a', '#ffffff', '#ffd60a', '#ffffff'], count: 60, size: 55, trackOpacity: 10, shape: 'circle', mode: 'seconds', glow: 45, stateColors: true, seed: 1 } },
+      { id: 'timer', type: 'text', name: 'Countdown', visible: true, binding: 'timer', customText: '',
+        pos: { x: 560, y: 420, w: 800, h: 240 },
+        font: { family: 'Bebas Neue', size: 220, weight: 400, italic: false, lineHeight: 1, letterSpacing: 6, transform: 'none' },
+        color: '#ff453a', opacity: 100, align: 'center', warnColor: '#ffd60a', overtimeColor: '#ffffff',
+        shadow: { enabled: true, color: '#ff453a', opacity: 45, blur: 24, x: 0, y: 0 }, outline: { ...NO_OUTLINE } },
+    ],
+  },
+  {
+    // Pre-service warmth: beams of light, a few sparkles, the countdown and a
+    // bar that runs down under it.
+    id: 'timer-rays', name: 'Timer — Light Rays', layout: 'fullscreen', animation: 'cut',
+    groupId: 'grp-timer', groupName: 'Timer',
+    layers: [
+      { id: 'bg', type: 'background', name: 'Canvas', visible: true,
+        fill: 'gradient', color: '#1d140a', opacity: 100, color2: '#0a0a0d', angle: 180 },
+      { id: 'rays', type: 'motion', name: 'Light Rays', visible: true, opacity: 100, pos: { x: 0, y: 0, w: 1920, h: 1080 },
+        graphic: { kind: 'rays', colors: ['#ffe7b0'], count: 16, spread: 30, intensity: 26, originX: 50, originY: -12, motion: 'sway', speed: 0.7, seed: 1 } },
+      { id: 'sparkles', type: 'motion', name: 'Sparkles', visible: true, opacity: 100, pos: { x: 0, y: 0, w: 1920, h: 1080 },
+        graphic: { kind: 'sparkles', colors: ['#fff4d6'], count: 40, size: 2, intensity: 70, speed: 0.8, seed: 77 } },
+      { id: 'label', type: 'text', name: 'Label', visible: true, binding: 'custom', customText: 'Service begins in',
+        pos: { x: 360, y: 330, w: 1200, h: 80 },
+        font: { family: 'Manrope', size: 40, weight: 700, italic: false, lineHeight: 1.2, letterSpacing: 8, transform: 'uppercase' },
+        color: '#ffe7b0', opacity: 90, align: 'center',
+        shadow: { ...TXT_SHADOW_NONE }, outline: { ...NO_OUTLINE } },
+      { id: 'timer', type: 'text', name: 'Countdown', visible: true, binding: 'timer', customText: '',
+        pos: { x: 360, y: 420, w: 1200, h: 240 },
+        font: { family: 'Manrope', size: 190, weight: 800, italic: false, lineHeight: 1, letterSpacing: 0, transform: 'none' },
+        color: '#ffffff', opacity: 100, align: 'center',
+        shadow: { ...TXT_SHADOW_SOFT }, outline: { ...NO_OUTLINE } },
+      { id: 'bar', type: 'motion', name: 'Progress Bar', visible: true, opacity: 100, pos: { x: 660, y: 720, w: 600, h: 10 },
+        graphic: { kind: 'bar', colors: ['#ffe7b0', '#ffffff', '#e8a64a', '#e8404a'], trackOpacity: 16, radius: 100, direction: 'deplete', glow: 30, stateColors: true, seed: 1 } },
+    ],
+  },
+  {
+    // Full — Background's layout over slow-moving light.
+    id: 'full-aurora', name: 'Full — Aurora', layout: 'fullscreen', animation: 'fade',
+    groupId: 'grp-bible', groupName: 'Bible',
+    layers: [
+      { id: 'bg', type: 'background', name: 'Canvas', visible: true,
+        fill: 'gradient', color: '#07070c', opacity: 100, color2: '#10101c', angle: 160 },
+      { id: 'light', type: 'motion', name: 'Aurora', visible: true, opacity: 100, pos: { x: 0, y: 0, w: 1920, h: 1080 },
+        graphic: { kind: 'aurora', colors: ['#6d28d9', '#0ea5e9', '#db2777'], count: 4, size: 90, intensity: 42, speed: 0.45, blend: 'glow', seed: 5 } },
+      { id: 'verse', type: 'text', name: 'Verse', visible: true, binding: 'verse', customText: '',
+        pos: { x: 210, y: 80, w: 1500, h: 700 },
+        font: { family: 'Manrope', size: 64, weight: 500, italic: false, lineHeight: 1.35, letterSpacing: 0, transform: 'none' },
+        color: '#ffffff', opacity: 100, align: 'center',
+        shadow: { ...TXT_SHADOW_SOFT }, outline: { ...NO_OUTLINE } },
+      { id: 'ref', type: 'text', name: 'Reference', visible: true, binding: 'reference', customText: '',
+        pos: { x: 210, y: 820, w: 1500, h: 0 },
+        font: { family: 'Manrope', size: 28, weight: 600, italic: false, lineHeight: 1.2, letterSpacing: 4, transform: 'uppercase' },
+        color: '#ffffff', opacity: 65, align: 'center',
+        shadow: { ...TXT_SHADOW_NONE }, outline: { ...NO_OUTLINE } },
+    ],
+  },
+  {
+    // Warm out-of-focus lights rising behind the lyrics.
+    id: 'lyrics-bokeh', name: 'Lyrics — Bokeh', layout: 'fullscreen', animation: 'fade',
+    groupId: 'grp-lyrics', groupName: 'Lyrics',
+    layers: [
+      { id: 'bg', type: 'background', name: 'Canvas', visible: true,
+        fill: 'gradient', color: '#120c06', opacity: 100, color2: '#060506', angle: 170 },
+      { id: 'bokeh', type: 'motion', name: 'Bokeh', visible: true, opacity: 100, pos: { x: 0, y: 0, w: 1920, h: 1080 },
+        graphic: { kind: 'bokeh', colors: ['#ffd89b', '#ffb35c', '#ffffff'], count: 28, size: 12, softness: 60, intensity: 42, direction: 'up', speed: 0.55, seed: 21 } },
+      { id: 'verse', type: 'text', name: 'Lyrics', visible: true, binding: 'verse', customText: '',
+        pos: { x: 140, y: 250, w: 1640, h: 600 },
+        font: { family: 'Montserrat', size: 88, weight: 800, italic: false, lineHeight: 1.2, letterSpacing: 0, transform: 'uppercase' },
+        color: '#ffffff', opacity: 100, align: 'center',
+        shadow: { enabled: true, color: '#000000', opacity: 70, blur: 22, x: 0, y: 4 }, outline: { ...NO_OUTLINE } },
+      { id: 'ref', type: 'text', name: 'Song Title', visible: false, binding: 'reference', customText: '',
+        pos: { x: 140, y: 880, w: 1640, h: 0 },
+        font: { family: 'Montserrat', size: 26, weight: 600, italic: false, lineHeight: 1.2, letterSpacing: 6, transform: 'uppercase' },
+        color: '#ffffff', opacity: 55, align: 'center',
+        shadow: { ...TXT_SHADOW_NONE }, outline: { ...NO_OUTLINE } },
+    ],
+  },
+  {
+    // A night sky of twinkling stars behind the lyrics.
+    id: 'lyrics-starlight', name: 'Lyrics — Starlight', layout: 'fullscreen', animation: 'fade',
+    groupId: 'grp-lyrics', groupName: 'Lyrics',
+    layers: [
+      { id: 'bg', type: 'background', name: 'Canvas', visible: true,
+        fill: 'gradient', color: '#020412', opacity: 100, color2: '#0b1030', angle: 180 },
+      { id: 'stars', type: 'motion', name: 'Sparkles', visible: true, opacity: 100, pos: { x: 0, y: 0, w: 1920, h: 1080 },
+        graphic: { kind: 'sparkles', colors: ['#ffffff', '#c7d2fe'], count: 90, size: 3, intensity: 90, speed: 0.8, seed: 8 } },
+      { id: 'verse', type: 'text', name: 'Lyrics', visible: true, binding: 'verse', customText: '',
+        pos: { x: 160, y: 250, w: 1600, h: 600 },
+        font: { family: 'Manrope', size: 76, weight: 700, italic: false, lineHeight: 1.25, letterSpacing: 0, transform: 'none' },
+        color: '#ffffff', opacity: 100, align: 'center',
+        shadow: { enabled: true, color: '#000000', opacity: 70, blur: 18, x: 0, y: 4 }, outline: { ...NO_OUTLINE } },
+      { id: 'ref', type: 'text', name: 'Song Title', visible: false, binding: 'reference', customText: '',
+        pos: { x: 160, y: 880, w: 1600, h: 0 },
+        font: { family: 'Manrope', size: 24, weight: 700, italic: false, lineHeight: 1.2, letterSpacing: 4, transform: 'uppercase' },
+        color: '#ffffff', opacity: 60, align: 'center',
+        shadow: { ...TXT_SHADOW_NONE }, outline: { ...NO_OUTLINE } },
+    ],
+  },
+  // The Announcements pack (announcement_pack.js) — the same slides the
+  // Timer tab's pre-service loop plays, as themes for a Slides item.
+  ...(window.KairoAnnouncements ? window.KairoAnnouncements.themes() : []),
 ];
 
 // Load saved looks from localStorage and back-fill any NEW default-look IDs
@@ -720,8 +855,43 @@ let looks = (function loadLooks() {
     // (below) makes sure it's saveLooks()'d so it isn't relying on that
     // recheck to run again either.
     let cycleSampleMigrated = false;
+    // Built-in themes that shipped on a flat default gradient now ship on a
+    // bundled background picture (src/backgrounds). A stored copy whose
+    // fills are all STILL exactly the old shipped ones takes the new
+    // defaults; a theme the operator recoloured keeps its own. Gated and
+    // force-persisted, same as the align migration above.
+    const BACKGROUND_MIGRATION_KEY = 'kairo-migrated-builtin-backgrounds';
+    const runBackgroundMigration = !localStorage.getItem(BACKGROUND_MIGRATION_KEY);
+    if (runBackgroundMigration) localStorage.setItem(BACKGROUND_MIGRATION_KEY, '1');
+    let backgroundMigrated = false;
+    const OLD_GRADIENT = { fill: 'gradient', color: '#0b0b0f', color2: '#1c1c30', angle: 160, opacity: 100 };
+    const OLD_FILLS = {
+      'full-bg': { bg: OLD_GRADIENT }, 'scroll-fill': { bg: OLD_GRADIENT },
+      'timer-big': { bg: OLD_GRADIENT }, 'timer-preservice-split': { bg: OLD_GRADIENT },
+      'timer-stacked-min-sec': { bg: OLD_GRADIENT },
+      'split-left': { panel: OLD_GRADIENT }, 'split-right': { panel: OLD_GRADIENT },
+      'multi-language': { bg: OLD_GRADIENT, 'panel-left': OLD_GRADIENT,
+        'panel-right': { ...OLD_GRADIENT, color: '#020203', color2: '#0a0a12' } },
+    };
     stored.forEach(l => {
       const def = defaultsById.get(l.id);
+      const oldFills = runBackgroundMigration && def && OLD_FILLS[l.id];
+      if (oldFills) {
+        const pairs = Object.keys(oldFills).map(id => [
+          (l.layers || []).find(ly => ly.id === id && ly.type === 'background'),
+          def.layers.find(ly => ly.id === id && ly.type === 'background'),
+          oldFills[id],
+        ]);
+        const untouched = pairs.every(([ly, shipped, was]) => ly && shipped && Object.keys(was).every(k => ly[k] === was[k]));
+        if (untouched) {
+          pairs.forEach(([ly, shipped]) => {
+            ['fill', 'src', 'color', 'color2', 'angle', 'opacity'].forEach(k => {
+              if (shipped[k] === undefined) delete ly[k]; else ly[k] = shipped[k];
+            });
+          });
+          backgroundMigrated = true;
+        }
+      }
       if (def && def.groupId && !l.groupId) { l.groupId = def.groupId; l.groupName = def.groupName; }
       if (l.id === 'timer-preservice-split') {
         const cycle = (l.layers || []).find(ly => ly.type === 'image-cycle');
@@ -793,7 +963,7 @@ let looks = (function loadLooks() {
     // does (the align one is gated, so without a forced write here it would
     // silently never actually persist on an install that never happens to
     // save an unrelated theme edit — the gate key alone doesn't get you that).
-    if (cycleSampleMigrated || alignMigrated || textHeightMigrated) {
+    if (cycleSampleMigrated || alignMigrated || textHeightMigrated || backgroundMigrated) {
       try { localStorage.setItem(LOOKS_KEY, JSON.stringify(result)); } catch {}
     }
     return result;
@@ -808,6 +978,7 @@ let looks = (function loadLooks() {
   localStorage.setItem('kairo-migrated-songtitle-default-off', '1');
   localStorage.setItem('kairo-migrated-bible-center-align', '1');
   localStorage.setItem('kairo-migrated-fullscreen-text-height', '1');
+  localStorage.setItem('kairo-migrated-builtin-backgrounds', '1');
   const legacy = JSON.parse(localStorage.getItem('kairo-looks-v2') || 'null');
   const custom = Array.isArray(legacy) ? legacy.filter(l => l && !LEGACY_BUILTIN_IDS.has(l.id)) : [];
   return [...DEFAULT_LOOKS, ...custom];
@@ -866,6 +1037,12 @@ let layerClipboard = [];
 // "activeLook is a real theme in the looks array" — Theme Studio's own
 // behavior in tsMode === 'theme' must stay byte-for-byte unchanged.
 let tsMode = 'theme'; // 'theme' | 'item'
+// Set by Play (Animate tab / canvas bar): the next renderPreview replays every
+// layer's build-in once.
+let tsPlayBuilds = false;
+// A drag-a-box selection in progress (tsBeginMarquee).
+let tsMarquee = null;   // { startX, startY, stageRect, box, armed, bgLayer }
+function tsPlayAnimations() { tsPlayBuilds = true; renderPreview(); }
 let tsItemCtx = null; // { item, slideIndex, baseLook } — set only while tsMode === 'item'
 let itemUndoStack = [], itemRedoStack = [], itemPendingCheckpoint = null, itemAutosaveTimer = null;
 
@@ -1378,6 +1555,7 @@ function renderLayersList() {
     typeIcon.className = 'ts-layer-type-icon';
     typeIcon.textContent = layer.type === 'image' ? '▣'
                          : layer.type === 'image-cycle' ? '▤'
+                         : layer.type === 'motion' ? '✺'
                          : layer.type === 'background' ? '■'
                          : 'T';
 
@@ -1642,8 +1820,12 @@ function renderPreview() {
   // Dynamic preview scale — real stage width over design width, so fonts and
   // free positions render at true relative size whatever the modal size is.
   const pxScale = (stage.clientWidth / TS_DESIGN_W) || SCALE;
+  // "Play" (tsPlayBuilds) replays every layer's build-in once; any other
+  // repaint — every edit is one — shows the finished slide.
+  const playing = tsPlayBuilds;
+  tsPlayBuilds = false;
 
-  activeLook.layers.forEach(layer => {
+  const paintLayer = (layer) => {
     if (!layer.visible) return;
 
     if (layer.type === 'background') {
@@ -1660,6 +1842,9 @@ function renderPreview() {
         const c1 = hexOpacity(layer.color, layer.opacity);
         const c2 = hexOpacity(layer.color2, layer.opacity);
         div.style.background = `linear-gradient(${layer.angle}deg, ${c1}, ${c2})`;
+      } else if (layer.fill === 'image') {
+        div.style.background = imageFillCss(layer);
+        if ((layer.opacity ?? 100) < 100) div.style.opacity = String((layer.opacity ?? 100) / 100);
       } else if (layer.fill === 'blur') {
         div.style.background = hexOpacity(layer.color, layer.opacity);
         div.style.backdropFilter = 'blur(8px)';
@@ -1746,10 +1931,15 @@ function renderPreview() {
         // live countdown and switching to the actual display to check.
         // Same outer-wrapper/inner-art split as display.html's own
         // startCycleMotion, for the same clipping reason.
-        div.style.cssText = posCss + 'overflow:hidden;';
+        // Clipped one level in, so the selection handles and rotate handle
+        // (children of `div`) aren't clipped with the zoom.
+        div.style.cssText = posCss;
+        const clip = document.createElement('div');
+        clip.style.cssText = 'position:absolute;inset:0;overflow:hidden;border-radius:inherit;';
         const art = document.createElement('div');
         art.style.cssText = `position:absolute;inset:0;background-repeat:no-repeat;background-position:center;background-image:url('${layer.src}');background-size:${fit === 'fill' ? '100% 100%' : fit};animation:kairo-kenburns 18s ease-in-out infinite alternate;`;
-        div.appendChild(art);
+        clip.appendChild(art);
+        div.appendChild(clip);
       } else {
         div.style.cssText = posCss + `
           background-image:url('${layer.src}');
@@ -1758,6 +1948,7 @@ function renderPreview() {
           background-repeat:no-repeat;
         `;
       }
+      applyImageLook(div, layer);
       stage.appendChild(div);
       if (div.tagName === 'VIDEO') div.play().catch(() => {});
       // Same as the background branch above — full drag/resize in item
@@ -1784,16 +1975,19 @@ function renderPreview() {
         height:${(p.h / TS_DESIGN_H * 100)}%;
         opacity:${(layer.opacity ?? 100) / 100};
         border-radius:${((layer.radius || 0) * pxScale).toFixed(1)}px;
-        ${kenBurns ? 'overflow:hidden;' : (first ? `background-image:url('${first}');` : 'background:#1a1a1e;')}
+        ${kenBurns ? '' : (first ? `background-image:url('${first}');` : 'background:#1a1a1e;')}
         ${kenBurns ? '' : `background-size:${fit === 'fill' ? '100% 100%' : fit};background-position:center;background-repeat:no-repeat;`}
         ${layer.rotation ? `transform: rotate(${layer.rotation}deg);` : ''}
       `;
       // Live in the editor too — same reasoning as the plain 'image'
       // branch above.
       if (kenBurns) {
+        const clip = document.createElement('div');
+        clip.style.cssText = 'position:absolute;inset:0;overflow:hidden;border-radius:inherit;';
         const art = document.createElement('div');
         art.style.cssText = `position:absolute;inset:0;background-repeat:no-repeat;background-position:center;background-image:url('${first}');background-size:${fit === 'fill' ? '100% 100%' : fit};animation:kairo-kenburns 18s ease-in-out infinite alternate;`;
-        div.appendChild(art);
+        clip.appendChild(art);
+        div.appendChild(clip);
       }
       if ((layer.sources || []).length > 1) {
         const badge = document.createElement('span');
@@ -1801,12 +1995,37 @@ function renderPreview() {
         badge.textContent = `1 / ${layer.sources.length}`;
         div.appendChild(badge);
       }
+      applyImageLook(div, layer);
       stage.appendChild(div);
       // Full drag/resize in item mode too — this is exactly the "the
       // background isn't editable" gap: an Image Cycle layer is a base
       // theme layer, same as any image/background, and those used to have
       // no drag wiring at all in item mode because there was nowhere for
       // the change to persist to (see writeItemSlideStyleFromSynthetic).
+      tsDecorateLayerEl(div, layer, true);
+      return;
+    }
+
+    // Motion graphic (motion_graphics.js) — animated here too, and a timer
+    // kind loops a sample countdown ('demo'), so its motion can be judged
+    // while picking colours and speed rather than only on the live output.
+    if (layer.type === 'motion') {
+      const p = layer.pos || { x: 0, y: 0, w: TS_DESIGN_W, h: TS_DESIGN_H };
+      const div = document.createElement('div');
+      div.style.cssText = `
+        position:absolute;
+        left:${(p.x / TS_DESIGN_W * 100)}%;
+        top:${(p.y / TS_DESIGN_H * 100)}%;
+        width:${(p.w / TS_DESIGN_W * 100)}%;
+        height:${(p.h / TS_DESIGN_H * 100)}%;
+        opacity:${(layer.opacity ?? 100) / 100};
+        ${layer.rotation ? `transform: rotate(${layer.rotation}deg);` : ''}
+      `;
+      if (window.KairoMotion) {
+        const delay = playing ? window.KairoMotion.normalizeBuild(layer.build).delay : 0;
+        div.appendChild(window.KairoMotion.build(layer.graphic, { mode: 'demo', box: { w: p.w, h: p.h }, delay }));
+      }
+      stage.appendChild(div);
       tsDecorateLayerEl(div, layer, true);
       return;
     }
@@ -1827,6 +2046,7 @@ function renderPreview() {
         letter-spacing: ${(layer.font.letterSpacing * pxScale).toFixed(2)}px;
         text-transform: ${layer.font.transform};
         text-align: ${layer.align};
+        ${layer.binding === 'custom' ? 'white-space: pre-line;' : ''}
         padding: ${layout === 'fullscreen' ? '8%' : '3% 5%'};
       `;
 
@@ -1881,7 +2101,7 @@ function renderPreview() {
         div.style.width     = (layer.pos.w / TS_DESIGN_W * 100) + '%';
         div.style.right     = 'auto';
         div.style.bottom    = 'auto';
-        div.style.transform = 'none';
+        div.style.transform = layer.rotation ? `rotate(${layer.rotation}deg)` : 'none';
         div.style.padding   = '0';
         if (layer.pos.h > 0) div.style.height = (layer.pos.h / TS_DESIGN_H * 100) + '%';
         // Entrance (layer.entrance) only applies to a free-positioned
@@ -1918,6 +2138,8 @@ function renderPreview() {
         // the Live Preview panel/real output (see renderPreviewScreen/
         // buildLayerDOM), so a Motion theme actually shows the effect while
         // it's being designed, not just once sent live.
+      } else if (hasAccentMarkup(layerTextContent(layer), layer.accentColor)) {
+        div.innerHTML = accentHtml(layerTextContent(layer), layer.accentColor);
       } else {
         div.textContent = layerTextContent(layer);
       }
@@ -2009,6 +2231,15 @@ function renderPreview() {
       // Load font
       if (layer.font.family !== 'system-ui') loadGoogleFont(layer.font.family);
     }
+  };
+  // Idle motion runs here too, so it can be judged while editing; build-ins
+  // only when Play asked for them.
+  const unit = ((stage.clientHeight || TS_DESIGN_H * pxScale) / 100).toFixed(2) + 'px';
+  activeLook.layers.forEach(layer => {
+    const before = stage.childNodes.length;
+    paintLayer(layer);
+    if (!window.KairoMotion) return;
+    for (let i = before; i < stage.childNodes.length; i++) window.KairoMotion.animateLayer(stage.childNodes[i], layer, { builds: playing, unit });
   });
 
   // Auto-fit the verse in the preview so long verses (e.g. Esther 8:9) shrink to
@@ -2032,7 +2263,119 @@ function renderPreview() {
       h.style.top = (tsSnapGuides.y / TS_DESIGN_H * 100) + '%';
       stage.appendChild(h);
     }
+    // What the gesture is doing, in numbers, under the layer — position while
+    // moving, size (and type size, for a text corner) while resizing, the
+    // angle while rotating.
+    const l = tsDrag.layer, p = l?.pos;
+    if (tsDrag.armed && p && tsDrag.mode !== 'group-scale') {
+      const badge = document.createElement('div');
+      badge.className = 'ts-drag-badge';
+      if (tsDrag.mode === 'move') badge.textContent = `X ${p.x}   Y ${p.y}`;
+      else if (tsDrag.mode === 'rotate') badge.textContent = `${l.rotation || 0}°`;
+      else {
+        const h = p.h > 0 ? p.h : Math.round(tsEffectiveH(l, p));
+        badge.textContent = `${p.w} × ${h}` + (l.type === 'text' && l.font && tsDrag.startFont && l.font.size !== tsDrag.startFont.size ? `   ${l.font.size} px type` : '');
+      }
+      const bottom = p.y + (p.h > 0 ? p.h : tsEffectiveH(l, p));
+      badge.style.left = ((p.x + p.w / 2) / TS_DESIGN_W * 100) + '%';
+      badge.style.top = (Math.min(bottom + 28, TS_DESIGN_H - 10) / TS_DESIGN_H * 100) + '%';
+      stage.appendChild(badge);
+    }
   }
+  // A multi-selection's own frame, with corner handles to scale the group.
+  if (multiSelectedLayerIds.size >= 2) {
+    const sel = tsSelectedLayers();
+    if (sel.length >= 2) {
+      const b = tsGroupBounds(sel);
+      const f = document.createElement('div');
+      f.className = 'ts-group-frame';
+      f.style.left = (b.x / TS_DESIGN_W * 100) + '%';
+      f.style.top = (b.y / TS_DESIGN_H * 100) + '%';
+      f.style.width = (b.w / TS_DESIGN_W * 100) + '%';
+      f.style.height = (b.h / TS_DESIGN_H * 100) + '%';
+      ['nw', 'ne', 'se', 'sw'].forEach(dir => {
+        const h = document.createElement('div');
+        h.className = `ts-handle ts-handle-${dir}`;
+        h.addEventListener('mousedown', (e) => tsBeginGroupScale(e, dir));
+        f.appendChild(h);
+      });
+      if (tsDrag && tsDrag.mode === 'group-scale' && tsDrag.scale) {
+        const badge = document.createElement('div');
+        badge.className = 'ts-drag-badge';
+        badge.textContent = `${Math.round(tsDrag.scale * 100)}%`;
+        badge.style.left = '50%';
+        badge.style.top = 'calc(100% + 14px)';
+        f.appendChild(badge);
+      }
+      stage.appendChild(f);
+    }
+  }
+  // Drag-a-box selection in progress.
+  if (tsMarquee && tsMarquee.armed) {
+    const m = tsMarquee.box;
+    const r = document.createElement('div');
+    r.className = 'ts-marquee';
+    r.style.left = (m.x / TS_DESIGN_W * 100) + '%';
+    r.style.top = (m.y / TS_DESIGN_H * 100) + '%';
+    r.style.width = (m.w / TS_DESIGN_W * 100) + '%';
+    r.style.height = (m.h / TS_DESIGN_H * 100) + '%';
+    stage.appendChild(r);
+  }
+}
+
+// ── Drag-a-box selection ──────────────────────────────────────────────────
+// Dragging across the canvas's own background (not on a layer) draws a
+// selection box; every layer it touches is selected, ready to move, align or
+// delete together — the artboard gesture from Canva/Figma/Keynote. A plain
+// click without dragging still selects the background, as before.
+function tsBeginMarquee(e, bgLayer) {
+  if (e.button !== 0) return;
+  const stage = tsStageEl();
+  if (!stage) return;
+  e.preventDefault(); e.stopPropagation();
+  tsCommitActiveEdit(null);
+  tsMarquee = { startX: e.clientX, startY: e.clientY, stageRect: stage.getBoundingClientRect(), box: null, armed: false, bgLayer };
+  document.addEventListener('mousemove', tsMarqueeMove);
+  document.addEventListener('mouseup', tsMarqueeEnd);
+}
+function tsMarqueeMove(e) {
+  if (!tsMarquee) return;
+  const { startX, startY, stageRect } = tsMarquee;
+  if (!tsMarquee.armed && Math.hypot(e.clientX - startX, e.clientY - startY) < 4) return;
+  tsMarquee.armed = true;
+  const toX = (cx) => (cx - stageRect.left) / stageRect.width * TS_DESIGN_W;
+  const toY = (cy) => (cy - stageRect.top) / stageRect.height * TS_DESIGN_H;
+  const x0 = toX(startX), y0 = toY(startY), x1 = toX(e.clientX), y1 = toY(e.clientY);
+  tsMarquee.box = { x: Math.min(x0, x1), y: Math.min(y0, y1), w: Math.abs(x1 - x0), h: Math.abs(y1 - y0) };
+  if (!tsMarquee.queued) {
+    tsMarquee.queued = true;
+    requestAnimationFrame(() => { if (tsMarquee) { tsMarquee.queued = false; renderPreview(); } });
+  }
+}
+function tsMarqueeEnd() {
+  document.removeEventListener('mousemove', tsMarqueeMove);
+  document.removeEventListener('mouseup', tsMarqueeEnd);
+  const m = tsMarquee;
+  tsMarquee = null;
+  if (!m) return;
+  if (!m.armed) {
+    // Just a click on the background: select it, as before.
+    if (m.bgLayer && activeLayer !== m.bgLayer) { activeLayer = m.bgLayer; multiSelectedLayerIds = new Set(); renderLayersList(); renderProps(); }
+    renderPreview();
+    return;
+  }
+  const b = m.box;
+  const hit = (activeLook?.layers || []).filter(l => {
+    if (l.visible === false || (l.type === 'background' && !l.pos) || tsCoversCanvas(l)) return false;
+    const p = l.pos || measurePos(l);
+    const h = p.h > 0 ? p.h : tsEffectiveH(l, p);
+    return p.x < b.x + b.w && p.x + p.w > b.x && p.y < b.y + b.h && p.y + h > b.y;
+  });
+  multiSelectedLayerIds = hit.length > 1 ? new Set(hit.map(l => l.id)) : new Set();
+  activeLayer = hit[0] || null;
+  renderLayersList();
+  renderProps();
+  renderPreview();
 }
 
 // Preview-side counterpart to display.html's fitVerse(). Same per-layout height
@@ -2262,6 +2605,34 @@ function tsBeginDrag(e, layer, mode, dir) {
     start: { ...pos },
     stageRect: stage.getBoundingClientRect(),
     group,
+    // A corner scales a text layer's type with its box (see tsDragMove).
+    startFont: layer.font ? { size: layer.font.size, letterSpacing: layer.font.letterSpacing || 0 } : null,
+  };
+  if (mode === 'rotate') {
+    // Rotation turns about the layer's centre, measured on screen.
+    const el = stage.querySelector(`[data-layer-id="${CSS.escape(layer.id)}"]`);
+    const r = (el || stage).getBoundingClientRect();
+    tsDrag.cx = r.left + r.width / 2;
+    tsDrag.cy = r.top + r.height / 2;
+    tsDrag.startAngle = Math.atan2(e.clientY - tsDrag.cy, e.clientX - tsDrag.cx) * 180 / Math.PI;
+    tsDrag.startRot = layer.rotation || 0;
+    tsDrag.armed = true;
+  }
+  document.addEventListener('mousemove', tsDragMove);
+  document.addEventListener('mouseup', tsDragEnd);
+}
+
+function tsBeginGroupScale(e, dir) {
+  if (e.button !== 0) return;
+  e.preventDefault(); e.stopPropagation();
+  const layers = tsSelectedLayers();
+  const stage = tsStageEl();
+  if (layers.length < 2 || !stage) return;
+  const bounds = tsGroupBounds(layers);
+  tsDrag = {
+    mode: 'group-scale', dir, layer: layers[0],
+    startX: e.clientX, startY: e.clientY, stageRect: stage.getBoundingClientRect(),
+    bounds, items: layers.map(l => ({ layer: l, pos: { ...l.pos }, font: l.font ? { ...l.font } : null })),
   };
   document.addEventListener('mousemove', tsDragMove);
   document.addEventListener('mouseup', tsDragEnd);
@@ -2285,6 +2656,30 @@ function tsDragMove(e) {
   const { layer, mode, start, stageRect } = tsDrag;
   const dx = (e.clientX - tsDrag.startX) / stageRect.width  * TS_DESIGN_W;
   const dy = (e.clientY - tsDrag.startY) / stageRect.height * TS_DESIGN_H;
+  if (mode === 'group-scale') {
+    // A multi-selection's own corner: everything in it scales together from
+    // the opposite corner — positions, sizes and type sizes — like dragging
+    // the corner of a group in Canva.
+    const { bounds: b, dir: d, items } = tsDrag;
+    const sx = d.includes('e') ? 1 : -1, sy = d.includes('s') ? 1 : -1;
+    const diag = Math.hypot(b.w, b.h) || 1;
+    const scale = Math.max(0.1, 1 + ((sx * dx * b.w + sy * dy * b.h) / diag) / diag);
+    const ax = sx > 0 ? b.x : b.x + b.w, ay = sy > 0 ? b.y : b.y + b.h;
+    items.forEach(({ layer: l, pos: p0, font: f0 }) => {
+      l.pos.x = Math.round(ax + (p0.x - ax) * scale);
+      l.pos.y = Math.round(ay + (p0.y - ay) * scale);
+      l.pos.w = Math.max(4, Math.round(p0.w * scale));
+      if (p0.h > 0) l.pos.h = Math.max(4, Math.round(p0.h * scale));
+      if (l.font && f0) {
+        l.font.size = Math.max(6, Math.round(f0.size * scale));
+        l.font.letterSpacing = +((f0.letterSpacing || 0) * scale).toFixed(2);
+      }
+    });
+    tsDrag.scale = scale;
+    tsSnapGuides = { x: null, y: null };
+    tsScheduleDragRender(layer);
+    return;
+  }
   const xTargets = tsSnapTargetsX(layer.id);
   const yTargets = tsSnapTargetsY(layer.id);
   let snappedX = null, snappedY = null;
@@ -2325,69 +2720,88 @@ function tsDragMove(e) {
         gl.pos.y = Math.round(gs.y + appliedDy);
       });
     }
+  } else if (mode === 'rotate') {
+    // Round the centre, like any design tool: the angle follows the pointer;
+    // Shift steps in 15°, and it settles onto 0/45/90… when within 3°.
+    const a = Math.atan2(e.clientY - tsDrag.cy, e.clientX - tsDrag.cx) * 180 / Math.PI;
+    let r = tsDrag.startRot + (a - tsDrag.startAngle);
+    if (e.shiftKey) r = Math.round(r / 15) * 15;
+    else { const near = Math.round(r / 45) * 45; if (Math.abs(r - near) < 3) r = near; }
+    r = ((((r + 180) % 360) + 360) % 360) - 180;
+    layer.rotation = Math.round(r);
   } else {
-    // Resize from whichever handle was grabbed — the opposite edge stays put,
-    // exactly like dragging a selection corner in a design tool.
+    // Resize from whichever handle was grabbed, the way Canva's artboard
+    // does it: the point opposite the handle stays put; a corner scales the
+    // layer as a unit — proportions kept, and a text layer's type scales with
+    // it (font size, letter spacing) — while a side handle stretches one
+    // dimension (a text box just gets wider or narrower and re-wraps). Shift
+    // frees a corner; Alt/Option resizes from the centre. A rotated layer
+    // resizes along its own sides: the pointer's movement is measured in the
+    // layer's axes, and the anchor is held in place in the canvas's.
     const d = tsDrag.dir;
     const MIN_W = 40, MIN_H = 24;
-    // An auto-height text box gets a real height the moment it's stretched
-    // vertically; horizontal-only drags leave it on auto.
-    const vertical = d.includes('n') || d.includes('s');
     const baseH = start.h > 0 ? start.h : tsEffectiveH(layer, start);
-
-    let nx = start.x, ny = start.y, nw = start.w, nh = start.h;
-
-    if (d.includes('e')) nw = start.w + dx;
-    if (d.includes('w')) { nw = start.w - dx; nx = start.x + dx; }
-    if (vertical) {
-      if (d.includes('s')) nh = baseH + dy;
-      if (d.includes('n')) { nh = baseH - dy; ny = start.y + dy; }
+    const sx = d.includes('e') ? 1 : d.includes('w') ? -1 : 0;
+    const sy = d.includes('s') ? 1 : d.includes('n') ? -1 : 0;
+    const rot = (layer.rotation || 0) * Math.PI / 180;
+    const cos = Math.cos(rot), sin = Math.sin(rot);
+    const lx = dx * cos + dy * sin;
+    const ly = -dx * sin + dy * cos;
+    const k = e.altKey ? 2 : 1;
+    const proportional = sx !== 0 && sy !== 0 && !e.shiftKey;
+    let nw = sx ? start.w + sx * lx * k : start.w;
+    let nh = sy ? baseH + sy * ly * k : baseH;
+    if (proportional) {
+      // How far the corner moved along the box's own diagonal.
+      const diag = Math.hypot(start.w, baseH) || 1;
+      const along = (sx * lx * start.w + sy * ly * baseH) / diag;
+      const scale = Math.max(MIN_W / start.w, 1 + (along * k) / diag);
+      const aspect = layer.type === 'image' && layer.naturalW && layer.naturalH ? layer.naturalW / layer.naturalH : start.w / baseH;
+      nw = start.w * scale;
+      nh = nw / aspect;
     }
+    nw = Math.max(MIN_W, nw);
+    nh = Math.max(MIN_H, nh);
 
-    // Snap only the edge(s) actually being dragged — the anchored edge on
-    // the opposite side must never move.
-    if (d.includes('e')) {
-      const snap = tsClosestSnap(nx + nw, xTargets, TS_SNAP_TOLERANCE);
-      if (snap != null) { nw = snap - nx; snappedX = snap; }
-    } else if (d.includes('w')) {
-      const rightEdge = start.x + start.w;
-      const snap = tsClosestSnap(nx, xTargets, TS_SNAP_TOLERANCE);
-      if (snap != null) { nx = snap; nw = rightEdge - nx; snappedX = snap; }
-    }
-    if (vertical) {
-      if (d.includes('s')) {
+    // The anchor (opposite point, or the centre with Alt) stays where it was.
+    const c0x = start.x + start.w / 2, c0y = start.y + baseH / 2;
+    const ax0 = e.altKey ? 0 : -sx * start.w / 2, ay0 = e.altKey ? 0 : -sy * baseH / 2;
+    const ax1 = e.altKey ? 0 : -sx * nw / 2, ay1 = e.altKey ? 0 : -sy * nh / 2;
+    const wx = c0x + ax0 * cos - ay0 * sin, wy = c0y + ax0 * sin + ay0 * cos;
+    let nx = wx - (ax1 * cos - ay1 * sin) - nw / 2;
+    let ny = wy - (ax1 * sin + ay1 * cos) - nh / 2;
+
+    // Snap the dragged edge(s) onto guides — for a straight, free stretch
+    // only (snapping one edge of a proportional scale would bend it).
+    if (!rot && !proportional && !e.altKey) {
+      if (sx > 0) {
+        const snap = tsClosestSnap(nx + nw, xTargets, TS_SNAP_TOLERANCE);
+        if (snap != null) { nw = snap - nx; snappedX = snap; }
+      } else if (sx < 0) {
+        const right = start.x + start.w;
+        const snap = tsClosestSnap(nx, xTargets, TS_SNAP_TOLERANCE);
+        if (snap != null) { nx = snap; nw = right - snap; snappedX = snap; }
+      }
+      if (sy > 0) {
         const snap = tsClosestSnap(ny + nh, yTargets, TS_SNAP_TOLERANCE);
         if (snap != null) { nh = snap - ny; snappedY = snap; }
-      } else if (d.includes('n')) {
-        const bottomEdge = start.y + baseH;
+      } else if (sy < 0) {
+        const bottom = start.y + baseH;
         const snap = tsClosestSnap(ny, yTargets, TS_SNAP_TOLERANCE);
-        if (snap != null) { ny = snap; nh = bottomEdge - ny; snappedY = snap; }
+        if (snap != null) { ny = snap; nh = bottom - snap; snappedY = snap; }
       }
     }
 
-    // Corner-drag on an image with known natural dimensions: lock the box's
-    // aspect ratio to the image's own rather than letting nw/nh drift apart
-    // (independently derived from raw dx/dy above). That drift is exactly
-    // what made a contain-fit image look like it was zooming while being
-    // resized — the box's constraining dimension kept flipping between
-    // width and height as its aspect ratio wandered away from the image's.
-    // Edge-midpoint handles (a single character in `d`, e.g. just 'e' or
-    // 's') stay free-form — only corners scale as a unit, the same
-    // convention design tools use for image resize handles.
-    if (layer.type === 'image' && layer.naturalW && layer.naturalH && d.length === 2) {
-      const aspect = layer.naturalW / layer.naturalH;
-      nh = nw / aspect;
-      if (d.includes('n')) ny = start.y + baseH - nh; // bottom edge stays anchored
+    if (layer.type === 'text' && proportional && tsDrag.startFont) {
+      const scale = nw / start.w;
+      layer.font.size = Math.max(6, Math.round(tsDrag.startFont.size * scale));
+      layer.font.letterSpacing = +(tsDrag.startFont.letterSpacing * scale).toFixed(2);
     }
-
-    // Clamp without letting the anchored edge drift.
-    if (nw < MIN_W) { if (d.includes('w')) nx = start.x + (start.w - MIN_W); nw = MIN_W; }
-    if (vertical && nh < MIN_H) { if (d.includes('n')) ny = start.y + (baseH - MIN_H); nh = MIN_H; }
-
     layer.pos.x = Math.round(nx);
     layer.pos.y = Math.round(ny);
     layer.pos.w = Math.round(nw);
-    layer.pos.h = Math.round(nh);
+    // An auto-height text box stays auto unless it's stretched vertically.
+    layer.pos.h = start.h > 0 || (sy && !proportional) ? Math.round(nh) : 0;
   }
   tsSnapGuides = { x: snappedX, y: snappedY };
   // The position/size math above runs synchronously on every mousemove (it
@@ -2491,8 +2905,9 @@ function tsDecorateLayerEl(div, layer, draggable) {
     if (draggable) {
       tsBeginDrag(e, layer, 'move');
     } else {
-      e.stopPropagation();
-      if (activeLayer !== layer) { activeLayer = layer; renderLayersList(); renderProps(); renderPreview(); }
+      // The canvas background: drag across it to select a box of layers; a
+      // plain click selects the background itself.
+      tsBeginMarquee(e, layer);
     }
   });
   // multiSelectedLayerIds is the COMPLETE selection whenever 2+ layers are
@@ -2507,15 +2922,33 @@ function tsDecorateLayerEl(div, layer, draggable) {
   }
   if (activeLayer === layer) {
     div.classList.add('ts-el-selected');
-    // Eight-point selection frame: four corners + four edge midpoints,
-    // each resizing from the opposite anchor.
+    // Eight-point selection frame: four corners (scale, proportions kept) +
+    // four edge midpoints (stretch), each from the opposite anchor — and a
+    // rotate handle under the layer, for anything with its own box.
     ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'].forEach(dir => {
       const h = document.createElement('div');
       h.className = `ts-handle ts-handle-${dir}`;
       h.addEventListener('mousedown', (e) => tsBeginDrag(e, layer, 'resize', dir));
       div.appendChild(h);
     });
+    if (draggable) {
+      const rot = document.createElement('div');
+      rot.className = 'ts-handle ts-handle-rot';
+      rot.title = 'Rotate (Shift: 15° steps)';
+      rot.innerHTML = '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12a8 8 0 1 1-2.34-5.66"/><path d="M20 4v5h-5"/></svg>';
+      rot.addEventListener('mousedown', (e) => tsBeginDrag(e, layer, 'rotate'));
+      div.appendChild(rot);
+    }
+  } else if (tsCoversCanvas(layer)) {
+    // A layer filling the whole canvas (film grain, a moving background)
+    // would sit over everything and catch every click: it clicks through
+    // until it's picked in the Layers panel.
+    div.style.pointerEvents = 'none';
   }
+}
+function tsCoversCanvas(layer) {
+  const p = layer.pos;
+  return !!p && p.x <= 0 && p.y <= 0 && p.x + p.w >= TS_DESIGN_W && p.y + p.h >= TS_DESIGN_H;
 }
 
 // Toggles one layer's multi-selection membership. activeLayer (the
@@ -2764,10 +3197,11 @@ function beginInlineTextEdit(div, layer) {
 // background/image layer has nothing under Effects (no shadow/outline/
 // scroll), so that tab is hidden rather than shown-but-empty for them.
 const PROPS_TABS_BY_LAYER_TYPE = {
-  background:  ['layout', 'style'],
-  image:       ['layout', 'style'],
-  'image-cycle': ['layout', 'style'],
-  text:        ['layout', 'style', 'effects'],
+  background:  ['layout', 'style', 'animate'],
+  image:       ['layout', 'style', 'animate'],
+  'image-cycle': ['layout', 'style', 'animate'],
+  motion:      ['layout', 'style', 'animate'],
+  text:        ['layout', 'style', 'effects', 'animate'],
 };
 // Persists across layer switches within one Edit/Theme Studio session
 // (picking a different layer doesn't jump you back to Layout every time) —
@@ -2910,11 +3344,17 @@ function renderProps() {
     renderImageProps(panel, activeLayer);
   } else if (activeLayer.type === 'image-cycle') {
     renderImageCycleProps(panel, activeLayer);
+  } else if (activeLayer.type === 'motion') {
+    renderMotionProps(panel, activeLayer);
   } else {
     renderTextProps(panel, activeLayer);
   }
+  // The canvas fill itself doesn't arrive or move — everything on it can.
+  const isCanvasFill = activeLayer.type === 'background' && !activeLayer.pos;
+  if (!isCanvasFill) renderAnimateProps(panel, activeLayer);
 
-  const available = PROPS_TABS_BY_LAYER_TYPE[activeLayer.type] || PROPS_TABS_BY_LAYER_TYPE.text;
+  let available = PROPS_TABS_BY_LAYER_TYPE[activeLayer.type] || PROPS_TABS_BY_LAYER_TYPE.text;
+  if (isCanvasFill) available = available.filter(t => t !== 'animate');
   if (!available.includes(activePropsTab)) activePropsTab = available[0];
   if (tabs) {
     tabs.classList.remove('hidden');
@@ -3005,7 +3445,8 @@ function makeColor(val, onChange) {
   return inp;
 }
 
-function makeSlider(val, min, max, onChange) {
+// `format` (optional) turns the raw slider value into its label ("1.25×").
+function makeSlider(val, min, max, onChange, format) {
   const wrap = document.createElement('div');
   wrap.style.cssText = 'display:flex;align-items:center;gap:6px;flex:1;';
   const sl = document.createElement('input');
@@ -3013,7 +3454,8 @@ function makeSlider(val, min, max, onChange) {
   sl.min = min; sl.max = max; sl.value = val;
   const lbl = document.createElement('span');
   lbl.className = 'ts-prop-val';
-  lbl.textContent = val;
+  const show = (v) => (format ? format(parseFloat(v)) : v);
+  lbl.textContent = show(val);
   // The label updates on every 'input' event (cheap, instant feedback) —
   // but onChange always ends in up(), a full canvas teardown/rebuild.
   // Dragging a slider fires dozens of 'input' events a second; calling
@@ -3023,7 +3465,7 @@ function makeSlider(val, min, max, onChange) {
   // animation frame instead — same fix as the position-drag throttle.
   let queued = false, pendingValue = null;
   sl.addEventListener('input', () => {
-    lbl.textContent = sl.value;
+    lbl.textContent = show(sl.value);
     pendingValue = parseFloat(sl.value);
     if (queued) return;
     queued = true;
@@ -3036,7 +3478,7 @@ function makeSlider(val, min, max, onChange) {
 function makeFillChips(current, onChange) {
   const wrap = document.createElement('div');
   wrap.className = 'ts-fill-group';
-  ['solid','transparent','blur','gradient'].forEach(f => {
+  ['solid','transparent','blur','gradient','image'].forEach(f => {
     const btn = document.createElement('button');
     btn.className = 'ts-fill-chip' + (current === f ? ' active' : '');
     btn.textContent = f.charAt(0).toUpperCase() + f.slice(1);
@@ -3317,6 +3759,17 @@ function diffLayerOverride(baseLayer, curLayer) {
   // layer either side, so this stays a no-op for those).
   if (curLayer.fit !== undefined && curLayer.fit !== baseLayer?.fit) ov.fit = curLayer.fit;
   if (curLayer.radius !== undefined && curLayer.radius !== baseLayer?.radius) ov.radius = curLayer.radius;
+  // A motion graphic's settings travel whole: its colours, counts and speeds
+  // only make sense together.
+  if (curLayer.graphic && JSON.stringify(curLayer.graphic) !== JSON.stringify(baseLayer?.graphic)) ov.graphic = deepClone(curLayer.graphic);
+  // A background's fill — its kind, second colour and angle, picture and
+  // darkening (colour and opacity are covered above). Every renderer merges
+  // these the same way (layer_geometry.js's withFillOverride).
+  if (curLayer.type === 'background') {
+    ['fill', 'color2', 'angle', 'src', 'dim'].forEach(k => {
+      if (curLayer[k] !== undefined && curLayer[k] !== baseLayer?.[k]) ov[k] = curLayer[k];
+    });
+  }
   if (curLayer.visible === false) ov.visible = false; // only the hidden case is ever stored; visible is the assumed default
   return ov;
 }
@@ -3654,7 +4107,59 @@ function renderLayoutProps(panel, layer) {
     kids.push(prop('Position', reset));
   }
 
+  // Rotation, about the layer's own centre — a countdown running up the side
+  // of the screen, a tilted photo, a slanted headline. Only for a layer with
+  // its own box: a layout-preset text layer centres itself with a transform.
+  if (layer.pos || layer.type !== 'text') {
+    kids.push(prop('Rotate', makeSlider(Math.round(layer.rotation || 0), -180, 180,
+      v => { layer.rotation = v || 0; if (layer.type === 'text') ensurePos(layer); up(); }, v => `${Math.round(v)}°`)));
+  }
+
   panel.appendChild(section('layout', 'Layout', ...kids));
+}
+
+// ── Animate tab ───────────────────────────────────────────────────────────
+// How a layer arrives when its slide goes live (build-in: its own animation,
+// delay and duration, so a slide's pieces arrive one after another — a text
+// layer can come in word by word or letter by letter) and what it keeps
+// doing once it's there (idle: float, drift, breathe, sway, pulse). Play
+// replays the whole slide's build-ins on the canvas.
+function renderAnimateProps(panel, layer) {
+  const M = window.KairoMotion;
+  if (!M) return;
+  const b = M.normalizeBuild(layer.build);
+  const isText = layer.type === 'text';
+  const builds = M.BUILDS.filter(x => !x.text || isText).map(x => ({ label: x.label, value: x.id }));
+  const setBuild = (patch) => {
+    layer.build = { ...M.normalizeBuild(layer.build), ...patch };
+    if (layer.build.type === 'none') delete layer.build;
+    up();
+  };
+  const play = document.createElement('button');
+  play.className = 'ts-add-btn ts-add-btn-compact';
+  play.innerHTML = '<svg viewBox="0 0 24 24" fill="currentColor" width="11" height="11"><path d="M7 5v14l12-7z"/></svg><span>Play</span>';
+  play.title = 'Replay this slide\'s animations';
+  play.addEventListener('click', () => tsPlayAnimations());
+  panel.appendChild(section('animate', 'Arrives',
+    prop('Animation', makeSelect(builds, b.type, v => { setBuild({ type: v }); renderProps(); })),
+    ...(b.type === 'none' ? [] : [
+      prop('Delay', makeSlider(Math.round(b.delay * 10), 0, 100, v => setBuild({ delay: v / 10 }), v => `${(v / 10).toFixed(1)} s`)),
+      prop('Duration', makeSlider(Math.round(b.duration * 10), 1, 50, v => setBuild({ duration: v / 10 }), v => `${(v / 10).toFixed(1)} s`)),
+    ]),
+    prop('Preview', play)));
+
+  const m = M.normalizeIdle(layer.idle);
+  const setIdle = (patch) => {
+    layer.idle = { ...M.normalizeIdle(layer.idle), ...patch };
+    if (layer.idle.type === 'none') delete layer.idle;
+    up();
+  };
+  panel.appendChild(section('animate', 'Keeps moving',
+    prop('Motion', makeChips(M.IDLES.map(x => ({ label: x.label, value: x.id })), m.type, v => { setIdle({ type: v }); renderProps(); })),
+    ...(m.type === 'none' ? [] : [
+      prop('Amount', makeSlider(m.amount, 1, 100, v => setIdle({ amount: v }), v => `${Math.round(v)}%`)),
+      prop('Speed', makeSlider(Math.round(m.speed * 100), 10, 300, v => setIdle({ speed: v / 100 }), v => `${(v / 100).toFixed(2)}×`)),
+    ])));
 }
 
 // Background layer properties
@@ -3668,7 +4173,8 @@ function renderBgProps(panel, layer) {
   // layer.radius entirely — pill/ellipse/triangle/diamond are already fully
   // rounded or already have their own hard edges), so it's hidden otherwise
   // rather than left sitting there doing nothing.
-  panel.appendChild(section('style', 'Shape',
+  // The canvas fill itself is always the whole screen — only shapes have one.
+  const shapeRow = section('style', 'Shape',
     makeChips([
       { label: 'Rectangle', value: 'rect' },
       { label: 'Ellipse',   value: 'ellipse' },
@@ -3676,16 +4182,21 @@ function renderBgProps(panel, layer) {
       { label: 'Triangle',  value: 'triangle' },
       { label: 'Diamond',   value: 'diamond' },
     ], layer.shape || 'rect', v => { layer.shape = v; radiusRow.style.display = v === 'rect' ? '' : 'none'; up(); })
-  ));
+  );
   const radiusRow = section('style', 'Corner Radius',
     prop('Radius', makeSlider(layer.radius || 0, 0, 200, v => { layer.radius = v; up(); }))
   );
   if ((layer.shape || 'rect') !== 'rect') radiusRow.style.display = 'none';
-  panel.appendChild(radiusRow);
+  if (layer.pos) { panel.appendChild(shapeRow); panel.appendChild(radiusRow); }
 
-  // Fill type
+  // Fill type. Picking Image with no picture yet starts on the first bundled
+  // background, so the canvas changes the moment it's clicked.
   panel.appendChild(section('style', 'Fill',
-    makeFillChips(layer.fill, v => { layer.fill = v; colorRow.style.display = v === 'transparent' ? 'none' : ''; grad2Row.style.display = v === 'gradient' ? '' : 'none'; up(); })
+    makeFillChips(layer.fill, v => {
+      layer.fill = v;
+      if (v === 'image' && !layer.src && (window.KairoBackgrounds || []).length) useBackground(layer, window.KairoBackgrounds[0]);
+      up(); renderProps();
+    })
   ));
 
   // Color + opacity
@@ -3693,7 +4204,7 @@ function renderBgProps(panel, layer) {
     prop('Color', makeColor(layer.color, v => { layer.color = v; up(); })),
     prop('Opacity', makeSlider(layer.opacity, 0, 100, v => { layer.opacity = v; up(); }))
   );
-  if (layer.fill === 'transparent') colorRow.style.display = 'none';
+  if (layer.fill === 'transparent' || layer.fill === 'image') colorRow.style.display = 'none';
   panel.appendChild(colorRow);
 
   // Gradient color 2
@@ -3703,6 +4214,64 @@ function renderBgProps(panel, layer) {
   );
   if (layer.fill !== 'gradient') grad2Row.style.display = 'none';
   panel.appendChild(grad2Row);
+
+  // Picture: the bundled backgrounds, or the operator's own image.
+  if (layer.fill === 'image') {
+    const own = document.createElement('button');
+    own.className = 'ts-add-btn ts-add-btn-compact';
+    own.textContent = 'Your own image…';
+    own.addEventListener('click', () => pickOwnBackground(layer));
+    panel.appendChild(section('style', 'Picture',
+      makeBackgroundGrid(layer.src, bg => { useBackground(layer, bg); up(); }),
+      own,
+      prop('Darken', makeSlider(layer.dim || 0, 0, 80, v => { layer.dim = v; up(); }, v => Math.round(v) + '%')),
+      prop('Opacity', makeSlider(layer.opacity ?? 100, 0, 100, v => { layer.opacity = v; up(); }))
+    ));
+  }
+}
+
+// ── Background pool ───────────────────────────────────────────────────────
+// The bundled backgrounds (src/backgrounds, listed by backgrounds.js) — any
+// background layer can be filled with one, by path, so the pictures ship with
+// the app, stay out of the saved themes, and one picture serves any number
+// of themes and slides.
+function useBackground(layer, bg) {
+  layer.fill = 'image';
+  layer.src = bg.src;
+  if (bg.color) layer.color = bg.color;
+}
+function makeBackgroundGrid(currentSrc, onPick) {
+  const grid = document.createElement('div');
+  grid.className = 'ts-bg-grid';
+  (window.KairoBackgrounds || []).forEach(bg => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'ts-bg-swatch' + (bg.src === currentSrc ? ' active' : '');
+    b.title = bg.name;
+    b.setAttribute('aria-label', bg.name);
+    b.style.backgroundImage = `url("${bg.thumb}")`;
+    b.addEventListener('click', () => {
+      grid.querySelectorAll('.ts-bg-swatch').forEach(x => x.classList.toggle('active', x === b));
+      onPick(bg);
+    });
+    grid.appendChild(b);
+  });
+  return grid;
+}
+function pickOwnBackground(layer, after) {
+  const inp = document.createElement('input');
+  inp.type = 'file'; inp.accept = 'image/*';
+  inp.addEventListener('change', async () => {
+    const file = inp.files && inp.files[0];
+    if (!file) return;
+    try {
+      const { src } = await loadImageFile(file);
+      layer.fill = 'image'; layer.src = src;
+      up(); renderProps();
+      if (after) after();
+    } catch { toast('Could not load that image', 'error'); }
+  });
+  inp.click();
 }
 
 // Image layer properties
@@ -3732,6 +4301,27 @@ function renderImageProps(panel, layer) {
       { label: 'None', value: 'none' }, { label: 'Ken Burns (slow zoom)', value: 'kenburns' },
     ], layer.motion || 'none', v => { layer.motion = v; up(); }))
   ));
+  renderPhotoLookProps(panel, layer);
+
+  // Swap the picture and keep everything else — its box, fade, animation.
+  const replace = document.createElement('button');
+  replace.className = 'ts-add-btn ts-add-btn-compact';
+  replace.textContent = 'Replace…';
+  replace.addEventListener('click', () => {
+    const inp = document.createElement('input');
+    inp.type = 'file'; inp.accept = 'image/*';
+    inp.addEventListener('change', async () => {
+      const file = inp.files && inp.files[0];
+      if (!file) return;
+      try {
+        const { src, w, h } = await loadImageFile(file);
+        layer.src = src; layer.naturalW = w; layer.naturalH = h;
+        up(); renderProps();
+      } catch { toast('Could not load that image', 'error'); }
+    });
+    inp.click();
+  });
+  panel.appendChild(section('style', 'Picture', prop('Image', replace)));
 
   // The color-key "Remove background" cutout used to live here — pulled per
   // operator report that it doesn't key cleanly (a flat-color-tolerance
@@ -3739,6 +4329,24 @@ function renderImageProps(panel, layer) {
   // so it did more harm than good. removeImageBackground() itself is gone
   // too; if a real cutout tool comes back, it should be an actual
   // segmentation model, not this.
+}
+
+// Black & white, and a soft fade into the slide from one edge — the washed-
+// back photo half of an announcement slide. Rendered by applyImageLook
+// (layer_geometry.js) everywhere the layer is shown.
+function renderPhotoLookProps(panel, layer) {
+  const side = layer.fade?.side || 'none';
+  panel.appendChild(section('style', 'Photo look',
+    prop('Black & white', makeSlider(layer.grayscale || 0, 0, 100, v => { layer.grayscale = v; up(); }, v => `${Math.round(v)}%`)),
+    prop('Fade from', makeChips([
+      { label: 'None', value: 'none' }, { label: 'Left', value: 'left' }, { label: 'Right', value: 'right' },
+      { label: 'Top', value: 'top' }, { label: 'Bottom', value: 'bottom' },
+    ], side, v => {
+      if (v === 'none') delete layer.fade; else layer.fade = { side: v, amount: layer.fade?.amount ?? 45 };
+      up(); renderProps();
+    })),
+    ...(side === 'none' ? [] : [prop('Fade length', makeSlider(layer.fade.amount ?? 45, 5, 100, v => { layer.fade.amount = v; up(); }, v => `${Math.round(v)}%`))])
+  ));
 }
 
 // Image Cycle layer properties — a slideshow of stills that advances on its
@@ -3792,6 +4400,7 @@ function renderImageCycleProps(panel, layer) {
       { label: 'None', value: 'none' }, { label: 'Ken Burns (slow zoom)', value: 'kenburns' },
     ], layer.motion || 'none', v => { layer.motion = v; up(); }))
   ));
+  renderPhotoLookProps(panel, layer);
 
   const listWrap = document.createElement('div');
   listWrap.className = 'ts-cycle-list';
@@ -3926,6 +4535,321 @@ async function openCycleImagePicker(layer) {
   });
 }
 
+// ── Motion graphics ───────────────────────────────────────────────────────
+// A 'motion' layer (motion_graphics.js) is drawn from shapes and CSS, so every
+// element of it is editable here: which graphic it is, each of its colours
+// (add, remove, recolour), and the kind's own controls — count, size, speed,
+// softness, direction… — all built from the kind's parameter list, so a new
+// kind gets its controls without new UI code. Position and size come from
+// Layout like any layer.
+function motionFormat(p) {
+  return (v) => {
+    if (p.unit === '×') return v.toFixed(2) + '×';
+    const n = Number.isInteger(p.step) ? Math.round(v) : +v.toFixed(2);
+    return n + (p.unit || '');
+  };
+}
+function renderMotionProps(panel, layer) {
+  const M = window.KairoMotion;
+  const nameInp = document.createElement('input');
+  nameInp.type = 'text'; nameInp.className = 'ts-prop-input';
+  nameInp.value = layer.name; nameInp.placeholder = 'Layer name';
+  nameInp.addEventListener('input', () => { layer.name = nameInp.value; renderLayersList(); });
+  panel.appendChild(section('layout', 'Layer', prop('Name', nameInp)));
+  renderLayoutProps(panel, layer);
+  if (!M) return;
+
+  layer.graphic = M.normalize(layer.graphic);
+  const g = layer.graphic;
+  const kind = M.kind(g.kind);
+
+  // Which graphic — switching keeps the colours the operator already chose
+  // where the new kind can use them. A layer still named after its old kind
+  // follows the new one; a name the operator typed stays.
+  const pickKind = (v) => {
+    const wasDefaultName = layer.name === kind.label;
+    layer.graphic = M.switchKind(g, v);
+    if (wasDefaultName) layer.name = M.kind(v).label;
+    up(); renderProps();
+  };
+  const kindChips = (family) => makeChips(
+    M.kinds().filter(k => k.family === family).map(k => ({ label: k.label, value: k.id })), g.kind, pickKind);
+  const blurb = document.createElement('div');
+  blurb.className = 'ts-motion-blurb';
+  blurb.textContent = kind.blurb;
+  panel.appendChild(section('style', 'Motion',
+    prop('Background', kindChips('ambient')),
+    prop('Timer', kindChips('timer')),
+    prop('Element', kindChips('element')),
+    blurb));
+
+  // Colours — one swatch per element colour, named where the kind names them.
+  const colors = document.createElement('div');
+  colors.className = 'ts-motion-colors';
+  g.colors.forEach((c, i) => {
+    const cell = document.createElement('div');
+    cell.className = 'ts-motion-color';
+    cell.appendChild(makeColor(c, v => { g.colors[i] = v; up(); }));
+    const lbl = document.createElement('span');
+    lbl.textContent = kind.colors.labels?.[i] || `Colour ${i + 1}`;
+    cell.appendChild(lbl);
+    if (g.colors.length > kind.colors.min) {
+      const rm = document.createElement('button');
+      rm.className = 'ts-motion-color-rm';
+      rm.title = 'Remove this colour';
+      rm.textContent = '×';
+      rm.addEventListener('click', () => { g.colors.splice(i, 1); up(); renderProps(); });
+      cell.appendChild(rm);
+    }
+    colors.appendChild(cell);
+  });
+  if (g.colors.length < kind.colors.max) {
+    const add = document.createElement('button');
+    add.className = 'ts-motion-color-add';
+    add.title = 'Add a colour';
+    add.textContent = '+';
+    add.addEventListener('click', () => {
+      g.colors.push(kind.colors.def[g.colors.length % kind.colors.def.length]);
+      up(); renderProps();
+    });
+    colors.appendChild(add);
+  }
+  if (kind.colors.max > 0) panel.appendChild(section('style', 'Colours', colors));
+
+  // The kind's own controls. makeSlider steps in whole numbers, so a range
+  // with a fractional step (Speed) runs in hundredths underneath.
+  const rows = kind.params.map(p => {
+    if (p.type === 'range') {
+      const f = p.step < 1 ? 100 : 1;
+      const fmt = motionFormat(p);
+      return prop(p.label, makeSlider(Math.round(g[p.key] * f), Math.round(p.min * f), Math.round(p.max * f),
+        v => { g[p.key] = v / f; up(); }, v => fmt(v / f)));
+    }
+    if (p.type === 'chips') return prop(p.label, makeChips(p.options, g[p.key], v => { g[p.key] = v; up(); }));
+    return prop(p.label, makeToggle(!!g[p.key], v => { g[p.key] = v; up(); }));
+  });
+  panel.appendChild(section('style', kind.label, ...rows));
+
+  const look = [prop('Opacity', makeSlider(layer.opacity ?? 100, 0, 100, v => { layer.opacity = v; up(); }))];
+  if (kind.shuffle) {
+    const btn = document.createElement('button');
+    btn.className = 'ts-add-btn ts-add-btn-compact';
+    btn.textContent = 'Shuffle';
+    btn.title = 'A new arrangement of the same elements';
+    btn.addEventListener('click', () => { g.seed = M.newSeed(); up(); });
+    look.push(prop('Arrangement', btn));
+  }
+  panel.appendChild(section('style', 'Layer look', ...look));
+}
+
+// Where a new motion layer lands: a background fills the canvas; a timer or
+// element graphic gets a sensible box of its own, centred.
+function defaultMotionPos(kindId) {
+  const W = TS_DESIGN_W, H = TS_DESIGN_H;
+  const box = (w, h, y) => ({ x: Math.round((W - w) / 2), y: Math.round(y ?? (H - h) / 2), w, h });
+  switch (kindId) {
+    case 'ring':   return box(720, 720);
+    case 'dots':   return box(820, 820);
+    case 'bar':    return box(1200, 16, 900);
+    case 'line':   return box(900, 600);
+    case 'doodle': return box(320, 220);
+    default:       return { x: 0, y: 0, w: W, h: H };
+  }
+}
+
+function addMotionLayer(kindId) {
+  const M = window.KairoMotion;
+  if (!activeLook || !M) return;
+  const kind = M.kind(kindId);
+  const layer = {
+    id: 'motion-' + Date.now(), type: 'motion', name: kind.label, visible: true, opacity: 100,
+    pos: defaultMotionPos(kind.id), graphic: M.create(kind.id),
+  };
+  // A background graphic is a backdrop: it goes right above the canvas fill,
+  // behind the theme's shapes, images and text. Timer and element graphics go
+  // on top, like any newly added layer.
+  if (kind.family === 'ambient') {
+    const bgIdx = activeLook.layers.findIndex(l => l.type === 'background' && !l.pos);
+    activeLook.layers.splice(bgIdx + 1, 0, layer);
+  } else {
+    activeLook.layers.push(layer);
+  }
+  activeLayer = layer;
+  up();
+  renderProps();
+}
+
+// The gallery behind "Motion": every graphic, moving, grouped by what it's
+// for. Picking one adds it; everything about it stays editable afterwards.
+let motionGalleryEl = null;
+function closeMotionGallery() { motionGalleryEl?.remove(); motionGalleryEl = null; }
+function openMotionGallery() {
+  const M = window.KairoMotion;
+  if (!M) return;
+  closeMotionGallery();
+  const overlay = document.createElement('div');
+  overlay.className = 'ts-media-picker-overlay';
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) closeMotionGallery(); });
+  const panel = document.createElement('div');
+  panel.className = 'ts-media-picker-panel ts-motion-gallery';
+  const header = document.createElement('div');
+  header.className = 'ts-media-picker-header';
+  header.innerHTML = '<span>Add motion</span>';
+  const closeBtn = document.createElement('button');
+  closeBtn.className = 'modal-close-btn';
+  closeBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 16 16"><path d="M3 3l10 10M13 3L3 13" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg><span>Close</span>';
+  closeBtn.addEventListener('click', closeMotionGallery);
+  header.appendChild(closeBtn);
+  panel.appendChild(header);
+  const body = document.createElement('div');
+  body.className = 'ts-motion-gallery-body';
+  const FAMILIES = [
+    { id: 'ambient', label: 'Backgrounds', hint: 'Fill the screen, behind everything else' },
+    { id: 'element', label: 'Elements', hint: 'Hand-drawn accents that draw themselves on' },
+    { id: 'timer', label: 'Timer', hint: 'Follow the live countdown' },
+  ];
+  FAMILIES.forEach(fam => {
+    const kinds = M.kinds().filter(k => k.family === fam.id);
+    if (!kinds.length) return;
+    const h = document.createElement('div');
+    h.className = 'ts-motion-family';
+    h.innerHTML = `<span>${fam.label}</span><em>${fam.hint}</em>`;
+    body.appendChild(h);
+    const grid = document.createElement('div');
+    grid.className = 'ts-motion-grid';
+    kinds.forEach(k => {
+      const tile = document.createElement('button');
+      tile.className = 'ts-motion-tile';
+      const art = document.createElement('div');
+      art.className = 'ts-motion-tile-art';
+      // Elements are shown bigger and bolder here than they're added, so a
+      // hand-drawn line reads at tile size.
+      const tileBox = { line: { x: 280, y: 140, w: 1360, h: 800 }, doodle: { x: 610, y: 190, w: 700, h: 700 } }[k.id];
+      const p = tileBox || defaultMotionPos(k.id);
+      const graphic = M.create(k.id);
+      if (tileBox) graphic.thickness = 22;
+      const box = document.createElement('div');
+      box.style.cssText = `position:absolute;left:${p.x / TS_DESIGN_W * 100}%;top:${p.y / TS_DESIGN_H * 100}%;width:${p.w / TS_DESIGN_W * 100}%;height:${p.h / TS_DESIGN_H * 100}%;`;
+      box.appendChild(M.build(graphic, { mode: 'demo', box: { w: p.w, h: p.h } }));
+      art.appendChild(box);
+      const label = document.createElement('div');
+      label.className = 'ts-motion-tile-label';
+      label.innerHTML = `<strong></strong><span></span>`;
+      label.querySelector('strong').textContent = k.label;
+      label.querySelector('span').textContent = k.blurb;
+      tile.appendChild(art);
+      tile.appendChild(label);
+      tile.addEventListener('click', () => { closeMotionGallery(); addMotionLayer(k.id); });
+      grid.appendChild(tile);
+    });
+    body.appendChild(grid);
+  });
+  panel.appendChild(body);
+  overlay.appendChild(panel);
+  document.body.appendChild(overlay);
+  motionGalleryEl = overlay;
+}
+document.getElementById('ts-add-motion-btn')?.addEventListener('click', () => { if (activeLook) openMotionGallery(); });
+
+// The gallery behind "Background": the bundled backgrounds, plus none and the
+// operator's own image. Picking one fills the canvas — the theme's, or in
+// Full-scale edit just this slide's — and selects it, so Darken and Opacity
+// are right there in the panel.
+let bgGalleryEl = null;
+function closeBgGallery() { bgGalleryEl?.remove(); bgGalleryEl = null; }
+function canvasFillLayer() {
+  let bg = baseBgLayer();
+  if (!bg && activeLook) {
+    const id = activeLook.layers.some(l => l.id === 'bg') ? 'bg-' + Date.now() : 'bg';
+    bg = { id, type: 'background', name: 'Canvas', visible: true, fill: 'transparent', color: '#000000', opacity: 100, color2: '#000000', angle: 0 };
+    activeLook.layers.unshift(bg);
+  }
+  return bg;
+}
+function afterCanvasFill(bg) {
+  activeLayer = bg; multiSelectedLayerIds.clear();
+  activePropsTab = 'style';
+  up(); renderLayersList(); renderProps(); syncMetaRow();
+}
+function openBgGallery() {
+  closeBgGallery();
+  const current = baseBgLayer();
+  const overlay = document.createElement('div');
+  overlay.className = 'ts-media-picker-overlay';
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) closeBgGallery(); });
+  const panel = document.createElement('div');
+  panel.className = 'ts-media-picker-panel ts-motion-gallery';
+  const header = document.createElement('div');
+  header.className = 'ts-media-picker-header';
+  header.innerHTML = '<span>Background</span>';
+  const closeBtn = document.createElement('button');
+  closeBtn.className = 'modal-close-btn';
+  closeBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 16 16"><path d="M3 3l10 10M13 3L3 13" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg><span>Close</span>';
+  closeBtn.addEventListener('click', closeBgGallery);
+  header.appendChild(closeBtn);
+  panel.appendChild(header);
+  const body = document.createElement('div');
+  body.className = 'ts-motion-gallery-body';
+  const family = (label, hint) => {
+    const h = document.createElement('div');
+    h.className = 'ts-motion-family';
+    h.innerHTML = '<span></span><em></em>';
+    h.querySelector('span').textContent = label;
+    h.querySelector('em').textContent = hint;
+    body.appendChild(h);
+    const grid = document.createElement('div');
+    grid.className = 'ts-motion-grid ts-bg-gallery-grid';
+    body.appendChild(grid);
+    return grid;
+  };
+  const tile = (grid, { name, blurb, art, active, onPick }) => {
+    const t = document.createElement('button');
+    t.className = 'ts-motion-tile' + (active ? ' active' : '');
+    const a = document.createElement('div');
+    a.className = 'ts-motion-tile-art';
+    art(a);
+    const label = document.createElement('div');
+    label.className = 'ts-motion-tile-label';
+    label.innerHTML = '<strong></strong><span></span>';
+    label.querySelector('strong').textContent = name;
+    label.querySelector('span').textContent = blurb;
+    t.appendChild(a); t.appendChild(label);
+    t.addEventListener('click', () => { closeBgGallery(); onPick(); });
+    grid.appendChild(t);
+  };
+  const pool = family('Backgrounds', 'Ship with Kairo — any theme or slide can use them');
+  (window.KairoBackgrounds || []).forEach(bg => tile(pool, {
+    name: bg.name,
+    blurb: bg.tone === 'light' ? 'Light — use dark text' : bg.tags.join(' · ').replace(/^./, c => c.toUpperCase()),
+    art: a => { a.style.background = `url("${bg.thumb}") center / cover no-repeat ${bg.color || '#000'}`; },
+    active: current?.fill === 'image' && current.src === bg.src,
+    onPick: () => { const c = canvasFillLayer(); if (!c) return; useBackground(c, bg); delete c.fillBefore; afterCanvasFill(c); },
+  }));
+  const other = family('Other', 'Your own picture, or nothing behind the content');
+  tile(other, {
+    name: 'Your own image…', blurb: 'Fills the canvas, cropped to fit',
+    art: a => { a.classList.add('ts-bg-tile-own'); a.textContent = '+'; },
+    active: current?.fill === 'image' && !!current.src && !/^backgrounds\//.test(current.src),
+    onPick: () => { const c = canvasFillLayer(); if (c) pickOwnBackground(c, () => { delete c.fillBefore; afterCanvasFill(c); }); },
+  });
+  tile(other, {
+    name: 'None', blurb: 'Transparent — for keying over cameras',
+    art: a => a.classList.add('ts-bg-tile-none'),
+    active: current?.fill === 'transparent',
+    onPick: () => {
+      const c = canvasFillLayer(); if (!c) return;
+      if (c.fill !== 'transparent') { c.fillBefore = c.fill; c.fill = 'transparent'; }
+      afterCanvasFill(c);
+    },
+  });
+  panel.appendChild(body);
+  overlay.appendChild(panel);
+  document.body.appendChild(overlay);
+  bgGalleryEl = overlay;
+}
+document.getElementById('ts-add-bg-btn')?.addEventListener('click', () => { if (activeLook) openBgGallery(); });
+document.getElementById('ts-play-anim-btn')?.addEventListener('click', () => { if (activeLook) tsPlayAnimations(); });
+
 // Text layer properties
 function renderTextProps(panel, layer) {
   // Name + binding
@@ -4019,6 +4943,21 @@ function renderTextProps(panel, layer) {
     prop('Opacity', makeSlider(layer.opacity, 0, 100, v => { layer.opacity = v; up(); })),
     prop('Align', makeAlignBtns(layer.align, v => { layer.align = v; up(); }))
   ));
+
+  // Accent — words wrapped in *asterisks* show in this colour: a two-tone
+  // headline ("*FIRST TIME* / WITH US?") in one layer.
+  const accentRows = [prop('Accent', makeToggle(!!layer.accentColor, v => {
+    if (v) layer.accentColor = layer.accentColor || '#e3cf6c'; else delete layer.accentColor;
+    up(); renderProps();
+  }))];
+  if (layer.accentColor) {
+    accentRows.push(prop('Accent colour', makeColor(layer.accentColor, v => { layer.accentColor = v; up(); })));
+    const hint = document.createElement('div');
+    hint.className = 'ts-motion-blurb';
+    hint.textContent = 'Wrap words in *asterisks* to colour them.';
+    accentRows.push(hint);
+  }
+  panel.appendChild(section('style', 'Accent', ...accentRows));
 
   // Effects (Shadow/Outline/Scroll) — each one used to be TWO separate
   // .ts-props-section blocks (a header-only section, then a second section
@@ -4286,6 +5225,7 @@ function renderItemTimerControls() {
     scenesNote.style.margin = '4px 0 0';
     scenesNote.textContent = `Playing ${item.scenes.length} slide${item.scenes.length === 1 ? '' : 's'} in sequence — manage them in the Slides panel to the left.`;
     host.appendChild(scenesNote);
+    renderScenePaceControls(host, item);
   }
 
   // Local echo so the field reflects the change immediately even before
@@ -4305,6 +5245,68 @@ function renderItemTimerControls() {
     }
   }
 }
+// How a timer's slides share its countdown (segment.scenePace — see
+// KairoMotion.sceneAt). "Countdown sets the pace": every slide gets an equal
+// share of the time, so a shorter countdown moves faster; a long one repeats
+// the set so no slide outstays "Longest on screen"; the finale holds the last
+// slide for the final minute. "Each slide's own time" is the original
+// behaviour: the seconds on each slide's row, in order, then hold.
+function renderScenePaceControls(host, item) {
+  const M = window.KairoMotion;
+  if (!M) return;
+  const pace = M.normalizePace(item.scenePace);
+  // Sliders save without rebuilding the panel (it would drop the drag);
+  // chips and toggles rebuild it so dependent rows appear or go.
+  const savePace = (patch, rerender) => {
+    item.scenePace = { ...M.normalizePace(item.scenePace), ...patch };
+    window.KairoService?.saveScenePace?.(item);
+    if (rerender) { renderItemTimerControls(); renderItemSlidesList(); }
+    else readout.textContent = paceReadout();
+  };
+  const totalSec = item.trigger?.params?.mode === 'duration' ? Number(item.trigger.params.durationSec) || 0 : 0;
+  const paceReadout = () => {
+    const p = M.normalizePace(item.scenePace);
+    if (p.mode !== 'countdown') return 'Each slide stays for the seconds on its own row.';
+    if (!totalSec) return 'Paced by the time left when the countdown starts.';
+    const first = M.sceneAt(item.scenes, p, 0, totalSec * 1000);
+    const per = Math.round(first.slotMs / 1000);
+    const finale = p.finaleSec > 0 && item.scenes.length > 1;
+    return `About ${per} s per slide on this ${Math.round(totalSec / 60)}-minute countdown`
+      + (finale ? `, then “${item.scenes[item.scenes.length - 1].name || 'the last slide'}” to finish.` : '.');
+  };
+  const label = document.createElement('div');
+  label.className = 'ts-props-section-label';
+  label.textContent = 'Slides';
+  label.style.marginTop = '10px';
+  host.appendChild(label);
+  const row = (name, control) => {
+    const r = document.createElement('div');
+    r.className = 'ts-prop-row';
+    const l = document.createElement('span');
+    l.className = 'ts-prop-label';
+    l.textContent = name;
+    r.appendChild(l);
+    r.appendChild(control);
+    host.appendChild(r);
+  };
+  row('Pace', makeChips([
+    { label: 'Countdown sets it', value: 'countdown' },
+    { label: 'Each slide\'s own time', value: 'fixed' },
+  ], pace.mode, v => savePace({ mode: v }, true)));
+  if (pace.mode === 'countdown') {
+    row('Longest on screen', makeSlider(pace.maxSec, 5, 120, v => savePace({ maxSec: v }), v => `${Math.round(v)} s`));
+    row('Finale', makeToggle(pace.finaleSec > 0, v => savePace({ finaleSec: v ? 60 : 0 }, true)));
+  }
+  row('Change', makeChips([
+    { label: 'Blur', value: 'blur' }, { label: 'Fade', value: 'fade' }, { label: 'Cut', value: 'cut' },
+  ], pace.transition, v => savePace({ transition: v }, true)));
+  const readout = document.createElement('p');
+  readout.className = 'setting-hint';
+  readout.style.margin = '4px 0 0';
+  readout.textContent = paceReadout();
+  host.appendChild(readout);
+}
+
 document.getElementById('ts-item-theme-picker-btn')?.addEventListener('click', (e) => {
   if (!tsItemCtx) return;
   window.KairoService.openThemePopover(e.currentTarget, tsItemCtx.item);
@@ -4389,6 +5391,8 @@ function buildSyntheticLook(item, slideIndex) {
     if (ov.outline) layer.outline = { ...layer.outline, ...ov.outline };
     if (ov.fit) layer.fit = ov.fit;
     if (ov.radius !== undefined) layer.radius = ov.radius;
+    if (ov.graphic) layer.graphic = deepClone(ov.graphic);
+    if (layer.type === 'background') ['fill', 'color2', 'angle', 'src', 'dim'].forEach(k => { if (ov[k] !== undefined) layer[k] = ov[k]; });
     if (ov.visible === false) layer.visible = false;
   });
   // Item/slide-specific layers the operator added in Full-scale edit — not
@@ -4447,6 +5451,9 @@ function renderItemSlidesList() {
     if (isTimerScene) {
       const durRow = document.createElement('div');
       durRow.className = 'ts-item-slide-duration';
+      // When the countdown sets the pace, a slide's own seconds don't apply.
+      const countdownPaced = item.scenePace?.mode === 'countdown';
+      if (countdownPaced) durRow.style.display = 'none';
       const durInp = document.createElement('input');
       durInp.type = 'number'; durInp.min = '1';
       durInp.value = s.durationSec || '';
@@ -4585,16 +5592,15 @@ function renderItemSlidesList() {
   }
 }
 
-// A fresh slide starts with one full-bleed background layer and a
-// centered Countdown, matching timer-big's own defaults — a real, visible
+// A fresh slide starts with one full-bleed background (a bundled picture) and
+// a centered Countdown, matching timer-big's own defaults — a real, visible
 // starting point rather than a blank canvas with nothing to select. The
 // operator's own Image Cycle layer(s)/captions get added from inside the
 // slide editor the same way any theme's do (the "Cycle"/Text/Image
 // buttons in Theme Studio's add-content bar).
 function defaultSceneLayers() {
   return [
-    { id: 'bg', type: 'background', name: 'Canvas', visible: true,
-      fill: 'gradient', color: '#0b0b0f', opacity: 100, color2: '#1c1c30', angle: 160 },
+    poolCanvas('midnight'),
     { id: 'timer', type: 'text', name: 'Countdown', visible: true, binding: 'timer', customText: '',
       pos: { x: 160, y: 380, w: 1600, h: 320 },
       font: { family: 'Manrope', size: 180, weight: 800, italic: false, lineHeight: 1, letterSpacing: 0, transform: 'none' },
@@ -4752,12 +5758,27 @@ window.KairoThemeStudio = {
   isOpen: () => !looksModal?.classList.contains('hidden'),
 };
 
-// Esc returns to the dashboard (unless a text field has focus). Item mode
-// reuses this same modal, so route to its own close function instead.
+// Esc steps back one level, like a design tool: an open Motion or Background
+// gallery closes, then a selection is let go (the way out from under a
+// full-canvas layer picked in the Layers panel), and only with nothing
+// selected does it return to the dashboard. Not while a text field has
+// focus. Item mode reuses this same modal, so it routes to its own close
+// function.
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape' || looksModal?.classList.contains('hidden')) return;
   const t = e.target;
   if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return;
+  if (motionGalleryEl) { e.preventDefault(); closeMotionGallery(); return; }
+  if (bgGalleryEl) { e.preventDefault(); closeBgGallery(); return; }
+  if (activeLayer || multiSelectedLayerIds.size) {
+    e.preventDefault();
+    activeLayer = null;
+    multiSelectedLayerIds = new Set();
+    renderLayersList();
+    renderProps();
+    renderPreview();
+    return;
+  }
   if (tsMode === 'item') closeItemStyleEditor(); else closeThemeStudio();
 });
 
@@ -5618,6 +6639,14 @@ newLookBtn?.addEventListener('click', () => {
   const base = deepClone(DEFAULT_LOOKS[0]);
   base.id   = 'look-' + Date.now();
   base.name = 'New Theme';
+  // A new theme's canvas starts transparent, with nothing behind the
+  // content; Background picks a picture, a colour or a gradient for it.
+  const canvasFill = base.layers.find(l => l.type === 'background' && !l.pos);
+  if (canvasFill) {
+    canvasFill.fillBefore = 'solid';
+    Object.assign(canvasFill, { fill: 'transparent', color: '#000000', color2: '#1c1c30', angle: 160 });
+    delete canvasFill.src;
+  }
   looks.push(base);
   activeLook  = base;
   activeLayer = null; multiSelectedLayerIds.clear();

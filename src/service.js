@@ -2973,10 +2973,19 @@
     // layer at all) has nothing else to show, so its reference must still
     // paint even when verseText is empty.
     const hasVerseLayer = layers.some(l => l.type === 'text' && l.binding === 'verse' && l.visible !== false);
-    layers.forEach(layer => {
+    // opts.motion: 'live' animates motion layers (the operator's Live
+    // Preview and timer monitor); anything else — thumbnails, slide lists,
+    // timer cards — shows them paused. opts.builds plays each layer's
+    // build-in, for content that has just arrived.
+    const motionMode = opts.motion === 'live' ? 'live' : 'still';
+    const buildOf = (layer) => ((style || {})[layer.id] || {}).build || layer.build;
+    const paintOne = (layer) => {
       if (layer.visible === false) return;
 
       if (layer.type === 'background') {
+        const bgOv = (style || {})[layer.id] || {};
+        if (bgOv.visible === false) return;
+        layer = withFillOverride(layer, bgOv);
         const d = document.createElement('div');
         d.style.position = 'absolute';
         if (layer.pos) {
@@ -2990,10 +2999,33 @@
         if (layer.fill === 'transparent') { host.classList.add('is-alpha'); return; }
         if (layer.fill === 'gradient') {
           d.style.background = `linear-gradient(${layer.angle || 0}deg, ${hexA(layer.color, layer.opacity)}, ${hexA(layer.color2 || layer.color, layer.opacity)})`;
+        } else if (layer.fill === 'image') {
+          // Theme cards and slide lists are small: they take the thumbnail.
+          d.style.background = imageFillCss(layer, { small: scale * DESIGN_W <= 360 });
+          if ((layer.opacity ?? 100) < 100) d.style.opacity = String((layer.opacity ?? 100) / 100);
         } else {
           d.style.background = hexA(layer.color, layer.opacity);
         }
         applyShapeGeometry(d, layer, scale);
+        host.appendChild(d);
+        return;
+      }
+      // Motion graphic (motion_graphics.js) — the same renderer the real
+      // output uses, so this preview matches it.
+      if (layer.type === 'motion') {
+        const ov = (style || {})[layer.id] || {};
+        if (ov.visible === false || !window.KairoMotion) return;
+        const p = ov.pos || layer.pos || { x: 0, y: 0, w: DESIGN_W, h: DESIGN_H };
+        const d = document.createElement('div');
+        d.style.cssText = 'position:absolute;';
+        d.style.left = (p.x / DESIGN_W * 100) + '%';
+        d.style.top = (p.y / DESIGN_H * 100) + '%';
+        d.style.width = (p.w / DESIGN_W * 100) + '%';
+        d.style.height = (p.h / DESIGN_H * 100) + '%';
+        d.style.opacity = (ov.opacity ?? layer.opacity ?? 100) / 100;
+        if (layer.rotation) d.style.transform = `rotate(${layer.rotation}deg)`;
+        const delay = opts.builds ? window.KairoMotion.normalizeBuild(buildOf(layer)).delay : 0;
+        d.appendChild(window.KairoMotion.build(ov.graphic || layer.graphic, { mode: motionMode, box: { w: p.w, h: p.h }, delay }));
         host.appendChild(d);
         return;
       }
@@ -3016,6 +3048,7 @@
           v.style.width = (p.w / DESIGN_W * 100) + '%';
           v.style.height = (p.h / DESIGN_H * 100) + '%';
           if (layer.rotation) v.style.transform = `rotate(${layer.rotation}deg)`;
+          applyImageLook(v, layer);
           v.src = layer.src;
           host.appendChild(v);
           v.play().catch(() => {});
@@ -3051,6 +3084,7 @@
           d.style.transformOrigin = 'center';
         }
         if (layer.src) d.style.backgroundImage = `url('${layer.src}')`;
+        applyImageLook(d, layer);
         host.appendChild(d);
         return;
       }
@@ -3071,6 +3105,7 @@
         d.style.height = (p.h / DESIGN_H * 100) + '%';
         if (layer.rotation) d.style.transform = `rotate(${layer.rotation}deg)`;
         d.style.backgroundImage = `url('${sources[0]}')`;
+        applyImageLook(d, layer);
         host.appendChild(d);
         return;
       }
@@ -3125,6 +3160,7 @@
       // it's safe to apply unconditionally.
       if (layer.entrance === 'fade-up') d.style.animation = 'kairo-text-in 700ms ease-out both';
       if (box.h > 0) d.style.height = (box.h / DESIGN_H * 100) + '%';
+      if (layer.rotation) d.style.transform = `rotate(${layer.rotation}deg)`;
       // A thumbnail/card preview has no handles or editing affordance to
       // show "this text doesn't fit its box" the way the real canvas can —
       // it should just always stay a clean, contained thumbnail regardless
@@ -3148,8 +3184,8 @@
         // Timer state colours (see display.html buildLayerDOM) — onTimerAction
         // recolours the element as the countdown enters warning / overtime.
         d.dataset.baseColor = hexA(color, opacity);
-        d.dataset.warnColor = ov.warnColor || layer.warnColor || '#e8a64a';
-        d.dataset.overtimeColor = ov.overtimeColor || layer.overtimeColor || '#e8404a';
+        d.dataset.warnColor = hexA(ov.warnColor || layer.warnColor || '#e8a64a', opacity);
+        d.dataset.overtimeColor = hexA(ov.overtimeColor || layer.overtimeColor || '#e8404a', opacity);
       }
       // Outline folded into this SAME text-shadow (a ring of sharp offset
       // shadows via outlineShadows — see layer_geometry.js) rather than
@@ -3172,13 +3208,17 @@
         // handled
       } else {
         const hasTimerTemplate = layer.binding === 'custom' && typeof layer.customText === 'string' && layer.customText.includes('{timer}');
-        d.textContent = isVerse ? content.verseText
+        const text = isVerse ? content.verseText
           : isTranslated ? (content.translatedText || '')
           : isReference ? (content.referenceText || '')
           : isTimer ? (content.timerText || '')
           : isTimerPart ? '00'
           : hasTimerTemplate ? layer.customText.replace('{timer}', content.timerText || '0:00')
           : (layer.customText || '');
+        // "*word*" in the accent colour — not while the text is being typed
+        // into in place, where the markup must stay visible.
+        if (!editable && !isTimer && !isTimerPart && !hasTimerTemplate && hasAccentMarkup(text, layer.accentColor)) d.innerHTML = accentHtml(text, layer.accentColor);
+        else d.textContent = text;
         if (hasTimerTemplate) d.dataset.timerTemplate = layer.customText;
       }
 
@@ -3204,6 +3244,18 @@
         d.addEventListener('mousedown', (e) => e.stopPropagation());
       }
       host.appendChild(d);
+    };
+    // Idle motion only where things move at all (motionMode 'live'); one
+    // percent of this host's height is the unit, so a float covers the same
+    // share of the screen as on the output.
+    const unit = ((host.clientHeight || DESIGN_H * scale) / 100).toFixed(2) + 'px';
+    layers.forEach(layer => {
+      const before = host.childNodes.length;
+      paintOne(layer);
+      if (!window.KairoMotion || motionMode !== 'live') return;
+      const ov = (style || {})[layer.id] || {};
+      const anim = { build: buildOf(layer), idle: ov.idle || layer.idle };
+      for (let i = before; i < host.childNodes.length; i++) window.KairoMotion.animateLayer(host.childNodes[i], anim, { builds: !!opts.builds, unit });
     });
   }
 
@@ -4853,6 +4905,20 @@
   // scheduleItemStyleAutosave's own resendLiveForSlideStyleEdit call; without
   // this flag a live-scene layer edit fired sendTimerSegment twice (150ms
   // apart), visibly flashing the output back to scene 0 an extra time.
+  // How a segment's scenes share its countdown (segment.scenePace — see
+  // KairoMotion.sceneAt). A live countdown picks it up straight away; a
+  // slider drag is debounced so the output isn't re-sent on every step.
+  let scenePaceTimer = null;
+  function saveScenePace(item) {
+    clearTimeout(scenePaceTimer);
+    scenePaceTimer = setTimeout(() => {
+      fetchWithTimeout(`${SERVER}/api/segments/${item.id}`, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ scenePace: item.scenePace }),
+      }).catch(() => {});
+      if (item.status === 'live') resendLiveTimer();
+    }, 350);
+  }
+
   function saveTimerScenes(item, opts) {
     fetchWithTimeout(`${SERVER}/api/segments/${item.id}`, {
       method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ scenes: item.scenes }),
@@ -4994,6 +5060,7 @@
         body: JSON.stringify({
           look,
           scenes,
+          pace: scenes ? (seg.scenePace || null) : null,
           style: seg.slideStyles?.[0] || {},
           label: seg.name || 'Timer',
           timerText: '0:00',
@@ -5283,6 +5350,32 @@
     segmentList.slice().sort((a, b) => a.order - b.order).forEach(seg => grid.appendChild(buildSegmentCard(seg)));
   }
 
+  // A pre-service countdown built from the Announcements pack
+  // (announcement_pack.js): its slides as scenes, each carrying the
+  // countdown, paced by it — the shorter the countdown, the faster they
+  // change — with Service Begins holding the last minute. Ten minutes to
+  // start; every slide, the pace and the time are editable like any segment.
+  document.getElementById('segment-add-preservice-btn')?.addEventListener('click', async () => {
+    const pack = window.KairoAnnouncements;
+    if (!pack) return;
+    try {
+      const r = await fetchWithTimeout(`${SERVER}/api/segments`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: 'Pre-service', scenes: pack.preserviceScenes(), scenePace: { ...pack.PACE } }),
+      });
+      const j = await r.json();
+      if (j.segment) {
+        await fetchWithTimeout(`${SERVER}/api/segments/${j.segment.id}`, {
+          method: 'PUT', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ params: { ...(j.segment.trigger?.params || {}), mode: 'duration', durationSec: 600 } }),
+        });
+      }
+    } catch (err) {
+      console.warn('[Timer] Could not create the pre-service loop:', err.message);
+    }
+    await loadSegments(); renderTimerGrid();
+  });
+
   document.getElementById('segment-add-btn')?.addEventListener('click', async () => {
     await fetchWithTimeout(`${SERVER}/api/segments`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'New Segment' }),
@@ -5355,6 +5448,7 @@
       // for the visible UI updates right below) — cheap on the Rust side,
       // just a string + text re-render, no per-tick decode/composite cost.
       window.KairoNativeOutputs?.pushTimer(f);
+      window.KairoMotion?.tick(document, { remainingMs, totalMs, cleared });
       document.querySelectorAll('#slide-preview-timer [data-binding="timer"]').forEach(el => {
         el.textContent = f;
         el.classList.toggle('is-overtime', ot);
@@ -5395,13 +5489,15 @@
       // last scene should still be the one showing throughout that.
       if (previewTimerScenes && previewTimerScenes.length && typeof totalMs === 'number' && totalMs > 0) {
         const elapsed = Math.max(0, totalMs - remainingMs);
-        const { index } = previewActiveSceneForElapsed(elapsed);
-        if (index !== previewActiveSceneIndex) {
+        const { index, slot } = previewActiveSceneForElapsed(elapsed, totalMs);
+        const showing = slot ?? index;
+        if (index !== previewActiveSceneIndex || showing !== previewActiveSceneSlot) {
           previewActiveSceneIndex = index;
+          previewActiveSceneSlot = showing;
           const host = document.getElementById('slide-preview-timer');
           const scene = previewTimerScenes[index];
           if (host && scene) {
-            paintLookLayers(host, { layers: scene.layers || [] }, {}, { timerText: f });
+            paintLookLayers(host, { layers: scene.layers || [] }, {}, { timerText: f }, { motion: 'live', builds: true });
           }
         }
       }
@@ -5450,7 +5546,10 @@
   // activeSceneIndex/activeSceneForElapsed exactly.
   let previewTimerScenes = null;
   let previewActiveSceneIndex = -1;
-  function previewActiveSceneForElapsed(elapsedMs) {
+  let previewTimerPace = null;       // segment.scenePace — see display.html's timerScenePace
+  let previewActiveSceneSlot = -1;
+  function previewActiveSceneForElapsed(elapsedMs, totalMs) {
+    if (window.KairoMotion) return window.KairoMotion.sceneAt(previewTimerScenes || [], previewTimerPace, elapsedMs, totalMs);
     if (!previewTimerScenes || !previewTimerScenes.length) return { index: 0, sceneElapsedMs: elapsedMs };
     let cum = 0;
     for (let i = 0; i < previewTimerScenes.length; i++) {
@@ -5472,7 +5571,9 @@
     const themed = document.getElementById('slide-preview-themed');
     const media = document.getElementById('slide-preview-media');
     previewTimerScenes = msg.scenes && msg.scenes.length ? msg.scenes : null;
+    previewTimerPace = msg.pace || null;
     previewActiveSceneIndex = 0;
+    previewActiveSceneSlot = 0;
     const look = msg.look || (msg.scenes && msg.scenes[0] ? { layers: msg.scenes[0].layers || [] } : null);
     if (msg.clear || !look) {
       previewTimerScenes = null;
@@ -5492,7 +5593,7 @@
     plain?.classList.add('hidden');
     paintLookLayers(host, look, msg.style || {}, {
       verseText: '', referenceText: '', translatedText: '', timerText: msg.timerText || '0:00',
-    });
+    }, { motion: 'live', builds: true });
   }
   function onClockAction() { /* clock has no in-tab readout to update yet — the output badge is the source of truth */ }
 
@@ -6461,7 +6562,7 @@
     effectiveTranslateTo, awaitTranslatedText,
     paintLookLayers, renderLookThumbnail, saveService, openContextMenu, openThemePopover, themeForItem,
     showMediaLibrary, onMediaStatus, onMediaFolderChanged, setMediaTransportVisible,
-    showTimerLibrary, onTimerAction, onClockAction, getTimerItem, updateSegmentParams, saveTimerScenes,
+    showTimerLibrary, onTimerAction, onClockAction, getTimerItem, updateSegmentParams, saveTimerScenes, saveScenePace,
     onTranscript, setAutoFollow, get autoFollow() { return autoFollow; },
     resendLiveForThemeEdit, resendLiveForSlideStyleEdit, onTimerSlide, refreshThumbnails, clearLive,
     // Lets Full-scale edit's canvas (app.js's beginInlineTextEdit) double-

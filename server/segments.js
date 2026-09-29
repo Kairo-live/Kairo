@@ -36,6 +36,7 @@ function loadSegments() {
     if (s.themeId === undefined) s.themeId = null;
     if (s.slideStyles === undefined) s.slideStyles = {};
     if (s.scenes === undefined) s.scenes = [];
+    if (s.scenePace === undefined) s.scenePace = null;
   });
 }
 
@@ -89,6 +90,10 @@ function addSegment(name, opts = {}) {
     // slideStyles exactly as before — scenes are opt-in, not a
     // replacement for the simple single-theme case.
     scenes: opts.scenes ?? [],
+    // How the scenes share the live countdown — { mode: 'fixed'|'countdown',
+    // maxSec, finaleSec, transition }, see KairoMotion.sceneAt. null keeps
+    // the original behaviour: each scene's own durationSec, then hold.
+    scenePace: opts.scenePace ?? null,
   };
   segments.push(segment);
   saveSegments();
@@ -116,6 +121,7 @@ function updateSegment(id, record) {
   if (record.themeId !== undefined) s.themeId = record.themeId;
   if (record.slideStyles !== undefined) s.slideStyles = record.slideStyles;
   if (record.scenes !== undefined) s.scenes = record.scenes;
+  if (record.scenePace !== undefined) s.scenePace = record.scenePace;
   saveSegments();
   return withTrigger(s);
 }

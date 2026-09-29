@@ -2470,7 +2470,9 @@ const segments = require('./segments');
 segments.init();
 
 app.get('/api/segments', (_req, res) => res.json({ ok: true, segments: segments.listSegments() }));
-app.post('/api/segments', (req, res) => res.json({ ok: true, segment: segments.addSegment(req.body?.name || 'Segment', { themeId: req.body?.themeId, slideStyles: req.body?.slideStyles }) }));
+app.post('/api/segments', (req, res) => res.json({ ok: true, segment: segments.addSegment(req.body?.name || 'Segment', {
+  themeId: req.body?.themeId, slideStyles: req.body?.slideStyles, scenes: req.body?.scenes, scenePace: req.body?.scenePace,
+}) }));
 app.put('/api/segments/:id', (req, res) => {
   const s = segments.updateSegment(req.params.id, req.body || {});
   if (!s) return res.status(404).json({ error: 'No such segment' });
@@ -2509,7 +2511,7 @@ app.post('/api/service/send-media', (req, res) => {
 // on screen are undisturbed and Clear Timer removes only this. The
 // per-second value still arrives via the stage-timer 'action' broadcast.
 app.post('/api/service/send-timer', (req, res) => {
-  const { look, style, label, timerText, clear, scenes } = req.body || {};
+  const { look, style, label, timerText, clear, scenes, pace } = req.body || {};
   if (clear) {
     broadcast({ type: 'timer-slide', target: 'viewer', clear: true });
   } else {
@@ -2520,7 +2522,9 @@ app.post('/api/service/send-timer', (req, res) => {
     // per-second 'action' broadcast (server/triggers.js) only ever carries
     // remainingMs/totalMs, so the display needs the full scene list
     // up front to know what to switch to and when.
-    broadcast({ type: 'timer-slide', target: 'viewer', look: look || null, style: style || {}, label: label || null, timerText: timerText || '0:00', scenes: scenes || null, timestamp: Date.now() });
+    // `pace` (segment.scenePace) says how the scenes share the countdown —
+    // see KairoMotion.sceneAt in src/motion_graphics.js.
+    broadcast({ type: 'timer-slide', target: 'viewer', look: look || null, style: style || {}, label: label || null, timerText: timerText || '0:00', scenes: scenes || null, pace: pace || null, timestamp: Date.now() });
   }
   res.json({ ok: true });
 });

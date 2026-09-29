@@ -5900,26 +5900,54 @@ mark.help-hit.is-current { background: rgba(255,255,255,0.38); }
    9px. A dark neutral border reads clearly against the white fill regardless
    of theme, and matches every other selection indicator now being neutral
    rather than accent-colored. */
+/* Canva-style frame: round corner handles (scale, proportions kept) and pill
+   side handles (stretch one way), white with a dark rim so they read on any
+   slide, and a rotate handle hanging under the layer. Each handle carries a
+   bigger invisible hit area than it draws. */
 .ts-handle {
   position: absolute;
-  width: 9px;
-  height: 9px;
+  width: 12px;
+  height: 12px;
   background: #ffffff;
   border: 1.5px solid #2a2a2e;
-  border-radius: 2px;
+  border-radius: 50%;
   z-index: 30;
-  box-shadow: 0 1px 3px rgba(0,0,0,0.5);
+  box-shadow: 0 1px 4px rgba(0,0,0,0.45);
 }
+.ts-handle::after { content: ''; position: absolute; inset: -6px; }
 /* Corners */
-.ts-handle-nw { left: -5px;  top: -5px;    cursor: nwse-resize; }
-.ts-handle-ne { right: -5px; top: -5px;    cursor: nesw-resize; }
-.ts-handle-se { right: -5px; bottom: -5px; cursor: nwse-resize; }
-.ts-handle-sw { left: -5px;  bottom: -5px; cursor: nesw-resize; }
-/* Edge midpoints */
+.ts-handle-nw { left: -7px;  top: -7px;    cursor: nwse-resize; }
+.ts-handle-ne { right: -7px; top: -7px;    cursor: nesw-resize; }
+.ts-handle-se { right: -7px; bottom: -7px; cursor: nwse-resize; }
+.ts-handle-sw { left: -7px;  bottom: -7px; cursor: nesw-resize; }
+/* Edge midpoints — pills along their edge */
+.ts-handle-n, .ts-handle-s { width: 22px; height: 8px; border-radius: 5px; }
+.ts-handle-w, .ts-handle-e { width: 8px; height: 22px; border-radius: 5px; }
 .ts-handle-n { left: 50%; top: -5px;    transform: translateX(-50%); cursor: ns-resize; }
 .ts-handle-s { left: 50%; bottom: -5px; transform: translateX(-50%); cursor: ns-resize; }
 .ts-handle-w { top: 50%;  left: -5px;   transform: translateY(-50%); cursor: ew-resize; }
 .ts-handle-e { top: 50%;  right: -5px;  transform: translateY(-50%); cursor: ew-resize; }
+/* Rotate — a round button hanging below the bottom edge */
+.ts-handle-rot {
+  width: 22px; height: 22px; left: 50%; bottom: -36px; transform: translateX(-50%);
+  display: flex; align-items: center; justify-content: center; color: #2a2a2e; cursor: grab;
+}
+.ts-handle-rot:active { cursor: grabbing; }
+/* The live readout while moving, resizing or rotating */
+.ts-drag-badge {
+  position: absolute; transform: translate(-50%, 0); z-index: 45; pointer-events: none;
+  background: rgba(20, 20, 24, 0.92); color: #fff; border: 1px solid rgba(255,255,255,0.14);
+  font: 600 11px/1 var(--font-sans, system-ui); letter-spacing: .02em; white-space: pre;
+  padding: 5px 8px; border-radius: 6px; box-shadow: 0 4px 12px rgba(0,0,0,0.35);
+}
+/* A multi-selection's own frame: corner handles scale the whole group */
+.ts-group-frame { position: absolute; z-index: 29; pointer-events: none; outline: 1.5px solid rgba(255,255,255,0.85); }
+.ts-group-frame .ts-handle { pointer-events: auto; }
+/* Drag-a-box selection */
+.ts-marquee {
+  position: absolute; z-index: 44; pointer-events: none;
+  border: 1px solid rgba(139, 180, 255, 0.95); background: rgba(139, 180, 255, 0.14);
+}
 
 /* ── Alignment/breakpoint guides — shown only while dragging/resizing a
    layer, marking canvas breakpoints (edges/quarters/center) or another
@@ -7023,3 +7051,63 @@ mark.help-hit.is-current { background: rgba(255,255,255,0.38); }
   0%, 35% { box-shadow: 0 0 0 3px rgba(255,255,255,0.75); }
   100%    { box-shadow: 0 0 0 3px rgba(255,255,255,0); }
 }
+
+/* ── Motion graphics (motion_graphics.js) ─────────────────────────────── */
+/* The Motion gallery: every graphic moving in its own tile, by family. */
+.ts-motion-gallery { width: 900px; }
+.ts-motion-gallery-body { overflow-y: auto; padding: 6px 18px 18px; }
+.ts-motion-family { display: flex; align-items: baseline; gap: 10px; margin: 14px 0 8px; }
+.ts-motion-family span { font-size: 12px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; color: var(--text); }
+.ts-motion-family em { font-style: normal; font-size: 12px; color: var(--text-2); }
+.ts-motion-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 10px; }
+.ts-motion-tile {
+  display: flex; flex-direction: column; gap: 0; padding: 0; text-align: left; cursor: pointer;
+  background: var(--bg-input); border: 1px solid var(--border-md); border-radius: 10px; overflow: hidden; color: var(--text);
+}
+.ts-motion-tile:hover { border-color: rgba(255,255,255,0.3); }
+.ts-motion-tile-art {
+  position: relative; aspect-ratio: 16 / 9; overflow: hidden;
+  background: linear-gradient(160deg, #1d3b3f, #0c2023);
+}
+.ts-motion-tile-label { display: flex; flex-direction: column; gap: 2px; padding: 8px 10px 10px; }
+.ts-motion-tile-label strong { font-size: 12.5px; font-weight: 700; }
+.ts-motion-tile-label span { font-size: 11.5px; color: var(--text-2); line-height: 1.35; }
+
+/* The bundled backgrounds: a grid of thumbnails in the canvas's Picture
+   section, and tiles in the Background gallery. */
+.ts-bg-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; margin-bottom: 8px; }
+.ts-bg-swatch {
+  aspect-ratio: 16 / 9; padding: 0; border-radius: 6px; cursor: pointer;
+  border: 1px solid var(--border-md); background: center / cover no-repeat var(--bg-input);
+}
+.ts-bg-swatch:hover { border-color: rgba(255,255,255,0.35); }
+.ts-bg-swatch.active { border-color: var(--text); box-shadow: 0 0 0 1px var(--text); }
+.ts-bg-gallery-grid { grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); }
+.ts-motion-tile.active { border-color: var(--text); box-shadow: 0 0 0 1px var(--text); }
+.ts-bg-tile-own {
+  display: flex; align-items: center; justify-content: center;
+  font-size: 30px; font-weight: 300; color: var(--text-2); background: var(--bg-hover);
+}
+.ts-bg-tile-none {
+  background: repeating-conic-gradient(#3a3a40 0% 25%, #2a2a30 0% 50%) 50% / 18px 18px;
+}
+
+/* A motion layer's colours: one swatch per element colour. */
+.ts-motion-colors { display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-start; }
+.ts-motion-color { position: relative; display: flex; flex-direction: column; align-items: center; gap: 4px; width: 58px; }
+.ts-motion-color span { font-size: 10.5px; color: var(--text-2); text-align: center; line-height: 1.2; }
+.ts-motion-color-rm {
+  position: absolute; top: -6px; right: 4px; width: 16px; height: 16px; border-radius: 50%;
+  border: 1px solid var(--border-md); background: var(--bg-hover); color: var(--text-2);
+  font-size: 11px; line-height: 13px; padding: 0; cursor: pointer;
+}
+.ts-motion-color-rm:hover { color: var(--text); }
+.ts-motion-color-add {
+  width: 34px; height: 34px; border-radius: 8px; border: 1px dashed var(--border-md);
+  background: transparent; color: var(--text-2); font-size: 18px; cursor: pointer;
+}
+.ts-motion-color-add:hover { color: var(--text); border-color: rgba(255,255,255,0.3); }
+.ts-motion-blurb { font-size: 11.5px; color: var(--text-2); line-height: 1.4; margin-top: 4px; }
+/* A long set of choices (motion kinds, line shapes) wraps onto a second row
+   inside the panel instead of running off its edge. */
+.ts-chip-group { flex-wrap: wrap; max-width: 100%; row-gap: 2px; }

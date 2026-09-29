@@ -933,7 +933,9 @@ function renderPreviewScreen(text, reference, look, translatedText = '', image =
     } else if (effectiveLook && themed && window.KairoService?.paintLookLayers) {
       plain?.classList.add('hidden');
       themed.classList.remove('hidden');
-      window.KairoService.paintLookLayers(themed, effectiveLook, styleByLayerId, { verseText: text, referenceText: reference || '', translatedText, timerText });
+      // Motion layers move here as on the output; build-ins play when the
+      // content is new, not on a repaint of what's already showing.
+      window.KairoService.paintLookLayers(themed, effectiveLook, styleByLayerId, { verseText: text, referenceText: reference || '', translatedText, timerText }, { motion: 'live', builds: contentChanged });
     } else {
       themed?.classList.add('hidden');
       plain?.classList.remove('hidden');

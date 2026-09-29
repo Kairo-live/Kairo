@@ -196,6 +196,7 @@
     <script src="word_split.js"></script>
     <script src="color_utils.js"></script>
     <script src="layer_geometry.js"></script>
+    <script src="motion_graphics.js"></script>
     <script>
     'use strict';
 
@@ -312,7 +313,10 @@
     // "Full Edit" feature) — a specific playlist item's specific slide can
     // override any text layer's position/font/align/color/shadow/outline/
     // visibility without touching the theme itself.
-    function buildLayerDOM(look, verseText, verseRef, translatedText, styleByLayerId = {}, timerText = '', skipBackground = false) {
+    // opts.builds: this paint is new content arriving, so each layer's own
+    // build-in animation (layer.build — see motion_graphics.js) plays; a
+    // refresh of what's already on screen passes nothing and stays still.
+    function buildLayerDOM(look, verseText, verseRef, translatedText, styleByLayerId = {}, timerText = '', skipBackground = false, opts = {}) {
         const frag    = document.createDocumentFragment();
         const layout  = look.layout || 'fullscreen';
         let   isTransparent = false;
@@ -344,7 +348,8 @@
         // must still paint even when verseText is empty. Same rule
         // paintLookLayers (service.js) applies for every preview.
         const hasVerseLayer = layers.some(l => l.type === 'text' && l.binding === 'verse' && l.visible !== false);
-        layers.forEach(layer => {
+        const buildOf = (layer) => ((styleByLayerId || {})[layer.id] || {}).build || layer.build;
+        const paintLayer = (layer) => {
             if (!layer.visible) return;
 
             // Image layer — always free-positioned, drawn in layer order.
@@ -373,6 +378,7 @@
                     applyPos(v, p);
                     v.style.height = (p.h / DESIGN_H * 100) + '%';
                     if (layer.rotation) v.style.transform = `rotate(${layer.rotation}deg)`;
+                    applyImageLook(v, layer);
                     v.src = layer.src;
                     frag.appendChild(v);
                     // Belt-and-suspenders alongside the declarative autoplay
@@ -404,6 +410,7 @@
                     art.style.backgroundSize  = fit === 'fill' ? '100% 100%' : fit;
                     art.style.animation = 'kairo-kenburns 18s ease-in-out infinite alternate';
                     wrap.appendChild(art);
+                    applyImageLook(wrap, layer);
                     frag.appendChild(wrap);
                     return;
                 }
@@ -417,6 +424,7 @@
                 applyPos(div, p);
                 div.style.height = (p.h / DESIGN_H * 100) + '%';
                 if (layer.rotation) div.style.transform = `rotate(${layer.rotation}deg)`;
+                applyImageLook(div, layer);
                 frag.appendChild(div);
                 return;
             }
@@ -476,6 +484,28 @@
                 art.style.backgroundSize  = fit === 'fill' ? '100% 100%' : fit;
                 div.appendChild(art);
                 startCycleMotion(div, art);
+                applyImageLook(div, layer);
+                frag.appendChild(div);
+                return;
+            }
+
+            // Motion graphic (motion_graphics.js): an animated layer drawn from
+            // shapes and CSS. Timer kinds follow the countdown through
+            // KairoMotion.tick in handleActionBadge; a hand-drawn line starts
+            // drawing once its layer's build delay is up.
+            if (layer.type === 'motion') {
+                const ov = (styleByLayerId || {})[layer.id] || {};
+                if (ov.visible === false || !window.KairoMotion) return;
+                const p = ov.pos || layer.pos || { x: 0, y: 0, w: DESIGN_W, h: DESIGN_H };
+                const div = document.createElement('div');
+                div.className = 'display-layer';
+                div.style.cssText = 'position:absolute;z-index:1;';
+                div.style.opacity = (ov.opacity ?? layer.opacity ?? 100) / 100;
+                applyPos(div, p);
+                div.style.height = (p.h / DESIGN_H * 100) + '%';
+                if (layer.rotation) div.style.transform = `rotate(${layer.rotation}deg)`;
+                const delay = opts.builds ? window.KairoMotion.normalizeBuild(buildOf(layer)).delay : 0;
+                div.appendChild(window.KairoMotion.build(ov.graphic || layer.graphic, { mode: 'live', box: { w: p.w, h: p.h }, delay }));
                 frag.appendChild(div);
                 return;
             }
@@ -485,6 +515,9 @@
                 // slide — its theme's background must never paint over the
                 // scripture/lyrics underneath.
                 if (skipBackground) return;
+                const bgOv = (styleByLayerId || {})[layer.id] || {};
+                if (bgOv.visible === false) return;
+                layer = withFillOverride(layer, bgOv);
                 // Only a full-canvas background keys the output transparent —
                 // a positioned shape with a transparent fill is just invisible.
                 if (layer.fill === 'transparent') {
@@ -506,6 +539,9 @@
                     div.style.background = hexOpacity(layer.color, layer.opacity);
                     div.style.backdropFilter    = 'blur(24px)';
                     div.style.webkitBackdropFilter = 'blur(24px)';
+                } else if (layer.fill === 'image') {
+                    div.style.background = imageFillCss(layer);
+                    if ((layer.opacity ?? 100) < 100) div.style.opacity = String((layer.opacity ?? 100) / 100);
                 }
 
                 // Layout-specific background coverage. Each layout puts the
@@ -640,14 +676,20 @@
                     z-index: 10;
                 `;
 
+                // Line breaks typed into a custom text layer are meant — the
+                // operator's preview (.svc-canvas-text) always kept them.
+                if (layer.binding === 'custom') div.style.whiteSpace = 'pre-line';
+
                 // Timer state colours travel on the element so the per-second
                 // 'action' tick (handleActionBadge) can recolour it as the
                 // countdown enters warning / overtime — the theme owns all
                 // three colours; these are just the classic defaults.
                 if (layer.binding === 'timer' || layer.binding === 'timer-h' || layer.binding === 'timer-m' || layer.binding === 'timer-s') {
                     div.dataset.baseColor     = hexOpacity(color, opacity);
-                    div.dataset.warnColor     = ov.warnColor     || layer.warnColor     || '#e8a64a';
-                    div.dataset.overtimeColor = ov.overtimeColor || layer.overtimeColor || '#e8404a';
+                    // At the layer's own opacity, so a countdown faded back
+                    // behind the copy stays faded as it turns amber/red.
+                    div.dataset.warnColor     = hexOpacity(ov.warnColor     || layer.warnColor     || '#e8a64a', opacity);
+                    div.dataset.overtimeColor = hexOpacity(ov.overtimeColor || layer.overtimeColor || '#e8404a', opacity);
                 }
 
                 // Positioning by layout
@@ -789,7 +831,9 @@
                 const effectivePos = ov.pos || layer.pos;
                 if (effectivePos) {
                     applyPos(div, effectivePos);
-                    div.style.transform = 'none';
+                    // Turned about its own centre (a countdown running up the
+                    // edge of the screen, say).
+                    div.style.transform = layer.rotation ? `rotate(${layer.rotation}deg)` : 'none';
                     div.style.padding   = '0';
                     // Entrance (layer.entrance, renderTextProps' Effects
                     // tab) — only safe for a free-positioned layer, since a
@@ -827,6 +871,9 @@
                     div.appendChild(span);
                 } else if (layer.binding === 'verse' && window.KairoWordSplit?.applyMotionText(div, look?.textAnimation, content, look?.textAnimationSpeed || 1, { color: look?.textHighlightColor, intensity: look?.textAnimationIntensity })) {
                     // handled
+                } else if (hasAccentMarkup(content, layer.accentColor)) {
+                    // "*word*" in the accent colour — a two-tone headline in one layer.
+                    div.innerHTML = accentHtml(content, layer.accentColor);
                 } else {
                     div.textContent = content;
                 }
@@ -835,6 +882,16 @@
                 // Ensure font is loaded
                 if (fs.family !== 'system-ui') loadGoogleFont(fs.family);
             }
+        };
+        // Each layer's build-in (new content only) and its idle motion — the
+        // stage fills this window, so 1vh is one percent of the output.
+        layers.forEach(layer => {
+            const before = frag.childNodes.length;
+            paintLayer(layer);
+            if (!window.KairoMotion) return;
+            const ov = (styleByLayerId || {})[layer.id] || {};
+            const anim = { build: buildOf(layer), idle: ov.idle || layer.idle };
+            for (let i = before; i < frag.childNodes.length; i++) window.KairoMotion.animateLayer(frag.childNodes[i], anim, { builds: !!opts.builds, unit: '1vh' });
         });
 
         return { frag, isTransparent };
@@ -1010,6 +1067,7 @@
             if (timerScenes && timerScenes.length) renderMediaStage(null);
             timerScenes = null;
             activeSceneIndex = -1;
+            activeSceneSlot = -1;
         }
     }
     outputLayers = loadOutputLayers();
@@ -1052,7 +1110,7 @@
             // two are blank.
             if (!verseText && !verseRef && !timerText) { fitVerse(); return; }
 
-            const { frag, isTransparent } = buildLayerDOM(look, verseText, verseRef, translatedText, styleByLayerId, timerText);
+            const { frag, isTransparent } = buildLayerDOM(look, verseText, verseRef, translatedText, styleByLayerId, timerText, false, { builds: animate });
             if (isTransparent) document.body.classList.add('transparent-bg');
             slideLayer.appendChild(frag);
             fitVerse();
@@ -1119,13 +1177,32 @@
     // The per-second value arrives via the 'action' broadcast
     // (handleActionBadge writes into [data-binding="timer"], which lives in
     // this layer). renderTimerLayer runs once, at segment start.
-    function renderTimerLayer(look, styleByLayerId, timerText) {
+    // opts.builds: play each layer's build-in (a segment starting, a scene
+    // arriving). opts.transition 'blur'/'fade': hand over from what's showing
+    // through a crossfade rather than a cut — the outgoing scene is lifted
+    // into its own copy on top that blurs/fades away while the new scene's
+    // pieces build in underneath it.
+    function renderTimerLayer(look, styleByLayerId, timerText, opts = {}) {
+        const leaving = opts.transition && opts.transition !== 'cut' && timerLayer.childNodes.length
+            ? liftForCrossfade(timerLayer, opts.transition) : null;
         timerLayer.innerHTML = '';
         timerLayer.classList.remove('transparent');
         if (!look) return;
-        const { frag, isTransparent } = buildLayerDOM(look, '', '', '', styleByLayerId || {}, timerText || '');
+        const { frag, isTransparent } = buildLayerDOM(look, '', '', '', styleByLayerId || {}, timerText || '', false, { builds: !!opts.builds });
         if (isTransparent) timerLayer.classList.add('transparent');
         timerLayer.appendChild(frag);
+        if (leaving) timerLayer.appendChild(leaving);
+    }
+    function liftForCrossfade(layerEl, kind) {
+        const out = document.createElement('div');
+        out.style.cssText = 'position:absolute;inset:0;z-index:50;pointer-events:none;';
+        while (layerEl.firstChild) out.appendChild(layerEl.firstChild);
+        const ms = 900;
+        out.animate(kind === 'blur'
+            ? [{ opacity: 1, filter: 'blur(0px)' }, { opacity: 0, filter: 'blur(18px)' }]
+            : [{ opacity: 1 }, { opacity: 0 }], { duration: ms, easing: 'ease-in-out', fill: 'forwards' });
+        setTimeout(() => out.remove(), ms + 60);
+        return out;
     }
 
     // ── Scene storyboard (segment.scenes — see segments.js) ────────────────
@@ -1140,6 +1217,12 @@
     // segment's actual countdown length.
     let timerScenes = null;      // [{id, name, durationSec, layers}] | null
     let activeSceneIndex = -1;   // -1 = nothing painted yet this run
+    // segment.scenePace (see KairoMotion.sceneAt): 'fixed' runs each scene's
+    // own duration; 'countdown' lets the countdown set the pace — the scenes
+    // share the time, loop on a long countdown, and a finale can hold the
+    // last minute. null for a segment saved before pacing existed.
+    let timerScenePace = null;
+    let activeSceneSlot = -1;    // which showing: a scene coming round again is a new one
 
     // A scene's own full-bleed backdrop (its 'bg' layer) goes out through
     // the SAME independent media layer/slot Media Bin sends use
@@ -1156,7 +1239,7 @@
     // backdrop slot, with the scene's own copy/countdown still layered on
     // top exactly as designed, instead of two competing, inconsistent
     // paths for "what's the background."
-    function renderTimerScene(index) {
+    function renderTimerScene(index, opts = {}) {
         const scene = timerScenes && timerScenes[index];
         if (!scene) return;
         const layers = scene.layers || [];
@@ -1170,14 +1253,15 @@
         // keeps showing through underneath this scene's own layers.
         if (bg) renderMediaStage(bg.src, isVideoLayerSrc(bg.src) ? 'video' : 'image', bg.fit || 'cover', bg.motion);
         else renderMediaStage(null);
-        renderTimerLayer({ layers: rest }, {}, currentTimerText);
+        renderTimerLayer({ layers: rest }, {}, currentTimerText, { builds: true, transition: opts.transition });
     }
 
     // elapsedMs counts up from 0 (segment start) — the countdown's own
     // remainingMs counts DOWN, so this is just totalMs - remainingMs,
     // clamped so overtime (remainingMs < 0) doesn't push it past totalMs
     // and off the end of the last scene.
-    function activeSceneForElapsed(elapsedMs) {
+    function activeSceneForElapsed(elapsedMs, totalMs) {
+        if (window.KairoMotion) return window.KairoMotion.sceneAt(timerScenes || [], timerScenePace, elapsedMs, totalMs);
         if (!timerScenes || !timerScenes.length) return { index: 0, sceneElapsedMs: elapsedMs };
         let cum = 0;
         for (let i = 0; i < timerScenes.length; i++) {
@@ -1712,6 +1796,7 @@
                 if (timerScenes && timerScenes.length) renderMediaStage(null);
                 timerScenes = null;
                 activeSceneIndex = -1;
+                activeSceneSlot = -1;
             }
             return;
         }
@@ -1737,9 +1822,12 @@
                 if (timerScenes && timerScenes.length) renderMediaStage(null);
                 timerScenes = null;
                 activeSceneIndex = -1;
+                activeSceneSlot = -1;
             } else if (msg.scenes && msg.scenes.length) {
                 timerScenes = msg.scenes;
+                timerScenePace = msg.pace || null;
                 activeSceneIndex = 0;
+                activeSceneSlot = 0;
                 currentTimerText = msg.timerText || '0:00';
                 renderTimerScene(0);
             } else {
@@ -1750,7 +1838,8 @@
                 if (timerScenes && timerScenes.length) renderMediaStage(null);
                 timerScenes = null;
                 activeSceneIndex = -1;
-                renderTimerLayer(msg.look, msg.style || {}, msg.timerText || '0:00');
+                activeSceneSlot = -1;
+                renderTimerLayer(msg.look, msg.style || {}, msg.timerText || '0:00', { builds: true });
             }
             return;
         }
@@ -1877,6 +1966,9 @@
             }
             currentTimerText = formatted;
 
+            // Motion graphics that follow the countdown (ring, bar, dots).
+            window.KairoMotion?.tick(document, { remainingMs, totalMs, cleared });
+
             // Custom text with a "{timer}" placeholder (see the
             // hasTimerTemplate note in buildLayerDOM) — substitutes the
             // live formatted countdown into that ONE spot in an otherwise
@@ -1900,10 +1992,15 @@
             // instant the countdown crosses zero.
             if (!cleared && timerScenes && timerScenes.length && typeof totalMs === 'number' && totalMs > 0) {
                 const elapsed = Math.max(0, totalMs - remainingMs);
-                const { index, sceneElapsedMs } = activeSceneForElapsed(elapsed);
-                if (index !== activeSceneIndex) {
+                const { index, sceneElapsedMs, slot } = activeSceneForElapsed(elapsed, totalMs);
+                const showing = slot ?? index;
+                if (index !== activeSceneIndex || showing !== activeSceneSlot) {
+                    // A segment saved before pacing existed keeps its hard cut.
+                    const transition = timerScenePace && window.KairoMotion ? window.KairoMotion.normalizePace(timerScenePace).transition : 'cut';
+                    const first = activeSceneIndex < 0;
                     activeSceneIndex = index;
-                    renderTimerScene(index);
+                    activeSceneSlot = showing;
+                    renderTimerScene(index, { transition: first ? 'cut' : transition });
                 } else {
                     stage.querySelectorAll('[data-cycle-images][data-cycle-interval]').forEach(el => {
                         let sources;
