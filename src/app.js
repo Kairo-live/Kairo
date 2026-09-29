@@ -597,37 +597,34 @@ let previewRenderGen = 0;
 // monitoring — matches ProPresenter's Preview Window, which has its own
 // screen-selector dropdown independent of what's being edited. Defaults to
 // the primary/External Display output.
-// 'main' is the composite — every layer in order (media, slide, Bible, timer)
-// with the primary display's look; any other value is one real output.
-let livePreviewOutputId = 'main';
-
+// The Monitor's own preview is Main: the composite — every layer in order
+// (media, slide, Bible, timer) with the primary display's look.
 function primaryOutputLook() {
   try {
     const map = (typeof outputThemeMap === 'function') ? outputThemeMap() : {};
-    const id  = map[livePreviewOutputId] ?? ((typeof PRIMARY_DISPLAY !== 'undefined') ? map[PRIMARY_DISPLAY] : null);
+    const id  = map.main ?? ((typeof PRIMARY_DISPLAY !== 'undefined') ? map[PRIMARY_DISPLAY] : null);
     return (Array.isArray(looks) ? looks.find(l => l.id === id) : null) || null;
   } catch { return null; }
 }
 
-// Shapes the Live preview box to whichever output it's currently monitoring
-// — its assigned physical screen's aspect ratio if one's been set (see
-// outputScreenMap), otherwise the shared fixed 16:9 default.
+// Shapes the Live preview box to Main's screen — its assigned physical
+// screen's aspect ratio if one's been set (see outputScreenMap), otherwise
+// the shared fixed 16:9 default.
 function applyLivePreviewAspect() {
   const el = document.getElementById('slide-preview');
   if (!el) return;
-  const s = (typeof outputScreenMap === 'function') ? outputScreenMap()[livePreviewOutputId === 'main' ? PRIMARY_DISPLAY : livePreviewOutputId] : null;
+  const s = (typeof outputScreenMap === 'function') ? outputScreenMap()[PRIMARY_DISPLAY] : null;
   el.style.aspectRatio = s ? `${s.width} / ${s.height}` : '';
 }
 
-// ── Monitor: what each output is actually showing ─────────────────────────
-// The dropdown and the grid list Main plus every output that's ON (an output
-// that's off shows nothing, so it isn't monitored). Main is the operator's own
-// composite preview (#slide-preview). A specific output is shown by a live copy
-// of that output's real page — display.html?output=<id>&monitor=1, the exact
-// page its screen runs, so its theme and its own layers (e.g. a screen that
-// only carries the timer) are what you see — rendered at the output's real
-// resolution and scaled down. Picking a tile in the grid, or an entry in the
-// dropdown, shows that one output alone.
+// ── Monitor: what the outputs are showing ─────────────────────────────────
+// Main — the operator's own composite preview (#slide-preview) — or, with the
+// grid on, Main plus every output that's ON (an output that's off shows
+// nothing, so it isn't monitored). An output is shown by a live copy of its
+// real page — display.html?output=<id>&monitor=1, the exact page its screen
+// runs, so its theme and its own layers (e.g. a screen that only carries the
+// timer) are what you see — rendered at the output's real resolution and
+// scaled down. Nothing to pick: the pop-out window always shows the grid.
 const MONITOR_MAIN = { id: 'main', type: 'main', name: 'Main' };
 
 function monitorTargets() {
@@ -668,51 +665,18 @@ function buildMonitorFrame(o) {
   return box;
 }
 
-function renderLivePreviewOutputSelect() {
-  const sel = document.getElementById('live-preview-output-select');
-  if (!sel) return;
-  const targets = monitorTargets();
-  if (!targets.some(t => t.id === livePreviewOutputId)) livePreviewOutputId = 'main';
-  sel.innerHTML = '';
-  targets.forEach(t => {
-    const opt = document.createElement('option');
-    opt.value = t.id; opt.textContent = t.name;
-    if (t.id === livePreviewOutputId) opt.selected = true;
-    sel.appendChild(opt);
-  });
+// Keeps the Monitor in step with the configured outputs (a screen assigned or
+// changed, an output turned on or off).
+function refreshMonitor() {
   applyLivePreviewAspect();
-  showMonitorSelection();
   if (monitorGridActive) renderMonitorGrid();
 }
 
-// Single view: Main -> the composite preview; an output -> its live copy.
 function disposeMonitorFrames(container) {
   container?.querySelectorAll('.monitor-frame').forEach(box => { _monitorScaleObservers.get(box)?.disconnect(); });
 }
 
-function showMonitorSelection() {
-  const single = document.getElementById('slide-preview');
-  const host = document.getElementById('monitor-single');
-  if (!single || !host) return;
-  const target = monitorTargets().find(t => t.id === livePreviewOutputId) || MONITOR_MAIN;
-  const isMain = target.id === 'main';
-  single.classList.toggle('hidden', monitorGridActive || !isMain);
-  host.classList.toggle('hidden', monitorGridActive || isMain);
-  if (isMain) { disposeMonitorFrames(host); host.replaceChildren(); return; }
-  const { w, h } = monitorResolution(target);
-  if (host.firstChild?.dataset.key !== `${target.id}|${w}x${h}`) { disposeMonitorFrames(host); host.replaceChildren(buildMonitorFrame(target)); }
-}
-
-function selectMonitorTarget(id) {
-  livePreviewOutputId = id;
-  const sel = document.getElementById('live-preview-output-select');
-  if (sel) sel.value = id;
-  applyLivePreviewAspect();
-  repaintPreviewWithOutputLook();
-  setMonitorGrid(false);
-}
-
-// Grid: Main plus every output that's on, each a live copy; click to open one.
+// Grid: Main plus every output that's on, each a live copy.
 let monitorGridActive = false;
 function renderMonitorGrid() {
   const host = document.getElementById('outputs-monitor-grid');
@@ -724,23 +688,19 @@ function renderMonitorGrid() {
     const { w, h } = monitorResolution(t);
     const key = `${t.id}|${w}x${h}`;
     if (existing.has(key)) return existing.get(key);
-    const tile = document.createElement('button');
-    tile.type = 'button';
+    const tile = document.createElement('div');
     tile.className = 'monitor-grid-tile';
     tile.dataset.key = key;
-    tile.title = `Show ${t.name} alone`;
     const header = document.createElement('div');
     header.className = 'monitor-grid-tile-header';
     header.textContent = t.name;
     tile.appendChild(header);
     if (t.type !== 'main' && typeof buildOutputLayersSummary === 'function') tile.appendChild(buildOutputLayersSummary(t.id, layersMap));
     tile.appendChild(buildMonitorFrame(t));
-    tile.addEventListener('click', () => selectMonitorTarget(t.id));
     return tile;
   });
   [...host.children].filter(t => !tiles.includes(t)).forEach(disposeMonitorFrames);
   host.replaceChildren(...tiles);
-  host.querySelectorAll('.monitor-grid-tile').forEach(tile => tile.classList.toggle('is-selected', tile.dataset.key.startsWith(`${livePreviewOutputId}|`)));
 }
 
 function setMonitorGrid(on) {
@@ -749,31 +709,30 @@ function setMonitorGrid(on) {
   btn?.classList.toggle('active', on);
   btn?.setAttribute('aria-pressed', String(on));
   document.getElementById('outputs-monitor-grid')?.classList.toggle('hidden', !on);
+  document.getElementById('slide-preview')?.classList.toggle('hidden', on);
+  const showing = document.getElementById('monitor-showing');
+  if (showing) showing.textContent = on ? 'All outputs' : 'Main';
   if (on) renderMonitorGrid();
   else { const g = document.getElementById('outputs-monitor-grid'); disposeMonitorFrames(g); g?.replaceChildren(); }   // stop the copies while hidden
-  showMonitorSelection();
 }
 document.getElementById('monitor-grid-toggle-btn')?.addEventListener('click', () => setMonitorGrid(!monitorGridActive));
 
-// Pop the monitor out: what it shows now (Main or one output) in its own
-// normal window — title bar, resizable, movable to any screen. Same live copy
-// of the output page the monitor uses; one pop-out at a time.
+// Pop the monitor out: every output that's on, Main included, as the grid
+// (monitor.html) in its own normal window — title bar, resizable, movable to
+// any screen. Each is the same live copy of its output's page the in-app grid
+// uses, laid out at the output's resolution and scaled into its tile, so it
+// looks right at any window size. One pop-out at a time.
 const MONITOR_WINDOW_LABEL = 'kairo-monitor';
 async function openMonitorWindow() {
-  const target = monitorTargets().find(t => t.id === livePreviewOutputId) || MONITOR_MAIN;
   // About the size of the Settings panel (880 wide, 78% of the app's height),
   // resizable. It opens in front without taking focus, so the operator keeps
   // working in the main window; it's a normal window, not always-on-top, so
   // clicking the app brings the app forward.
   const width = Math.min(880, Math.round(window.screen.availWidth * 0.9));
   const height = Math.max(420, Math.round(window.innerHeight * 0.78));
-  // The grid pops out as the grid (monitor.html: every output that's on, plus
-  // Main); the single view pops out that one output.
   const tiles = monitorTargets().map(t => { const { w, h } = monitorResolution(t); return { id: t.type === 'main' ? 'main' : t.id, name: t.name, w, h }; });
-  const path = monitorGridActive
-    ? `/monitor.html?tiles=${encodeURIComponent(JSON.stringify(tiles))}`
-    : `/display.html?output=${encodeURIComponent(target.type === 'main' ? 'main' : target.id)}&monitor=1`;
-  const title = monitorGridActive ? 'KAIRO Monitor — all outputs' : `KAIRO Monitor — ${target.name}`;
+  const path = `/monitor.html?tiles=${encodeURIComponent(JSON.stringify(tiles))}`;
+  const title = 'KAIRO Monitor';
   const WebviewWindow = window.__TAURI__?.webviewWindow?.WebviewWindow;
   if (!WebviewWindow) { window.open(path, MONITOR_WINDOW_LABEL, `width=${width},height=${height}`); return; }
   try {
@@ -786,16 +745,6 @@ async function openMonitorWindow() {
   } catch (err) { console.warn('[KAIRO] Monitor window failed:', err); }
 }
 document.getElementById('monitor-popout-btn')?.addEventListener('click', openMonitorWindow);
-
-document.getElementById('live-preview-output-select')?.addEventListener('change', (e) => {
-  livePreviewOutputId = e.target.value;
-  applyLivePreviewAspect();
-  // Only the output-default fallback (no item-specific theme) is stale when
-  // switching which output we're monitoring — an item with its own theme
-  // stays exactly as sent, same guard applyOutputThemes() already uses.
-  repaintPreviewWithOutputLook();
-  if (monitorGridActive) setMonitorGrid(false); else showMonitorSelection();
-});
 
 // ProPresenter-style song section annotation — mirrors slide_import.js's
 // own SECTION_LABEL_RE (server-side, applied at import time) so a block's

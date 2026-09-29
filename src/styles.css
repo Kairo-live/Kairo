@@ -1068,15 +1068,7 @@ input[type="range"]:disabled { opacity: 0.4; cursor: default; }
   display: flex;
   flex-direction: column;
   gap: 4px;
-  /* a <button>: click opens that output alone */
-  font: inherit;
-  color: inherit;
-  text-align: left;
-  cursor: pointer;
-  transition: border-color var(--trans);
 }
-.monitor-grid-tile:hover { border-color: var(--selected-border); }
-.monitor-grid-tile.is-selected { border-color: var(--brand); }
 
 /* A live copy of one output (display.html?monitor=1), laid out at the
    output's real resolution and scaled down to fit — see buildMonitorFrame. */
@@ -1094,7 +1086,6 @@ input[type="range"]:disabled { opacity: 0.4; cursor: default; }
   transform-origin: 0 0;
   pointer-events: none;
 }
-.monitor-single .monitor-frame { border-radius: var(--radius); }
 .monitor-grid-tile-header {
   font-size: 11px;
   font-weight: 700;
@@ -5286,23 +5277,16 @@ mark.help-hit.is-current { background: rgba(255,255,255,0.38); }
    6-icon align row (.ts-align-group's shared 2px) — only 3 buttons here,
    so they read as separate choices rather than one fused block. */
 #rs-anim-picker { gap: 6px; }
-.rs-preview-output-select {
+/* What the Monitor is showing: Main, or all outputs (the grid). */
+.rs-preview-output-name {
   flex: 1;
   min-width: 0;
-  height: 22px;
-  background-color: var(--bg-input);
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%236e6e6e' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
-  background-repeat: no-repeat;
-  background-position: right 6px center;
-  border: 1px solid var(--border-md);
-  border-radius: var(--radius-sm);
-  color: var(--text);
-  font-family: var(--font);
   font-size: 11px;
   font-weight: 600;
-  padding: 0 20px 0 7px;
-  outline: none;
-  cursor: pointer;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .range-nav-bar {

@@ -98,8 +98,9 @@ function setOutputScreen(outputId, screen) {
   if (screen) map[outputId] = screen; else delete map[outputId];
   settings.outputScreens = map;
   saveSettingsPatch({ outputScreens: map });
-  // A display is "on" when it has a screen — the monitor lists only outputs that are on.
-  if (typeof renderLivePreviewOutputSelect === 'function') renderLivePreviewOutputSelect();
+  // A display is "on" when it has a screen — the monitor shows only outputs
+  // that are on, and Main's box takes its screen's shape.
+  if (typeof refreshMonitor === 'function') refreshMonitor();
 }
 
 function populateScreenOptions(sel, outputId) {
@@ -160,7 +161,6 @@ function buildScreenSelect(outputId) {
     // does for every OTHER non-numeric string.
     const s = sel.value === '' ? null : cachedScreens[Number(sel.value)];
     setOutputScreen(outputId, s ? { width: s.width, height: s.height, left: s.left, top: s.top } : null);
-    if (typeof livePreviewOutputId !== 'undefined' && livePreviewOutputId === outputId) applyLivePreviewAspect();
     const label = `kairo-${outputId}`;
     if (s) {
       if (typeof openDisplayOutput === 'function') openDisplayOutput({ id: outputId, name: outputId });
@@ -375,7 +375,7 @@ function renderOutputsPane() {
   if (!selectedOutputId) selectedOutputId = PRIMARY_DISPLAY;
   renderOutputsList(); // also renders the Output Control matrix — see its own comment
   renderOutputsDetail();
-  renderLivePreviewOutputSelect(); // keep the Live Preview's output dropdown in step with configured outputs
+  refreshMonitor(); // keep the Monitor in step with the configured outputs
   wireOutputsAddMenu();
   autoResumeNativeOutputs();
 }
@@ -938,7 +938,7 @@ function updateNativeOutput(kind, id, patch) {
   const list = outputsFn().map(x => x.id === id ? { ...x, ...patch } : x);
   settings[`${kind}Outputs`] = list;
   saveSettingsPatch({ [`${kind}Outputs`]: list });
-  if ('enabled' in patch && typeof renderLivePreviewOutputSelect === 'function') renderLivePreviewOutputSelect();
+  if ('enabled' in patch && typeof refreshMonitor === 'function') refreshMonitor();
 }
 
 // "+ Add Output" — a small type-chooser popover (mirrors the existing

@@ -602,23 +602,21 @@
                 </button>
             </div>
 
-            <!-- Live preview — compact 16:9 in right sidebar. The output
-                 selector below it picks which configured output this box is
-                 monitoring (matches ProPresenter's Preview Window, which has
-                 its own screen dropdown separate from the editor). -->
+            <!-- Live preview — compact 16:9 in right sidebar: Main, or with
+                 the grid on, every output that's on. Nothing to pick. -->
             <div class="rs-preview-card">
                 <div class="rs-preview-output-row">
                     <span class="rs-preview-output-label">Monitoring</span>
-                    <select id="live-preview-output-select" class="rs-preview-output-select" title="Which output this preview is monitoring"></select>
-                    <!-- Toggles between the single view below and a grid of
-                         live copies of Main and every output that's on
-                         (renderMonitorGrid in app.js). -->
+                    <span class="rs-preview-output-name" id="monitor-showing">Main</span>
+                    <!-- Toggles between Main below and a grid of live copies
+                         of Main and every output that's on (renderMonitorGrid
+                         in app.js). -->
                     <button id="monitor-grid-toggle-btn" class="ls-icon-btn" title="Show all outputs at once" aria-pressed="false">
                         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
                     </button>
-                    <!-- Pops what the monitor shows (Main or the selected
-                         output) out into its own resizable window. -->
-                    <button id="monitor-popout-btn" class="ls-icon-btn" title="Open the monitor in its own window">
+                    <!-- Pops every output that's on out into its own
+                         resizable window, as the grid (monitor.html). -->
+                    <button id="monitor-popout-btn" class="ls-icon-btn" title="Open all outputs in their own window">
                         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 4h6v6"/><path d="M20 4l-9 9"/><path d="M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></svg>
                     </button>
                 </div>
@@ -653,13 +651,8 @@
                     <div class="live-screen-timer hidden" id="slide-preview-timer"></div>
                     <div class="live-screen-badge">LIVE</div>
                 </div>
-                <!-- One output shown alone: a live copy of that output's
-                     real page (display.html?monitor=1), so its own theme and
-                     layers are exactly what's seen — see showMonitorSelection
-                     in app.js. Main uses #slide-preview above instead. -->
-                <div class="monitor-single hidden" id="monitor-single"></div>
-                <!-- Grid mode — Main plus one live copy per output that's on;
-                     click a tile to show that output alone (renderMonitorGrid). -->
+                <!-- Grid mode — Main plus one live copy per output that's on
+                     (renderMonitorGrid). -->
                 <div class="outputs-monitor-grid hidden" id="outputs-monitor-grid"></div>
                 <!-- Range navigation -->
                 <div id="range-nav-bar" class="range-nav-bar" style="display:none">

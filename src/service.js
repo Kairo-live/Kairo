@@ -2944,10 +2944,25 @@
   // display.html — already silently drifted (this copy of
   // applyShapeGeometry had dropped app.js's .toFixed(1) rounding).
 
+  // A painted look's text is sized to its host's width at the moment it's
+  // painted, and a hidden host measures 0 (painted at a 640 px guess): the
+  // Monitor's own preview, painted while the grid hid it, came back with its
+  // text twice too big and clipped. Painted again at the new width, without
+  // build-ins; `patch` updates the content (the countdown's latest value).
+  const paintedHosts = new WeakMap();
+  function repaintAtHostWidth(host, patch = {}) {
+    const p = host && paintedHosts.get(host);
+    if (!p || !host.clientWidth || Math.abs(host.clientWidth - p.width) < 2 || !host.hasChildNodes()) return;
+    paintLookLayers(host, p.look, p.style, { ...p.content, ...patch }, { ...p.opts, builds: false });
+  }
+
   function paintLookLayers(host, look, style, content, opts = {}) {
     host.classList.remove('is-alpha');
     host.innerHTML = '';
     const scale = (host.clientWidth || 640) / DESIGN_W;
+    // Text is sized to the host's width now — remembered, so a host that
+    // changes size can be painted again at its new one (repaintAtHostWidth).
+    paintedHosts.set(host, { look, style, content, opts, width: host.clientWidth });
 
     // Item/slide-specific layers (added in Full-scale edit, see
     // src/app.js's writeItemSlideStyleFromSynthetic) ride along inside the
@@ -5241,6 +5256,30 @@
   // button underneath was one more thing on the face for no real gain.
   // Everything else (quick-edit the time, rename, full edit, duplicate,
   // delete) lives behind right-click.
+  // A card's background is painted once the card is on screen with a size,
+  // and again if its size changes: painted while the card was being built
+  // (not on the page yet, or the Timer view hidden), its text was sized to a
+  // 640 px guess — "TO" filled the Preservice card. Only the cards on screen
+  // now are watched (forgetCardPaints when the grid is rebuilt).
+  const cardPaints = new Map();   // card background → { paint, width }
+  const cardSizes = window.ResizeObserver ? new ResizeObserver(entries => {
+    for (const { target } of entries) {
+      const c = cardPaints.get(target);
+      if (!c || !target.clientWidth || Math.abs(target.clientWidth - c.width) < 2) continue;
+      c.width = target.clientWidth;
+      c.paint();
+    }
+  }) : null;
+  function paintCardWhenSized(host, paint) {
+    if (!cardSizes) { paint(); return; }
+    cardPaints.set(host, { paint, width: 0 });
+    cardSizes.observe(host);
+  }
+  function forgetCardPaints() {
+    cardPaints.forEach((_, host) => cardSizes.unobserve(host));
+    cardPaints.clear();
+  }
+
   function buildSegmentCard(seg) {
     const card = document.createElement('div');
     card.className = 'timer-card' + (seg.status === 'live' ? ' is-live' : seg.status === 'done' ? ' is-done' : '');
@@ -5263,7 +5302,7 @@
     // whatever themeForItem would otherwise fall back to (there's no real
     // themeId to resolve once a segment has scenes).
     const theme = (seg.scenes && seg.scenes.length) ? { layers: seg.scenes[0].layers || [] } : themeForItem(seg);
-    if (theme) paintLookLayers(bg, theme, seg.slideStyles?.[0] || {}, { timerText: '' });
+    if (theme) paintCardWhenSized(bg, () => paintLookLayers(bg, theme, seg.slideStyles?.[0] || {}, { timerText: '' }));
 
     const status = document.createElement('span');
     status.className = 'timer-card-status' + (seg.status === 'live' ? ' is-live' : '');
@@ -5347,6 +5386,7 @@
     const grid = document.getElementById('timer-grid');
     if (!grid) return;
     grid.innerHTML = '';
+    forgetCardPaints();
     if (!segmentList.length) {
       grid.innerHTML = '<div class="svc-empty">No segments yet. Use "+ Add Segment" above.</div>';
       return;
@@ -5543,6 +5583,17 @@
     previewEl?.classList.toggle('is-overtime', overtime);
     previewEl?.classList.toggle('is-warning', warning);
     if (readoutEl) readoutEl.textContent = (overtime ? '+' : '') + formatTime(Math.abs(remainingMs) / 1000);
+  }
+
+  // The Monitor's Main preview: shown again after the grid, or resized with
+  // the sidebar, its slide and countdown layers are painted again at its new
+  // size (see repaintAtHostWidth).
+  const monitorBox = document.getElementById('slide-preview');
+  if (monitorBox && window.ResizeObserver) {
+    new ResizeObserver(() => {
+      repaintAtHostWidth(document.getElementById('slide-preview-themed'));
+      repaintAtHostWidth(document.getElementById('slide-preview-timer'), lastPreviewTick ? { timerText: lastPreviewTick.text } : {});
+    }).observe(monitorBox);
   }
 
   // Scenes (segment.scenes — a storyboard, see segments.js) live-switch in
