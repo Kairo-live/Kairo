@@ -54,3 +54,20 @@ test('a slide\'s fill changes merge over the theme\'s without touching it', () =
   assert.equal(slide.pos, undefined, 'only fill fields merge');
   assert.equal(theme.fill, 'gradient', 'the theme layer is untouched');
 });
+
+test('a slide\'s rotation, accent and photo look merge over the theme\'s; null takes one away', () => {
+  const { withLayerOverride, animOverride } = sandbox.window;
+  const theme = { id: 'photo', type: 'image', rotation: 0, grayscale: 100, fade: { side: 'left', amount: 60 }, build: { type: 'fade' } };
+  assert.equal(withLayerOverride(theme, {}), theme);
+  const slide = withLayerOverride(theme, { rotation: 12, grayscale: null, fade: { side: 'right', amount: 40 }, pos: { x: 1 } });
+  assert.equal(slide.rotation, 12);
+  assert.equal('grayscale' in slide, false, 'null removes the theme\'s value');
+  assert.equal(JSON.stringify(slide.fade), JSON.stringify({ side: 'right', amount: 40 }));
+  assert.equal(slide.pos, undefined, 'only the listed keys merge');
+  assert.equal(theme.grayscale, 100, 'the theme layer is untouched');
+  // Build-in and idle: the slide's own when it has one, null = none. (Objects
+  // from the script's own context compare by value, not by prototype.)
+  const plain = (o) => JSON.stringify(o);
+  assert.equal(plain(animOverride(theme, {})), plain({ build: { type: 'fade' } }));
+  assert.equal(plain(animOverride(theme, { build: null, idle: { type: 'float' } })), plain({ build: null, idle: { type: 'float' } }));
+});

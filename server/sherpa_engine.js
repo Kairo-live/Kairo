@@ -148,12 +148,19 @@ const RELEASE_AFTER_MS = 2 * 60 * 1000;
 let sharedRecognizer = null;   // { key, recognizer }
 let releaseTimer = null;
 
-function acquireRecognizer(OnlineRecognizer, modelDir, opts) {
+async function acquireRecognizer(OnlineRecognizer, modelDir, opts) {
   clearTimeout(releaseTimer);
   releaseTimer = null;
   const key = JSON.stringify([modelDir, opts]);
   if (sharedRecognizer?.key !== key) {
-    if (sharedRecognizer) { sharedRecognizer = null; collectGarbage(); }   // settings changed: free the old model before loading
+    if (sharedRecognizer) {
+      // Settings changed: let the old model go before loading the new one,
+      // or both are in memory at once. Its native memory is freed by
+      // finalizers that run after a collection, hence the wait.
+      sharedRecognizer = null;
+      collectGarbage();
+      await new Promise(r => setTimeout(r, 1100));
+    }
     sharedRecognizer = { key, recognizer: new OnlineRecognizer(recognizerConfig(modelDir, opts)) };
   }
   return sharedRecognizer.recognizer;
@@ -211,8 +218,15 @@ class SherpaEngine {
       throw e;
     }
 
-    this._recognizer = acquireRecognizer(OnlineRecognizer, this.modelDir, { utteranceEndMs: this.utteranceEndMs });
-    this._stream = this._recognizer.createStream();
+    this._recognizer = await acquireRecognizer(OnlineRecognizer, this.modelDir, { utteranceEndMs: this.utteranceEndMs });
+    try {
+      this._stream = this._recognizer.createStream();
+    } catch (err) {
+      // No session after all: the model mustn't stay loaded waiting for one.
+      this._recognizer = null;
+      releaseRecognizerSoon();
+      throw err;
+    }
     this._lastPartial = '';
     this._locked = 0;
     this._running = true;

@@ -139,11 +139,17 @@ function accentHtml(text, color) {
 // (layer.grayscale, 0-100) and a soft fade into whatever is behind it from
 // one edge (layer.fade: { side: 'left'|'right'|'top'|'bottom', amount: 0-100,
 // the share of the image the fade covers}) — the washed-back photo half of an
-// announcement slide.
+// announcement slide. The grayscale also goes in --km-filter, which the
+// animations that animate `filter` (motion_graphics.js: Blur in, Pulse) keep
+// in their own filter lists — an animated filter replaces the element's own
+// for as long as it runs.
 function applyImageLook(el, layer) {
   if (!el || !layer) return;
   const gs = Math.max(0, Math.min(100, Number(layer.grayscale) || 0));
-  if (gs > 0) el.style.filter = `grayscale(${gs}%)`;
+  if (gs > 0) {
+    el.style.filter = `grayscale(${gs}%)`;
+    el.style.setProperty('--km-filter', `grayscale(${gs}%)`);
+  }
   const f = layer.fade;
   const dir = f && { left: 'to right', right: 'to left', top: 'to bottom', bottom: 'to top' }[f.side];
   const amount = Math.max(0, Math.min(100, Number(f && f.amount) || 0));
@@ -170,24 +176,38 @@ function imageFillCss(layer, opts = {}) {
   return `${shade}${url} center / cover no-repeat ${base}`;
 }
 
-// A slide's own changes to a background layer's fill (Full-scale edit stores
-// them per slide, by layer id) — the same fields the editor merges into its
-// canvas, so the output and previews paint what the editor shows.
+// A slide's own values for some of a layer's settings (Full-scale edit stores
+// them per slide, by layer id — app_theme_studio.js's diffLayerOverride),
+// merged over its theme's, so the output and previews paint what the editor
+// shows. null means the slide took the setting away (no build-in, say).
+// FILL_OVERRIDE_KEYS: a background layer's fill. LAYER_OVERRIDE_KEYS: any
+// layer's rotation, accent colour and photo look. (Build-in and idle motion
+// travel the same way — see animOverride.)
 const FILL_OVERRIDE_KEYS = ['fill', 'color', 'color2', 'angle', 'opacity', 'src', 'dim'];
-function withFillOverride(layer, ov) {
+const LAYER_OVERRIDE_KEYS = ['rotation', 'accentColor', 'grayscale', 'fade'];
+function withLayerOverride(layer, ov, keys = LAYER_OVERRIDE_KEYS) {
   if (!ov) return layer;
   let out = layer;
-  FILL_OVERRIDE_KEYS.forEach(k => {
+  keys.forEach(k => {
     if (ov[k] === undefined || ov[k] === layer[k]) return;
     if (out === layer) out = { ...layer };
-    out[k] = ov[k];
+    if (ov[k] === null) delete out[k]; else out[k] = ov[k];
   });
   return out;
+}
+function withFillOverride(layer, ov) { return withLayerOverride(layer, ov, FILL_OVERRIDE_KEYS); }
+// A layer's build-in and idle motion, with the slide's own when it has one.
+function animOverride(layer, ov) {
+  const has = (k) => !!ov && ov[k] !== undefined;
+  return { build: has('build') ? ov.build : layer.build, idle: has('idle') ? ov.idle : layer.idle };
 }
 
 window.imageFillCss      = imageFillCss;
 window.withFillOverride  = withFillOverride;
+window.withLayerOverride = withLayerOverride;
+window.animOverride      = animOverride;
 window.FILL_OVERRIDE_KEYS = FILL_OVERRIDE_KEYS;
+window.LAYER_OVERRIDE_KEYS = LAYER_OVERRIDE_KEYS;
 window.hasAccentMarkup   = hasAccentMarkup;
 window.accentHtml        = accentHtml;
 window.applyImageLook    = applyImageLook;

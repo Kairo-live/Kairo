@@ -291,19 +291,19 @@
 @keyframes kb-drop{from{opacity:0;translate:0 -14%}}
 @keyframes kb-left{from{opacity:0;translate:-10% 0}}
 @keyframes kb-right{from{opacity:0;translate:10% 0}}
-@keyframes kb-blur{from{opacity:0;filter:blur(14px);scale:1.06}}
+@keyframes kb-blur{from{opacity:0;filter:var(--km-filter,) blur(14px);scale:1.06}}
 @keyframes kb-pop{from{opacity:0;scale:.8}60%{opacity:1;scale:1.04}}
 @keyframes kb-wipe{from{clip-path:inset(0 100% 0 0)}}
-@keyframes kb-word{from{opacity:0;translate:0 .55em;filter:blur(6px)}}
+@keyframes kb-word{from{opacity:0;translate:0 .55em;filter:var(--km-filter,) blur(6px)}}
 @keyframes kb-letter{from{opacity:0;translate:0 .35em;scale:.6}}
 @keyframes kb-type{from{opacity:0}to{opacity:1}}
 .kb-piece{display:inline-block;white-space:pre;}
 .kb-word-wrap{display:inline-block;white-space:nowrap;}
 @keyframes ki-float{from{translate:0 0}to{translate:0 calc(var(--ku,1vh) * var(--ka,1) * -2.4)}}
-@keyframes ki-drift{from{translate:calc(var(--ku,1vh) * var(--ka,1) * -2.6) 0}to{translate:calc(var(--ku,1vh) * var(--ka,1) * 2.6) 0}}
+@keyframes ki-drift{0%{translate:0 0;animation-timing-function:ease-out}25%{translate:calc(var(--ku,1vh) * var(--ka,1) * -2.6) 0;animation-timing-function:ease-in-out}75%{translate:calc(var(--ku,1vh) * var(--ka,1) * 2.6) 0;animation-timing-function:ease-in}100%{translate:0 0}}
 @keyframes ki-breathe{from{scale:1}to{scale:calc(1 + .045 * var(--ka,1))}}
-@keyframes ki-sway{from{rotate:calc(-2.5deg * var(--ka,1))}to{rotate:calc(2.5deg * var(--ka,1))}}
-@keyframes ki-pulse{from{filter:brightness(1)}to{filter:brightness(calc(1 + .45 * var(--ka,1)))}}
+@keyframes ki-sway{0%{rotate:0deg;animation-timing-function:ease-out}25%{rotate:calc(-2.5deg * var(--ka,1));animation-timing-function:ease-in-out}75%{rotate:calc(2.5deg * var(--ka,1));animation-timing-function:ease-in}100%{rotate:0deg}}
+@keyframes ki-pulse{from{filter:var(--km-filter,) brightness(1)}to{filter:var(--km-filter,) brightness(calc(1 + .45 * var(--ka,1)))}}
 .km-timer.km-is-over .km-progress{animation:km-over 1.2s ease-in-out infinite;}
 .km-ring-fill{transition:stroke-dashoffset 1s linear,stroke .5s ease;}
 .km-bar-fill{transition:width 1s linear,height 1s linear,background-color .5s ease;}
@@ -906,7 +906,10 @@
   // 1-100; `unit` is one percent of the stage's height as a CSS length
   // (the output uses 1vh, a small preview its own pixels), so a float covers
   // the same share of the screen at any size. Starts after `delay` (the
-  // layer's build) so the two never fight over the same property.
+  // layer's build) so the two never fight over the same property, and from
+  // where the layer is at rest: float, breathe and pulse go out and back
+  // (alternate); drift and sway swing both ways from the middle in one
+  // cycle, so neither snaps sideways the moment it starts.
   const IDLES = [
     { id: 'none', label: 'None' },
     { id: 'float', label: 'Float' },
@@ -930,9 +933,10 @@
     el.style.setProperty('--ku', opts.unit || '1vh');
     el.style.setProperty('--ka', (m.amount / 50).toFixed(3));
     const base = { float: 5, drift: 11, breathe: 6, sway: 7, pulse: 3.2 }[m.type];
-    const dur = base / m.speed;
+    const swing = m.type === 'drift' || m.type === 'sway';   // one iteration = there and back
+    const dur = (swing ? base * 2 : base) / m.speed;
     const delay = Math.max(0, Number(opts.delay) || 0);
-    el.style.animation = appendAnim(el.style.animation, `ki-${m.type} ${dur.toFixed(2)}s ease-in-out ${delay.toFixed(2)}s infinite alternate`);
+    el.style.animation = appendAnim(el.style.animation, `ki-${m.type} ${dur.toFixed(2)}s ease-in-out ${delay.toFixed(2)}s infinite${swing ? '' : ' alternate'}`);
   }
 
   // ── Scene pacing ──────────────────────────────────────────────────────────

@@ -348,9 +348,12 @@
         // must still paint even when verseText is empty. Same rule
         // paintLookLayers (service.js) applies for every preview.
         const hasVerseLayer = layers.some(l => l.type === 'text' && l.binding === 'verse' && l.visible !== false);
-        const buildOf = (layer) => ((styleByLayerId || {})[layer.id] || {}).build || layer.build;
+        const animOf = (layer) => animOverride(layer, (styleByLayerId || {})[layer.id]);
         const paintLayer = (layer) => {
             if (!layer.visible) return;
+            // The slide's own rotation / accent colour / photo look, if any
+            // (see layer_geometry.js's withLayerOverride).
+            layer = withLayerOverride(layer, (styleByLayerId || {})[layer.id]);
 
             // Image layer — always free-positioned, drawn in layer order.
             // Video is added the same way (Theme Studio's file picker/native
@@ -504,7 +507,7 @@
                 applyPos(div, p);
                 div.style.height = (p.h / DESIGN_H * 100) + '%';
                 if (layer.rotation) div.style.transform = `rotate(${layer.rotation}deg)`;
-                const delay = opts.builds ? window.KairoMotion.normalizeBuild(buildOf(layer)).delay : 0;
+                const delay = opts.builds ? window.KairoMotion.normalizeBuild(animOf(layer).build).delay : 0;
                 div.appendChild(window.KairoMotion.build(ov.graphic || layer.graphic, { mode: 'live', box: { w: p.w, h: p.h }, delay }));
                 frag.appendChild(div);
                 return;
@@ -889,8 +892,7 @@
             const before = frag.childNodes.length;
             paintLayer(layer);
             if (!window.KairoMotion) return;
-            const ov = (styleByLayerId || {})[layer.id] || {};
-            const anim = { build: buildOf(layer), idle: ov.idle || layer.idle };
+            const anim = animOf(layer);
             for (let i = before; i < frag.childNodes.length; i++) window.KairoMotion.animateLayer(frag.childNodes[i], anim, { builds: !!opts.builds, unit: '1vh' });
         });
 
@@ -1253,7 +1255,7 @@
         // keeps showing through underneath this scene's own layers.
         if (bg) renderMediaStage(bg.src, isVideoLayerSrc(bg.src) ? 'video' : 'image', bg.fit || 'cover', bg.motion);
         else renderMediaStage(null);
-        renderTimerLayer({ layers: rest }, {}, currentTimerText, { builds: true, transition: opts.transition });
+        renderTimerLayer({ layers: rest }, {}, currentTimerText, { builds: opts.builds !== false, transition: opts.transition });
     }
 
     // elapsedMs counts up from 0 (segment start) — the countdown's own
@@ -1261,17 +1263,7 @@
     // clamped so overtime (remainingMs < 0) doesn't push it past totalMs
     // and off the end of the last scene.
     function activeSceneForElapsed(elapsedMs, totalMs) {
-        if (window.KairoMotion) return window.KairoMotion.sceneAt(timerScenes || [], timerScenePace, elapsedMs, totalMs);
-        if (!timerScenes || !timerScenes.length) return { index: 0, sceneElapsedMs: elapsedMs };
-        let cum = 0;
-        for (let i = 0; i < timerScenes.length; i++) {
-            const durMs = Math.max(0, Number(timerScenes[i].durationSec) || 0) * 1000;
-            if (i === timerScenes.length - 1 || elapsedMs < cum + durMs) {
-                return { index: i, sceneElapsedMs: Math.max(0, elapsedMs - cum) };
-            }
-            cum += durMs;
-        }
-        return { index: timerScenes.length - 1, sceneElapsedMs: 0 };
+        return window.KairoMotion.sceneAt(timerScenes || [], timerScenePace, elapsedMs, totalMs);
     }
 
     // 'cut' (default) just swaps the background-image outright. 'slide'
@@ -1826,10 +1818,16 @@
             } else if (msg.scenes && msg.scenes.length) {
                 timerScenes = msg.scenes;
                 timerScenePace = msg.pace || null;
-                activeSceneIndex = 0;
-                activeSceneSlot = 0;
-                currentTimerText = msg.timerText || '0:00';
-                renderTimerScene(0);
+                // An edit to the running countdown (a slide, the pace) resends
+                // it: carry on from the slide and time the countdown is at,
+                // rather than cutting back to the first slide at 0:00 until
+                // the next tick.
+                const t = msg.resend && lastTimerTick && Date.now() - lastTimerTick.at < 3000 ? lastTimerTick : null;
+                const at = t ? activeSceneForElapsed(Math.max(0, t.totalMs - t.remainingMs), t.totalMs) : { index: 0, slot: 0 };
+                activeSceneIndex = at.index;
+                activeSceneSlot = at.slot ?? at.index;
+                if (!t) currentTimerText = msg.timerText || '0:00';
+                renderTimerScene(at.index, { builds: !t });   // an edit repaints in place; a start arrives
             } else {
                 // A plain (non-scene) segment starting right after a scene
                 // segment was live — clear any scene backdrop the previous
@@ -1922,9 +1920,13 @@
                 : base;
         }
     }
+    // The latest countdown tick, so a resent countdown (see 'timer-slide')
+    // can pick up at the right slide.
+    let lastTimerTick = null;   // { remainingMs, totalMs, at }
     function handleActionBadge(msg) {
         if (msg.actionId === 'stage-timer') {
             const { remainingMs, label, cleared, style, totalMs } = msg.payload || {};
+            lastTimerTick = !cleared && typeof totalMs === 'number' && totalMs > 0 ? { remainingMs, totalMs, at: Date.now() } : null;
             // Two independent render targets share this one tick: the fixed
             // corner badge (always available, no theme needed) and — if this
             // segment was actually sent to the slide layer with a theme that

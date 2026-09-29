@@ -1803,6 +1803,21 @@ window.addEventListener('resize', () => {
 // (this canvas's own coordinate system) — see that file's own comment for
 // how display.html's vh-based coordinate system uses the same function.
 
+// An image layer's picture inside its box in the editor canvas: clipped to
+// the box (so Ken Burns can zoom inside it) and carrying the photo look —
+// kept off the layer's own element, whose children include the selection
+// and rotate handles.
+function tsImageArt(layer, src, fit, kenBurns) {
+  const clip = document.createElement('div');
+  clip.style.cssText = 'position:absolute;inset:0;overflow:hidden;border-radius:inherit;';
+  const art = document.createElement('div');
+  art.style.cssText = `position:absolute;inset:0;background-repeat:no-repeat;background-position:center;background-image:url('${src}');background-size:${fit === 'fill' ? '100% 100%' : fit};`
+    + (kenBurns ? 'animation:kairo-kenburns 18s ease-in-out infinite alternate;' : '');
+  clip.appendChild(art);
+  applyImageLook(clip, layer);
+  return clip;
+}
+
 function renderPreview() {
   const stage = document.getElementById('looks-preview-stage');
   if (!stage || !activeLook) return;
@@ -1834,6 +1849,10 @@ function renderPreview() {
 
       if (layer.fill === 'transparent') {
         stage.classList.add('ts-transparent-bg');
+        // Nothing to paint, but it's still the canvas's own surface: a click
+        // selects the background and a drag across it draws a selection box,
+        // the same as on a filled canvas.
+        if (!layer.pos) { stage.appendChild(div); tsDecorateLayerEl(div, layer, false); }
         return;
       }
       if (layer.fill === 'solid') {
@@ -1924,31 +1943,17 @@ function renderPreview() {
         div.autoplay = true; div.loop = true; div.muted = true; div.playsInline = true;
         div.style.cssText = posCss + `object-fit:${fit};`;
         div.src = layer.src;
-      } else if (layer.motion === 'kenburns') {
-        // Live in the editor too, not just the real output — the whole
-        // point of a "does this feel dynamic" judgment call is seeing the
-        // motion while picking colors/copy, not only after starting a
-        // live countdown and switching to the actual display to check.
-        // Same outer-wrapper/inner-art split as display.html's own
-        // startCycleMotion, for the same clipping reason.
-        // Clipped one level in, so the selection handles and rotate handle
-        // (children of `div`) aren't clipped with the zoom.
-        div.style.cssText = posCss;
-        const clip = document.createElement('div');
-        clip.style.cssText = 'position:absolute;inset:0;overflow:hidden;border-radius:inherit;';
-        const art = document.createElement('div');
-        art.style.cssText = `position:absolute;inset:0;background-repeat:no-repeat;background-position:center;background-image:url('${layer.src}');background-size:${fit === 'fill' ? '100% 100%' : fit};animation:kairo-kenburns 18s ease-in-out infinite alternate;`;
-        clip.appendChild(art);
-        div.appendChild(clip);
+        applyImageLook(div, layer);
       } else {
-        div.style.cssText = posCss + `
-          background-image:url('${layer.src}');
-          background-size:${fit === 'fill' ? '100% 100%' : fit};
-          background-position:center;
-          background-repeat:no-repeat;
-        `;
+        // The picture is drawn one level in (tsImageArt): clipped for Ken
+        // Burns, which moves here too — the whole point of a "does this feel
+        // dynamic" judgment call is seeing the motion while picking colors/
+        // copy — and carrying the photo look, since the selection and rotate
+        // handles are children of `div` and a fade mask on `div` would hide
+        // them too.
+        div.style.cssText = posCss;
+        div.appendChild(tsImageArt(layer, layer.src, fit, layer.motion === 'kenburns'));
       }
-      applyImageLook(div, layer);
       stage.appendChild(div);
       if (div.tagName === 'VIDEO') div.play().catch(() => {});
       // Same as the background branch above — full drag/resize in item
@@ -1975,27 +1980,17 @@ function renderPreview() {
         height:${(p.h / TS_DESIGN_H * 100)}%;
         opacity:${(layer.opacity ?? 100) / 100};
         border-radius:${((layer.radius || 0) * pxScale).toFixed(1)}px;
-        ${kenBurns ? '' : (first ? `background-image:url('${first}');` : 'background:#1a1a1e;')}
-        ${kenBurns ? '' : `background-size:${fit === 'fill' ? '100% 100%' : fit};background-position:center;background-repeat:no-repeat;`}
+        ${first ? '' : 'background:#1a1a1e;'}
         ${layer.rotation ? `transform: rotate(${layer.rotation}deg);` : ''}
       `;
-      // Live in the editor too — same reasoning as the plain 'image'
-      // branch above.
-      if (kenBurns) {
-        const clip = document.createElement('div');
-        clip.style.cssText = 'position:absolute;inset:0;overflow:hidden;border-radius:inherit;';
-        const art = document.createElement('div');
-        art.style.cssText = `position:absolute;inset:0;background-repeat:no-repeat;background-position:center;background-image:url('${first}');background-size:${fit === 'fill' ? '100% 100%' : fit};animation:kairo-kenburns 18s ease-in-out infinite alternate;`;
-        clip.appendChild(art);
-        div.appendChild(clip);
-      }
+      // The first frame, drawn one level in like the plain 'image' branch.
+      if (first) div.appendChild(tsImageArt(layer, first, fit, kenBurns));
       if ((layer.sources || []).length > 1) {
         const badge = document.createElement('span');
         badge.style.cssText = 'position:absolute;top:6px;right:6px;background:rgba(0,0,0,0.6);color:#fff;font-size:10px;font-weight:700;padding:2px 6px;border-radius:4px;pointer-events:none;';
         badge.textContent = `1 / ${layer.sources.length}`;
         div.appendChild(badge);
       }
-      applyImageLook(div, layer);
       stage.appendChild(div);
       // Full drag/resize in item mode too — this is exactly the "the
       // background isn't editable" gap: an Image Cycle layer is a base
@@ -2023,7 +2018,11 @@ function renderPreview() {
       `;
       if (window.KairoMotion) {
         const delay = playing ? window.KairoMotion.normalizeBuild(layer.build).delay : 0;
-        div.appendChild(window.KairoMotion.build(layer.graphic, { mode: 'demo', box: { w: p.w, h: p.h }, delay }));
+        // Held still while something is being dragged: every drag frame
+        // repaints the canvas, which would rebuild and restart each moving
+        // part on every frame.
+        const busy = (tsDrag && tsDrag.armed) || (tsMarquee && tsMarquee.armed);
+        div.appendChild(window.KairoMotion.build(layer.graphic, { mode: busy ? 'still' : 'demo', box: { w: p.w, h: p.h }, delay }));
       }
       stage.appendChild(div);
       tsDecorateLayerEl(div, layer, true);
@@ -2286,7 +2285,7 @@ function renderPreview() {
   if (multiSelectedLayerIds.size >= 2) {
     const sel = tsSelectedLayers();
     if (sel.length >= 2) {
-      const b = tsGroupBounds(sel);
+      const b = tsGroupBounds(sel, { measureOnly: true });
       const f = document.createElement('div');
       f.className = 'ts-group-frame';
       f.style.left = (b.x / TS_DESIGN_W * 100) + '%';
@@ -3023,9 +3022,12 @@ function tsAlignSelection(kind) {
 // The selection's own outer bounding box (design px) — the multi-select
 // Transform panel's X/Y/W/H fields (renderProps) read and write against
 // this, same as a single layer's own X/Y/W/H reads/writes against its pos.
-function tsGroupBounds(layers) {
+// opts.measureOnly: just look — a layer still on a layout preset is
+// measured where it is instead of being pinned there (ensurePos), for
+// drawing the selection's frame rather than acting on it.
+function tsGroupBounds(layers, opts = {}) {
   if (!layers.length) return { x: 0, y: 0, w: 0, h: 0 };
-  const boxes = layers.map(l => { const pos = ensurePos(l); return { pos, h: tsEffectiveH(l, pos) }; });
+  const boxes = layers.map(l => { const pos = opts.measureOnly ? (l.pos || measurePos(l)) : ensurePos(l); return { pos, h: tsEffectiveH(l, pos) }; });
   const minX = Math.min(...boxes.map(b => b.pos.x));
   const minY = Math.min(...boxes.map(b => b.pos.y));
   const maxX = Math.max(...boxes.map(b => b.pos.x + b.pos.w));
@@ -3760,18 +3762,31 @@ function diffLayerOverride(baseLayer, curLayer) {
   if (curLayer.fit !== undefined && curLayer.fit !== baseLayer?.fit) ov.fit = curLayer.fit;
   if (curLayer.radius !== undefined && curLayer.radius !== baseLayer?.radius) ov.radius = curLayer.radius;
   // A motion graphic's settings travel whole: its colours, counts and speeds
-  // only make sense together.
-  if (curLayer.graphic && JSON.stringify(curLayer.graphic) !== JSON.stringify(baseLayer?.graphic)) ov.graphic = deepClone(curLayer.graphic);
-  // A background's fill — its kind, second colour and angle, picture and
-  // darkening (colour and opacity are covered above). Every renderer merges
-  // these the same way (layer_geometry.js's withFillOverride).
-  if (curLayer.type === 'background') {
-    ['fill', 'color2', 'angle', 'src', 'dim'].forEach(k => {
-      if (curLayer[k] !== undefined && curLayer[k] !== baseLayer?.[k]) ov[k] = curLayer[k];
-    });
-  }
+  // only make sense together. Compared normalized — key order and filled-in
+  // defaults aren't a change.
+  if (curLayer.graphic && !sameGraphic(curLayer.graphic, baseLayer?.graphic)) ov.graphic = deepClone(curLayer.graphic);
+  // Rotation, accent colour and photo look, plus a background's fill (its
+  // kind, colours, picture and darkening) — merged back by every renderer
+  // through layer_geometry.js's withLayerOverride. null records a setting
+  // the slide took away.
+  const keys = [...LAYER_OVERRIDE_KEYS, ...(curLayer.type === 'background' ? FILL_OVERRIDE_KEYS : [])];
+  keys.forEach(k => {
+    if (k === 'color' || k === 'opacity') return;   // covered above
+    const cur = curLayer[k] ?? null, base = baseLayer?.[k] ?? null;
+    if (JSON.stringify(cur) !== JSON.stringify(base)) ov[k] = cur && typeof cur === 'object' ? deepClone(cur) : cur;
+  });
+  // Build-in and idle motion (the Animate tab), same way.
+  ['build', 'idle'].forEach(k => {
+    const cur = curLayer[k] ?? null, base = baseLayer?.[k] ?? null;
+    if (JSON.stringify(cur) !== JSON.stringify(base)) ov[k] = cur ? deepClone(cur) : null;
+  });
   if (curLayer.visible === false) ov.visible = false; // only the hidden case is ever stored; visible is the assumed default
   return ov;
+}
+function sameGraphic(a, b) {
+  const M = window.KairoMotion;
+  if (!a || !b || !M) return JSON.stringify(a) === JSON.stringify(b);
+  return JSON.stringify(M.normalize(a)) === JSON.stringify(M.normalize(b));
 }
 // Recomputes item.slideStyles[slideIndex] from scratch by diffing the
 // synthetic look's current text layers against tsItemCtx.baseLook's
@@ -4109,8 +4124,10 @@ function renderLayoutProps(panel, layer) {
 
   // Rotation, about the layer's own centre — a countdown running up the side
   // of the screen, a tilted photo, a slanted headline. Only for a layer with
-  // its own box: a layout-preset text layer centres itself with a transform.
-  if (layer.pos || layer.type !== 'text') {
+  // its own box: a layout-preset text layer centres itself with a transform,
+  // and the canvas fill is always the whole screen.
+  const isCanvasFill = layer.type === 'background' && !layer.pos;
+  if ((layer.pos || layer.type !== 'text') && !isCanvasFill) {
     kids.push(prop('Rotate', makeSlider(Math.round(layer.rotation || 0), -180, 180,
       v => { layer.rotation = v || 0; if (layer.type === 'text') ensurePos(layer); up(); }, v => `${Math.round(v)}°`)));
   }
@@ -4258,20 +4275,25 @@ function makeBackgroundGrid(currentSrc, onPick) {
   });
   return grid;
 }
-function pickOwnBackground(layer, after) {
+// Asks for one image file and hands back what loadImageFile makes of it.
+function pickImageFile(onLoaded) {
   const inp = document.createElement('input');
   inp.type = 'file'; inp.accept = 'image/*';
   inp.addEventListener('change', async () => {
     const file = inp.files && inp.files[0];
     if (!file) return;
-    try {
-      const { src } = await loadImageFile(file);
-      layer.fill = 'image'; layer.src = src;
-      up(); renderProps();
-      if (after) after();
-    } catch { toast('Could not load that image', 'error'); }
+    let img;
+    try { img = await loadImageFile(file); } catch { toast('Could not load that image', 'error'); return; }
+    onLoaded(img);
   });
   inp.click();
+}
+function pickOwnBackground(layer, after) {
+  pickImageFile(({ src }) => {
+    layer.fill = 'image'; layer.src = src;
+    up(); renderProps();
+    if (after) after();
+  });
 }
 
 // Image layer properties
@@ -4307,20 +4329,10 @@ function renderImageProps(panel, layer) {
   const replace = document.createElement('button');
   replace.className = 'ts-add-btn ts-add-btn-compact';
   replace.textContent = 'Replace…';
-  replace.addEventListener('click', () => {
-    const inp = document.createElement('input');
-    inp.type = 'file'; inp.accept = 'image/*';
-    inp.addEventListener('change', async () => {
-      const file = inp.files && inp.files[0];
-      if (!file) return;
-      try {
-        const { src, w, h } = await loadImageFile(file);
-        layer.src = src; layer.naturalW = w; layer.naturalH = h;
-        up(); renderProps();
-      } catch { toast('Could not load that image', 'error'); }
-    });
-    inp.click();
-  });
+  replace.addEventListener('click', () => pickImageFile(({ src, w, h }) => {
+    layer.src = src; layer.naturalW = w; layer.naturalH = h;
+    up(); renderProps();
+  }));
   panel.appendChild(section('style', 'Picture', prop('Image', replace)));
 
   // The color-key "Remove background" cutout used to live here — pulled per
@@ -4559,9 +4571,12 @@ function renderMotionProps(panel, layer) {
   renderLayoutProps(panel, layer);
   if (!M) return;
 
-  layer.graphic = M.normalize(layer.graphic);
-  const g = layer.graphic;
+  // Edited as a normalized copy, stored back only when something changes —
+  // just opening the layer mustn't rewrite it (in Full-scale edit that would
+  // pin the theme's graphic to this slide).
+  const g = M.normalize(layer.graphic);
   const kind = M.kind(g.kind);
+  const changed = () => { layer.graphic = g; up(); };
 
   // Which graphic — switching keeps the colours the operator already chose
   // where the new kind can use them. A layer still named after its old kind
@@ -4589,7 +4604,7 @@ function renderMotionProps(panel, layer) {
   g.colors.forEach((c, i) => {
     const cell = document.createElement('div');
     cell.className = 'ts-motion-color';
-    cell.appendChild(makeColor(c, v => { g.colors[i] = v; up(); }));
+    cell.appendChild(makeColor(c, v => { g.colors[i] = v; changed(); }));
     const lbl = document.createElement('span');
     lbl.textContent = kind.colors.labels?.[i] || `Colour ${i + 1}`;
     cell.appendChild(lbl);
@@ -4598,7 +4613,7 @@ function renderMotionProps(panel, layer) {
       rm.className = 'ts-motion-color-rm';
       rm.title = 'Remove this colour';
       rm.textContent = '×';
-      rm.addEventListener('click', () => { g.colors.splice(i, 1); up(); renderProps(); });
+      rm.addEventListener('click', () => { g.colors.splice(i, 1); changed(); renderProps(); });
       cell.appendChild(rm);
     }
     colors.appendChild(cell);
@@ -4610,7 +4625,7 @@ function renderMotionProps(panel, layer) {
     add.textContent = '+';
     add.addEventListener('click', () => {
       g.colors.push(kind.colors.def[g.colors.length % kind.colors.def.length]);
-      up(); renderProps();
+      changed(); renderProps();
     });
     colors.appendChild(add);
   }
@@ -4623,10 +4638,10 @@ function renderMotionProps(panel, layer) {
       const f = p.step < 1 ? 100 : 1;
       const fmt = motionFormat(p);
       return prop(p.label, makeSlider(Math.round(g[p.key] * f), Math.round(p.min * f), Math.round(p.max * f),
-        v => { g[p.key] = v / f; up(); }, v => fmt(v / f)));
+        v => { g[p.key] = v / f; changed(); }, v => fmt(v / f)));
     }
-    if (p.type === 'chips') return prop(p.label, makeChips(p.options, g[p.key], v => { g[p.key] = v; up(); }));
-    return prop(p.label, makeToggle(!!g[p.key], v => { g[p.key] = v; up(); }));
+    if (p.type === 'chips') return prop(p.label, makeChips(p.options, g[p.key], v => { g[p.key] = v; changed(); }));
+    return prop(p.label, makeToggle(!!g[p.key], v => { g[p.key] = v; changed(); }));
   });
   panel.appendChild(section('style', kind.label, ...rows));
 
@@ -4636,7 +4651,7 @@ function renderMotionProps(panel, layer) {
     btn.className = 'ts-add-btn ts-add-btn-compact';
     btn.textContent = 'Shuffle';
     btn.title = 'A new arrangement of the same elements';
-    btn.addEventListener('click', () => { g.seed = M.newSeed(); up(); });
+    btn.addEventListener('click', () => { g.seed = M.newSeed(); changed(); });
     look.push(prop('Arrangement', btn));
   }
   panel.appendChild(section('style', 'Layer look', ...look));
@@ -4679,30 +4694,72 @@ function addMotionLayer(kindId) {
   renderProps();
 }
 
-// The gallery behind "Motion": every graphic, moving, grouped by what it's
-// for. Picking one adds it; everything about it stays editable afterwards.
-let motionGalleryEl = null;
-function closeMotionGallery() { motionGalleryEl?.remove(); motionGalleryEl = null; }
-function openMotionGallery() {
-  const M = window.KairoMotion;
-  if (!M) return;
-  closeMotionGallery();
+// The shell both galleries (Motion, Background) open in: a titled panel over
+// the editor that closes on its Close button, a click outside it, or Esc.
+// Returns the scrolling body to fill, and a group(label, hint) that adds a
+// labelled grid of tiles to it.
+let galleryEl = null;
+function closeGallery() { galleryEl?.remove(); galleryEl = null; }
+function openGalleryShell(title) {
+  closeGallery();
   const overlay = document.createElement('div');
   overlay.className = 'ts-media-picker-overlay';
-  overlay.addEventListener('click', (e) => { if (e.target === overlay) closeMotionGallery(); });
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) closeGallery(); });
   const panel = document.createElement('div');
   panel.className = 'ts-media-picker-panel ts-motion-gallery';
   const header = document.createElement('div');
   header.className = 'ts-media-picker-header';
-  header.innerHTML = '<span>Add motion</span>';
+  header.innerHTML = '<span></span>';
+  header.querySelector('span').textContent = title;
   const closeBtn = document.createElement('button');
   closeBtn.className = 'modal-close-btn';
   closeBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 16 16"><path d="M3 3l10 10M13 3L3 13" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg><span>Close</span>';
-  closeBtn.addEventListener('click', closeMotionGallery);
+  closeBtn.addEventListener('click', closeGallery);
   header.appendChild(closeBtn);
   panel.appendChild(header);
   const body = document.createElement('div');
   body.className = 'ts-motion-gallery-body';
+  panel.appendChild(body);
+  overlay.appendChild(panel);
+  document.body.appendChild(overlay);
+  galleryEl = overlay;
+  const group = (label, hint, gridClass = '') => {
+    const h = document.createElement('div');
+    h.className = 'ts-motion-family';
+    h.innerHTML = '<span></span><em></em>';
+    h.querySelector('span').textContent = label;
+    h.querySelector('em').textContent = hint;
+    body.appendChild(h);
+    const grid = document.createElement('div');
+    grid.className = 'ts-motion-grid' + (gridClass ? ' ' + gridClass : '');
+    body.appendChild(grid);
+    return grid;
+  };
+  return { body, group };
+}
+// A gallery tile: its picture (art(el) paints it), a name and a line under it.
+function galleryTile(grid, { name, blurb, art, active, onPick }) {
+  const t = document.createElement('button');
+  t.className = 'ts-motion-tile' + (active ? ' active' : '');
+  const a = document.createElement('div');
+  a.className = 'ts-motion-tile-art';
+  art(a);
+  const label = document.createElement('div');
+  label.className = 'ts-motion-tile-label';
+  label.innerHTML = '<strong></strong><span></span>';
+  label.querySelector('strong').textContent = name;
+  label.querySelector('span').textContent = blurb;
+  t.appendChild(a); t.appendChild(label);
+  t.addEventListener('click', () => { closeGallery(); onPick(); });
+  grid.appendChild(t);
+}
+
+// The gallery behind "Motion": every graphic, moving, grouped by what it's
+// for. Picking one adds it; everything about it stays editable afterwards.
+function openMotionGallery() {
+  const M = window.KairoMotion;
+  if (!M) return;
+  const { group } = openGalleryShell('Add motion');
   const FAMILIES = [
     { id: 'ambient', label: 'Backgrounds', hint: 'Fill the screen, behind everything else' },
     { id: 'element', label: 'Elements', hint: 'Hand-drawn accents that draw themselves on' },
@@ -4711,52 +4768,28 @@ function openMotionGallery() {
   FAMILIES.forEach(fam => {
     const kinds = M.kinds().filter(k => k.family === fam.id);
     if (!kinds.length) return;
-    const h = document.createElement('div');
-    h.className = 'ts-motion-family';
-    h.innerHTML = `<span>${fam.label}</span><em>${fam.hint}</em>`;
-    body.appendChild(h);
-    const grid = document.createElement('div');
-    grid.className = 'ts-motion-grid';
-    kinds.forEach(k => {
-      const tile = document.createElement('button');
-      tile.className = 'ts-motion-tile';
-      const art = document.createElement('div');
-      art.className = 'ts-motion-tile-art';
-      // Elements are shown bigger and bolder here than they're added, so a
-      // hand-drawn line reads at tile size.
-      const tileBox = { line: { x: 280, y: 140, w: 1360, h: 800 }, doodle: { x: 610, y: 190, w: 700, h: 700 } }[k.id];
-      const p = tileBox || defaultMotionPos(k.id);
-      const graphic = M.create(k.id);
-      if (tileBox) graphic.thickness = 22;
-      const box = document.createElement('div');
-      box.style.cssText = `position:absolute;left:${p.x / TS_DESIGN_W * 100}%;top:${p.y / TS_DESIGN_H * 100}%;width:${p.w / TS_DESIGN_W * 100}%;height:${p.h / TS_DESIGN_H * 100}%;`;
-      box.appendChild(M.build(graphic, { mode: 'demo', box: { w: p.w, h: p.h } }));
-      art.appendChild(box);
-      const label = document.createElement('div');
-      label.className = 'ts-motion-tile-label';
-      label.innerHTML = `<strong></strong><span></span>`;
-      label.querySelector('strong').textContent = k.label;
-      label.querySelector('span').textContent = k.blurb;
-      tile.appendChild(art);
-      tile.appendChild(label);
-      tile.addEventListener('click', () => { closeMotionGallery(); addMotionLayer(k.id); });
-      grid.appendChild(tile);
-    });
-    body.appendChild(grid);
+    const grid = group(fam.label, fam.hint);
+    kinds.forEach(k => galleryTile(grid, {
+      name: k.label, blurb: k.blurb,
+      art: (a) => {
+        // Elements are shown bigger and bolder here than they're added, so a
+        // hand-drawn line reads at tile size.
+        const tileBox = { line: { x: 280, y: 140, w: 1360, h: 800 }, doodle: { x: 610, y: 190, w: 700, h: 700 } }[k.id];
+        const p = tileBox || defaultMotionPos(k.id);
+        const graphic = M.create(k.id);
+        if (tileBox) graphic.thickness = 22;
+        const box = document.createElement('div');
+        box.style.cssText = `position:absolute;left:${p.x / TS_DESIGN_W * 100}%;top:${p.y / TS_DESIGN_H * 100}%;width:${p.w / TS_DESIGN_W * 100}%;height:${p.h / TS_DESIGN_H * 100}%;`;
+        box.appendChild(M.build(graphic, { mode: 'demo', box: { w: p.w, h: p.h } }));
+        a.appendChild(box);
+      },
+      onPick: () => addMotionLayer(k.id),
+    }));
   });
-  panel.appendChild(body);
-  overlay.appendChild(panel);
-  document.body.appendChild(overlay);
-  motionGalleryEl = overlay;
 }
 document.getElementById('ts-add-motion-btn')?.addEventListener('click', () => { if (activeLook) openMotionGallery(); });
 
-// The gallery behind "Background": the bundled backgrounds, plus none and the
-// operator's own image. Picking one fills the canvas — the theme's, or in
-// Full-scale edit just this slide's — and selects it, so Darken and Opacity
-// are right there in the panel.
-let bgGalleryEl = null;
-function closeBgGallery() { bgGalleryEl?.remove(); bgGalleryEl = null; }
+// The theme's (or slide's) canvas fill, made if it has none.
 function canvasFillLayer() {
   let bg = baseBgLayer();
   if (!bg && activeLook) {
@@ -4771,68 +4804,30 @@ function afterCanvasFill(bg) {
   activePropsTab = 'style';
   up(); renderLayersList(); renderProps(); syncMetaRow();
 }
+
+// The gallery behind "Background": the bundled backgrounds, plus none and the
+// operator's own image. Picking one fills the canvas — the theme's, or in
+// Full-scale edit just this slide's — and selects it, so Darken and Opacity
+// are right there in the panel.
 function openBgGallery() {
-  closeBgGallery();
   const current = baseBgLayer();
-  const overlay = document.createElement('div');
-  overlay.className = 'ts-media-picker-overlay';
-  overlay.addEventListener('click', (e) => { if (e.target === overlay) closeBgGallery(); });
-  const panel = document.createElement('div');
-  panel.className = 'ts-media-picker-panel ts-motion-gallery';
-  const header = document.createElement('div');
-  header.className = 'ts-media-picker-header';
-  header.innerHTML = '<span>Background</span>';
-  const closeBtn = document.createElement('button');
-  closeBtn.className = 'modal-close-btn';
-  closeBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 16 16"><path d="M3 3l10 10M13 3L3 13" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg><span>Close</span>';
-  closeBtn.addEventListener('click', closeBgGallery);
-  header.appendChild(closeBtn);
-  panel.appendChild(header);
-  const body = document.createElement('div');
-  body.className = 'ts-motion-gallery-body';
-  const family = (label, hint) => {
-    const h = document.createElement('div');
-    h.className = 'ts-motion-family';
-    h.innerHTML = '<span></span><em></em>';
-    h.querySelector('span').textContent = label;
-    h.querySelector('em').textContent = hint;
-    body.appendChild(h);
-    const grid = document.createElement('div');
-    grid.className = 'ts-motion-grid ts-bg-gallery-grid';
-    body.appendChild(grid);
-    return grid;
-  };
-  const tile = (grid, { name, blurb, art, active, onPick }) => {
-    const t = document.createElement('button');
-    t.className = 'ts-motion-tile' + (active ? ' active' : '');
-    const a = document.createElement('div');
-    a.className = 'ts-motion-tile-art';
-    art(a);
-    const label = document.createElement('div');
-    label.className = 'ts-motion-tile-label';
-    label.innerHTML = '<strong></strong><span></span>';
-    label.querySelector('strong').textContent = name;
-    label.querySelector('span').textContent = blurb;
-    t.appendChild(a); t.appendChild(label);
-    t.addEventListener('click', () => { closeBgGallery(); onPick(); });
-    grid.appendChild(t);
-  };
-  const pool = family('Backgrounds', 'Ship with Kairo — any theme or slide can use them');
-  (window.KairoBackgrounds || []).forEach(bg => tile(pool, {
+  const { group } = openGalleryShell('Background');
+  const pool = group('Backgrounds', 'Ship with Kairo — any theme or slide can use them', 'ts-bg-gallery-grid');
+  (window.KairoBackgrounds || []).forEach(bg => galleryTile(pool, {
     name: bg.name,
     blurb: bg.tone === 'light' ? 'Light — use dark text' : bg.tags.join(' · ').replace(/^./, c => c.toUpperCase()),
     art: a => { a.style.background = `url("${bg.thumb}") center / cover no-repeat ${bg.color || '#000'}`; },
     active: current?.fill === 'image' && current.src === bg.src,
     onPick: () => { const c = canvasFillLayer(); if (!c) return; useBackground(c, bg); delete c.fillBefore; afterCanvasFill(c); },
   }));
-  const other = family('Other', 'Your own picture, or nothing behind the content');
-  tile(other, {
+  const other = group('Other', 'Your own picture, or nothing behind the content', 'ts-bg-gallery-grid');
+  galleryTile(other, {
     name: 'Your own image…', blurb: 'Fills the canvas, cropped to fit',
     art: a => { a.classList.add('ts-bg-tile-own'); a.textContent = '+'; },
     active: current?.fill === 'image' && !!current.src && !/^backgrounds\//.test(current.src),
     onPick: () => { const c = canvasFillLayer(); if (c) pickOwnBackground(c, () => { delete c.fillBefore; afterCanvasFill(c); }); },
   });
-  tile(other, {
+  galleryTile(other, {
     name: 'None', blurb: 'Transparent — for keying over cameras',
     art: a => a.classList.add('ts-bg-tile-none'),
     active: current?.fill === 'transparent',
@@ -4842,10 +4837,6 @@ function openBgGallery() {
       afterCanvasFill(c);
     },
   });
-  panel.appendChild(body);
-  overlay.appendChild(panel);
-  document.body.appendChild(overlay);
-  bgGalleryEl = overlay;
 }
 document.getElementById('ts-add-bg-btn')?.addEventListener('click', () => { if (activeLook) openBgGallery(); });
 document.getElementById('ts-play-anim-btn')?.addEventListener('click', () => { if (activeLook) tsPlayAnimations(); });
@@ -5392,7 +5383,14 @@ function buildSyntheticLook(item, slideIndex) {
     if (ov.fit) layer.fit = ov.fit;
     if (ov.radius !== undefined) layer.radius = ov.radius;
     if (ov.graphic) layer.graphic = deepClone(ov.graphic);
-    if (layer.type === 'background') ['fill', 'color2', 'angle', 'src', 'dim'].forEach(k => { if (ov[k] !== undefined) layer[k] = ov[k]; });
+    // Rotation, accent colour, photo look, a background's fill, build-in and
+    // idle motion — the same merge every renderer does (layer_geometry.js).
+    Object.assign(layer, withLayerOverride(layer, ov, [...LAYER_OVERRIDE_KEYS, ...(layer.type === 'background' ? FILL_OVERRIDE_KEYS : [])]));
+    LAYER_OVERRIDE_KEYS.forEach(k => { if (ov[k] === null) delete layer[k]; });
+    ['build', 'idle'].forEach(k => {
+      if (ov[k] === null) delete layer[k];
+      else if (ov[k] !== undefined) layer[k] = deepClone(ov[k]);
+    });
     if (ov.visible === false) layer.visible = false;
   });
   // Item/slide-specific layers the operator added in Full-scale edit — not
@@ -5768,8 +5766,7 @@ document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape' || looksModal?.classList.contains('hidden')) return;
   const t = e.target;
   if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return;
-  if (motionGalleryEl) { e.preventDefault(); closeMotionGallery(); return; }
-  if (bgGalleryEl) { e.preventDefault(); closeBgGallery(); return; }
+  if (galleryEl) { e.preventDefault(); closeGallery(); return; }
   if (activeLayer || multiSelectedLayerIds.size) {
     e.preventDefault();
     activeLayer = null;

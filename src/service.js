@@ -867,7 +867,7 @@
     const liveSeg = segmentList.find(s => s.status === 'live');
     if (liveSeg) {
       const eff = themeForItem({ ...liveSeg, type: 'timer' });
-      if (themeId == null || (eff && eff.id === themeId)) { sendTimerSegment(liveSeg); did = true; }
+      if (themeId == null || (eff && eff.id === themeId)) { sendTimerSegment(liveSeg, { resend: true }); did = true; }
     }
     return did;
   }
@@ -875,7 +875,7 @@
   // touching the slide layer.
   function resendLiveTimer() {
     const liveSeg = segmentList.find(s => s.status === 'live');
-    if (liveSeg) { sendTimerSegment(liveSeg); return true; }
+    if (liveSeg) { sendTimerSegment(liveSeg, { resend: true }); return true; }
     return false;
   }
   // Per-slide style (Full-Edit item mode) changed for a specific item+slide.
@@ -901,7 +901,7 @@
     // stops/starts the segment to see it. Segments only ever have one
     // slide (index 0), unlike a real item's multiple slides.
     const liveSeg = segmentList.find(s => s.id === itemId && s.status === 'live');
-    if (liveSeg) { sendTimerSegment(liveSeg); return true; }
+    if (liveSeg) { sendTimerSegment(liveSeg, { resend: true }); return true; }
     if (!liveSlideKey || liveSlideKey !== `${itemId}:${slideIndex}`) return false;
     const item = service && service.items.find(i => i.id === itemId);
     if (!item) return false;
@@ -2978,9 +2978,11 @@
     // timer cards — shows them paused. opts.builds plays each layer's
     // build-in, for content that has just arrived.
     const motionMode = opts.motion === 'live' ? 'live' : 'still';
-    const buildOf = (layer) => ((style || {})[layer.id] || {}).build || layer.build;
+    const animOf = (layer) => animOverride(layer, (style || {})[layer.id]);
     const paintOne = (layer) => {
       if (layer.visible === false) return;
+      // The slide's own rotation / accent colour / photo look, if any.
+      layer = withLayerOverride(layer, (style || {})[layer.id]);
 
       if (layer.type === 'background') {
         const bgOv = (style || {})[layer.id] || {};
@@ -3024,7 +3026,7 @@
         d.style.height = (p.h / DESIGN_H * 100) + '%';
         d.style.opacity = (ov.opacity ?? layer.opacity ?? 100) / 100;
         if (layer.rotation) d.style.transform = `rotate(${layer.rotation}deg)`;
-        const delay = opts.builds ? window.KairoMotion.normalizeBuild(buildOf(layer)).delay : 0;
+        const delay = opts.builds ? window.KairoMotion.normalizeBuild(animOf(layer).build).delay : 0;
         d.appendChild(window.KairoMotion.build(ov.graphic || layer.graphic, { mode: motionMode, box: { w: p.w, h: p.h }, delay }));
         host.appendChild(d);
         return;
@@ -3253,8 +3255,7 @@
       const before = host.childNodes.length;
       paintOne(layer);
       if (!window.KairoMotion || motionMode !== 'live') return;
-      const ov = (style || {})[layer.id] || {};
-      const anim = { build: buildOf(layer), idle: ov.idle || layer.idle };
+      const anim = animOf(layer);
       for (let i = before; i < host.childNodes.length; i++) window.KairoMotion.animateLayer(host.childNodes[i], anim, { builds: !!opts.builds, unit });
     });
   }
@@ -5026,7 +5027,9 @@
   // at Start. The per-second value then arrives via the stage-timer 'action'
   // broadcast (display.html's handleActionBadge writes into
   // [data-binding="timer"], which lives in that layer).
-  async function sendTimerSegment(seg) {
+  // opts.resend: an edit to the countdown already running (resendLiveTimer),
+  // which the outputs repaint in place instead of starting it over.
+  async function sendTimerSegment(seg, opts = {}) {
     const p = seg.trigger?.params || {};
     // Fold this segment's warning/overtime colour choices onto every
     // Countdown-bound text layer so the output recolours through them as
@@ -5064,6 +5067,7 @@
           style: seg.slideStyles?.[0] || {},
           label: seg.name || 'Timer',
           timerText: '0:00',
+          resend: !!opts.resend,
         }),
       });
     } catch (err) {
@@ -5432,8 +5436,12 @@
   // onClockAction (see registerActionHandler wiring in app.js) — updates
   // just the live card's readout in place rather than re-fetching and
   // re-rendering the whole grid every second.
+  // The latest countdown tick, for a resent countdown (onTimerSlide).
+  let lastPreviewTick = null;   // { remainingMs, totalMs, text, at }
   function onTimerAction(msg) {
     const { remainingMs, cleared, totalMs } = msg.payload || {};
+    lastPreviewTick = !cleared && typeof totalMs === 'number' && totalMs > 0
+      ? { remainingMs, totalMs, text: (remainingMs < 0 ? '+' : '') + formatTime(Math.abs(remainingMs) / 1000), at: Date.now() } : null;
 
     // Tick the Monitoring panel's timer layer regardless of which view the
     // operator is on — segmentList is only loaded when the Timer view has
@@ -5549,17 +5557,7 @@
   let previewTimerPace = null;       // segment.scenePace — see display.html's timerScenePace
   let previewActiveSceneSlot = -1;
   function previewActiveSceneForElapsed(elapsedMs, totalMs) {
-    if (window.KairoMotion) return window.KairoMotion.sceneAt(previewTimerScenes || [], previewTimerPace, elapsedMs, totalMs);
-    if (!previewTimerScenes || !previewTimerScenes.length) return { index: 0, sceneElapsedMs: elapsedMs };
-    let cum = 0;
-    for (let i = 0; i < previewTimerScenes.length; i++) {
-      const durMs = Math.max(0, Number(previewTimerScenes[i].durationSec) || 0) * 1000;
-      if (i === previewTimerScenes.length - 1 || elapsedMs < cum + durMs) {
-        return { index: i, sceneElapsedMs: Math.max(0, elapsedMs - cum) };
-      }
-      cum += durMs;
-    }
-    return { index: previewTimerScenes.length - 1, sceneElapsedMs: 0 };
+    return window.KairoMotion.sceneAt(previewTimerScenes || [], previewTimerPace, elapsedMs, totalMs);
   }
 
   // A segment went live (or was cleared) — render its full theme into the
@@ -5572,9 +5570,13 @@
     const media = document.getElementById('slide-preview-media');
     previewTimerScenes = msg.scenes && msg.scenes.length ? msg.scenes : null;
     previewTimerPace = msg.pace || null;
-    previewActiveSceneIndex = 0;
-    previewActiveSceneSlot = 0;
-    const look = msg.look || (msg.scenes && msg.scenes[0] ? { layers: msg.scenes[0].layers || [] } : null);
+    // A resent countdown (an edit while it runs) carries on from the slide
+    // and time it's at — see display.html's matching 'timer-slide' branch.
+    const t = msg.resend && previewTimerScenes && lastPreviewTick && Date.now() - lastPreviewTick.at < 3000 ? lastPreviewTick : null;
+    const at = t ? previewActiveSceneForElapsed(Math.max(0, t.totalMs - t.remainingMs), t.totalMs) : { index: 0, slot: 0 };
+    previewActiveSceneIndex = at.index;
+    previewActiveSceneSlot = at.slot ?? at.index;
+    const look = msg.look || (msg.scenes && msg.scenes[at.index] ? { layers: msg.scenes[at.index].layers || [] } : null);
     if (msg.clear || !look) {
       previewTimerScenes = null;
       previewActiveSceneIndex = -1;
@@ -5592,8 +5594,8 @@
     // let the "Nothing on display" placeholder show through beneath it.
     plain?.classList.add('hidden');
     paintLookLayers(host, look, msg.style || {}, {
-      verseText: '', referenceText: '', translatedText: '', timerText: msg.timerText || '0:00',
-    }, { motion: 'live', builds: true });
+      verseText: '', referenceText: '', translatedText: '', timerText: t ? t.text : (msg.timerText || '0:00'),
+    }, { motion: 'live', builds: !t });
   }
   function onClockAction() { /* clock has no in-tab readout to update yet — the output badge is the source of truth */ }
 
