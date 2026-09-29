@@ -177,6 +177,22 @@ async function embed(text) {
   return out.data instanceof Float32Array ? out.data : Float32Array.from(out.data);
 }
 
+// Unit vectors for a list of texts, in order — sermon notes' sentences (see
+// sermon_notes.js). A few at a time: each batch runs on the model's own
+// threads, so the worker keeps answering detection calls in between. [] when
+// the model isn't loaded.
+async function embedMany(texts, batch = 8) {
+  if (!_extractor || !Array.isArray(texts) || !texts.length) return [];
+  const out = [];
+  for (let i = 0; i < texts.length; i += batch) {
+    const res = await _extractor(texts.slice(i, i + batch), { pooling: 'mean', normalize: true });
+    const data = res.data instanceof Float32Array ? res.data : Float32Array.from(res.data);
+    const dims = data.length / Math.min(batch, texts.length - i);
+    for (let j = 0; j * dims < data.length; j++) out.push(data.slice(j * dims, (j + 1) * dims));
+  }
+  return out;
+}
+
 // Top-K nearest verses by cosine similarity. Since every stored vector
 // (corpus AND query) is unit-normalized, cosine similarity reduces to a
 // plain dot product — no per-candidate division needed, just a tight
@@ -263,7 +279,23 @@ async function searchMany(texts, limit = 5) {
   if (!isReady() || !texts || !texts.length) return [];
   const out = await _extractor(texts, { pooling: 'mean', normalize: true });
   const data = out.data instanceof Float32Array ? out.data : Float32Array.from(out.data);
-  const n = texts.length, dims = _dims, corpus = _corpus, norms = prefixNorms();
+  return nearestVerses(data, texts.length, limit);
+}
+
+// The `limit` verses nearest each of these unit vectors, as verse indexes
+// (sermon notes checks them for a sentence that is scripture being read).
+function nearestVersesFor(vectors, limit = 5) {
+  if (!isReady() || !vectors || !vectors.length) return (vectors || []).map(() => []);
+  const data = new Float32Array(vectors.length * _dims);
+  vectors.forEach((v, i) => data.set(v, i * _dims));
+  return nearestVerses(data, vectors.length, limit).map(top => top.map(t => t.idx));
+}
+
+// The top `limit` verses for each of `n` query vectors laid end to end in
+// `data`: a first pass over every verse on the leading dimensions, then the
+// full vectors for the few that pass.
+function nearestVerses(data, n, limit) {
+  const dims = _dims, corpus = _corpus, norms = prefixNorms();
   const qNorm = [];
   for (let q = 0; q < n; q++) { let s = 0; for (let d = 0; d < PREFILTER_DIMS; d++) s += data[q * dims + d] ** 2; qNorm.push(Math.sqrt(s) || 1); }
   const short = Array.from({ length: n }, () => []);
@@ -289,7 +321,7 @@ async function searchMany(texts, limit = 5) {
 
 module.exports = {
   ORT_SESSION_OPTIONS,
-  ensureLoaded, retryLoaded, isReady, embed, search, searchWithin, searchMany,
+  ensureLoaded, retryLoaded, isReady, embed, embedMany, nearestVersesFor, search, searchWithin, searchMany,
   isModelPresent, embeddingsPresent, installModel,
   MODEL_DIR, MODEL_WEIGHTS_FILE, EMB_BIN, EMB_META,
 };

@@ -3102,7 +3102,19 @@ app.post('/api/export', async (req, res) => {
     let filename, data;
     if (kind === 'notes') {
       const sermonNotes = require('./sermon_notes');
-      const notes = sermonNotes.buildNotes({ name, transcript, verses });
+      // The sentences' meaning comes from the semantic model the detection
+      // worker already has loaded (each point's quotable lines, and the points
+      // themselves where the preacher didn't number them); without it the
+      // notes are the rule-based ones.
+      const embed = async (texts, { check } = {}) => {
+        const r = await workerCall('embedSentences', { texts, check }, 120000, true);
+        if (!r || !r.count) return null;
+        return {
+          vectors: Array.from({ length: r.count }, (_, i) => r.vectors.subarray(i * r.dims, (i + 1) * r.dims)),
+          quoteShares: r.quoteShares,
+        };
+      };
+      const notes = await sermonNotes.buildNotesWithMeaning({ name, transcript, verses }, embed);
       data = await sermonNotes.renderNotesPdf(notes);
       filename = `${safeFileName(notes.title) || 'Sermon Notes'} — ${date}.pdf`;
     } else if (kind === 'transcript') {

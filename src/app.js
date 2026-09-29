@@ -3651,7 +3651,7 @@ function openSermonNotesDialog() {
   const status = document.getElementById('sn-status');
   const btn = document.getElementById('sn-download');
   if (!modal) return;
-  const hint = 'The key things said, each point of the sermon and the scriptures under it — saved as a PDF in Downloads.';
+  const hint = 'Each point of the sermon with its quotable lines and the scriptures referenced in it, then the prayer points — in the preacher\'s own words, saved as a PDF in Downloads.';
   status.textContent = sessionTranscriptParts.length ? hint : 'Nothing captured yet — start listening first, then come back here.';
   btn.disabled = !sessionTranscriptParts.length;
   modal.classList.remove('hidden');
@@ -3670,6 +3670,7 @@ function openSermonNotesDialog() {
   input.addEventListener('keydown', (e) => { if (e.key === 'Enter') btn.click(); if (e.key === 'Escape') close(); });
   btn.addEventListener('click', async () => {
     btn.disabled = true; btn.textContent = 'Preparing…';
+    status.textContent = 'Reading the sermon — this takes a few seconds…';
     try {
       const out = await exportSession('notes', input.value.trim());
       status.textContent = `Saved to Downloads: ${out.file}`;

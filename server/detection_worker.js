@@ -1915,6 +1915,24 @@ async function semanticSearchScoped(transcript, chapters, limit = 5) {
 }
 
 // ── Message handler ───────────────────────────────────────────────────────
+// How much of a sentence is one of the verses nearest it in meaning: the
+// share of its content words (stemmed) that verse also has — in the KJV, the
+// second translation, or the church's own. Meaning alone can't tell a verse
+// being read from preaching about it (to this model, all Bible-flavoured
+// speech is close); shared wording can.
+function quoteShare(text, nearIdx) {
+  const words = [...new Set(norm(text).split(' ').filter(w => w.length >= 3 && !STOP_WORDS.has(w)).map(healWord))];
+  if (!words.length || !nearIdx || !nearIdx.length) return 0;
+  let best = 0;
+  for (const idx of nearIdx) {
+    const have = new Set([...(verseStemWords.get(idx) || []), ...(verseStemNltWords.get(idx) || []), ...(verseHealedWords.get(idx + ALT_SLOT_BASE) || [])]);
+    let hit = 0;
+    for (const w of words) if (have.has(w)) hit++;
+    best = Math.max(best, hit / words.length);
+  }
+  return best;
+}
+
 parentPort.on('message', async (msg) => {
   try {
     switch (msg.type) {
@@ -2196,6 +2214,33 @@ parentPort.on('message', async (msg) => {
       case 'streamReset': {
         streamReset();
         parentPort.postMessage({ type: 'streamResetAck', id: msg.id });
+        break;
+      }
+      case 'embedSentences': {
+        // Sermon notes (sermon_notes.js): the sermon's sentences as unit
+        // vectors, from the semantic model already loaded here, and how much
+        // of each is a Bible verse's own words (quoteShare). Sent back flat,
+        // as transferred buffers. A model still loading (the server has just
+        // started) is waited for; one that can't load sends nothing back, and
+        // the notes are made without it.
+        await semanticEngine.ensureLoaded().catch(() => {});
+        const texts = Array.isArray(msg.texts) ? msg.texts : [];
+        const vecs = await semanticEngine.embedMany(texts);
+        const dims = vecs.length ? vecs[0].length : 0;
+        const flat = new Float32Array(vecs.length * dims);
+        vecs.forEach((v, i) => flat.set(v, i * dims));
+        // Only the first `check` texts are checked for scripture being read
+        // (the rest stay 0): a few at a time — each few is a pass over every
+        // verse — so detection's own calls are answered in between, even with
+        // the notes made mid-service.
+        const check = Math.min(vecs.length, Number.isInteger(msg.check) ? msg.check : vecs.length);
+        const quoteShares = new Float32Array(vecs.length);
+        for (let i = 0; i < check; i += 8) {
+          const near = semanticEngine.nearestVersesFor(vecs.slice(i, Math.min(check, i + 8)), 5);
+          near.forEach((idx, j) => { quoteShares[i + j] = quoteShare(texts[i + j], idx); });
+          await new Promise(setImmediate);
+        }
+        parentPort.postMessage({ type: 'embedSentencesResult', id: msg.id, dims, count: vecs.length, vectors: flat, quoteShares }, [flat.buffer, quoteShares.buffer]);
         break;
       }
       case 'semanticSearch': {
