@@ -287,15 +287,16 @@
 @keyframes km-wander{0%,100%{transform:translate(0,0) rotate(0deg)}33%{transform:translate(var(--dx1),var(--dy1)) rotate(var(--r1))}66%{transform:translate(var(--dx2),var(--dy2)) rotate(var(--r2))}}
 @keyframes km-grain{0%{transform:translate(0,0)}10%{transform:translate(-4%,-7%)}20%{transform:translate(-9%,3%)}30%{transform:translate(5%,-9%)}40%{transform:translate(-3%,8%)}50%{transform:translate(-9%,6%)}60%{transform:translate(9%,0)}70%{transform:translate(0,9%)}80%{transform:translate(2%,-5%)}90%{transform:translate(-6%,4%)}100%{transform:translate(0,0)}}
 @keyframes kb-fade{from{opacity:0}}
-@keyframes kb-rise{from{opacity:0;translate:0 14%}}
-@keyframes kb-drop{from{opacity:0;translate:0 -14%}}
-@keyframes kb-left{from{opacity:0;translate:-10% 0}}
-@keyframes kb-right{from{opacity:0;translate:10% 0}}
-@keyframes kb-blur{from{opacity:0;filter:var(--km-filter,) blur(14px);scale:1.06}}
-@keyframes kb-pop{from{opacity:0;scale:.8}60%{opacity:1;scale:1.04}}
+@keyframes kb-unblur{from{filter:var(--km-filter,) blur(var(--kb-blur,12px))}}
+@keyframes kb-rise{from{translate:0 12%}}
+@keyframes kb-drop{from{translate:0 -12%}}
+@keyframes kb-left{from{translate:-8% 0}}
+@keyframes kb-right{from{translate:8% 0}}
+@keyframes kb-settle{from{scale:1.08}}
+@keyframes kb-pop{0%{scale:.72}62%{scale:1.04}82%{scale:.99}100%{scale:1}}
 @keyframes kb-wipe{from{clip-path:inset(0 100% 0 0)}}
-@keyframes kb-word{from{opacity:0;translate:0 .55em;filter:var(--km-filter,) blur(6px)}}
-@keyframes kb-letter{from{opacity:0;translate:0 .35em;scale:.6}}
+@keyframes kb-word{from{translate:0 .45em}}
+@keyframes kb-letter{from{translate:0 .3em;scale:.8}}
 @keyframes kb-type{from{opacity:0}to{opacity:1}}
 .kb-piece{display:inline-block;white-space:pre;}
 .kb-word-wrap{display:inline-block;white-space:nowrap;}
@@ -304,6 +305,7 @@
 @keyframes ki-breathe{from{scale:1}to{scale:calc(1 + .045 * var(--ka,1))}}
 @keyframes ki-sway{0%{rotate:0deg;animation-timing-function:ease-out}25%{rotate:calc(-2.5deg * var(--ka,1));animation-timing-function:ease-in-out}75%{rotate:calc(2.5deg * var(--ka,1));animation-timing-function:ease-in}100%{rotate:0deg}}
 @keyframes ki-pulse{from{filter:var(--km-filter,) brightness(1)}to{filter:var(--km-filter,) brightness(calc(1 + .45 * var(--ka,1)))}}
+@keyframes ki-tilt{0%{rotate:0deg}25%{rotate:calc(.8deg * var(--ka,1))}75%{rotate:calc(-.8deg * var(--ka,1))}100%{rotate:0deg}}
 .km-timer.km-is-over .km-progress{animation:km-over 1.2s ease-in-out infinite;}
 .km-ring-fill{transition:stroke-dashoffset 1s linear,stroke .5s ease;}
 .km-bar-fill{transition:width 1s linear,height 1s linear,background-color .5s ease;}
@@ -833,6 +835,31 @@
       duration: clamp(isNum(b && b.duration) ? b.duration : 0.8, 0.1, 5),
     };
   }
+  // How each arrival moves — timed the way a motion designer lands a title:
+  // the element is visible within the first stretch (its fade, a separate,
+  // shorter animation that ends at the layer's own opacity), any blur clears
+  // by about half-way, and the movement itself settles long on an
+  // exponential ease-out. A pop overshoots and settles like a spring; a wipe
+  // eases in and out. [keyframes, share of the duration, curve]
+  const EXPO = 'cubic-bezier(.16,1,.3,1)';
+  const FADE = ['kb-fade', 0.45, 'cubic-bezier(.33,1,.68,1)'];
+  const BUILD_MOTION = {
+    fade: [['kb-fade', 1, 'cubic-bezier(.33,1,.68,1)']],
+    rise: [['kb-rise', 1, EXPO], FADE],
+    drop: [['kb-drop', 1, EXPO], FADE],
+    left: [['kb-left', 1, EXPO], FADE],
+    right: [['kb-right', 1, EXPO], FADE],
+    blur: [['kb-settle', 1, EXPO], ['kb-unblur', 0.55, 'ease-out'], FADE],
+    pop: [['kb-pop', 1, 'cubic-bezier(.22,1,.36,1)'], ['kb-fade', 0.35, 'ease-out']],
+    wipe: [['kb-wipe', 1, 'cubic-bezier(.65,0,.35,1)']],
+    words: [['kb-word', 1, EXPO], ['kb-unblur', 0.5, 'ease-out'], FADE],
+    letters: [['kb-letter', 1, EXPO], ['kb-unblur', 0.5, 'ease-out'], FADE],
+    type: [['kb-type', 0.01, 'linear']],
+  };
+  const motionOf = (type, duration, at) => BUILD_MOTION[type]
+    .map(([name, share, curve]) => `${name} ${Math.max(0.01, duration * share).toFixed(3)}s ${curve} ${at.toFixed(3)}s backwards`)
+    .join(', ');
+
   // Returns when the element has fully arrived, in seconds from now.
   function applyBuild(el, build) {
     const b = normalizeBuild(build);
@@ -841,22 +868,27 @@
     // A text build splits the words/letters already in the element; one
     // with nothing to split (an image, a shape) just fades in instead.
     if (TEXT_BUILDS.has(b.type)) {
-      const pieces = splitText(el, b);
-      if (pieces) return b.delay + b.duration + (pieces - 1) * PIECE_STEP[b.type];
-      el.style.animation = appendAnim(el.style.animation, `kb-fade ${b.duration}s ease ${b.delay}s backwards`);
+      const span = splitText(el, b);
+      if (span !== null) return b.delay + b.duration + span;
+      el.style.animation = appendAnim(el.style.animation, motionOf('fade', b.duration, b.delay));
       return b.delay + b.duration;
     }
-    el.style.animation = appendAnim(el.style.animation, `kb-${b.type} ${b.duration}s cubic-bezier(.2,.75,.2,1) ${b.delay}s backwards`);
+    if (b.type === 'blur') el.style.setProperty('--kb-blur', '18px');
+    el.style.animation = appendAnim(el.style.animation, motionOf(b.type, b.duration, b.delay));
     return b.delay + b.duration;
   }
+  // How far apart the pieces of a text build start — but a long verse never
+  // takes more than MAX_STAGGER to lay down: the steps shrink instead.
   const PIECE_STEP = { words: 0.09, letters: 0.035, type: 0.05 };
+  const MAX_STAGGER = { words: 1.4, letters: 1.1, type: 3 };
   const appendAnim = (cur, a) => (cur && cur !== 'none' ? `${cur}, ${a}` : a);
 
   // Wraps each word (or letter) of an element's text in its own span and
   // staggers them in. Walks text nodes, so accent spans ("*word*") and line
   // breaks survive; a letter-by-letter build keeps each word together so a
   // line never wraps mid-word. The whole layer takes about `duration` plus
-  // the stagger. Returns how many pieces it split into.
+  // the stagger. Returns the stagger (seconds from the first piece to the
+  // last), or null with nothing to split.
   function splitText(el, b) {
     const doc = el.ownerDocument;
     // A text layer's box is a flex column: loose words would each become a
@@ -873,15 +905,12 @@
     const walker = doc.createTreeWalker(el, 4 /* NodeFilter.SHOW_TEXT */);
     const nodes = [];
     while (walker.nextNode()) nodes.push(walker.currentNode);
-    let i = 0;
-    const step = PIECE_STEP[b.type];
-    const name = b.type === 'words' ? 'kb-word' : b.type === 'letters' ? 'kb-letter' : 'kb-type';
-    const dur = b.type === 'type' ? 0.01 : b.duration;
+    const pieces = [];
     const piece = (text) => {
       const s = doc.createElement('span');
       s.className = 'kb-piece';
       s.textContent = text;
-      s.style.animation = `${name} ${dur}s cubic-bezier(.2,.75,.2,1) ${(b.delay + i++ * step).toFixed(3)}s backwards`;
+      pieces.push(s);
       return s;
     };
     nodes.forEach(node => {
@@ -897,7 +926,18 @@
       });
       node.parentNode.replaceChild(frag, node);
     });
-    return i;
+    if (!pieces.length) return null;
+    // A typewriter keeps an even rhythm. Words and letters start close
+    // together and spread out towards the end — the wave of arrivals itself
+    // eases out, so the line lands rather than ticking in like a metronome.
+    const n = pieces.length;
+    const span = Math.min(PIECE_STEP[b.type] * (n - 1), MAX_STAGGER[b.type]);
+    const spread = b.type === 'type' ? (t) => t : (t) => 1 - Math.pow(1 - t, 0.75);
+    if (b.type !== 'type') el.style.setProperty('--kb-blur', b.type === 'words' ? '8px' : '5px');
+    pieces.forEach((s, k) => {
+      s.style.animation = motionOf(b.type, b.duration, b.delay + (n > 1 ? span * spread(k / (n - 1)) : 0));
+    });
+    return span;
   }
 
   // ── Idle motion ───────────────────────────────────────────────────────────
@@ -936,7 +976,13 @@
     const swing = m.type === 'drift' || m.type === 'sway';   // one iteration = there and back
     const dur = (swing ? base * 2 : base) / m.speed;
     const delay = Math.max(0, Number(opts.delay) || 0);
-    el.style.animation = appendAnim(el.style.animation, `ki-${m.type} ${dur.toFixed(2)}s ease-in-out ${delay.toFixed(2)}s infinite${swing ? '' : ' alternate'}`);
+    // A sine ease — the one for breathing and floating loops: soft at every
+    // turn. A float also tilts, very slightly, on its own longer cycle (the
+    // golden ratio of the float's): the two never line up, so it never
+    // repeats exactly and reads as alive rather than looped.
+    const SINE = 'cubic-bezier(.37,0,.63,1)';
+    el.style.animation = appendAnim(el.style.animation, `ki-${m.type} ${dur.toFixed(2)}s ${SINE} ${delay.toFixed(2)}s infinite${swing ? '' : ' alternate'}`);
+    if (m.type === 'float') el.style.animation = appendAnim(el.style.animation, `ki-tilt ${(dur * 2 * 1.618).toFixed(2)}s ${SINE} ${delay.toFixed(2)}s infinite`);
   }
 
   // ── Scene pacing ──────────────────────────────────────────────────────────
