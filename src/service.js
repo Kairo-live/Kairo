@@ -3266,9 +3266,11 @@
     // percent of this host's height is the unit, so a float covers the same
     // share of the screen as on the output.
     const unit = ((host.clientHeight || DESIGN_H * scale) / 100).toFixed(2) + 'px';
+    host.style.isolation = 'isolate';   // blend modes stay inside this slide
     layers.forEach(layer => {
       const before = host.childNodes.length;
       paintOne(layer);
+      for (let i = before; i < host.childNodes.length; i++) applyBlendMode(host.childNodes[i], layer, (style || {})[layer.id]);
       if (!window.KairoMotion || motionMode !== 'live') return;
       const anim = animOf(layer);
       for (let i = before; i < host.childNodes.length; i++) window.KairoMotion.animateLayer(host.childNodes[i], anim, { builds: !!opts.builds, unit });

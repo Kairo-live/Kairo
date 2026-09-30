@@ -1372,10 +1372,57 @@ function deleteLayer(layer) {
   if (tsMode === 'item') tsSave(); else scheduleThemeAutosave();
 }
 
+// The selected layer's blend mode and opacity, above the layer list — where
+// Photoshop and Compositor keep them: Blend (Photoshop's modes, in its
+// groups), then Opacity (a draggable name, a slider and the exact %). The
+// canvas has nothing under it to blend with, so it shows Opacity alone.
+// Rebuilt only when the selection changes, so a drag on its own slider or
+// name is never torn down mid-drag; otherwise its values just follow.
+function renderLayerAppearance() {
+  const host = document.getElementById('ts-layer-appearance');
+  if (!host) return;
+  const layer = activeLook && !multiSelectedLayerIds.size ? activeLayer : null;
+  host.classList.toggle('hidden', !layer);
+  if (!layer) { host.innerHTML = ''; delete host.dataset.layerId; return; }
+  if (host.dataset.layerId === layer.id && host.firstChild) {
+    const sel = host.querySelector('select');
+    if (sel) sel.value = layer.blendMode || 'Normal';
+    host.querySelectorAll('input').forEach(i => { if (document.activeElement !== i) i.value = Math.round(layer.opacity ?? 100); });
+    return;
+  }
+  host.innerHTML = '';
+  host.dataset.layerId = layer.id;
+  if (layer !== baseBgLayer()) {
+    const sel = document.createElement('select');
+    sel.className = 'ts-select';
+    BLEND_MODE_GROUPS.forEach((group, gi) => {
+      if (gi) sel.add(Object.assign(new Option('──────────', ''), { disabled: true }));
+      group.forEach(([name]) => sel.add(new Option(name, name, false, (layer.blendMode || 'Normal') === name)));
+    });
+    sel.addEventListener('change', () => { setLayerBlend(layer, sel.value); });
+    host.appendChild(prop('Blend', sel));
+  }
+  const slider = document.createElement('input');
+  slider.type = 'range'; slider.min = 0; slider.max = 100; slider.className = 'ts-prop-slider';
+  const field = numField('Opacity', Math.round(layer.opacity ?? 100), {
+    min: 0, max: 100, unit: '%', onChange: v => { layer.opacity = v ?? 100; slider.value = layer.opacity; up(); },
+  });
+  slider.value = Math.round(layer.opacity ?? 100);
+  slider.addEventListener('input', () => { layer.opacity = +slider.value; field.querySelector('input').value = slider.value; up(); });
+  host.appendChild(fieldRow([field, slider]));
+}
+// Normal is no blend mode at all, so a layer without one stays as it was.
+function setLayerBlend(layer, mode) {
+  if (!mode || mode === 'Normal') delete layer.blendMode; else layer.blendMode = mode;
+  up();
+  renderLayerAppearance();
+}
+
 function renderLayersList() {
   const el = document.getElementById('ts-layers-list');
   if (!el) return;
   el.innerHTML = '';
+  renderLayerAppearance();
   if (!activeLook) return;
   // Render in reverse so background is at bottom visually (like PP). Used
   // to filter to text-only (+ custom layers) in item mode, from back when
@@ -2106,6 +2153,7 @@ function renderPreview() {
   activeLook.layers.forEach(layer => {
     const before = stage.childNodes.length;
     paintLayer(layer);
+    for (let i = before; i < stage.childNodes.length; i++) applyBlendMode(stage.childNodes[i], layer);
     if (!window.KairoMotion) return;
     for (let i = before; i < stage.childNodes.length; i++) window.KairoMotion.animateLayer(stage.childNodes[i], layer, { builds: playing, unit });
   });
@@ -3358,7 +3406,52 @@ function numField(label, value, { min = -Infinity, max = Infinity, step = 1, uni
     u.textContent = unit;
     wrap.appendChild(u);
   }
+  const nameEl = wrap.querySelector('.ts-field-label');
+  if (nameEl) scrubbable(nameEl, inp, { min, max, step });
   return wrap;
+}
+// Drag a number's name sideways to change it, as in Photoshop (Compositor's
+// NumericScrub): a whole-number field moves one per pixel, a finer one a step
+// per two; Shift is ten times faster, Option ten times finer. Dragged values
+// snap to the field's step and stay in its range; a click that doesn't move
+// still just puts the cursor in the field. The field's own input event does
+// the rest, so a drag is one edit (one undo), however long.
+function scrubbable(nameEl, inp, { min = -Infinity, max = Infinity, step = 1 }) {
+  const stepN = Number(step) || 1;
+  const perPx = Number.isInteger(stepN) ? 1 : stepN / 2;
+  const decimals = (String(stepN).split('.')[1] || '').length;
+  let justScrubbed = false;
+  nameEl.classList.add('ts-scrub');
+  nameEl.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0 || inp.disabled) return;
+    const startX = e.clientX;
+    const start = parseFloat(inp.value) || 0;
+    let moved = false;
+    const move = (ev) => {
+      const dx = ev.clientX - startX;
+      if (!moved && Math.abs(dx) < 1) return;
+      if (!moved) { moved = true; document.body.classList.add('ts-scrubbing'); }
+      const speed = ev.shiftKey ? 10 : ev.altKey ? 0.1 : 1;
+      let v = start + dx * perPx * speed;
+      v = Math.round(v / stepN) * stepN;
+      v = Math.min(max, Math.max(min, v));
+      const shown = Number(v.toFixed(decimals));
+      if (String(shown) === inp.value) return;
+      inp.value = shown;
+      inp.dispatchEvent(new Event('input', { bubbles: true }));
+    };
+    const up = () => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+      document.body.classList.remove('ts-scrubbing');
+      if (moved) { justScrubbed = true; inp.dispatchEvent(new Event('change', { bubbles: true })); }
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+  });
+  // The label wraps the field, so a click on the name would focus it — not
+  // after a drag.
+  nameEl.addEventListener('click', (e) => { if (justScrubbed) { e.preventDefault(); justScrubbed = false; } });
 }
 // Controls side by side on one line of the inspector's grid, sharing it
 // equally (`cols` keeps a lone field to its share of a wider line); a control
@@ -4215,27 +4308,21 @@ function renderBgProps(panel, layer) {
     if (v === 'image' && !layer.src && (window.KairoBackgrounds || []).length) useBackground(layer, window.KairoBackgrounds[0]);
     up(); renderProps();
   })])];
-  const opacityField = () => numField('Opacity', layer.opacity ?? 100, { min: 0, max: 100, unit: '%', onChange: v => { layer.opacity = v ?? 100; up(); } });
+  // (The layer's opacity is in the Layers panel, with its blend mode.)
   if (layer.fill === 'gradient') {
     rows.push(
       fieldRow([
         colorField(layer.color, v => { layer.color = v; up(); }, 'Where the gradient starts'),
         colorField(layer.color2 || '#1a1a2e', v => { layer.color2 = v; up(); }, 'Where it ends'),
       ]),
-      fieldRow([
-        numField('Angle', layer.angle ?? 160, { min: 0, max: 360, unit: '°', onChange: v => { layer.angle = v ?? 0; up(); } }),
-        opacityField(),
-      ]));
+      fieldRow([numField('Angle', layer.angle ?? 160, { min: 0, max: 360, unit: '°', onChange: v => { layer.angle = v ?? 0; up(); } })], { cols: 2 }));
   } else if (layer.fill === 'image') {
     rows.push(
       fieldRow([makeBackgroundGrid(layer.src, bg => { useBackground(layer, bg); up(); })]),
       fieldRow([fieldBtn('Your own image…', () => pickOwnBackground(layer))]),
-      fieldRow([
-        numField('Darken', layer.dim || 0, { min: 0, max: 80, unit: '%', title: 'Darken the picture so text on it reads', onChange: v => { layer.dim = v ?? 0; up(); } }),
-        opacityField(),
-      ]));
+      fieldRow([numField('Darken', layer.dim || 0, { min: 0, max: 80, unit: '%', title: 'Darken the picture so text on it reads', onChange: v => { layer.dim = v ?? 0; up(); } })], { cols: 2 }));
   } else if (layer.fill !== 'transparent') {
-    rows.push(colorOpacityRow(layer.color, v => { layer.color = v; up(); }, layer.opacity, v => { layer.opacity = v; up(); }));
+    rows.push(fieldRow([colorField(layer.color, v => { layer.color = v; up(); })], { cols: 2 }));
   }
   panel.appendChild(section('style', 'Fill', ...rows));
 }
@@ -4320,10 +4407,7 @@ function renderImageProps(panel, layer) {
   panel.appendChild(section('style', 'Image',
     fieldRow([thumb, replace]),
     fieldRow([makeSelect(IMAGE_FITS, layer.fit || 'contain', v => { layer.fit = v; up(); })]),
-    fieldRow([
-      numField('Corners', layer.radius || 0, { min: 0, max: 200, unit: 'px', onChange: v => { layer.radius = v ?? 0; up(); } }),
-      numField('Opacity', layer.opacity ?? 100, { min: 0, max: 100, unit: '%', onChange: v => { layer.opacity = v ?? 100; up(); } }),
-    ])));
+    fieldRow([numField('Corners', layer.radius || 0, { min: 0, max: 200, unit: 'px', onChange: v => { layer.radius = v ?? 0; up(); } })], { cols: 2 })));
   renderPhotoLookProps(panel, layer);
 
   // The color-key "Remove background" cutout used to live here — pulled per
@@ -4348,7 +4432,7 @@ function renderPhotoLookProps(panel, layer) {
   });
   fadeSel.title = 'The edge the picture fades in from';
   panel.appendChild(section('style', 'Photo look',
-    fieldRow([numField('Black & white', layer.grayscale || 0, { min: 0, max: 100, unit: '%', onChange: v => { layer.grayscale = v ?? 0; up(); } })], { cols: 2 }),
+    fieldRow([numField('Black & white', layer.grayscale || 0, { min: 0, max: 100, unit: '%', onChange: v => { layer.grayscale = v ?? 0; up(); } })]),
     fieldRow([
       labeledField('Fade', fadeSel),
       side !== 'none' && numField('Length', layer.fade.amount ?? 45, { min: 5, max: 100, unit: '%', title: 'How much of the picture the fade covers', onChange: v => { layer.fade.amount = v ?? 45; up(); } }),
@@ -4385,10 +4469,7 @@ function renderImageCycleProps(panel, layer) {
         { label: 'Cut', value: 'cut' }, { label: 'Slide across', value: 'slide' }, { label: 'Crossfade', value: 'crossfade' },
       ], layer.transition || 'cut', v => { layer.transition = v; up(); }),
     ]),
-    fieldRow([
-      numField('Corners', layer.radius || 0, { min: 0, max: 200, unit: 'px', onChange: v => { layer.radius = v ?? 0; up(); } }),
-      numField('Opacity', layer.opacity ?? 100, { min: 0, max: 100, unit: '%', onChange: v => { layer.opacity = v ?? 100; up(); } }),
-    ]),
+    fieldRow([numField('Corners', layer.radius || 0, { min: 0, max: 200, unit: 'px', onChange: v => { layer.radius = v ?? 0; up(); } })], { cols: 2 }),
   ];
 
   const listWrap = document.createElement('div');
@@ -4590,10 +4671,8 @@ function renderMotionProps(panel, layer) {
       : toggleField(p.label, !!g[p.key], v => { g[p.key] = v; changed(); }));
     if (pair.length === 2) flush();
   });
-  // …and, last, the layer's opacity with Shuffle (a new arrangement of the
-  // same elements, for the kinds scattered at random) beside it.
-  pair.push(numField('Opacity', layer.opacity ?? 100, { min: 0, max: 100, unit: '%', onChange: v => { layer.opacity = v ?? 100; up(); } }));
-  if (pair.length === 2) flush();
+  // …and, last, Shuffle: a new arrangement of the same elements, for the
+  // kinds scattered at random. (Opacity is in the Layers panel.)
   if (kind.shuffle) pair.push(fieldBtn('Shuffle', () => { g.seed = M.newSeed(); changed(); }, 'A new arrangement of the same elements'));
   flush();
   panel.appendChild(section('style', kind.label, ...rows));
@@ -4945,7 +5024,7 @@ function renderTextProps(panel, layer) {
   // verse or the countdown — highlighted words: words wrapped in
   // *asterisks* show in the highlight colour, a two-tone headline
   // ("*FIRST TIME* / WITH US?") in one layer.
-  const colorKids = [colorOpacityRow(layer.color, v => { layer.color = v; up(); }, layer.opacity, v => { layer.opacity = v; up(); })];
+  const colorKids = [fieldRow([colorField(layer.color, v => { layer.color = v; up(); })], { cols: 2 })];
   if (layer.binding === 'custom') {
     colorKids.push(fieldRow([
       toggleField('Highlight', !!layer.accentColor, v => {

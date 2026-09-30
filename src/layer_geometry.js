@@ -183,10 +183,10 @@ function imageFillCss(layer, opts = {}) {
 // merged over its theme's, so the output and previews paint what the editor
 // shows. null means the slide took the setting away (no build-in, say).
 // FILL_OVERRIDE_KEYS: a background layer's fill. LAYER_OVERRIDE_KEYS: any
-// layer's rotation, accent colour and photo look. (Build-in and idle motion
+// layer's rotation, accent colour, photo look and blend mode. (Build-in and idle motion
 // travel the same way — see animOverride.)
 const FILL_OVERRIDE_KEYS = ['fill', 'color', 'color2', 'angle', 'opacity', 'src', 'dim'];
-const LAYER_OVERRIDE_KEYS = ['rotation', 'accentColor', 'grayscale', 'fade'];
+const LAYER_OVERRIDE_KEYS = ['rotation', 'accentColor', 'grayscale', 'fade', 'blendMode'];
 function withLayerOverride(layer, ov, keys = LAYER_OVERRIDE_KEYS) {
   if (!ov) return layer;
   let out = layer;
@@ -204,6 +204,32 @@ function animOverride(layer, ov) {
   return { build: has('build') ? ov.build : layer.build, idle: has('idle') ? ov.idle : layer.idle };
 }
 
+// Photoshop's blend modes, grouped and ordered as Photoshop (and Compositor)
+// list them — darkening, lightening, contrast, comparative, component — named
+// as they and PSD files name them. Only the ones a browser draws (CSS
+// mix-blend-mode); "Linear Dodge (Add)" is CSS's plus-lighter.
+const BLEND_MODE_GROUPS = [
+  [['Normal', 'normal']],
+  [['Darken', 'darken'], ['Multiply', 'multiply'], ['Color Burn', 'color-burn']],
+  [['Lighten', 'lighten'], ['Screen', 'screen'], ['Color Dodge', 'color-dodge'], ['Linear Dodge (Add)', 'plus-lighter']],
+  [['Overlay', 'overlay'], ['Soft Light', 'soft-light'], ['Hard Light', 'hard-light']],
+  [['Difference', 'difference'], ['Exclusion', 'exclusion']],
+  [['Hue', 'hue'], ['Saturation', 'saturation'], ['Color', 'color'], ['Luminosity', 'luminosity']],
+];
+const BLEND_MODES = BLEND_MODE_GROUPS.flat().map(([name]) => name);
+// Gives a layer's element its blend mode (the slide's own, when it has one).
+// Every renderer calls it on each layer's top element; each isolates its
+// slide, so layers blend with the slide under them and never with the page.
+function applyBlendMode(el, layer, ov) {
+  if (!el || el.nodeType !== 1) return;
+  const mode = ov && ov.blendMode !== undefined ? ov.blendMode : layer && layer.blendMode;
+  const css = (BLEND_MODE_GROUPS.flat().find(([name]) => name === mode) || [])[1];
+  if (css && css !== 'normal') el.style.mixBlendMode = css;
+}
+
+window.BLEND_MODE_GROUPS = BLEND_MODE_GROUPS;
+window.BLEND_MODES       = BLEND_MODES;
+window.applyBlendMode    = applyBlendMode;
 window.imageFillCss      = imageFillCss;
 window.withFillOverride  = withFillOverride;
 window.withLayerOverride = withLayerOverride;

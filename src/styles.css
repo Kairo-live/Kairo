@@ -5849,6 +5849,7 @@ mark.help-hit.is-current { background: rgba(255,255,255,0.38); }
   position: relative;
   border: 1px solid rgba(255,255,255,0.08);
   box-shadow: 0 4px 24px rgba(0,0,0,0.6);
+  isolation: isolate;   /* blend modes stay inside the slide */
 }
 
 /* Flat grey for a transparent-canvas theme — matches the app's own standard
@@ -6184,7 +6185,7 @@ mark.help-hit.is-current { background: rgba(255,255,255,0.38); }
   gap: 8px;
 }
 #ts-props-panel { padding-bottom: 12px; }
-.ts-props-col { --ts-field-bg: #2c2c2e; }
+:root { --ts-field-bg: #2c2c2e; }   /* the inspector's quiet field boxes, wherever they sit */
 
 /* Tab filtering for the props panel (renderProps in app.js) — a class, not
    a direct style.display write, so it composes with a section's own
@@ -6374,6 +6375,24 @@ mark.help-hit.is-current { background: rgba(255,255,255,0.38); }
   transition: color var(--trans), border-color var(--trans);
 }
 .ts-field-btn:hover { color: var(--text); border-color: var(--selected-border); }
+/* A field's name that can be dragged to change its number (scrubbable). */
+.ts-scrub { cursor: ew-resize; user-select: none; }
+.ts-scrub:hover { color: var(--text-2); }
+body.ts-scrubbing, body.ts-scrubbing * { cursor: ew-resize !important; user-select: none !important; }
+/* The selected layer's Blend and Opacity, above the Layers list. */
+.ts-layer-appearance {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0 10px 8px;
+  padding: 8px;
+  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  border-radius: 8px;
+}
+.ts-layer-appearance.hidden { display: none; }
+.ts-layer-appearance .ts-field-row { grid-template-columns: repeat(var(--cols, 2), minmax(0, 1fr)); }
+.ts-layer-appearance .ts-prop-slider { width: 100%; }
 /* Dropdowns and buttons in the inspector's rows: the same quiet box. */
 .ts-field-row > .ts-select,
 .ts-field-row > .ts-field-btn,

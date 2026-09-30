@@ -87,6 +87,10 @@
             transition: opacity 350ms ease, transform 350ms ease;
         }
 
+        /* A slide's layers blend with the layers under them (blend modes),
+           never with the page or the media layer behind. */
+        #slide-layer, #timer-layer { isolation: isolate; }
+
         /* Transparent background (no-bg look) */
         body.transparent-bg {
             background: transparent;
@@ -899,6 +903,7 @@
         layers.forEach(layer => {
             const before = frag.childNodes.length;
             paintLayer(layer);
+            for (let i = before; i < frag.childNodes.length; i++) applyBlendMode(frag.childNodes[i], layer, (styleByLayerId || {})[layer.id]);
             if (!window.KairoMotion) return;
             const anim = animOf(layer);
             for (let i = before; i < frag.childNodes.length; i++) window.KairoMotion.animateLayer(frag.childNodes[i], anim, { builds: !!opts.builds, unit: '1vh' });
