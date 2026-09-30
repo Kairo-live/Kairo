@@ -1282,50 +1282,13 @@ function themeCanvasSize(look) {
     ? look.canvasSize : { w: 1920, h: 1080 };
 }
 
-// Builds the Size dropdown's options: the 1920x1080 default plus every
-// configured display output that has a real physical screen assigned (see
-// outputScreenMap) — mirrors ProPresenter's per-slide Size field listing
-// configured device resolutions (e.g. "Atem: 1440 x 900") as presets.
-function renderThemeCanvasSizeSelect() {
-  const sel = document.getElementById('ts-canvas-size-select');
-  if (!sel || !activeLook) return;
-  const size = themeCanvasSize(activeLook);
-  sel.innerHTML = '';
-  const def = document.createElement('option');
-  def.value = '1920x1080';
-  def.textContent = '1920 × 1080 (Default)';
-  sel.appendChild(def);
-
-  if (typeof displayOutputs === 'function' && typeof outputScreenMap === 'function') {
-    const screens = outputScreenMap();
-    displayOutputs().forEach(d => {
-      const s = screens[d.id];
-      if (!s) return;
-      const o = document.createElement('option');
-      o.value = `${s.width}x${s.height}`;
-      o.textContent = `${d.name}: ${s.width} × ${s.height}`;
-      sel.appendChild(o);
-    });
-  }
-
-  const wantValue = `${size.w}x${size.h}`;
-  if (![...sel.options].some(o => o.value === wantValue)) {
-    const custom = document.createElement('option');
-    custom.value = wantValue;
-    custom.textContent = `${size.w} × ${size.h} (Custom)`;
-    sel.appendChild(custom);
-  }
-  sel.value = wantValue;
-}
-
-document.getElementById('ts-canvas-size-select')?.addEventListener('change', (e) => {
-  if (!activeLook) return;
-  const [w, h] = e.target.value.split('x').map(Number);
-  if (!w || !h) return;
-  activeLook.canvasSize = { w, h };
-  scheduleThemeAutosave();
-  renderPreview();
-});
+// Size moved from a lone dropdown in the tool bar under the canvas into the
+// Layout tab, alongside the rest of the slide's own settings (renderSlideLayout
+// builds it fresh there on every renderProps(), same as everything else in
+// the panel) — kept here as a no-op so its many existing call sites (a new
+// theme, a paste, an import…) stay harmless rather than needing every one
+// individually removed.
+function renderThemeCanvasSizeSelect() {}
 
 // The theme's own background: the canvas fill every slide sits on.
 function baseBgLayer() {
@@ -2844,11 +2807,25 @@ function tsDecorateLayerEl(div, layer, draggable) {
     div.classList.add('ts-el-selected');
     // Eight-point selection frame: four corners (scale, proportions kept) +
     // four edge midpoints (stretch), each from the opposite anchor — and a
-    // rotate handle under the layer, for anything with its own box.
+    // rotate handle under the layer, for anything with its own box. Every
+    // corner ALSO rotates, the way Keynote/PowerPoint/Slides do it: land
+    // on its dot and it resizes, land in the ring just outside — its hit
+    // area already reaches a bit further (.ts-handle::after) — and it
+    // rotates instead, so there's no need to hunt down for the one small
+    // rotate handle specifically.
+    const CORNER_RESIZE_R = 7; // px — the visible dot's own radius
     ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'].forEach(dir => {
       const h = document.createElement('div');
       h.className = `ts-handle ts-handle-${dir}`;
-      h.addEventListener('mousedown', (e) => tsBeginDrag(e, layer, 'resize', dir));
+      const isCorner = dir.length === 2;
+      h.addEventListener('mousedown', (e) => {
+        if (isCorner) {
+          const r = h.getBoundingClientRect();
+          const dist = Math.hypot(e.clientX - (r.left + r.width / 2), e.clientY - (r.top + r.height / 2));
+          if (dist > CORNER_RESIZE_R) { tsBeginDrag(e, layer, 'rotate'); return; }
+        }
+        tsBeginDrag(e, layer, 'resize', dir);
+      });
       div.appendChild(h);
     });
     if (draggable) {
@@ -3180,17 +3157,25 @@ function renderProps() {
 
   // The slide itself — its Canvas selected, or nothing: where the text sits
   // and how the background keys under Layout, the canvas's fill under Style.
+  // Same panel shape as any other layer's — Layout/Style/Animate, never a
+  // different one (the owner's call, 2026-09-30: "we don't have multiple
+  // sidebars, just the one") — Style gets the Text/Color a text layer would,
+  // greyed out (it isn't one), not just Fill on its own.
   const canvas = baseBgLayer();
   if (!inItem && !multiSelectedLayerIds.size && (!activeLayer || activeLayer === canvas)) {
     lastPropsLayerId = activeLayer?.id ?? null;
-    const available = canvas ? ['layout', 'style'] : ['layout'];
+    const available = canvas ? ['layout', 'style', 'animate'] : ['layout'];
     if (!available.includes(activePropsTab)) activePropsTab = 'layout';
     showTabs(available);
     itemPane?.classList.add('ts-tab-hidden');
     empty.style.display = 'none';
     panel.innerHTML = '';
     renderSlideLayout(panel);
-    if (canvas) renderBgProps(panel, canvas);
+    if (canvas) {
+      renderBgProps(panel, canvas);
+      renderInertTextStyle(panel);
+      renderAnimateProps(panel, canvas);
+    }
     panel.style.display = 'block';
     panel.querySelectorAll('[data-tab]').forEach(el => el.classList.toggle('ts-tab-hidden', el.dataset.tab !== activePropsTab));
     return;
@@ -4294,6 +4279,14 @@ function renderLayoutProps(panel, layer) {
 function renderAnimateProps(panel, layer) {
   const M = window.KairoMotion;
   if (!M) return;
+
+  // Preview — replays the whole slide's Arrives, every layer in turn, same
+  // as a real transition onto it; not just this one layer's (was "Play", a
+  // bare icon lost in the tool bar under the canvas — one clearly-named
+  // button here instead, where the animation settings actually are).
+  const preview = fieldBtn('▶  Preview', () => tsPlayAnimations(), 'Replay this slide\'s animations, every layer in turn');
+  panel.appendChild(section('animate', null, fieldRow([preview])));
+
   const b = M.normalizeBuild(layer.build);
   const isText = layer.type === 'text';
   const builds = M.BUILDS.filter(x => !x.text || isText).map(x => ({ label: x.label, value: x.id }));
@@ -4302,14 +4295,7 @@ function renderAnimateProps(panel, layer) {
     if (layer.build.type === 'none') delete layer.build;
     up();
   };
-  const play = document.createElement('button');
-  play.type = 'button';
-  play.className = 'ts-aspect-link ts-row-icon';
-  play.innerHTML = '<svg viewBox="0 0 24 24" fill="currentColor" width="11" height="11"><path d="M7 5v14l12-7z"/></svg>';
-  play.title = 'Play — replay this slide\'s animations';
-  play.addEventListener('click', () => tsPlayAnimations());
-  // The animation, with Play in the row's icon column; its timing two to a line.
-  const arrives = [fieldRow([makeSelect(builds, b.type, v => { setBuild({ type: v }); renderProps(); }), play])];
+  const arrives = [fieldRow([makeSelect(builds, b.type, v => { setBuild({ type: v }); renderProps(); })])];
   if (b.type !== 'none') arrives.push(fieldRow([
     numField('Delay', b.delay, { min: 0, max: 10, step: 0.1, unit: 's', title: 'How long after the slide appears', onChange: v => setBuild({ delay: v ?? 0 }) }),
     numField('Length', b.duration, { min: 0.1, max: 5, step: 0.1, unit: 's', title: 'How long the animation takes', onChange: v => setBuild({ duration: v ?? 0.8 }) }),
@@ -4362,6 +4348,33 @@ function renderSlideLayout(panel) {
   const layoutSel = makeSelect(layouts, activeLook.layout || 'fullscreen', v => { activeLook.layout = v; renderPreview(); scheduleThemeAutosave(); });
   layoutSel.title = 'Where the text sits on the screen';
   panel.appendChild(section('layout', 'Slide', prop('Layout', layoutSel)));
+
+  // Size — was a plain preset dropdown off in the tool bar under the canvas;
+  // here with the rest of the slide's own layout, and a real W/H a size the
+  // presets don't cover can be typed into directly, not just picked from a
+  // synthesized "(Custom)" option nothing ever actually offered a way to
+  // reach.
+  const size = themeCanvasSize(activeLook);
+  const setSize = (w, h) => { activeLook.canvasSize = { w, h }; renderPreview(); scheduleThemeAutosave(); };
+  const sizeOptions = [{ label: '1920 × 1080 (Default)', value: '1920x1080' }];
+  if (typeof displayOutputs === 'function' && typeof outputScreenMap === 'function') {
+    const screens = outputScreenMap();
+    displayOutputs().forEach(d => {
+      const s = screens[d.id];
+      if (s) sizeOptions.push({ label: `${d.name}: ${s.width} × ${s.height}`, value: `${s.width}x${s.height}` });
+    });
+  }
+  const wantValue = `${size.w}x${size.h}`;
+  if (!sizeOptions.some(o => o.value === wantValue)) sizeOptions.push({ label: `${size.w} × ${size.h} (Custom)`, value: wantValue });
+  const sizeSel = makeSelect(sizeOptions, wantValue, v => {
+    const [w, h] = v.split('x').map(Number);
+    if (w && h) { setSize(w, h); renderProps(); }
+  });
+  sizeSel.title = 'A configured output\'s resolution — or type your own below';
+  panel.appendChild(section('layout', 'Size', fieldRow([sizeSel]), fieldRow([
+    numField('W', size.w, { min: 240, max: 7680, unit: 'px', onChange: v => { if (v) setSize(v, size.h); } }),
+    numField('H', size.h, { min: 240, max: 7680, unit: 'px', onChange: v => { if (v) setSize(size.w, v); } }),
+  ])));
 }
 
 // Background layer properties — a shape, or the canvas itself (always the
@@ -4382,10 +4395,12 @@ function renderBgProps(panel, layer) {
   }
 
   // Fill: its kind, then what that kind needs — a colour and its opacity; a
-  // gradient's two colours, angle and opacity; or a picture (the bundled
-  // backgrounds or the operator's own), darkened for legible text. Picking
-  // Picture with none yet starts on the first bundled background, so the
-  // canvas changes the moment it's chosen.
+  // gradient's two colours, angle and opacity; or a picture, darkened for
+  // legible text. Picking Picture with none yet starts on a bundled one
+  // (nothing else to show yet), so the canvas changes the moment it's
+  // chosen — but the grid offered to pick from is the operator's OWN media
+  // (the Media Bin's bin + smart folders), not bundled stock: a church
+  // isn't going to use stock photos here (the owner's call, 2026-09-30).
   const rows = [fieldRow([makeFillSelect(layer.fill, v => {
     layer.fill = v;
     if (v === 'image' && !layer.src && (window.KairoBackgrounds || []).length) useBackground(layer, window.KairoBackgrounds[0]);
@@ -4401,13 +4416,47 @@ function renderBgProps(panel, layer) {
       fieldRow([numField('Angle', layer.angle ?? 160, { min: 0, max: 360, unit: '°', onChange: v => { layer.angle = v ?? 0; up(); } })], { cols: 2 }));
   } else if (layer.fill === 'image') {
     rows.push(
-      fieldRow([makeBackgroundGrid(layer.src, bg => { useBackground(layer, bg); up(); })]),
+      fieldRow([makeMediaBinGrid(layer.src, item => { layer.fill = 'image'; layer.src = item.url; up(); })]),
       fieldRow([fieldBtn('Your own image…', () => pickOwnBackground(layer))]),
       fieldRow([numField('Darken', layer.dim || 0, { min: 0, max: 80, unit: '%', title: 'Darken the picture so text on it reads', onChange: v => { layer.dim = v ?? 0; up(); } })], { cols: 2 }));
   } else if (layer.fill !== 'transparent') {
     rows.push(fieldRow([colorField(layer.color, v => { layer.color = v; up(); })], { cols: 2 }));
   }
   panel.appendChild(section('style', 'Fill', ...rows));
+}
+
+// The Canvas isn't text, so its Style tab shows Text/Color inert rather than
+// not at all — the same Layout/Style/Animate shape every layer's panel has
+// (the owner's call, 2026-09-30), not a different, narrower one just because
+// nothing here happens to be selected. Built from a throwaway object (never
+// read back — there's nowhere on the canvas for it to live) with the exact
+// same fields renderTextProps shows for a real one, wrapped greyed out and
+// non-interactive.
+function renderInertTextStyle(panel) {
+  const ghost = { family: 'Manrope', weight: 500, size: 64, lineHeight: 1.2, letterSpacing: 0, transform: 'none', italic: false, align: 'center', color: '#ffffff' };
+  const wrap = document.createElement('div');
+  wrap.className = 'ts-inert';
+  wrap.title = 'Select a text layer to edit its type';
+  wrap.append(
+    fieldRow([makeFontSelect(ghost.family, () => {})]),
+    fieldRow([
+      makeWeightSelect(ghost.weight, () => {}),
+      numField('Size', ghost.size, { min: 8, max: 300, unit: 'px', onChange: () => {} }),
+    ]),
+    fieldRow([
+      numField('Line', ghost.lineHeight, { min: 0.5, max: 4, step: 0.05, title: 'Line spacing', onChange: () => {} }),
+      numField('Letter', ghost.letterSpacing, { min: -5, max: 30, step: 0.5, unit: 'px', title: 'Letter spacing', onChange: () => {} }),
+    ]),
+    fieldRow([makeAlignBtns(ghost.align, () => {}), makeSelect([
+      { label: 'Aa  As typed', value: 'none' }, { label: 'AA  Uppercase', value: 'uppercase' }, { label: 'aa  Lowercase', value: 'lowercase' },
+    ], ghost.transform, () => {}), iconToggle('I', false, '', () => {}, { italic: true })]),
+  );
+  panel.appendChild(section('style', 'Text', wrap));
+  const colorWrap = document.createElement('div');
+  colorWrap.className = 'ts-inert';
+  colorWrap.title = 'Select a text layer to edit its colour';
+  colorWrap.append(fieldRow([colorField(ghost.color, () => {})], { cols: 2 }));
+  panel.appendChild(section('style', 'Color', colorWrap));
 }
 
 // ── Background pool ───────────────────────────────────────────────────────
@@ -4420,22 +4469,51 @@ function useBackground(layer, bg) {
   layer.src = bg.src;
   if (bg.color) layer.color = bg.color;
 }
-function makeBackgroundGrid(currentSrc, onPick) {
+// A picture fill picks from the operator's own media, not bundled stock — the
+// same bin + smart folders as the "Library" add-image button and the Media
+// Bin strip during a live service. Off entirely when the Media Bin itself is
+// hidden (kairo-media-bin-hidden — service.js's own toggle): the owner's
+// "if the user has media bin toggled on" (2026-09-30) reads it as consent to
+// browse that media from Theme Studio too, not just as a live-service shortcut.
+// Cached briefly so switching fields/undo-redo doesn't refetch on every
+// render; fetchAllMediaItems' own comment already notes the round trips are
+// cheap, this just keeps them off the common case entirely.
+let tsMediaBinCache = null, tsMediaBinCacheAt = 0;
+const TS_MEDIA_BIN_CACHE_MS = 15000;
+async function fetchMediaBinImages() {
+  const now = Date.now();
+  if (tsMediaBinCache && now - tsMediaBinCacheAt < TS_MEDIA_BIN_CACHE_MS) return tsMediaBinCache;
+  const items = (await fetchAllMediaItems()).filter(it => it.kind === 'image');
+  tsMediaBinCache = items; tsMediaBinCacheAt = now;
+  return items;
+}
+function makeMediaBinGrid(currentSrc, onPick) {
   const grid = document.createElement('div');
   grid.className = 'ts-bg-grid';
-  (window.KairoBackgrounds || []).forEach(bg => {
-    const b = document.createElement('button');
-    b.type = 'button';
-    b.className = 'ts-bg-swatch' + (bg.src === currentSrc ? ' active' : '');
-    b.title = bg.name;
-    b.setAttribute('aria-label', bg.name);
-    b.style.backgroundImage = `url("${bg.thumb}")`;
-    b.addEventListener('click', () => {
-      grid.querySelectorAll('.ts-bg-swatch').forEach(x => x.classList.toggle('active', x === b));
-      onPick(bg);
+  let hidden = false;
+  try { hidden = localStorage.getItem('kairo-media-bin-hidden') === '1'; } catch {}
+  if (hidden) {
+    grid.innerHTML = '<div class="svc-empty">Media Bin is hidden — turn it on to pick from your own pictures here.</div>';
+    return grid;
+  }
+  grid.innerHTML = '<div class="svc-empty">Loading…</div>';
+  fetchMediaBinImages().then(items => {
+    grid.innerHTML = '';
+    if (!items.length) { grid.innerHTML = '<div class="svc-empty">No images in your Media Bin yet.</div>'; return; }
+    items.forEach(item => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'ts-bg-swatch' + (item.url === currentSrc ? ' active' : '');
+      b.title = item.name;
+      b.setAttribute('aria-label', item.name);
+      b.style.backgroundImage = `url("${item.url}")`;
+      b.addEventListener('click', () => {
+        grid.querySelectorAll('.ts-bg-swatch').forEach(x => x.classList.toggle('active', x === b));
+        onPick(item);
+      });
+      grid.appendChild(b);
     });
-    grid.appendChild(b);
-  });
+  }).catch(() => { grid.innerHTML = '<div class="svc-empty">Couldn\'t load your media right now.</div>'; });
   return grid;
 }
 // Asks for one image file and hands back what loadImageFile makes of it.
@@ -4939,7 +5017,6 @@ function blankSceneOn(bg) {
   return { id: 'scene-' + Date.now(), name: bg.name, durationSec: 60, layers };
 }
 document.getElementById('ts-add-bg-btn')?.addEventListener('click', () => { if (activeLook) openDesignGallery(); });
-document.getElementById('ts-play-anim-btn')?.addEventListener('click', () => { if (activeLook) tsPlayAnimations(); });
 
 // How the verse text reveals as it goes up (KairoWordSplit), separate from the
 // transition between slides — the theme's setting, shown with the type of the
@@ -5180,9 +5257,11 @@ function toggleItemModeChrome(isItem) {
   document.querySelector('#ts-pane-themes .ts-col-header')?.classList.toggle('hidden', isItem);
   document.getElementById('ts-item-mode-header')?.classList.toggle('hidden', !isItem);
   document.getElementById('ts-item-theme-header')?.classList.toggle('hidden', !isItem);
-  // Canvas size is a whole-theme concern too — floats over the preview
-  // instead of living among the others, so it needs its own toggle here.
-  document.querySelector('.ts-canvas-size-group')?.classList.toggle('hidden', isItem);
+  // Canvas Size is a whole-theme concern too, same as Layout — both are
+  // renderSlideLayout's, which (like the rest of the "nothing selected"
+  // panel) only ever renders outside item mode; nothing to toggle here now
+  // that it lives in the properties panel instead of floating over the
+  // preview on its own.
   const hint = document.querySelector('.ts-layers-hint');
   if (hint) hint.style.visibility = isItem ? 'hidden' : '';
   if (isItem) updateItemThemeLabel();
@@ -6002,21 +6081,20 @@ document.addEventListener('keydown', (e) => {
 
 // ── Tools, after Compositor ───────────────────────────────────────────────
 // The editor works the way Photoshop and Compositor (github.com/robbietilton/
-// Compositor, MIT) do, so a designer's hands already know it: a tool is picked
-// in the bar under the canvas or by its key, the bar over the canvas holds
-// that tool's options, and the line under the tools says what it does.
-//   Move (V)  — select, drag, resize, turn. Options: Transform.
+// Compositor, MIT) do, so a designer's hands already know it: a tool is
+// picked by its key or from the float centred over the top of the canvas
+// (.ts-tool-float in index.html). Each key's behaviour is on its button's
+// own title (hover for the detail); the panel on the right holds what it
+// edits — Transform, the type, a shape's kind (transformControls,
+// renderTextProps, renderBgProps).
+//   Move (V)  — select, drag, resize, turn.
 //   Type (T)  — drag a text box, or click for one, and type; click text to
-//               edit it. Options: the type.
+//               edit it.
 //   Shape (U) — drag a shape on a new layer: Shift for a square or circle,
 //               Option from its centre; Shift-U steps through the shapes.
 // With nothing of the tool's kind selected, its options are what the next
 // text box or shape is made with.
-const TS_TOOLS = {
-  move: { key: 'v', hint: 'Drag to move · Handles to resize · Circle to rotate · Arrows nudge, Shift ×10 · 1–0 opacity · Double-click text to type' },
-  type: { key: 't', hint: 'Drag a text box, or click for one · Click text to edit it · Return or a click outside to finish · Esc to cancel' },
-  shape: { key: 'u', hint: 'Drag to draw a shape on a new layer · Shift square or circle · Option from the centre · Shift-U next shape · Esc cancels' },
-};
+const TS_TOOLS = { move: { key: 'v' }, type: { key: 't' }, shape: { key: 'u' } };
 let tsTool = 'move';
 const tsTypeDefaults = { family: 'Manrope', size: 72, weight: 600, italic: false, lineHeight: 1.2, letterSpacing: 0, transform: 'none', color: '#ffffff', align: 'left' };
 const tsShapeDefaults = { shape: 'rect', color: '#e8404a', radius: 0 };
@@ -6024,14 +6102,14 @@ const tsShapeDefaults = { shape: 'rect', color: '#e8404a', radius: 0 };
 function selectTool(tool) {
   if (!TS_TOOLS[tool]) return;
   tsTool = tool;
-  document.querySelectorAll('#ts-tool-bar .ts-tool-btn').forEach(b => b.classList.toggle('active', b.dataset.tool === tool));
+  // The tools float over the canvas (.ts-tool-float), not in the bar under
+  // it any more — unscoped, since there's only ever the one set of them.
+  document.querySelectorAll('.ts-tool-btn').forEach(b => b.classList.toggle('active', b.dataset.tool === tool));
   const wrap = document.querySelector('.ts-preview-wrap');
   wrap?.classList.toggle('ts-tool-type', tool === 'type');
   wrap?.classList.toggle('ts-tool-shape', tool === 'shape');
-  const hint = document.getElementById('ts-tool-hint');
-  if (hint) hint.textContent = TS_TOOLS[tool].hint;
 }
-document.querySelectorAll('#ts-tool-bar .ts-tool-btn').forEach(b => b.addEventListener('click', () => selectTool(b.dataset.tool)));
+document.querySelectorAll('.ts-tool-btn').forEach(b => b.addEventListener('click', () => selectTool(b.dataset.tool)));
 
 // The Shape tool's own corner caret (Photoshop's flyout): which shape gets
 // drawn next, shown as icons rather than names — picking one also switches

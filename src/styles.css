@@ -4839,7 +4839,8 @@ mark.help-hit.is-current { background: rgba(255,255,255,0.38); }
 /* A message in a picture grid ("No images… yet", "Loading…") spans the
    whole grid, centred — not squeezed into its first cell. */
 .ts-media-picker-grid > .svc-empty,
-.ts-cycle-grid > .svc-empty { grid-column: 1 / -1; }
+.ts-cycle-grid > .svc-empty,
+.ts-bg-grid > .svc-empty { grid-column: 1 / -1; }
 
 .rs-section {
   display: flex;
@@ -5432,22 +5433,30 @@ mark.help-hit.is-current { background: rgba(255,255,255,0.38); }
   background: transparent;
   border: 1px solid transparent;
   border-radius: 7px;
-  color: var(--text-2);
+  color: var(--text);
   cursor: pointer;
-  transition: background var(--trans), color var(--trans);
+  transition: background var(--trans), color var(--trans), border-color var(--trans);
 }
 .ts-tool-btn svg { width: 17px; height: 17px; }
-.ts-tool-btn:hover { background: rgba(255, 255, 255, 0.06); color: var(--text); }
-.ts-tool-btn.active { background: rgba(255, 255, 255, 0.12); border-color: rgba(255, 255, 255, 0.14); color: #fff; }
-.ts-tool-hint {
-  padding: 0 var(--space-4) var(--space-2);
-  font-size: var(--fs-xs);
-  color: var(--text-3);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  flex: none;
+.ts-tool-btn:hover { background: rgba(255, 255, 255, 0.08); color: #fff; }
+/* The active tool in the app's own accent (--red), not a plain white wash —
+   easy to pick out against the canvas at a glance (2026-09-30: "add more
+   color to the tool icon for contrast"). */
+.ts-tool-btn.active { background: var(--red); border-color: var(--red); color: #fff; }
+/* The tools float centred over the TOP of the canvas (after Figma and
+   Compositor) instead of sitting in the bar under it — taken out of
+   .ts-preview-wrap's flex flow (position:absolute) so it never competes
+   with the stage for the centring that flex does there; without this the
+   stage shrank to share space with it instead of staying centred on its
+   own (2026-09-30). 28px clears the ruler when it's showing. */
+.ts-tool-float {
+  position: absolute;
+  top: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 40;
 }
+.ts-preview-wrap.ts-has-rulers .ts-tool-float { top: 28px; }
 /* What Type and Shape draw on the canvas: a crosshair over it, and the box
    (or the shape) being dragged out. A box's own handles keep theirs. */
 .ts-preview-wrap.ts-tool-type, .ts-preview-wrap.ts-tool-type [data-layer-id] { cursor: text !important; }
@@ -5972,16 +5981,6 @@ body.ts-dragging-guide-h, body.ts-dragging-guide-h * { cursor: row-resize !impor
   overflow: hidden;
 }
 
-/* Right-aligned on the Add-content row, rather than living in the meta row
-   below or floating loose over the canvas. */
-.ts-canvas-size-group {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-left: auto;
-}
-.ts-canvas-size-group .ts-meta-label { white-space: nowrap; }
-
 .ts-preview-stage {
   /* Width/height are set as explicit px inline styles by fitPreviewStage()
      in app.js (measures .ts-preview-wrap's real padded content box and
@@ -6100,39 +6099,6 @@ body.ts-dragging-guide-h, body.ts-dragging-guide-h * { cursor: row-resize !impor
 .ts-guide-v { top: 0; bottom: 0; width: 1px; }
 .ts-guide-h { left: 0; right: 0; height: 1px; }
 
-/* ── Meta row (layout + animation + name) ── */
-/* Still used by the Add-Content row's own "Size" picker (.ts-canvas-size-group)
-   — the rest of what used to share this label style (Layout/Transition/
-   Canvas/Translate) moved into the right-side properties panel as
-   .ts-props-section/.ts-props-section-label, matching that panel's own
-   per-layer property convention instead of a separate one. */
-.ts-meta-label {
-  font-size: 9px;
-  font-weight: 700;
-  letter-spacing: 0.8px;
-  text-transform: uppercase;
-  color: var(--text-3);
-  white-space: nowrap;
-}
-
-.ts-size-select {
-  /* The same height and corners as the add buttons beside it, so the whole
-     bar reads as one row of controls. */
-  height: 31px;
-  background-color: var(--bg-input);
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%236e6e6e' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
-  background-repeat: no-repeat;
-  background-position: right 6px center;
-  border: 1px solid var(--border-md);
-  border-radius: var(--radius);
-  color: var(--text);
-  font-family: var(--font);
-  font-size: var(--fs-sm);
-  font-weight: 600;
-  padding: 0 24px 0 12px;
-  outline: none;
-  cursor: pointer;
-}
 
 .ts-chip-group {
   /* inline-flex + fit-content so the pill hugs its buttons — stretching it to
@@ -6332,6 +6298,12 @@ body.ts-dragging-guide-h, body.ts-dragging-guide-h * { cursor: row-resize !impor
   gap: 8px;
 }
 #ts-props-panel { padding-bottom: 12px; }
+/* Text/Color shown but inert on the Canvas (renderInertTextStyle) — it isn't
+   a text layer, so its type controls are there to see, not to touch. A real
+   box (not display:contents) so hovering it still shows why, even though
+   its fields themselves (pointer-events:none) don't react to the mouse. */
+.ts-inert { display: flex; flex-direction: column; gap: 8px; cursor: default; }
+.ts-inert > * { opacity: 0.4; pointer-events: none; }
 :root { --ts-field-bg: #2c2c2e; }   /* the inspector's quiet field boxes, wherever they sit */
 
 /* Tab filtering for the props panel (renderProps in app.js) — a class, not
