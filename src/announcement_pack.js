@@ -273,7 +273,7 @@
       const grainAt = layers.findIndex(l => l.id === 'grain');
       const count = s.finale ? finaleCountdown() : [sideCountdown()];
       layers.splice(grainAt < 0 ? layers.length : grainAt, 0, ...count);
-      return { id: 'scene-' + s.id + '-' + i, name: s.name, durationSec: 30, layers };
+      return { id: 'scene-' + s.id + '-' + i, name: s.name, durationSec: 30, layers, ...(s.finale ? { finale: true } : {}) };
     });
   }
 

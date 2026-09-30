@@ -5735,9 +5735,11 @@ function addTimerSlide(item, template = null) {
     ? { ...deepClone(template), id: 'scene-' + (Date.now() + 1) }
     : { id: 'scene-' + (Date.now() + 1), name: `Slide ${item.scenes.length + 1}`, durationSec: 60, layers: defaultSceneLayers() };
   // The pre-service loop ends on Service Begins, which holds the final
-  // minute — a new slide goes in before it, so it stays the finale.
+  // minute — a new slide goes in before it, so it stays the finale. (Loops
+  // made before scenes carried `finale` are known by the finale's id.)
+  const isFinale = (sc) => !!sc && (sc.finale || /^scene-begins-/.test(sc.id || ''));
   const last = item.scenes[item.scenes.length - 1];
-  const beforeFinale = /^scene-begins-/.test(last?.id || '') && !/^scene-begins-/.test(template?.id || '');
+  const beforeFinale = isFinale(last) && !isFinale(template);
   const at = beforeFinale ? item.scenes.length - 1 : item.scenes.length;
   item.scenes.splice(at, 0, scene);
   window.KairoService.saveTimerScenes(item);
