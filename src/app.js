@@ -2304,6 +2304,7 @@ async function loadSettings() {
     // looked like it "worked sometimes and not others."
     applyOutputThemes();
     applyOutputLayers();
+    applyOutputKeying();
     // Language
     const sttLang = document.getElementById('stt-language');
     if (sttLang) sttLang.value = settings.sttLanguage || 'en-US';

@@ -2699,7 +2699,7 @@ app.post('/api/lang/install', async (req, res) => {
 // route/message type, since display.html already has one message handler
 // for "the main window just pushed output configuration."
 app.post('/api/look/apply', (req, res) => {
-  const { look, themes, layers } = req.body;
+  const { look, themes, layers, keying } = req.body;
   const layersOut = layers && typeof layers === 'object' ? layers : null;
   if (themes && typeof themes === 'object') {
     currentOutputThemes = themes;
@@ -2711,6 +2711,11 @@ app.post('/api/look/apply', (req, res) => {
   if (layersOut && !look) {
     broadcast({ type: 'look-update', layers: layersOut });
     return res.json({ ok: true, outputs: Object.keys(layersOut).length });
+  }
+  // keying-only call (applyOutputKeying) — { [outputId]: 'none'|'alpha'|'chroma'|'luma' }.
+  if (keying && typeof keying === 'object' && !look) {
+    broadcast({ type: 'look-update', keying });
+    return res.json({ ok: true, outputs: Object.keys(keying).length });
   }
   if (!look || typeof look !== 'object') return res.status(400).json({ error: 'No look provided' });
   broadcast({ type: 'look-update', look, layers: layersOut });

@@ -715,6 +715,7 @@ function renderDisplayDetail(host, o) {
   host.appendChild(identifyBtn);
 
   host.appendChild(detailInlineGroup('Theme', buildThemeSelect(o.id)));
+  host.appendChild(detailInlineGroup('Keying', buildKeyingSelect(o.id)));
 
   appendOutputLayersSection(host, o.id);
 
@@ -1102,6 +1103,54 @@ async function verifyDisplayWindowOpened(label) {
   } catch (err) {
     logDisplayLifecycleFallback('verifyDisplayWindowOpened threw', { label, error: String(err) });
   }
+}
+
+// ── Keying — how a display output's background keys out for a mixer ───────
+// Each display window's own choice; the theme never carries it, so one theme
+// serves the projector and the stream overlay alike. None shows the theme's
+// background; Transparent makes the window see-through (real alpha); Chroma
+// key shows pure green and Luma key black where the background would be, for
+// OBS or vMix to key out from a plain window capture. NDI and Syphon need
+// none: they already send the content on real alpha.
+const KEYING_OPTIONS = [
+  ['none', "None — the theme's background"],
+  ['alpha', 'Transparent'],
+  ['chroma', 'Chroma key (green)'],
+  ['luma', 'Luma key (black)'],
+];
+function outputKeyingMap() {
+  const src = settings.outputKeying && typeof settings.outputKeying === 'object' ? settings.outputKeying : {};
+  const map = {};
+  for (const d of displayOutputs()) map[d.id] = KEYING_OPTIONS.some(([k]) => k === src[d.id]) ? src[d.id] : 'none';
+  return map;
+}
+// Same dual delivery as the output layers: localStorage for the windows on
+// this machine, and a look-update broadcast.
+async function applyOutputKeying() {
+  const map = outputKeyingMap();
+  localStorage.setItem('kairo-output-keying', JSON.stringify(map));
+  try {
+    await fetch(`${SERVER}/api/look/apply`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ keying: map }),
+    });
+  } catch (err) {
+    console.warn('[Look] per-output keying broadcast failed:', err.message);
+  }
+}
+function buildKeyingSelect(outputId) {
+  const sel = document.createElement('select');
+  sel.className = 'setting-input';
+  sel.title = 'Transparent needs a capture that keeps alpha; Chroma or Luma key works with a plain window capture in OBS or vMix.';
+  const current = outputKeyingMap()[outputId];
+  KEYING_OPTIONS.forEach(([value, label]) => sel.add(new Option(label, value, false, value === current)));
+  sel.addEventListener('change', () => {
+    settings.outputKeying = { ...outputKeyingMap(), [outputId]: sel.value };
+    saveSettingsPatch({ outputKeying: settings.outputKeying });
+    applyOutputKeying();
+  });
+  return sel;
 }
 
 async function applyOutputThemes() {

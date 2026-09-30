@@ -91,6 +91,12 @@
         body.transparent-bg {
             background: transparent;
         }
+        /* This output keyed for a video mixer (Settings → Outputs → Keying):
+           no theme canvas is painted, so this shows behind the content —
+           see-through, chroma green, or black for a luma key. */
+        body[data-keying="alpha"] { background: transparent; }
+        body[data-keying="chroma"] { background: #00ff00; }
+        body[data-keying="luma"] { background: #000000; }
 
         /* KAIRO watermark */
         #kairo-label {
@@ -521,6 +527,8 @@
                 const bgOv = (styleByLayerId || {})[layer.id] || {};
                 if (bgOv.visible === false) return;
                 layer = withFillOverride(layer, bgOv);
+                // A keyed output shows its key colour where the canvas would be.
+                if (!layer.pos && outputKeying !== 'none') return;
                 // Only a full-canvas background keys the output transparent —
                 // a positioned shape with a transparent fill is just invisible.
                 if (layer.fill === 'transparent') {
@@ -1038,6 +1046,28 @@
             if (map && map[OUTPUT_KEY]) return { ...DEFAULT_LAYERS, ...map[OUTPUT_KEY] };
         } catch {}
         return DEFAULT_LAYERS;
+    }
+
+    // ── Keying: how this output's background keys out for a mixer ─────────
+    // 'none' | 'alpha' | 'chroma' | 'luma' — the output's own choice, not the
+    // theme's, so one theme serves the projector and the stream overlay alike.
+    // Same dual delivery as the layers above (localStorage + look-update).
+    const KEYINGS = ['none', 'alpha', 'chroma', 'luma'];
+    let outputKeying = loadOutputKeying();
+    document.body.dataset.keying = outputKeying;
+    function loadOutputKeying() {
+        try {
+            const map = JSON.parse(localStorage.getItem('kairo-output-keying') || 'null');
+            if (map && KEYINGS.includes(map[OUTPUT_KEY])) return map[OUTPUT_KEY];
+        } catch {}
+        return 'none';
+    }
+    function applyOutputKeying(k) {
+        if (!KEYINGS.includes(k)) k = 'none';
+        document.body.dataset.keying = k;
+        if (k === outputKeying) return;
+        outputKeying = k;
+        applyLook(activeLook, false);
     }
 
     function pickLayers(payload) {
@@ -1641,6 +1671,9 @@
                 if (map && map[OUTPUT_KEY]) applyOutputLayers({ ...DEFAULT_LAYERS, ...map[OUTPUT_KEY] });
             } catch {}
         }
+        if (e.key === 'kairo-output-keying' && e.newValue) {
+            try { applyOutputKeying((JSON.parse(e.newValue) || {})[OUTPUT_KEY]); } catch {}
+        }
     });
 
     // Re-fit when the output window resizes (projector attach, fullscreen toggle).
@@ -1865,6 +1898,7 @@
             if (mine) { assignedLook = mine; try { applyLook(mine, true); } catch {} }
             const myLayers = pickLayers(msg);
             if (myLayers) { try { applyOutputLayers(myLayers); } catch {} }
+            if (msg.keying && typeof msg.keying === 'object') { try { applyOutputKeying(msg.keying[OUTPUT_KEY]); } catch {} }
             return;
         }
 
