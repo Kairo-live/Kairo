@@ -1231,7 +1231,7 @@ async function deleteThemeGroup(groupId, groupName, groupLooks) {
     resetThemeHistory();
   }
   saveLooks();
-  renderLooksList(); renderLayersList(); syncMetaRow(); renderPreview(); renderProps();
+  renderLooksList(); renderLayersList(); renderThemeCanvasSizeSelect(); renderPreview(); renderProps();
 }
 
 function renderLooksList() {
@@ -1261,7 +1261,7 @@ function selectLook(look) {
   resetThemeHistory();
   renderLooksList();
   renderLayersList();
-  syncMetaRow();
+  renderThemeCanvasSizeSelect();
   renderPreview();
   renderProps();
 }
@@ -1311,7 +1311,7 @@ function duplicateLook(look) {
   activeLayer = null; multiSelectedLayerIds.clear();
   resetThemeHistory();
   saveLooks();
-  renderLooksList(); renderLayersList(); syncMetaRow(); renderPreview(); renderProps();
+  renderLooksList(); renderLayersList(); renderThemeCanvasSizeSelect(); renderPreview(); renderProps();
 }
 
 async function deleteLook(look) {
@@ -1330,7 +1330,7 @@ async function deleteLook(look) {
   saveLooks();
   renderLooksList();
   renderLayersList();
-  syncMetaRow();
+  renderThemeCanvasSizeSelect();
   renderPreview();
   renderProps();
 }
@@ -1391,85 +1391,9 @@ document.getElementById('ts-canvas-size-select')?.addEventListener('change', (e)
   renderPreview();
 });
 
-function syncMetaRow() {
-  if (!activeLook) return;
-  const layoutSel = document.getElementById('ts-layout-picker');
-  if (layoutSel) {
-    // A theme on a layout the list doesn't offer (a lower-third card, two
-    // languages…) shows it as it is rather than as something else.
-    if (activeLook.layout && ![...layoutSel.options].some(o => o.value === activeLook.layout)) {
-      layoutSel.add(new Option(activeLook.layout.replace(/-/g, ' ').replace(/^./, c => c.toUpperCase()), activeLook.layout));
-    }
-    layoutSel.value = activeLook.layout || 'fullscreen';
-  }
-  const alphaBtn = document.getElementById('ts-alpha-toggle');
-  if (alphaBtn) alphaBtn.classList.toggle('active', isAlphaCanvas());
-  const chromaBtn = document.getElementById('ts-chroma-toggle');
-  if (chromaBtn) chromaBtn.classList.toggle('active', isChromaCanvas());
-  renderThemeCanvasSizeSelect();
-
-  // Text Animation — how the verse text itself reveals, independent of the
-  // Transition above (which is how the whole slide swaps). See
-  // KairoWordSplit's file header for why these are two separate settings
-  // rather than the single overloaded `animation` field this used to be.
-  const textAnim = activeLook.textAnimation || 'none';
-  const textAnimSelect = document.getElementById('ts-text-anim-select');
-  if (textAnimSelect) textAnimSelect.value = textAnim;
-  const textAnimSpeed = document.getElementById('ts-text-anim-speed');
-  if (textAnimSpeed) {
-    textAnimSpeed.value = activeLook.textAnimationSpeed || 1;
-    textAnimSpeed.closest('.ts-prop-row')?.classList.toggle('hidden', textAnim === 'none');
-  }
-  // Highlight Color only means something to the animations that actually
-  // read opts.color (see applyMotionText in word_split.js) — hidden for
-  // every other choice rather than shown-but-inert.
-  const colorRow = document.getElementById('ts-text-anim-color-row');
-  if (colorRow) {
-    colorRow.classList.toggle('hidden', !['impact', 'karaoke', 'highlight-box'].includes(textAnim));
-    const colorInput = document.getElementById('ts-text-anim-color');
-    if (colorInput) colorInput.value = activeLook.textHighlightColor || '#ffd23f';
-  }
-  // Same reasoning for Intensity — only Impact/Bold Caption read opts.intensity.
-  const intensityRow = document.getElementById('ts-text-anim-intensity-row');
-  if (intensityRow) {
-    intensityRow.classList.toggle('hidden', !['impact', 'bold-caption'].includes(textAnim));
-    const intensityInput = document.getElementById('ts-text-anim-intensity');
-    if (intensityInput) intensityInput.value = activeLook.textAnimationIntensity ?? 1;
-  }
-
-  // Translate-to language — meaningful for ANY theme with a verse_translated
-  // layer, not just the one built-in preset whose layout happens to be
-  // literally named 'multi-language'. A custom theme built from scratch (or
-  // duplicated and restyled) with its own translated-text layer needs this
-  // picker just as much, so gate on the layer actually being present instead
-  // of a hardcoded layout-name check that only ever matched that one preset.
-  const translateGroup = document.getElementById('ts-translate-group');
-  if (translateGroup) {
-    const needsTranslation = (activeLook.layers || []).some(l => l.type === 'text' && l.binding === 'verse_translated');
-    translateGroup.classList.toggle('hidden', !needsTranslation);
-    const translateSel = document.getElementById('ts-translate-picker');
-    if (translateSel) translateSel.value = activeLook.translateTo || '';
-  }
-}
-
-// The canvas is "transparent" when the base background layer is keyed out —
-// the state operators want for chroma / alpha-key rigs.
+// The theme's own background: the canvas fill every slide sits on.
 function baseBgLayer() {
   return activeLook?.layers?.find(l => l.type === 'background' && !l.pos) || null;
-}
-function isAlphaCanvas() {
-  return baseBgLayer()?.fill === 'transparent';
-}
-// Standard chroma-green — see the Chroma Key button's own tooltip for why
-// this exists as a distinct option from Transparent: real per-pixel alpha
-// only survives through Syphon/NDI output; a plain OBS/vMix "Window
-// Capture" of the display window does NOT preserve any app's transparency,
-// so a solid, keyable color is the reliable default for that far more
-// common setup.
-const CHROMA_KEY_COLOR = '#00FF00';
-function isChromaCanvas() {
-  const bg = baseBgLayer();
-  return bg?.fill === 'solid' && (bg.color || '').toUpperCase() === CHROMA_KEY_COLOR;
 }
 
 // ── Render layers list ────────────────────────────────────────────────────
@@ -3219,10 +3143,11 @@ const PROPS_TABS_BY_LAYER_TYPE = {
 // Persists across layer switches within one Edit/Theme Studio session
 // (picking a different layer doesn't jump you back to Layout every time) —
 // reset only when it lands on a tab the newly-selected layer doesn't have.
-// 'item' is the first tab: the whole thing being edited (#ts-props-item-pane
-// — a countdown's timer and slides, an item's theme, or in Theme Studio the
-// theme's own layout, text animation and canvas).
-let activePropsTab = 'item';
+// 'item' is the first tab when editing a playlist item or a countdown: the
+// whole thing being edited (#ts-props-item-pane — its theme, or its timer
+// and slides). Theme Studio has no such tab: the theme's own settings are
+// the slide's (renderSlideLayout) and its verse layer's (revealRows).
+let activePropsTab = 'layout';
 
 // Which layer renderProps last drew the panel for — lets it tell "a new
 // layer just got selected" apart from "the same layer's props panel is
@@ -3237,10 +3162,13 @@ function renderProps() {
   const tabs = document.getElementById('ts-props-tabs');
   const itemPane = document.getElementById('ts-props-item-pane');
   if (!panel || !empty) return;
-  // The tabs are always at the top: the first names the whole thing being
-  // edited; the layer tabs follow (with nothing selected they say so).
+  // The tabs are always at the top, and nothing sits above them. Editing a
+  // playlist item or a countdown, the first names it (its theme, its timer
+  // and slides); the layer tabs follow.
+  const inItem = tsMode === 'item';
   const itemTab = document.getElementById('ts-props-tab-item');
-  if (itemTab) itemTab.textContent = tsMode === 'item' ? (tsItemCtx?.item?.type === 'timer' ? 'Timer' : 'Look') : 'Theme';
+  if (itemTab) itemTab.textContent = inItem && tsItemCtx?.item?.type === 'timer' ? 'Timer' : 'Look';
+  if (!inItem && activePropsTab === 'item') activePropsTab = 'layout';
   const showTabs = (available) => {
     tabs?.classList.remove('hidden');
     tabs?.querySelectorAll('.ts-tab-btn').forEach(btn => {
@@ -3252,6 +3180,24 @@ function renderProps() {
     itemPane?.classList.toggle('ts-tab-hidden', activePropsTab !== 'item');
     return activePropsTab === 'item';
   };
+
+  // The slide itself — its Canvas selected, or nothing: where the text sits
+  // and how the background keys under Layout, the canvas's fill under Style.
+  const canvas = baseBgLayer();
+  if (!inItem && !multiSelectedLayerIds.size && (!activeLayer || activeLayer === canvas)) {
+    lastPropsLayerId = activeLayer?.id ?? null;
+    const available = canvas ? ['layout', 'style'] : ['layout'];
+    if (!available.includes(activePropsTab)) activePropsTab = 'layout';
+    showTabs(available);
+    itemPane?.classList.add('ts-tab-hidden');
+    empty.style.display = 'none';
+    panel.innerHTML = '';
+    renderSlideLayout(panel);
+    if (canvas) renderBgProps(panel, canvas);
+    panel.style.display = 'block';
+    panel.querySelectorAll('[data-tab]').forEach(el => el.classList.toggle('ts-tab-hidden', el.dataset.tab !== activePropsTab));
+    return;
+  }
 
   if (!activeLayer) {
     lastPropsLayerId = null;
@@ -3291,50 +3237,22 @@ function renderProps() {
     ['left', 'h-center', 'right', 'top', 'v-center', 'bottom'].forEach(kind => {
       alignWrap.appendChild(tsAlignIconBtn(kind, () => tsAlignSelection(kind)));
     });
-    panel.appendChild(section(null, 'Align', alignWrap));
+    panel.appendChild(section(null, 'Align', fieldRow([alignWrap])));
 
-    // Transform — the group's own bounding box as one X/Y/W/H, same fields
-    // a single layer gets. X/Y moves every selected layer by the same
-    // delta (same as dragging one of them). W/H, with the chain link
-    // locked (default), SCALES every layer's position and size together
-    // relative to the group's own top-left, instead of only ever being
-    // able to resize members one at a time.
+    // Transform — the group's own bounding box as one X/Y/W/H, the same
+    // fields a single layer gets. X/Y moves every selected layer by the same
+    // delta (same as dragging one of them). W/H, with the chain link locked
+    // (default), SCALES every layer's position and size together relative to
+    // the group's own top-left, instead of only ever being able to resize
+    // members one at a time.
     const bounds = tsGroupBounds(tsSelectedLayers());
     const groupLinked = layerAspectLock.get('__group__') ?? true;
-    const numField = (label, val, min, max, onChange) => {
-      const inp = document.createElement('input');
-      inp.type = 'number'; inp.className = 'ts-prop-number';
-      inp.value = Math.round(val); inp.min = min; inp.max = max;
-      inp.addEventListener('input', () => onChange(parseFloat(inp.value) || 0));
-      const lbl = document.createElement('span'); lbl.className = 'ts-prop-label'; lbl.textContent = label;
-      const g = document.createElement('span'); g.className = 'ts-field-group';
-      g.appendChild(lbl); g.appendChild(inp);
-      return g;
-    };
-    const xyRow = document.createElement('div');
-    xyRow.className = 'ts-prop-row'; xyRow.style.gap = '8px';
-    xyRow.appendChild(numField('X', bounds.x, -TS_DESIGN_W, TS_DESIGN_W, (v) => {
-      const b = tsGroupBounds(tsSelectedLayers());
-      tsTransformSelection(tsSelectedLayers(), b, { dx: v - b.x });
-      up();
-    }));
-    xyRow.appendChild(numField('Y', bounds.y, -TS_DESIGN_H, TS_DESIGN_H, (v) => {
-      const b = tsGroupBounds(tsSelectedLayers());
-      tsTransformSelection(tsSelectedLayers(), b, { dy: v - b.y });
-      up();
-    }));
-    const whRow = document.createElement('div');
-    whRow.className = 'ts-prop-row'; whRow.style.gap = '8px';
-    whRow.appendChild(numField('W', bounds.w, 4, TS_DESIGN_W, (v) => {
-      const b = tsGroupBounds(tsSelectedLayers());
-      const sx = v / Math.max(1, b.w);
-      const linked = layerAspectLock.get('__group__') ?? true;
-      tsTransformSelection(tsSelectedLayers(), b, { sx, sy: linked ? sx : 1 });
-      up(); renderProps();
-    }));
+    const groupField = (label, key, min, max, apply) => numField(label, Math.round(bounds[key]), {
+      min, max, onChange: (v) => { apply(v ?? 0, tsGroupBounds(tsSelectedLayers())); up(); },
+    });
     const linkBtn = document.createElement('button');
     linkBtn.type = 'button';
-    linkBtn.className = 'ts-aspect-link' + (groupLinked ? ' active' : '');
+    linkBtn.className = 'ts-aspect-link ts-row-icon' + (groupLinked ? ' active' : '');
     linkBtn.title = groupLinked ? 'Width/Height are linked — click to unlink' : 'Width/Height are unlinked — click to link';
     linkBtn.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 15l6-6"/><path d="M11 6l1.5-1.5a3.54 3.54 0 0 1 5 5L16 11"/><path d="M13 18l-1.5 1.5a3.54 3.54 0 0 1-5-5L8 13"/></svg>';
     linkBtn.addEventListener('click', () => {
@@ -3343,15 +3261,17 @@ function renderProps() {
       linkBtn.classList.toggle('active', now);
       linkBtn.title = now ? 'Width/Height are linked — click to unlink' : 'Width/Height are unlinked — click to link';
     });
-    whRow.appendChild(linkBtn);
-    whRow.appendChild(numField('H', bounds.h, 4, TS_DESIGN_H, (v) => {
-      const b = tsGroupBounds(tsSelectedLayers());
-      const sy = v / Math.max(1, b.h);
-      const linked = layerAspectLock.get('__group__') ?? true;
-      tsTransformSelection(tsSelectedLayers(), b, { sy, sx: linked ? sy : 1 });
-      up(); renderProps();
-    }));
-    panel.appendChild(section(null, 'Transform', xyRow, whRow));
+    const linked = () => layerAspectLock.get('__group__') ?? true;
+    panel.appendChild(section(null, 'Transform',
+      fieldRow([
+        groupField('X', 'x', -TS_DESIGN_W, TS_DESIGN_W, (v, b) => tsTransformSelection(tsSelectedLayers(), b, { dx: v - b.x })),
+        groupField('Y', 'y', -TS_DESIGN_H, TS_DESIGN_H, (v, b) => tsTransformSelection(tsSelectedLayers(), b, { dy: v - b.y })),
+      ]),
+      fieldRow([
+        groupField('W', 'w', 4, TS_DESIGN_W, (v, b) => { const sx = v / Math.max(1, b.w); tsTransformSelection(tsSelectedLayers(), b, { sx, sy: linked() ? sx : 1 }); renderProps(); }),
+        groupField('H', 'h', 4, TS_DESIGN_H, (v, b) => { const sy = v / Math.max(1, b.h); tsTransformSelection(tsSelectedLayers(), b, { sy, sx: linked() ? sy : 1 }); renderProps(); }),
+        linkBtn,
+      ])));
     return;
   }
 
@@ -3386,7 +3306,7 @@ function renderProps() {
   // The canvas fill is always the whole screen: nothing to place, nothing to animate.
   if (isCanvasFill) available = available.filter(t => t !== 'animate' && t !== 'layout');
   if (activePropsTab !== 'item' && !available.includes(activePropsTab)) activePropsTab = available[0];
-  showTabs(['item', ...available]);
+  showTabs(inItem ? ['item', ...available] : available);
   panel.style.display = onItemTab() ? 'none' : 'block';
   // A class, not a direct style write — see the .ts-tab-hidden comment in
   // styles.css for why this has to compose with, not clobber, each
@@ -3404,15 +3324,20 @@ document.querySelectorAll('#ts-props-tabs .ts-tab-btn').forEach(btn => {
   });
 });
 
-function prop(label, content) {
-  const row = document.createElement('div');
-  row.className = 'ts-prop-row';
-  const lbl = document.createElement('span');
-  lbl.className = 'ts-prop-label';
-  lbl.textContent = label;
-  row.appendChild(lbl);
-  row.appendChild(content);
-  return row;
+// A control with its name inside the same box ("Shows  The verse or lyrics ⌄",
+// "Name  Verse"), on its own line of the grid — the way the number fields
+// carry theirs, so a labelled row lines up with every other row.
+function prop(label, content, { cols } = {}) {
+  return fieldRow([labeledField(label, content)], { cols });
+}
+function labeledField(label, content) {
+  const f = document.createElement('label');
+  f.className = 'ts-field ts-labeled-field';
+  const l = document.createElement('span');
+  l.className = 'ts-field-label';
+  l.textContent = label;
+  f.append(l, content);
+  return f;
 }
 
 // `tab` groups this section under one of the props panel's tabs (see
@@ -3499,13 +3424,27 @@ function numField(label, value, { min = -Infinity, max = Infinity, step = 1, uni
   }
   return wrap;
 }
-// Controls side by side on one line, sharing it equally; `lead` sizes the
-// first to its content (a colour swatch), `trail` the last (a button).
-function fieldRow(children, { lead = false, trail = false } = {}) {
+// Controls side by side on one line of the inspector's grid, sharing it
+// equally (`cols` keeps a lone field to its share of a wider line); a control
+// marked .ts-row-icon (the W/H link, Play, Italic) takes the row's icon column
+// on the right, so every field lines up with the ones above and below.
+function fieldRow(children, { cols } = {}) {
   const r = document.createElement('div');
-  r.className = 'ts-field-row' + (lead ? ' ts-lead-auto' : '') + (trail ? ' ts-trail-auto' : '');
-  children.filter(Boolean).forEach(c => r.appendChild(c));
+  r.className = 'ts-field-row';
+  const kids = children.filter(Boolean);
+  r.style.setProperty('--cols', cols || Math.max(1, kids.filter(c => !c.classList.contains('ts-row-icon')).length));
+  kids.forEach(c => r.appendChild(c));
   return r;
+}
+// A button the size of a field, filling its column.
+function fieldBtn(text, onClick, title = '') {
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.className = 'ts-field-btn';
+  b.textContent = text;
+  if (title) b.title = title;
+  b.addEventListener('click', onClick);
+  return b;
 }
 // A small on/off button (Italic), pressed when on.
 function iconToggle(text, on, title, onChange, { italic = false } = {}) {
@@ -3548,45 +3487,48 @@ function toggleField(label, on, onChange, title = '') {
   wrap.append(l, makeToggle(on, onChange));
   return wrap;
 }
+// A colour as design tools show one: its swatch and hex code in one field.
+function colorField(color, onChange, title = '') {
+  const f = document.createElement('label');
+  f.className = 'ts-field ts-color-field';
+  if (title) f.title = title;
+  const hex = document.createElement('span');
+  hex.className = 'ts-hex';
+  const show = (v) => { hex.textContent = String(v || '').replace('#', '').toUpperCase(); };
+  const c = makeColor(color, v => { show(v); onChange(v); });
+  c.className = 'ts-swatch-mini';
+  show(color);
+  f.append(c, hex);
+  return f;
+}
 // A colour, and its opacity beside it — a design tool's fill line.
 function colorOpacityRow(color, onColor, opacity, onOpacity) {
   return fieldRow([
-    makeColor(color, onColor),
+    colorField(color, onColor),
     numField('Opacity', Math.round(opacity ?? 100), { min: 0, max: 100, unit: '%', onChange: v => onOpacity(v ?? 100) }),
-  ], { lead: true });
+  ]);
 }
 
-// `format` (optional) turns the raw slider value into its label ("1.25×").
-function makeSlider(val, min, max, onChange, format) {
+// Chip buttons, one pressed — still used by the Timer tab's own popovers
+// (service.js shares this page's globals). The inspector uses dropdowns.
+function makeChips(options, current, onChange) {
   const wrap = document.createElement('div');
-  wrap.style.cssText = 'display:flex;align-items:center;gap:6px;flex:1;';
-  const sl = document.createElement('input');
-  sl.type = 'range'; sl.className = 'ts-prop-slider';
-  sl.min = min; sl.max = max; sl.value = val;
-  const lbl = document.createElement('span');
-  lbl.className = 'ts-prop-val';
-  const show = (v) => (format ? format(parseFloat(v)) : v);
-  lbl.textContent = show(val);
-  // The label updates on every 'input' event (cheap, instant feedback) —
-  // but onChange always ends in up(), a full canvas teardown/rebuild.
-  // Dragging a slider fires dozens of 'input' events a second; calling
-  // onChange synchronously for every single one rebuilt the whole canvas
-  // that often, which is exactly what read as "Opacity flickers while
-  // dragging" (or any other slider). Coalesced to at most once per
-  // animation frame instead — same fix as the position-drag throttle.
-  let queued = false, pendingValue = null;
-  sl.addEventListener('input', () => {
-    lbl.textContent = show(sl.value);
-    pendingValue = parseFloat(sl.value);
-    if (queued) return;
-    queued = true;
-    requestAnimationFrame(() => { queued = false; onChange(pendingValue); });
+  wrap.className = 'ts-chip-group';
+  options.forEach(({ label, value }) => {
+    const btn = document.createElement('button');
+    btn.className = 'ts-chip' + (current === value ? ' active' : '');
+    btn.textContent = label;
+    btn.addEventListener('click', () => {
+      wrap.querySelectorAll('.ts-chip').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      onChange(value);
+    });
+    wrap.appendChild(btn);
   });
-  wrap.appendChild(sl); wrap.appendChild(lbl);
   return wrap;
 }
 
-function makeFillChips(current, onChange) {
+function makeFillSelect(current, onChange) {
   return makeSelect([
     { label: 'Solid colour', value: 'solid' },
     { label: 'Gradient', value: 'gradient' },
@@ -3749,23 +3691,6 @@ function makeFontSelect(current, onChange) {
   return wrap;
 }
 
-function makeChips(options, current, onChange) {
-  const wrap = document.createElement('div');
-  wrap.className = 'ts-chip-group';
-  options.forEach(({ label, value }) => {
-    const btn = document.createElement('button');
-    btn.className = 'ts-chip' + (current === value ? ' active' : '');
-    btn.textContent = label;
-    btn.addEventListener('click', () => {
-      wrap.querySelectorAll('.ts-chip').forEach(b => b.classList.remove('active'));
-      btn.classList.add('active');
-      onChange(value);
-    });
-    wrap.appendChild(btn);
-  });
-  return wrap;
-}
-
 // A real <select> for a small fixed set of choices — same shape as
 // makeWeightSelect/makeFontSelect, generalized. Chips read fine for a
 // handful of options with room to spare (Fit Mode, alignment), but for
@@ -3774,10 +3699,11 @@ function makeChips(options, current, onChange) {
 function makeSelect(options, current, onChange) {
   const sel = document.createElement('select');
   sel.className = 'ts-select';
-  options.forEach(({ label, value }) => {
+  options.forEach(({ label, value, title }) => {
     const opt = document.createElement('option');
     opt.value = value;
     opt.textContent = label;
+    if (title) opt.title = title;
     if (value === current) opt.selected = true;
     sel.appendChild(opt);
   });
@@ -4068,7 +3994,7 @@ function restoreLookSnapshot(snapshot) {
   activeLayer = null; multiSelectedLayerIds.clear();
   lastThemeSnapshot = deepClone(activeLook); // the just-restored state is the new baseline
   saveLooks();
-  renderLooksList(); renderLayersList(); syncMetaRow(); renderPreview(); renderProps();
+  renderLooksList(); renderLayersList(); renderThemeCanvasSizeSelect(); renderPreview(); renderProps();
 }
 
 function themeUndo() {
@@ -4190,7 +4116,7 @@ function renderLayoutProps(panel, layer) {
   const linked = layerAspectLock.get(layer.id) ?? true;
   const linkBtn = document.createElement('button');
   linkBtn.type = 'button';
-  linkBtn.className = 'ts-aspect-link' + (linked ? ' active' : '');
+  linkBtn.className = 'ts-aspect-link ts-row-icon' + (linked ? ' active' : '');
   linkBtn.title = linked ? 'Width/Height are linked — click to unlink' : 'Width/Height are unlinked — click to link';
   linkBtn.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 15l6-6"/><path d="M11 6l1.5-1.5a3.54 3.54 0 0 1 5 5L16 11"/><path d="M13 18l-1.5 1.5a3.54 3.54 0 0 1-5-5L8 13"/></svg>';
   linkBtn.addEventListener('click', () => {
@@ -4199,10 +4125,12 @@ function renderLayoutProps(panel, layer) {
     linkBtn.classList.toggle('active', now);
     linkBtn.title = now ? 'Width/Height are linked — click to unlink' : 'Width/Height are unlinked — click to link';
   });
-  const whRow = fieldRow([posField('w', 'W', 40, TS_DESIGN_W, { aspect: true }), linkBtn, posField('h', 'H', 0, TS_DESIGN_H, { aspect: true })]);
-  whRow.style.gridTemplateColumns = 'minmax(0, 1fr) auto minmax(0, 1fr)';
-
-  const kids = [alignWrap, fieldRow([posField('x', 'X', -TS_DESIGN_W, TS_DESIGN_W), posField('y', 'Y', -TS_DESIGN_H, TS_DESIGN_H)]), whRow];
+  // W under X and H under Y; the link sits in the row's icon column.
+  const kids = [
+    fieldRow([alignWrap]),
+    fieldRow([posField('x', 'X', -TS_DESIGN_W, TS_DESIGN_W), posField('y', 'Y', -TS_DESIGN_H, TS_DESIGN_H)]),
+    fieldRow([posField('w', 'W', 40, TS_DESIGN_W, { aspect: true }), posField('h', 'H', 0, TS_DESIGN_H, { aspect: true }), linkBtn]),
+  ];
 
   // Rotation, about the layer's own centre — a countdown running up the side
   // of the screen, a tilted photo, a slanted headline. Turned with the handle
@@ -4220,12 +4148,14 @@ function renderLayoutProps(panel, layer) {
     rot.querySelector('input').dataset.posInput = 'rotation';
     rotRow.push(rot);
   }
-  // Escape hatch back to the layout preset once a layer has been freed.
+  // Escape hatch back to the layout preset once a layer has been freed — an
+  // icon in the row's icon column, as a design tool's small actions are.
   if (layer.pos) {
     const reset = document.createElement('button');
-    reset.className = 'ts-fill-chip';
-    reset.textContent = 'Reset to layout';
-    reset.title = 'Put this layer back where the theme\'s layout places it';
+    reset.type = 'button';
+    reset.className = 'ts-aspect-link ts-row-icon';
+    reset.title = 'Reset to layout — put this layer back where the theme\'s layout places it';
+    reset.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>';
     reset.addEventListener('click', () => {
       delete layer.pos;
       up();
@@ -4233,7 +4163,7 @@ function renderLayoutProps(panel, layer) {
     });
     rotRow.push(reset);
   }
-  if (rotRow.length) kids.push(fieldRow(rotRow));
+  if (rotRow.length) kids.push(fieldRow(rotRow, { cols: 2 }));
 
   panel.appendChild(section('layout', 'Position', ...kids));
 }
@@ -4256,12 +4186,13 @@ function renderAnimateProps(panel, layer) {
     up();
   };
   const play = document.createElement('button');
-  play.className = 'ts-add-btn ts-add-btn-compact';
-  play.innerHTML = '<svg viewBox="0 0 24 24" fill="currentColor" width="11" height="11"><path d="M7 5v14l12-7z"/></svg><span>Play</span>';
-  play.title = 'Replay this slide\'s animations';
+  play.type = 'button';
+  play.className = 'ts-aspect-link ts-row-icon';
+  play.innerHTML = '<svg viewBox="0 0 24 24" fill="currentColor" width="11" height="11"><path d="M7 5v14l12-7z"/></svg>';
+  play.title = 'Play — replay this slide\'s animations';
   play.addEventListener('click', () => tsPlayAnimations());
-  // The animation and its Play button on one line; its timing two to a line.
-  const arrives = [fieldRow([makeSelect(builds, b.type, v => { setBuild({ type: v }); renderProps(); }), play], { trail: true })];
+  // The animation, with Play in the row's icon column; its timing two to a line.
+  const arrives = [fieldRow([makeSelect(builds, b.type, v => { setBuild({ type: v }); renderProps(); }), play])];
   if (b.type !== 'none') arrives.push(fieldRow([
     numField('Delay', b.delay, { min: 0, max: 10, step: 0.1, unit: 's', title: 'How long after the slide appears', onChange: v => setBuild({ delay: v ?? 0 }) }),
     numField('Length', b.duration, { min: 0.1, max: 5, step: 0.1, unit: 's', title: 'How long the animation takes', onChange: v => setBuild({ duration: v ?? 0.8 }) }),
@@ -4274,17 +4205,52 @@ function renderAnimateProps(panel, layer) {
     if (layer.idle.type === 'none') delete layer.idle;
     up();
   };
-  const moving = [makeSelect(M.IDLES.map(x => ({ label: x.label, value: x.id })), m.type, v => { setIdle({ type: v }); renderProps(); })];
-  if (m.type !== 'none') moving.push(fieldRow([
+  // One list of motions for every layer. A picture's slow zoom (layer.motion,
+  // the renderers' own Ken Burns animation) is one of them, so a picture never
+  // has a second motion control somewhere else.
+  const isPicture = layer.type === 'image' || layer.type === 'image-cycle';
+  const motions = M.IDLES.map(x => ({ label: x.label, value: x.id }));
+  if (isPicture) motions.splice(1, 0, { label: 'Slow zoom', value: 'kenburns' });
+  const current = isPicture && layer.motion === 'kenburns' ? 'kenburns' : m.type;
+  const moving = [fieldRow([makeSelect(motions, current, v => {
+    if (isPicture) layer.motion = v === 'kenburns' ? 'kenburns' : 'none';
+    setIdle({ type: v === 'kenburns' ? 'none' : v });
+    renderProps();
+  })])];
+  if (current !== 'none' && current !== 'kenburns') moving.push(fieldRow([
     numField('Amount', m.amount, { min: 1, max: 100, unit: '%', onChange: v => setIdle({ amount: v ?? 20 }) }),
     numField('Speed', m.speed, { min: 0.1, max: 3, step: 0.05, unit: '×', onChange: v => setIdle({ speed: v ?? 1 }) }),
   ]));
   panel.appendChild(section('animate', 'Keeps moving', ...moving));
 }
 
-// Background layer properties
+// The slide as a whole — what its Canvas stands for, shown with the Canvas or
+// nothing selected: where the verse sits (the theme's layout). Keying the
+// background out for a video mixer is each output's (Settings → Outputs), not
+// the theme's: one theme serves the projector and the stream overlay alike.
+const THEME_LAYOUTS = [
+  { label: 'Full screen', value: 'fullscreen' },
+  { label: 'Lower third', value: 'lower-third' },
+  { label: 'Split, text left', value: 'split-left' },
+  { label: 'Split, text right', value: 'split-right' },
+];
+function renderSlideLayout(panel) {
+  if (!activeLook) return;
+  const layouts = [...THEME_LAYOUTS];
+  // A theme on a layout the list doesn't offer (a lower-third card, two
+  // languages…) shows it as it is rather than as something else.
+  if (activeLook.layout && !layouts.some(o => o.value === activeLook.layout)) {
+    layouts.push({ label: activeLook.layout.replace(/-/g, ' ').replace(/^./, c => c.toUpperCase()), value: activeLook.layout });
+  }
+  const layoutSel = makeSelect(layouts, activeLook.layout || 'fullscreen', v => { activeLook.layout = v; renderPreview(); scheduleThemeAutosave(); });
+  layoutSel.title = 'Where the text sits on the screen';
+  panel.appendChild(section('layout', 'Slide', prop('Layout', layoutSel)));
+}
+
+// Background layer properties — a shape, or the canvas itself (always the
+// whole screen: its layout is the slide's, see renderSlideLayout).
 function renderBgProps(panel, layer) {
-  renderLayoutProps(panel, layer);
+  if (layer.pos) renderLayoutProps(panel, layer);
 
   // Shape (a shape layer only — the canvas fill is always the whole screen):
   // which shape, and for a rectangle its corner radius (the other shapes
@@ -4308,28 +4274,26 @@ function renderBgProps(panel, layer) {
   // backgrounds or the operator's own), darkened for legible text. Picking
   // Picture with none yet starts on the first bundled background, so the
   // canvas changes the moment it's chosen.
-  const rows = [makeFillChips(layer.fill, v => {
+  const rows = [fieldRow([makeFillSelect(layer.fill, v => {
     layer.fill = v;
     if (v === 'image' && !layer.src && (window.KairoBackgrounds || []).length) useBackground(layer, window.KairoBackgrounds[0]);
     up(); renderProps();
-  })];
+  })])];
   const opacityField = () => numField('Opacity', layer.opacity ?? 100, { min: 0, max: 100, unit: '%', onChange: v => { layer.opacity = v ?? 100; up(); } });
   if (layer.fill === 'gradient') {
-    const colors = fieldRow([
-      makeColor(layer.color, v => { layer.color = v; up(); }),
-      makeColor(layer.color2 || '#1a1a2e', v => { layer.color2 = v; up(); }),
-      numField('Angle', layer.angle ?? 160, { min: 0, max: 360, unit: '°', onChange: v => { layer.angle = v ?? 0; up(); } }),
-    ]);
-    colors.style.gridTemplateColumns = 'auto auto minmax(0, 1fr)';
-    rows.push(colors, fieldRow([opacityField()]));
-  } else if (layer.fill === 'image') {
-    const own = document.createElement('button');
-    own.className = 'ts-add-btn ts-add-btn-compact';
-    own.textContent = 'Your own image…';
-    own.addEventListener('click', () => pickOwnBackground(layer));
     rows.push(
-      makeBackgroundGrid(layer.src, bg => { useBackground(layer, bg); up(); }),
-      own,
+      fieldRow([
+        colorField(layer.color, v => { layer.color = v; up(); }, 'Where the gradient starts'),
+        colorField(layer.color2 || '#1a1a2e', v => { layer.color2 = v; up(); }, 'Where it ends'),
+      ]),
+      fieldRow([
+        numField('Angle', layer.angle ?? 160, { min: 0, max: 360, unit: '°', onChange: v => { layer.angle = v ?? 0; up(); } }),
+        opacityField(),
+      ]));
+  } else if (layer.fill === 'image') {
+    rows.push(
+      fieldRow([makeBackgroundGrid(layer.src, bg => { useBackground(layer, bg); up(); })]),
+      fieldRow([fieldBtn('Your own image…', () => pickOwnBackground(layer))]),
       fieldRow([
         numField('Darken', layer.dim || 0, { min: 0, max: 80, unit: '%', title: 'Darken the picture so text on it reads', onChange: v => { layer.dim = v ?? 0; up(); } }),
         opacityField(),
@@ -4396,9 +4360,6 @@ const IMAGE_FITS = [
   { label: 'Fit inside the box', value: 'contain' },
   { label: 'Stretch to the box', value: 'fill' },
 ];
-const IMAGE_MOTIONS = [
-  { label: 'Still', value: 'none' }, { label: 'Slow zoom (Ken Burns)', value: 'kenburns' },
-];
 function layerNameSection(panel, layer) {
   const nameInp = document.createElement('input');
   nameInp.type = 'text'; nameInp.className = 'ts-prop-input';
@@ -4415,24 +4376,18 @@ function renderImageProps(panel, layer) {
   const thumb = document.createElement('div');
   thumb.className = 'ts-image-thumb';
   thumb.style.backgroundImage = `url("${String(layer.src || '').replace(/["\\\n\r]/g, c => encodeURIComponent(c))}")`;
-  const replace = document.createElement('button');
-  replace.className = 'ts-add-btn ts-add-btn-compact';
-  replace.textContent = 'Replace…';
-  replace.addEventListener('click', () => pickImageFile(({ src, w, h }) => {
+  const replace = fieldBtn('Replace…', () => pickImageFile(({ src, w, h }) => {
     layer.src = src; layer.naturalW = w; layer.naturalH = h;
     up(); renderProps();
   }));
-  // A slow continuous zoom/pan while this image sits on screen — same option
-  // Image Cycle has, a plain CSS animation (see display.html's matching
-  // branch): a single still background still benefits from feeling alive.
+  // (Its slow zoom is under Animate → Keeps moving, with every other motion.)
   panel.appendChild(section('style', 'Image',
-    fieldRow([thumb, replace], { lead: true }),
-    makeSelect(IMAGE_FITS, layer.fit || 'contain', v => { layer.fit = v; up(); }),
+    fieldRow([thumb, replace]),
+    fieldRow([makeSelect(IMAGE_FITS, layer.fit || 'contain', v => { layer.fit = v; up(); })]),
     fieldRow([
       numField('Corners', layer.radius || 0, { min: 0, max: 200, unit: 'px', onChange: v => { layer.radius = v ?? 0; up(); } }),
       numField('Opacity', layer.opacity ?? 100, { min: 0, max: 100, unit: '%', onChange: v => { layer.opacity = v ?? 100; up(); } }),
-    ]),
-    makeSelect(IMAGE_MOTIONS, layer.motion || 'none', v => { layer.motion = v; up(); })));
+    ])));
   renderPhotoLookProps(panel, layer);
 
   // The color-key "Remove background" cutout used to live here — pulled per
@@ -4449,18 +4404,19 @@ function renderImageProps(panel, layer) {
 function renderPhotoLookProps(panel, layer) {
   const side = layer.fade?.side || 'none';
   const fadeSel = makeSelect([
-    { label: 'No fade', value: 'none' }, { label: 'Fade from the left', value: 'left' }, { label: 'Fade from the right', value: 'right' },
-    { label: 'Fade from the top', value: 'top' }, { label: 'Fade from the bottom', value: 'bottom' },
+    { label: 'None', value: 'none' }, { label: 'Left', value: 'left' }, { label: 'Right', value: 'right' },
+    { label: 'Top', value: 'top' }, { label: 'Bottom', value: 'bottom' },
   ], side, v => {
     if (v === 'none') delete layer.fade; else layer.fade = { side: v, amount: layer.fade?.amount ?? 45 };
     up(); renderProps();
   });
+  fadeSel.title = 'The edge the picture fades in from';
   panel.appendChild(section('style', 'Photo look',
-    prop('Black & white', makeSlider(layer.grayscale || 0, 0, 100, v => { layer.grayscale = v; up(); }, v => `${Math.round(v)}%`)),
+    fieldRow([numField('Black & white', layer.grayscale || 0, { min: 0, max: 100, unit: '%', onChange: v => { layer.grayscale = v ?? 0; up(); } })], { cols: 2 }),
     fieldRow([
-      fadeSel,
+      labeledField('Fade', fadeSel),
       side !== 'none' && numField('Length', layer.fade.amount ?? 45, { min: 5, max: 100, unit: '%', title: 'How much of the picture the fade covers', onChange: v => { layer.fade.amount = v ?? 45; up(); } }),
-    ])));
+    ], { cols: 2 })));
 }
 
 // Image Cycle layer properties — a slideshow of stills that advances on its
@@ -4486,7 +4442,7 @@ function renderImageCycleProps(panel, layer) {
   // startCycleMotion), so it keeps running against a countdown that can be
   // re-timed at any moment.
   const cycleSettings = [
-    makeSelect(IMAGE_FITS, layer.fit || 'cover', v => { layer.fit = v; up(); }),
+    fieldRow([makeSelect(IMAGE_FITS, layer.fit || 'cover', v => { layer.fit = v; up(); })]),
     fieldRow([
       numField('Each', layer.intervalSec || '', { min: 0, max: 600, unit: 's', placeholder: 'auto', title: 'Seconds per picture — empty spreads them over the countdown', onChange: v => { layer.intervalSec = v > 0 ? v : undefined; up(); } }),
       makeSelect([
@@ -4497,20 +4453,14 @@ function renderImageCycleProps(panel, layer) {
       numField('Corners', layer.radius || 0, { min: 0, max: 200, unit: 'px', onChange: v => { layer.radius = v ?? 0; up(); } }),
       numField('Opacity', layer.opacity ?? 100, { min: 0, max: 100, unit: '%', onChange: v => { layer.opacity = v ?? 100; up(); } }),
     ]),
-    makeSelect(IMAGE_MOTIONS, layer.motion || 'none', v => { layer.motion = v; up(); }),
   ];
 
   const listWrap = document.createElement('div');
   listWrap.className = 'ts-cycle-list';
-  const addBtns = document.createElement('div');
-  addBtns.className = 'ts-cycle-add-row';
-  const uploadBtn = document.createElement('button');
-  uploadBtn.className = 'ts-add-btn ts-add-btn-compact'; uploadBtn.textContent = 'Upload…';
-  const libBtn = document.createElement('button');
-  libBtn.className = 'ts-add-btn ts-add-btn-compact'; libBtn.textContent = 'From Library…';
   const fileInp = document.createElement('input');
   fileInp.type = 'file'; fileInp.accept = 'image/*'; fileInp.multiple = true; fileInp.style.display = 'none';
-  uploadBtn.addEventListener('click', () => fileInp.click());
+  const uploadBtn = fieldBtn('Upload…', () => fileInp.click());
+  const libBtn = fieldBtn('From Library…', () => openCycleImagePicker(layer));
   fileInp.addEventListener('change', async () => {
     for (const file of Array.from(fileInp.files || [])) {
       try {
@@ -4523,23 +4473,7 @@ function renderImageCycleProps(panel, layer) {
     up();
     renderProps();
   });
-  libBtn.addEventListener('click', () => openCycleImagePicker(layer));
-  addBtns.appendChild(uploadBtn); addBtns.appendChild(libBtn); addBtns.appendChild(fileInp);
-  // Only offered while empty — once there are real images, loading the
-  // sample set on top would just be clutter, not a preview aid anymore.
-  if (!(layer.sources || []).length) {
-    const sampleBtn = document.createElement('button');
-    sampleBtn.className = 'ts-add-btn ts-add-btn-compact';
-    sampleBtn.textContent = 'Load samples';
-    sampleBtn.title = 'Placeholder frames so you can see the cycle in action before adding your own';
-    sampleBtn.addEventListener('click', () => {
-      layer.sources = [...SAMPLE_CYCLE_IMAGES];
-      up();
-      renderProps();
-    });
-    addBtns.appendChild(sampleBtn);
-  }
-  listWrap.appendChild(addBtns);
+  listWrap.append(fieldRow([uploadBtn, libBtn]), fileInp);
 
   const grid = document.createElement('div');
   grid.className = 'ts-cycle-grid';
@@ -4598,7 +4532,7 @@ async function openCycleImagePicker(layer) {
   panel.appendChild(header);
   const grid = document.createElement('div');
   grid.className = 'ts-media-picker-grid';
-  grid.textContent = 'Loading…';
+  grid.innerHTML = '<div class="svc-empty">Loading…</div>';
   panel.appendChild(grid);
   overlay.appendChild(panel);
   document.body.appendChild(overlay);
@@ -4642,13 +4576,6 @@ async function openCycleImagePicker(layer) {
 // softness, direction… — all built from the kind's parameter list, so a new
 // kind gets its controls without new UI code. Position and size come from
 // Layout like any layer.
-function motionFormat(p) {
-  return (v) => {
-    if (p.unit === '×') return v.toFixed(2) + '×';
-    const n = Number.isInteger(p.step) ? Math.round(v) : +v.toFixed(2);
-    return n + (p.unit || '');
-  };
-}
 function renderMotionProps(panel, layer) {
   const M = window.KairoMotion;
   layerNameSection(panel, layer);
@@ -4676,11 +4603,11 @@ function renderMotionProps(panel, layer) {
   blurb.className = 'ts-motion-blurb';
   blurb.textContent = kind.blurb;
   panel.appendChild(section('style', 'Motion',
-    makeGroupedSelect([
+    fieldRow([makeGroupedSelect([
       family('ambient', 'Moving backgrounds'),
       family('timer', 'Countdown'),
       family('element', 'Hand-drawn'),
-    ], g.kind, pickKind),
+    ], g.kind, pickKind)]),
     blurb));
 
   // Colours — one swatch per element colour, named where the kind names them.
@@ -4714,34 +4641,25 @@ function renderMotionProps(panel, layer) {
     });
     colors.appendChild(add);
   }
-  if (kind.colors.max > 0) panel.appendChild(section('style', 'Colors', colors));
+  if (kind.colors.max > 0) panel.appendChild(section('style', 'Colors', fieldRow([colors])));
 
-  // The kind's own controls. makeSlider steps in whole numbers, so a range
-  // with a fractional step (Speed) runs in hundredths underneath.
-  const rows = kind.params.map(p => {
-    if (p.type === 'range') {
-      const f = p.step < 1 ? 100 : 1;
-      const fmt = motionFormat(p);
-      return prop(p.label, makeSlider(Math.round(g[p.key] * f), Math.round(p.min * f), Math.round(p.max * f),
-        v => { g[p.key] = v / f; changed(); }, v => fmt(v / f)));
-    }
-    if (p.type === 'chips') return prop(p.label, (p.options.length > 3 ? makeSelect : makeChips)(p.options, g[p.key], v => { g[p.key] = v; changed(); }));
-    return prop(p.label, makeToggle(!!g[p.key], v => { g[p.key] = v; changed(); }));
+  // The kind's own controls: each choice a dropdown with its name inside, on
+  // its own line; numbers and switches as fields, two to a line.
+  const rows = [], pair = [];
+  const flush = () => { if (pair.length) rows.push(fieldRow(pair.splice(0), { cols: 2 })); };
+  kind.params.forEach(p => {
+    if (p.type === 'chips') { flush(); rows.push(prop(p.label, makeSelect(p.options, g[p.key], v => { g[p.key] = v; changed(); }))); return; }
+    pair.push(p.type === 'range'
+      ? numField(p.label, +(+g[p.key]).toFixed(p.step < 1 ? 2 : 0), { min: p.min, max: p.max, step: p.step, unit: p.unit || '', onChange: v => { g[p.key] = v ?? p.min; changed(); } })
+      : toggleField(p.label, !!g[p.key], v => { g[p.key] = v; changed(); }));
+    if (pair.length === 2) flush();
   });
   // …and, last, the layer's opacity with Shuffle (a new arrangement of the
   // same elements, for the kinds scattered at random) beside it.
-  let shuffle = null;
-  if (kind.shuffle) {
-    shuffle = document.createElement('button');
-    shuffle.className = 'ts-add-btn ts-add-btn-compact';
-    shuffle.textContent = 'Shuffle';
-    shuffle.title = 'A new arrangement of the same elements';
-    shuffle.addEventListener('click', () => { g.seed = M.newSeed(); changed(); });
-  }
-  rows.push(fieldRow([
-    numField('Opacity', layer.opacity ?? 100, { min: 0, max: 100, unit: '%', onChange: v => { layer.opacity = v ?? 100; up(); } }),
-    shuffle,
-  ], { trail: !!shuffle }));
+  pair.push(numField('Opacity', layer.opacity ?? 100, { min: 0, max: 100, unit: '%', onChange: v => { layer.opacity = v ?? 100; up(); } }));
+  if (pair.length === 2) flush();
+  if (kind.shuffle) pair.push(fieldBtn('Shuffle', () => { g.seed = M.newSeed(); changed(); }, 'A new arrangement of the same elements'));
+  flush();
   panel.appendChild(section('style', kind.label, ...rows));
 }
 
@@ -4890,7 +4808,7 @@ function canvasFillLayer() {
 function afterCanvasFill(bg) {
   activeLayer = bg; multiSelectedLayerIds.clear();
   activePropsTab = 'style';
-  up(); renderLayersList(); renderProps(); syncMetaRow();
+  up(); renderLayersList(); renderProps(); renderThemeCanvasSizeSelect();
 }
 
 // The gallery behind "Background": the bundled backgrounds, plus none and the
@@ -4929,6 +4847,37 @@ function openBgGallery() {
 document.getElementById('ts-add-bg-btn')?.addEventListener('click', () => { if (activeLook) openBgGallery(); });
 document.getElementById('ts-play-anim-btn')?.addEventListener('click', () => { if (activeLook) tsPlayAnimations(); });
 
+// How the verse text reveals as it goes up (KairoWordSplit), separate from the
+// transition between slides — the theme's setting, shown with the type of the
+// layer it moves (one showing the verse or lyrics). Its speed, and the colour
+// and intensity only the reveals that use them get.
+const TEXT_REVEALS = [
+  { label: 'None', value: 'none' },
+  { label: 'Word', value: 'word-in', title: 'Bold per-word reveal' },
+  { label: 'Activate', value: 'activate', title: 'Each word flashes from dim to fully lit' },
+  { label: 'Karaoke', value: 'karaoke', title: 'Sing-along chase: each word snaps lit in turn' },
+  { label: 'Typewriter', value: 'typewriter', title: 'Types out one character at a time' },
+  { label: 'Impact', value: 'impact', title: 'Captions where keywords pop bigger, bolder, highlighted' },
+  { label: 'Bold Caption', value: 'bold-caption', title: 'Stacked short lines; an occasional word pops much bigger' },
+  { label: 'Bounce', value: 'bounce', title: 'Springy pop-on, higher-energy than Word' },
+  { label: 'Highlight Box', value: 'highlight-box', title: 'A highlight-coloured box slides under each word in turn' },
+  { label: 'Shimmer', value: 'shimmer', title: 'A soft sheen sweeps across the line once' },
+];
+function revealRows() {
+  const anim = activeLook.textAnimation || 'none';
+  const set = (key, v) => { activeLook[key] = v; scheduleThemeAutosave(); renderPreview(); };
+  const rows = [prop('Reveal', makeSelect(TEXT_REVEALS, anim, v => {
+    activeLook.textAnimation = v === 'none' ? null : v;
+    scheduleThemeAutosave(); renderPreview(); renderProps();
+  }))];
+  if (anim === 'none') return rows;
+  const kids = [numField('Speed', activeLook.textAnimationSpeed || 1, { min: 0.3, max: 2.5, step: 0.1, unit: '×', onChange: v => set('textAnimationSpeed', v ?? 1) })];
+  if (['impact', 'karaoke', 'highlight-box'].includes(anim)) kids.push(swatchField('Highlight', activeLook.textHighlightColor || '#ffd23f', v => set('textHighlightColor', v)));
+  if (['impact', 'bold-caption'].includes(anim)) kids.push(numField('Intensity', activeLook.textAnimationIntensity ?? 1, { min: 0.5, max: 2, step: 0.1, unit: '×', onChange: v => set('textAnimationIntensity', v ?? 1) }));
+  rows.push(fieldRow(kids, { cols: Math.max(2, kids.length) }));
+  return rows;
+}
+
 // Text layer properties — laid out as a design tool's text inspector: what the
 // layer shows (Layout tab), then the type — family; weight and size; line and
 // letter spacing; alignment, italic and case — and its colour (Style), its
@@ -4946,7 +4895,7 @@ function renderTextProps(panel, layer) {
   const customRow = prop('Text', customInp);
   customRow.style.display = layer.binding === 'custom' ? '' : 'none';
 
-  panel.appendChild(section('layout', 'Layer',
+  panel.appendChild(section('layout', 'Layer', ...[
     prop('Name', nameInp),
     prop('Shows', makeSelect([
       { label: 'The verse or lyrics', value: 'verse' },
@@ -4961,9 +4910,17 @@ function renderTextProps(panel, layer) {
       { label: 'Countdown hours', value: 'timer-h' },
       { label: 'Countdown minutes', value: 'timer-m' },
       { label: 'Countdown seconds', value: 'timer-s' },
+      { label: 'The verse, translated', value: 'verse_translated' },
       { label: 'Text you type', value: 'custom' },
     ], layer.binding, v => { layer.binding = v; up(); renderProps(); })),
-    customRow));
+    customRow,
+    // The language a translated verse shows in — the theme's, set on the
+    // layer that shows it (a playlist item or the Bible tab can still pick
+    // another). A whole-theme setting, so not in a slide's own editor.
+    tsMode !== 'item' && layer.binding === 'verse_translated' && prop('Language', makeSelect([
+      { label: 'None', value: '' }, { label: 'French', value: 'fr' }, { label: 'Spanish', value: 'es' }, { label: 'Portuguese', value: 'pt' },
+    ], activeLook.translateTo || '', v => { activeLook.translateTo = v || null; renderPreview(); scheduleThemeAutosave(); }))
+  ].filter(Boolean)));
 
   renderLayoutProps(panel, layer);
 
@@ -4974,14 +4931,10 @@ function renderTextProps(panel, layer) {
     { label: 'Aa  As typed', value: 'none' }, { label: 'AA  Uppercase', value: 'uppercase' }, { label: 'aa  Lowercase', value: 'lowercase' },
   ], layer.font.transform || 'none', v => { layer.font.transform = v; up(); });
   caseSel.title = 'Letter case';
-  const alignRow = fieldRow([
-    makeAlignBtns(layer.align, v => { layer.align = v; up(); }),
-    iconToggle('I', layer.font.italic, 'Italic', v => { layer.font.italic = v; up(); }, { italic: true }),
-    caseSel,
-  ]);
-  alignRow.style.gridTemplateColumns = 'auto auto minmax(0, 1fr)';
+  const italic = iconToggle('I', layer.font.italic, 'Italic', v => { layer.font.italic = v; up(); }, { italic: true });
+  italic.classList.add('ts-row-icon');
   panel.appendChild(section('style', 'Text',
-    makeFontSelect(layer.font.family, v => { layer.font.family = v; up(); }),
+    fieldRow([makeFontSelect(layer.font.family, v => { layer.font.family = v; up(); })]),
     fieldRow([
       makeWeightSelect(layer.font.weight, v => { layer.font.weight = v; up(); }),
       numField('Size', layer.font.size, { min: 8, max: 300, unit: 'px', onChange: v => { layer.font.size = v ?? layer.font.size; up(); } }),
@@ -4990,7 +4943,9 @@ function renderTextProps(panel, layer) {
       numField('Line', layer.font.lineHeight, { min: 0.5, max: 4, step: 0.05, title: 'Line spacing', onChange: v => { layer.font.lineHeight = parseFloat((v ?? 1.2).toFixed(2)); up(); } }),
       numField('Letter', layer.font.letterSpacing, { min: -5, max: 30, step: 0.5, unit: 'px', title: 'Letter spacing', onChange: v => { layer.font.letterSpacing = parseFloat((v ?? 0).toFixed(1)); up(); } }),
     ]),
-    alignRow));
+    fieldRow([makeAlignBtns(layer.align, v => { layer.align = v; up(); }), caseSel, italic]),
+    // How the verse reveals — the theme's, so not in a slide's own editor.
+    ...(tsMode !== 'item' && layer.binding === 'verse' ? revealRows() : [])));
 
   // Colour: the text's, with its opacity; and — for text typed in, not a
   // verse or the countdown — highlighted words: words wrapped in
@@ -4998,18 +4953,13 @@ function renderTextProps(panel, layer) {
   // ("*FIRST TIME* / WITH US?") in one layer.
   const colorKids = [colorOpacityRow(layer.color, v => { layer.color = v; up(); }, layer.opacity, v => { layer.opacity = v; up(); })];
   if (layer.binding === 'custom') {
-    const hl = document.createElement('div');
-    hl.className = 'ts-prop-row';
-    hl.title = 'Colour chosen words differently — put *asterisks* around them';
-    const hlLabel = document.createElement('span');
-    hlLabel.className = 'ts-prop-label'; hlLabel.textContent = 'Highlight';
-    hl.appendChild(hlLabel);
-    hl.appendChild(makeToggle(!!layer.accentColor, v => {
-      if (v) layer.accentColor = layer.accentColor || '#e3cf6c'; else delete layer.accentColor;
-      up(); renderProps();
-    }));
-    if (layer.accentColor) hl.appendChild(makeColor(layer.accentColor, v => { layer.accentColor = v; up(); }));
-    colorKids.push(hl);
+    colorKids.push(fieldRow([
+      toggleField('Highlight', !!layer.accentColor, v => {
+        if (v) layer.accentColor = layer.accentColor || '#e3cf6c'; else delete layer.accentColor;
+        up(); renderProps();
+      }, 'Colour chosen words differently — put *asterisks* around them'),
+      layer.accentColor && colorField(layer.accentColor, v => { layer.accentColor = v; up(); }, 'The highlight colour'),
+    ], { cols: 2 }));
     if (layer.accentColor) {
       const hint = document.createElement('div');
       hint.className = 'ts-motion-blurb';
@@ -5048,9 +4998,9 @@ function renderTextProps(panel, layer) {
   // Outline: its colour and width.
   panel.appendChild(effectSection('Outline', layer.outline.enabled, v => { layer.outline.enabled = v; }, [
     fieldRow([
-      makeColor(layer.outline.color, v => { layer.outline.color = v; up(); }),
+      colorField(layer.outline.color, v => { layer.outline.color = v; up(); }),
       numField('Width', layer.outline.width, { min: 1, max: 10, unit: 'px', onChange: v => { layer.outline.width = v ?? 2; up(); } }),
-    ], { lead: true }),
+    ]),
   ]));
 
   // Scroll — continuous horizontal marquee (news-ticker / large-scroll
@@ -5059,7 +5009,7 @@ function renderTextProps(panel, layer) {
   // just as well. Its speed is the seconds one full loop takes.
   if (!layer.scroll) layer.scroll = { enabled: false, speed: 15 };
   panel.appendChild(effectSection('Scroll', layer.scroll.enabled, v => { layer.scroll.enabled = v; }, [
-    fieldRow([numField('One loop', layer.scroll.speed, { min: 3, max: 60, unit: 's', title: 'Seconds for one full loop — lower is faster', onChange: v => { layer.scroll.speed = v ?? 15; up(); } })]),
+    fieldRow([numField('One loop', layer.scroll.speed, { min: 3, max: 60, unit: 's', title: 'Seconds for one full loop — lower is faster', onChange: v => { layer.scroll.speed = v ?? 15; up(); } })], { cols: 2 }),
   ]));
 
   // Entrance — the one-time fade + rise older themes used before build-ins
@@ -5095,7 +5045,7 @@ function openThemeStudio() {
     activeLook = looks[0];
     activeLayer = null; multiSelectedLayerIds.clear();
   }
-  activePropsTab = 'item';
+  activePropsTab = 'layout';
   document.querySelector('.main-layout')?.classList.add('hidden-el');
   // Only one full-window view at a time.
   document.getElementById('service-view')?.classList.add('hidden');
@@ -5110,7 +5060,7 @@ function openThemeStudio() {
   collapsedThemeGroups = new Set(looks.filter(l => l.groupId).map(l => l.groupId));
   renderLooksList();
   renderLayersList();
-  syncMetaRow();
+  renderThemeCanvasSizeSelect();
   renderProps();
   // Render after layout settles so the stage has real dimensions — the preview
   // scale and verse auto-fit both measure the stage.
@@ -5126,25 +5076,17 @@ function closeThemeStudio() {
 
 // Item mode reuses this same modal shell (left/center/right three-pane
 // layout) but has no use for whole-theme concerns: creating/importing/
-// exporting/renaming/deleting themes, or the layout/transition/canvas/
-// translate-to row. Hiding these wholesale (plain classList toggles, no
-// per-control changes) is simpler and safer than threading tsMode checks
-// into each of those unrelated render paths. Adding new layers IS supported
-// in item mode (per-slide custom text/shape/image layers, stored on the
-// item) — Text, Shape, Image and Library all stay visible; only the
-// whole-theme meta row (layout/transition/canvas/translate-to) is hidden.
+// exporting/renaming/deleting themes, and the theme's own settings (its
+// layout, reveal and language — renderProps leaves those out in item mode).
+// Hiding these wholesale (plain classList toggles, no per-control changes) is
+// simpler and safer than threading tsMode checks into each of those unrelated
+// render paths. Adding new layers IS supported in item mode (per-slide custom
+// text/shape/image layers, stored on the item) — Text, Shape, Image and
+// Library all stay visible.
 function toggleItemModeChrome(isItem) {
   document.querySelector('#ts-pane-themes .ts-col-header')?.classList.toggle('hidden', isItem);
   document.getElementById('ts-item-mode-header')?.classList.toggle('hidden', !isItem);
   document.getElementById('ts-item-theme-header')?.classList.toggle('hidden', !isItem);
-  // .ts-meta-row doesn't exist anywhere in the DOM (a stale selector from
-  // before these became individual .ts-props-section blocks — this was a
-  // silent no-op, so Layout/Transition/Text Animation/Canvas/Translate-to
-  // never actually hid in item mode at all). .ts-theme-meta is the real,
-  // current marker shared by all of them (Transition now lives next to the
-  // canvas instead of in this column, but it's still theme-level and still
-  // tagged the same way).
-  document.querySelectorAll('.ts-theme-meta').forEach(el => el.classList.toggle('hidden', isItem));
   // Canvas size is a whole-theme concern too — floats over the preview
   // instead of living among the others, so it needs its own toggle here.
   document.querySelector('.ts-canvas-size-group')?.classList.toggle('hidden', isItem);
@@ -5152,7 +5094,7 @@ function toggleItemModeChrome(isItem) {
   if (hint) hint.style.visibility = isItem ? 'hidden' : '';
   if (isItem) updateItemThemeLabel();
   renderItemTimerControls();   // hides itself outside a countdown's editor
-  activePropsTab = 'item';
+  activePropsTab = isItem ? 'item' : 'layout';
   renderProps();
 }
 document.getElementById('ts-item-back-btn')?.addEventListener('click', () => closeItemStyleEditor());
@@ -5231,22 +5173,16 @@ function renderItemTimerControls() {
 
   let valueRow;
   if (mode === 'duration') {
-    const minutes = document.createElement('input');
-    minutes.type = 'number'; minutes.min = '1'; minutes.max = '600'; minutes.className = 'ts-prop-number';
-    minutes.placeholder = '10';
-    minutes.setAttribute('aria-label', 'Minutes');
-    minutes.value = params.durationSec ? String(Math.round(params.durationSec / 60)) : '';
-    minutes.addEventListener('change', () => {
-      const min = parseFloat(minutes.value);
+    // Saved when the number is done ('change'), not on each keystroke — a
+    // live countdown would otherwise be re-timed to "1" on the way to "15".
+    const length = numField('Length', params.durationSec ? Math.round(params.durationSec / 60) : '', {
+      min: 1, max: 600, unit: 'min', placeholder: '10', title: 'Minutes', onChange: () => {},
+    });
+    length.querySelector('input').addEventListener('change', (e) => {
+      const min = parseFloat(e.target.value);
       if (min > 0) { save({ mode: 'duration', durationSec: Math.round(min * 60) }); renderPreview(); }
     });
-    const unit = document.createElement('span');
-    unit.className = 'ts-prop-unit';
-    unit.textContent = 'minutes';
-    const field = document.createElement('div');
-    field.className = 'ts-inline-field';
-    field.append(minutes, unit);
-    valueRow = prop('Length', field);
+    valueRow = fieldRow([length], { cols: 2 });
   } else {
     // Plain validated text, not <input type="time"> — WebKit's native time
     // control (Tauri's real webview on macOS) can show a complete-looking
@@ -5272,7 +5208,7 @@ function renderItemTimerControls() {
       const resolved = resolveFlexibleTime(timeInp.value);
       if (resolved) { save({ mode: 'endAt', endAtTime: resolved }); timeInp.value = clockTime(resolved); renderPreview(); }
     });
-    valueRow = prop('Ends at', timeInp);
+    valueRow = prop('Ends at', timeInp, { cols: 2 });
   }
 
   // Warning / overtime colours — the countdown recolours through these as it
@@ -5346,15 +5282,14 @@ function renderScenePaceControls(host, item) {
     { label: 'Each slide\'s own time', value: 'fixed' },
   ], pace.mode, v => savePace({ mode: v }, true)))];
   if (pace.mode === 'countdown') {
-    rows.push(prop('Longest slide', makeSlider(pace.maxSec, 5, 120, v => savePace({ maxSec: v }), v => `${Math.round(v)} s`)));
+    rows.push(fieldRow([
+      numField('Longest', pace.maxSec, { min: 5, max: 120, unit: 's', title: 'The longest any slide stays up', onChange: v => { if (v) savePace({ maxSec: v }); } }),
+      toggleField('Finale', pace.finaleSec > 0, v => savePace({ finaleSec: v ? 60 : 0 }, true), 'The last slide holds the final minute'),
+    ]));
   }
-  const transition = makeSelect([
+  rows.push(fieldRow([makeSelect([
     { label: 'Blur between slides', value: 'blur' }, { label: 'Fade between slides', value: 'fade' }, { label: 'Cut between slides', value: 'cut' },
-  ], pace.transition, v => savePace({ transition: v }, true));
-  rows.push(fieldRow([
-    pace.mode === 'countdown' && toggleField('Finale', pace.finaleSec > 0, v => savePace({ finaleSec: v ? 60 : 0 }, true), 'The last slide holds the final minute'),
-    transition,
-  ]));
+  ], pace.transition, v => savePace({ transition: v }, true))]));
   const readout = document.createElement('p');
   readout.className = 'setting-hint';
   readout.style.margin = '0';
@@ -5900,7 +5835,7 @@ function pasteLayers() {
   multiSelectedLayerIds = new Set(pasted.map(l => l.id));
   activeLayer = pasted[pasted.length - 1];
   saveLooks();
-  renderLayersList(); renderPreview(); renderProps(); syncMetaRow();
+  renderLayersList(); renderPreview(); renderProps(); renderThemeCanvasSizeSelect();
   toast(`Pasted ${pasted.length} layer${pasted.length === 1 ? '' : 's'}`, 'success');
 }
 document.addEventListener('keydown', (e) => {
@@ -5993,24 +5928,6 @@ document.querySelector('.ts-preview-wrap')?.addEventListener('mousedown', (e) =>
 // the live stage width.
 window.addEventListener('resize', () => {
   if (!looksModal?.classList.contains('hidden')) renderPreview();
-});
-
-// Layout
-document.getElementById('ts-layout-picker')?.addEventListener('change', e => {
-  if (!activeLook) return;
-  activeLook.layout = e.target.value;
-  syncMetaRow();
-  renderPreview();
-  scheduleThemeAutosave();
-});
-
-// Translate-to language (Multi-Language layout only); None clears it.
-document.getElementById('ts-translate-picker')?.addEventListener('change', e => {
-  if (!activeLook) return;
-  activeLook.translateTo = e.target.value || null;
-  syncMetaRow();
-  renderPreview();
-  scheduleThemeAutosave();
 });
 
 // ── Settings split view ───────────────────────────────────────────────────
@@ -6108,90 +6025,12 @@ initVerticalSplitter({
   minTop: 90, minBottom: 120, storageKey: 'kairo-ts-themes-h',
 });
 
-// Canvas alpha toggle — flips the base background between its fill and
-// transparent, remembering the previous fill so it round-trips.
-document.getElementById('ts-alpha-toggle')?.addEventListener('click', () => {
-  const bg = baseBgLayer();
-  if (!bg) { toast('This theme has no background layer', 'error'); return; }
-  if (bg.fill === 'transparent') {
-    bg.fill = bg.fillBefore || 'solid';
-    delete bg.fillBefore;
-  } else {
-    bg.fillBefore = bg.fill;
-    bg.fill = 'transparent';
-  }
-  syncMetaRow();
-  up();
-  renderProps();
-});
-
-// Chroma Key — one click to a solid, reliably-keyable green, same
-// fillBefore round-trip as Transparent above. A distinct button rather
-// than a third click-state on Transparent since they're genuinely
-// different setups (see both buttons' own tooltips): this one just needs
-// a normal solid-fill background layer, no OS-level window transparency
-// involved at all, which is exactly why it works through a plain OBS/vMix
-// Window Capture where Transparent does not.
-document.getElementById('ts-chroma-toggle')?.addEventListener('click', () => {
-  const bg = baseBgLayer();
-  if (!bg) { toast('This theme has no background layer', 'error'); return; }
-  if (isChromaCanvas()) {
-    bg.fill = bg.fillBefore || 'solid';
-    bg.color = bg.colorBefore || bg.color;
-    delete bg.fillBefore;
-    delete bg.colorBefore;
-  } else {
-    bg.fillBefore = bg.fill;
-    bg.colorBefore = bg.color;
-    bg.fill = 'solid';
-    bg.color = CHROMA_KEY_COLOR;
-  }
-  syncMetaRow();
-  up();
-  renderProps();
-});
-
 // Transition (Fade/Slide/Cut + speed) moved from a per-theme setting here
 // to a display-level one — see the Monitoring panel's own quick picker
 // (service.js) and display.html's outputAnimation. activeLook.animation/
 // animationSpeed are no longer read anywhere; left as harmless unused
 // fields on already-saved themes rather than migrating every stored look
 // just to strip them.
-
-// Text Animation dropdown — a separate setting from the Transition chips
-// above (see KairoWordSplit's file header for why these were split out of
-// one overloaded `animation` field). A plain <select>, not a chip row like
-// Transition/Layout — 10 options wrapped across rows of pill buttons read
-// as a wall of buttons, a dropdown is the normal control once a list gets
-// this long. 'none' clears it back to plain text.
-document.getElementById('ts-text-anim-select')?.addEventListener('change', e => {
-  if (!activeLook) return;
-  activeLook.textAnimation = e.target.value === 'none' ? null : e.target.value;
-  syncMetaRow();
-  scheduleThemeAutosave();
-  renderPreview();
-});
-
-document.getElementById('ts-text-anim-speed')?.addEventListener('input', e => {
-  if (!activeLook) return;
-  activeLook.textAnimationSpeed = parseFloat(e.target.value);
-  scheduleThemeAutosave();
-  renderPreview();
-});
-
-document.getElementById('ts-text-anim-color')?.addEventListener('input', e => {
-  if (!activeLook) return;
-  activeLook.textHighlightColor = e.target.value;
-  scheduleThemeAutosave();
-  renderPreview();
-});
-
-document.getElementById('ts-text-anim-intensity')?.addEventListener('input', e => {
-  if (!activeLook) return;
-  activeLook.textAnimationIntensity = parseFloat(e.target.value);
-  scheduleThemeAutosave();
-  renderPreview();
-});
 
 // Add text layer
 tsAddLayerBtn?.addEventListener('click', () => {
@@ -6446,7 +6285,7 @@ async function openMediaLibraryPicker() {
 
   const grid = document.createElement('div');
   grid.className = 'ts-media-picker-grid';
-  grid.textContent = 'Loading…';
+  grid.innerHTML = '<div class="svc-empty">Loading…</div>';
   panel.appendChild(grid);
   overlay.appendChild(panel);
   document.body.appendChild(overlay);
@@ -6483,15 +6322,13 @@ document.getElementById('ts-add-media-lib-btn')?.addEventListener('click', () =>
 });
 
 const tsImageFile = document.getElementById('ts-image-file');
-// Image ▾ — a picture from the computer or the Media Library, or a slideshow
-// of pictures (an image-cycle layer).
+// Image ▾ — a picture from the computer or the Media Library. (A slideshow is
+// slides — a countdown's "+ Add Slide" — each fully editable.)
 document.getElementById('ts-add-image-btn')?.addEventListener('click', (e) => {
   const r = e.currentTarget.getBoundingClientRect();
   window.KairoService.openContextMenu(r.left, r.bottom + 4, [[
     { label: 'From your computer…', onClick: () => tsImageFile?.click() },
     { label: 'From your Media Library…', onClick: () => document.getElementById('ts-add-media-lib-btn')?.click() },
-  ], [
-    { label: 'Slideshow of pictures', onClick: () => document.getElementById('ts-add-cycle-btn')?.click() },
   ]]);
 });
 tsImageFile?.addEventListener('change', async () => {
@@ -6523,24 +6360,6 @@ tsImageFile?.addEventListener('change', async () => {
   } catch {
     toast(isVideo ? 'Could not load that video' : 'Could not load that image', 'error');
   }
-});
-
-// Starts empty — the operator adds frames afterward from the Style tab's
-// "Images" list (renderImageCycleProps) rather than picking a first file
-// upfront, since a cycle only makes sense with 2+ images anyway. Defaults
-// to the left 75% of the canvas (the requested pre-service split), sized
-// like any other layer via Layout after — not locked to that split.
-document.getElementById('ts-add-cycle-btn')?.addEventListener('click', () => {
-  if (!activeLook) return;
-  const layer = {
-    id: 'cycle-' + Date.now(), type: 'image-cycle', name: 'Image Cycle',
-    visible: true, sources: [], fit: 'cover', opacity: 100, radius: 0,
-    pos: { x: 0, y: 0, w: Math.round(TS_DESIGN_W * 0.75), h: TS_DESIGN_H },
-  };
-  activeLook.layers.push(layer);
-  activeLayer = layer;
-  up();
-  renderProps();
 });
 
 // ── Theme import / export ─────────────────────────────────────────────────
@@ -6584,7 +6403,7 @@ function finishLookImport(look) {
   activeLayer = null; multiSelectedLayerIds.clear();
   resetThemeHistory(); // a freshly-imported theme has no undo history of its own to inherit
   saveLooks();
-  renderLooksList(); renderLayersList(); syncMetaRow(); renderPreview(); renderProps();
+  renderLooksList(); renderLayersList(); renderThemeCanvasSizeSelect(); renderPreview(); renderProps();
 }
 
 // In-app replacement for window.confirm() — Tauri's webview doesn't
@@ -6743,7 +6562,7 @@ newLookBtn?.addEventListener('click', () => {
   saveLooks();
   renderLooksList();
   renderLayersList();
-  syncMetaRow();
+  renderThemeCanvasSizeSelect();
   renderPreview();
   renderProps();
   document.querySelector('.ts-theme-item.active .ts-theme-name')?.dispatchEvent(new Event('dblclick', { bubbles: true }));

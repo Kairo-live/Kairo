@@ -1010,7 +1010,6 @@
 
                     <!-- Add content bar -->
                     <div class="ts-add-bar">
-                        <span class="ts-add-label">Add content</span>
                         <button id="ts-add-layer-btn" class="ts-add-btn" title="Add a text layer">
                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 7 4 4 20 4 20 7"/><line x1="9" y1="20" x2="15" y2="20"/><line x1="12" y1="4" x2="12" y2="20"/></svg>
                             <span>Text</span>
@@ -1019,11 +1018,9 @@
                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="6" width="16" height="12" rx="2"/></svg>
                             <span>Shape</span>
                         </button>
-                        <!-- Image ▾: from the computer, from the Media Library, or
-                             a slideshow of pictures (an image-cycle layer, which
-                             changes on its own through a countdown) — the Library
-                             and Slideshow buttons below stay only as targets. -->
-                        <button id="ts-add-image-btn" class="ts-add-btn" title="Add a picture — from your computer, your Media Library, or a slideshow of pictures">
+                        <!-- Image ▾: from the computer or from the Media Library —
+                             the Library button below stays only as its target. -->
+                        <button id="ts-add-image-btn" class="ts-add-btn" title="Add a picture — from your computer or your Media Library">
                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="8.5" cy="9.5" r="1.5"/><polyline points="21 15 16 10 5 20"/></svg>
                             <span>Image</span>
                             <svg class="ts-add-caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
@@ -1031,10 +1028,6 @@
                         <button id="ts-add-media-lib-btn" class="ts-add-btn hidden" title="Add an image from your Media Library">
                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>
                             <span>Library</span>
-                        </button>
-                        <button id="ts-add-cycle-btn" class="ts-add-btn hidden" title="Add a slideshow of pictures that changes on its own">
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="6" width="14" height="12" rx="2"/><rect x="8" y="2" width="14" height="12" rx="2" opacity="0.5"/></svg>
-                            <span>Cycle</span>
                         </button>
                         <button id="ts-add-bg-btn" class="ts-add-btn" title="Set the background — pictures that ship with Kairo, your own image, or none">
                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 16c3-3 6-3 9 0s6 2 9-1"/><circle cx="16.5" cy="9" r="1.5"/></svg>
@@ -1076,15 +1069,15 @@
 
                 <!-- Col 3: Properties panel -->
                 <div class="ts-props-col" id="ts-props-col">
-                    <!-- The panel's tabs, at the top: the first is the whole
-                         thing being edited (Timer for a countdown, Look for
-                         any other item, Theme in Theme Studio — its sections
-                         are #ts-props-item-pane below); Layout/Style/Effects/
-                         Animate are the selected layer's (see PROPS_TABS/
-                         renderProps in app_theme_studio.js). Effects hides
-                         itself for layer types with nothing to put there. -->
+                    <!-- The panel's tabs, at the top, with nothing above them:
+                         editing an item or a countdown, the first is the whole
+                         thing (Look / Timer — #ts-props-item-pane below);
+                         Layout/Style/Effects/Animate are the selected layer's,
+                         or with the Canvas or nothing selected the slide's
+                         (see renderProps in app_theme_studio.js). A tab with
+                         nothing to show for the selection hides itself. -->
                     <div class="ts-props-tabs" id="ts-props-tabs">
-                        <button class="ts-tab-btn" data-tab="item" id="ts-props-tab-item">Theme</button>
+                        <button class="ts-tab-btn hidden" data-tab="item" id="ts-props-tab-item">Look</button>
                         <button class="ts-tab-btn active" data-tab="layout" id="ts-props-tab-layout">Layout</button>
                         <button class="ts-tab-btn" data-tab="style" id="ts-props-tab-style">Style</button>
                         <button class="ts-tab-btn" data-tab="effects" id="ts-props-tab-effects">Effects</button>
@@ -1096,11 +1089,13 @@
                          normal Theme Studio (theme picking lives in the
                          Themes list instead). -->
                     <div class="ts-item-mode-header ts-props-section hidden" id="ts-item-theme-header">
-                        <div class="ts-prop-row">
-                            <span class="ts-prop-label">Theme</span>
-                            <button id="ts-item-theme-picker-btn" class="ts-select-btn" title="Choose the theme this item uses">
-                                <span id="ts-item-theme-picker-label">Theme</span>
-                            </button>
+                        <div class="ts-field-row" style="--cols: 1">
+                            <label class="ts-field ts-labeled-field">
+                                <span class="ts-field-label">Theme</span>
+                                <button id="ts-item-theme-picker-btn" class="ts-select-btn" title="Choose the theme this item uses">
+                                    <span id="ts-item-theme-picker-label">Theme</span>
+                                </button>
+                            </label>
                         </div>
                     </div>
 
@@ -1112,66 +1107,6 @@
                          include what makes it a timer, not just its font. -->
                     <div class="ts-item-mode-header hidden" id="ts-item-timer-header"></div>
 
-                    <!-- The theme's own settings (Theme Studio's Theme tab) — one
-                         section, one row each, the way the layer tabs lay out
-                         theirs. -->
-                    <div class="ts-props-section ts-theme-meta" id="ts-text-anim-section">
-                        <div class="ts-prop-row">
-                            <span class="ts-prop-label">Layout</span>
-                            <select class="ts-select" id="ts-layout-picker" title="Where the text sits on the screen">
-                                <option value="fullscreen">Full screen</option>
-                                <option value="lower-third">Lower third</option>
-                                <option value="split-left">Split, text left</option>
-                                <option value="split-right">Split, text right</option>
-                            </select>
-                        </div>
-                        <div class="ts-prop-row" title="How the verse text itself reveals, separate from the transition between slides">
-                            <span class="ts-prop-label">Text reveal</span>
-                            <select id="ts-text-anim-select" class="ts-select">
-                                <option value="none">None</option>
-                                <option value="word-in" title="Bold per-word reveal">Word</option>
-                                <option value="activate" title="Each word flashes from dim to fully lit">Activate</option>
-                                <option value="karaoke" title="Sing-along chase: each word snaps lit in turn">Karaoke</option>
-                                <option value="typewriter" title="Types out one character at a time">Typewriter</option>
-                                <option value="impact" title="CapCut-style captions: keyword words pop bigger, bolder, and highlighted">Impact</option>
-                                <option value="bold-caption" title="Stacked short lines, an occasional word pops much bigger with tight kerning">Bold Caption</option>
-                                <option value="bounce" title="Springy pop-on, higher-energy than Word">Bounce</option>
-                                <option value="highlight-box" title="A highlight-colored box slides under each word in turn">Highlight Box</option>
-                                <option value="shimmer" title="A soft gradient sheen sweeps across the line once">Shimmer</option>
-                            </select>
-                        </div>
-                        <div class="ts-prop-row hidden">
-                            <input type="range" id="ts-text-anim-speed" class="ts-anim-speed-slider" min="0.3" max="2.5" step="0.1" value="1" title="Text animation speed" style="width:100%;">
-                        </div>
-                        <div class="ts-prop-row hidden" id="ts-text-anim-color-row">
-                            <span class="ts-prop-label">Highlight</span>
-                            <input type="color" id="ts-text-anim-color" class="ts-prop-color" value="#ffd23f">
-                        </div>
-                        <div class="ts-prop-row hidden" id="ts-text-anim-intensity-row">
-                            <span class="ts-prop-label">Intensity</span>
-                            <input type="range" id="ts-text-anim-intensity" class="ts-prop-slider" min="0.5" max="2" step="0.1" value="1" style="flex:1;">
-                        </div>
-                        <div class="ts-prop-row">
-                            <span class="ts-prop-label">Canvas</span>
-                            <div class="ts-chip-group">
-                                <button id="ts-alpha-toggle" class="ts-chip" title="True alpha transparency. Works reliably through Syphon/NDI output (real per-pixel alpha). Most OBS/vMix &quot;Window Capture&quot; setups do NOT preserve real transparency from any app's window — if your keyed background isn't showing up there, use Chroma Key instead.">Transparent</button>
-                                <button id="ts-chroma-toggle" class="ts-chip" title="Solid chroma-green background (#00FF00) — key it out with a Chroma Key filter in OBS/vMix/whatever you're capturing with. Works with plain Window Capture, unlike Transparent — the standard, reliable choice unless you're on Syphon/NDI.">Chroma key</button>
-                            </div>
-                        </div>
-                        <!-- Only shown for the Multi-Language layout — picks which
-                             language fills the right panel's preview here, and
-                             doubles as this theme's default when nothing else (a
-                             playlist item, the Bible tab) has already chosen one. -->
-                        <div class="ts-prop-row hidden" id="ts-translate-group">
-                            <span class="ts-prop-label">Translate to</span>
-                            <select class="ts-select" id="ts-translate-picker">
-                                <option value="">None</option>
-                                <option value="fr">French</option>
-                                <option value="es">Spanish</option>
-                                <option value="pt">Portuguese</option>
-                            </select>
-                        </div>
-                    </div>
 
                     </div>
                     <div class="ts-props-empty" id="ts-props-empty">

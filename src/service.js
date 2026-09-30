@@ -4178,7 +4178,7 @@
     panel.appendChild(header);
     const grid = document.createElement('div');
     grid.className = 'ts-media-picker-grid';
-    grid.textContent = 'Loading…';
+    grid.innerHTML = '<div class="svc-empty">Loading…</div>';
     panel.appendChild(grid);
     overlay.appendChild(panel);
     document.body.appendChild(overlay);

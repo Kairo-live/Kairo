@@ -4836,6 +4836,10 @@ mark.help-hit.is-current { background: rgba(255,255,255,0.38); }
   grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
   gap: 10px;
 }
+/* A message in a picture grid ("No images… yet", "Loading…") spans the
+   whole grid, centred — not squeezed into its first cell. */
+.ts-media-picker-grid > .svc-empty,
+.ts-cycle-grid > .svc-empty { grid-column: 1 / -1; }
 
 .rs-section {
   display: flex;
@@ -5474,7 +5478,7 @@ mark.help-hit.is-current { background: rgba(255,255,255,0.38); }
 /* Item-mode (Full Edit) header: replaces the themes header wholesale. */
 .ts-item-mode-header { padding: 12px 12px 8px; }
 .ts-item-mode-header .ts-add-btn { width: 100%; justify-content: center; }
-.ts-item-mode-header.ts-props-section { padding: 12px 14px; }
+.ts-item-mode-header.ts-props-section { padding: 10px 10px 12px; }
 /* A countdown's settings are sections of their own, with their own padding. */
 #ts-item-timer-header { padding: 0; }
 .ts-item-mode-header svg { width: 14px; height: 14px; }
@@ -5964,18 +5968,20 @@ mark.help-hit.is-current { background: rgba(255,255,255,0.38); }
 }
 
 .ts-size-select {
-  height: 24px;
+  /* The same height and corners as the add buttons beside it, so the whole
+     bar reads as one row of controls. */
+  height: 31px;
   background-color: var(--bg-input);
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%236e6e6e' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
   background-repeat: no-repeat;
   background-position: right 6px center;
   border: 1px solid var(--border-md);
-  border-radius: 5px;
+  border-radius: var(--radius);
   color: var(--text);
   font-family: var(--font);
-  font-size: 10px;
+  font-size: var(--fs-sm);
   font-weight: 600;
-  padding: 0 20px 0 8px;
+  padding: 0 24px 0 12px;
   outline: none;
   cursor: pointer;
 }
@@ -6164,14 +6170,21 @@ mark.help-hit.is-current { background: rgba(255,255,255,0.38); }
   line-height: 1.5;
 }
 
-/* Props panel sections */
+/* Props panel sections — each its own tinted, rounded card with space around
+   it, so the eye breaks the panel into its groups (Layer, Position, Text…)
+   at a glance, the way a grouped inspector does. */
 .ts-props-section {
-  padding: 12px 14px;
-  border-bottom: 1px solid var(--border);
+  margin: 8px 10px 0;
+  padding: 10px 10px 12px;
+  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  border-radius: 8px;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 8px;
 }
+#ts-props-panel { padding-bottom: 12px; }
+.ts-props-col { --ts-field-bg: #2c2c2e; }
 
 /* Tab filtering for the props panel (renderProps in app.js) — a class, not
    a direct style.display write, so it composes with a section's own
@@ -6262,33 +6275,40 @@ mark.help-hit.is-current { background: rgba(255,255,255,0.38); }
   color: var(--text-3);
 }
 .ts-inline-field { display: flex; align-items: center; gap: 6px; }
-/* Design-tool fields (numField/fieldRow in app_theme_studio.js): a number box
-   with its name and unit inside, several to a line. */
+/* Design-tool fields (numField/fieldRow in app_theme_studio.js): every row of
+   the inspector sits on one grid — its fields share the width equally (--cols
+   of them) and a narrow column on the right holds the row's icon button (the
+   W/H link, Play, Italic). So every field starts and ends where the ones
+   above and below it do, whatever the row holds. */
 .ts-field-row {
   display: grid;
-  grid-auto-flow: column;
-  grid-auto-columns: minmax(0, 1fr);
-  gap: 8px;
+  grid-template-columns: repeat(var(--cols, 2), minmax(0, 1fr)) 22px;
+  column-gap: 6px;
   align-items: center;
 }
-.ts-field-row.ts-lead-auto { grid-template-columns: auto; }
-.ts-field-row.ts-trail-auto { grid-auto-columns: auto; grid-template-columns: minmax(0, 1fr); }
+.ts-field-row > .ts-row-icon { grid-column: -2 / -1; }
 .ts-field {
+  /* A quiet filled box, as in Figma or Photoshop: no border until the
+     pointer is over it (or it has focus), so a panel of fields reads as
+     values rather than a grid of boxes. */
   display: flex;
   align-items: center;
-  gap: 4px;
-  height: 26px;
+  gap: 6px;
+  height: 24px;
   padding: 0 7px;
   min-width: 0;
-  background: #2c2c2e;
-  border: 1px solid var(--border-md);
-  border-radius: 4px;
+  background: var(--ts-field-bg);
+  border: 1px solid transparent;
+  border-radius: 5px;
   cursor: text;
   transition: border-color var(--trans);
 }
+.ts-field:hover { border-color: var(--border-md); }
 .ts-field:focus-within { border-color: var(--blue); }
-.ts-field-label { font-size: 10px; color: var(--text-3); flex-shrink: 0; white-space: nowrap; }
-.ts-field-unit { font-size: 10px; color: var(--text-3); flex-shrink: 0; }
+.ts-field-label { font-size: 11px; color: var(--text-3); flex-shrink: 0; white-space: nowrap; }
+.ts-field-unit { font-size: 11px; color: var(--text-3); flex-shrink: 0; }
+/* The value right after its name ("X 210"), in the interface's own font with
+   even-width figures — not pushed to the far edge in a code font. */
 .ts-field input {
   flex: 1;
   min-width: 0;
@@ -6299,13 +6319,97 @@ mark.help-hit.is-current { background: rgba(255,255,255,0.38); }
   outline: none;
   color: var(--text);
   font-size: 11px;
-  font-family: var(--mono);
-  text-align: right;
+  font-family: inherit;
+  font-variant-numeric: tabular-nums;
+  text-align: left;
   -moz-appearance: textfield;
 }
 .ts-field input::-webkit-inner-spin-button { -webkit-appearance: none; }
 .ts-field-row > .ts-select, .ts-field-row > .ts-select-btn { width: 100%; }
-.ts-field-row > .ts-prop-color { width: 34px; }
+/* A control with its name inside the box (prop()): "Shows  The verse ⌄",
+   "Name  Verse" — the dropdown or text fills the rest of the field. */
+.ts-labeled-field { cursor: default; }
+.ts-labeled-field > .ts-select,
+.ts-labeled-field > .ts-select-btn,
+.ts-labeled-field > input[type="text"] {
+  flex: 1;
+  min-width: 0;
+  height: 24px;
+  padding: 0 16px 0 4px;
+  background-color: transparent;
+  background-position: right 0 center;
+  border: 0;
+  border-radius: 0;
+  outline: none;
+  color: var(--text);
+  font-size: 11px;
+  font-family: inherit;
+}
+.ts-labeled-field > input[type="text"] { padding-right: 0; text-align: left; }
+.ts-labeled-field > .ts-select-btn:hover { border: 0; }
+/* A colour as design tools show one: its swatch and hex code (colorField). */
+.ts-color-field { gap: 6px; cursor: pointer; }
+.ts-color-field .ts-hex { font-family: var(--mono); font-size: 11px; color: var(--text); letter-spacing: 0.3px; }
+/* A button the size of a field, filling its column (Reset to layout, Replace…). */
+.ts-field-btn {
+  height: 24px;
+  width: 100%;
+  min-width: 0;
+  padding: 0 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  background: #2c2c2e;
+  border: 1px solid var(--border-md);
+  border-radius: 4px;
+  color: var(--text-2);
+  font-size: 11px;
+  font-weight: 600;
+  font-family: inherit;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+  transition: color var(--trans), border-color var(--trans);
+}
+.ts-field-btn:hover { color: var(--text); border-color: var(--selected-border); }
+/* Dropdowns and buttons in the inspector's rows: the same quiet box. */
+.ts-field-row > .ts-select,
+.ts-field-row > .ts-field-btn,
+.ts-field-row > .ts-font-picker .ts-font-picker-btn {
+  height: 24px;
+  background-color: var(--ts-field-bg);
+  border-color: transparent;
+  border-radius: 5px;
+}
+.ts-field-row > .ts-select:hover,
+.ts-field-row > .ts-field-btn:hover,
+.ts-field-row > .ts-font-picker .ts-font-picker-btn:hover { border-color: var(--border-md); }
+.ts-field-row > .ts-select:focus { border-color: var(--blue); }
+.ts-field-row > .ts-font-picker .ts-font-picker-btn {
+  padding: 0 24px 0 8px;
+  font-size: 11px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%238e8e93' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 7px center;
+}
+/* An icon button in the row's right-hand column (Play, the W/H link, Italic). */
+.ts-field-row > .ts-row-icon { width: 100%; height: 24px; padding: 0; }
+/* A row of icon buttons (alignment) fills its cell, buttons shared equally. */
+.ts-field-row > .ts-align-group {
+  display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); gap: 0;
+  padding: 1px; background: var(--ts-field-bg); border-radius: 5px;
+}
+.ts-field-row > .ts-align-group .ts-align-btn {
+  width: 100%; height: 22px;
+  background: transparent; border: 0; border-radius: 4px;
+  color: var(--text-3);
+}
+.ts-field-row > .ts-align-group .ts-align-btn:hover { background: var(--bg-hover); color: var(--text); }
+.ts-field-row > .ts-align-group .ts-align-btn.active { background: var(--selected-dim); color: var(--selected-text); }
+.ts-field-row > .ts-image-thumb { width: 100%; }
+.ts-field-row > .ts-font-picker { min-width: 0; }
 /* A named colour and a named switch, field-sized (swatchField/toggleField). */
 .ts-swatch-field, .ts-toggle-field { justify-content: space-between; cursor: default; }
 .ts-field input.ts-swatch-mini {
