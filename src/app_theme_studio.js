@@ -113,22 +113,6 @@ const TXT_SHADOW_SOFT = { enabled: true,  color: '#000000', opacity: 70, blur: 1
 const TXT_SHADOW_NONE = { enabled: false, color: '#000000', opacity: 70, blur: 4,  x: 0, y: 1 };
 const NO_OUTLINE      = { enabled: false, color: '#000000', width: 2 };
 
-// Four small placeholder frames (complementary warm/cool gradients, no
-// real photos needed) so the "Timer — Pre-Service Split" preset below —
-// and Full-scale edit's "Load sample images" button for any Image Cycle
-// layer, see renderImageCycleProps — can be seen actually cycling right
-// away, without the operator having to source real images first. Declared
-// up here (not next to renderImageCycleProps, where it's also used) since
-// DEFAULT_LOOKS' own loadLooks() migration runs immediately at script
-// load, not later like everything else that forward-references code
-// further down this file — it needs this to already exist.
-const SAMPLE_CYCLE_IMAGES = [
-  'data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxOTIwIiBoZWlnaHQ9IjEwODAiIHZpZXdCb3g9IjAgMCAxOTIwIDEwODAiPgogIDxkZWZzPgogICAgPGxpbmVhckdyYWRpZW50IGlkPSJnIiB4MT0iMCIgeTE9IjAiIHgyPSIxIiB5Mj0iMSI+CiAgICAgIDxzdG9wIG9mZnNldD0iMCIgc3RvcC1jb2xvcj0iIzEyM2IzMiIvPgogICAgICA8c3RvcCBvZmZzZXQ9IjEiIHN0b3AtY29sb3I9IiMxZjVjNGQiLz4KICAgIDwvbGluZWFyR3JhZGllbnQ+CiAgPC9kZWZzPgogIDxyZWN0IHdpZHRoPSIxOTIwIiBoZWlnaHQ9IjEwODAiIGZpbGw9InVybCgjZykiLz4KICA8Y2lyY2xlIGN4PSIxNjUwIiBjeT0iMTgwIiByPSIyNjAiIGZpbGw9IiNlOGMyN2EiIG9wYWNpdHk9IjAuMDgiLz4KICA8Y2lyY2xlIGN4PSIyMjAiIGN5PSI5MjAiIHI9IjM0MCIgZmlsbD0iI2U4YzI3YSIgb3BhY2l0eT0iMC4wNiIvPgogIDx0ZXh0IHg9Ijk2MCIgeT0iNTAwIiBmb250LWZhbWlseT0iR2VvcmdpYSwgc2VyaWYiIGZvbnQtc2l6ZT0iMTUwIiBmaWxsPSIjZThjMjdhIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXdlaWdodD0iNzAwIj5XRUxDT01FPC90ZXh0PgogIDx0ZXh0IHg9Ijk2MCIgeT0iNjAwIiBmb250LWZhbWlseT0iQXJpYWwsIHNhbnMtc2VyaWYiIGZvbnQtc2l6ZT0iNDIiIGZpbGw9IiNmZmZmZmZjYyIgdGV4dC1hbmNob3I9Im1pZGRsZSIgbGV0dGVyLXNwYWNpbmc9IjIiPldlIGFyZSBnbGFkIHlvdSBhcmUgaGVyZTwvdGV4dD4KICA8cmVjdCB4PSI4NjAiIHk9IjY2MCIgd2lkdGg9IjIwMCIgaGVpZ2h0PSI0IiBmaWxsPSIjZThjMjdhIi8+Cjwvc3ZnPg==',
-  'data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxOTIwIiBoZWlnaHQ9IjEwODAiIHZpZXdCb3g9IjAgMCAxOTIwIDEwODAiPgogIDxkZWZzPgogICAgPGxpbmVhckdyYWRpZW50IGlkPSJnIiB4MT0iMCIgeTE9IjAiIHgyPSIxIiB5Mj0iMSI+CiAgICAgIDxzdG9wIG9mZnNldD0iMCIgc3RvcC1jb2xvcj0iIzVjM2ExZiIvPgogICAgICA8c3RvcCBvZmZzZXQ9IjEiIHN0b3AtY29sb3I9IiM4YTVhMmMiLz4KICAgIDwvbGluZWFyR3JhZGllbnQ+CiAgPC9kZWZzPgogIDxyZWN0IHdpZHRoPSIxOTIwIiBoZWlnaHQ9IjEwODAiIGZpbGw9InVybCgjZykiLz4KICA8Y2lyY2xlIGN4PSIxNjUwIiBjeT0iMTgwIiByPSIyNjAiIGZpbGw9IiNmNmU4Y2YiIG9wYWNpdHk9IjAuMDgiLz4KICA8Y2lyY2xlIGN4PSIyMjAiIGN5PSI5MjAiIHI9IjM0MCIgZmlsbD0iI2Y2ZThjZiIgb3BhY2l0eT0iMC4wNiIvPgogIDx0ZXh0IHg9Ijk2MCIgeT0iNTAwIiBmb250LWZhbWlseT0iR2VvcmdpYSwgc2VyaWYiIGZvbnQtc2l6ZT0iMTUwIiBmaWxsPSIjZjZlOGNmIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXdlaWdodD0iNzAwIj5TVEFSVElORyBTT09OPC90ZXh0PgogIDx0ZXh0IHg9Ijk2MCIgeT0iNjAwIiBmb250LWZhbWlseT0iQXJpYWwsIHNhbnMtc2VyaWYiIGZvbnQtc2l6ZT0iNDIiIGZpbGw9IiNmZmZmZmZjYyIgdGV4dC1hbmNob3I9Im1pZGRsZSIgbGV0dGVyLXNwYWNpbmc9IjIiPlBsZWFzZSBmaW5kIHlvdXIgc2VhdDwvdGV4dD4KICA8cmVjdCB4PSI4NjAiIHk9IjY2MCIgd2lkdGg9IjIwMCIgaGVpZ2h0PSI0IiBmaWxsPSIjZjZlOGNmIi8+Cjwvc3ZnPg==',
-  'data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxOTIwIiBoZWlnaHQ9IjEwODAiIHZpZXdCb3g9IjAgMCAxOTIwIDEwODAiPgogIDxkZWZzPgogICAgPGxpbmVhckdyYWRpZW50IGlkPSJnIiB4MT0iMCIgeTE9IjAiIHgyPSIxIiB5Mj0iMSI+CiAgICAgIDxzdG9wIG9mZnNldD0iMCIgc3RvcC1jb2xvcj0iIzBmMmQzZCIvPgogICAgICA8c3RvcCBvZmZzZXQ9IjEiIHN0b3AtY29sb3I9IiMxYzRmNjMiLz4KICAgIDwvbGluZWFyR3JhZGllbnQ+CiAgPC9kZWZzPgogIDxyZWN0IHdpZHRoPSIxOTIwIiBoZWlnaHQ9IjEwODAiIGZpbGw9InVybCgjZykiLz4KICA8Y2lyY2xlIGN4PSIxNjUwIiBjeT0iMTgwIiByPSIyNjAiIGZpbGw9IiNlOGMyN2EiIG9wYWNpdHk9IjAuMDgiLz4KICA8Y2lyY2xlIGN4PSIyMjAiIGN5PSI5MjAiIHI9IjM0MCIgZmlsbD0iI2U4YzI3YSIgb3BhY2l0eT0iMC4wNiIvPgogIDx0ZXh0IHg9Ijk2MCIgeT0iNTAwIiBmb250LWZhbWlseT0iR2VvcmdpYSwgc2VyaWYiIGZvbnQtc2l6ZT0iMTUwIiBmaWxsPSIjZThjMjdhIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXdlaWdodD0iNzAwIj5QUkUtU0VSVklDRTwvdGV4dD4KICA8dGV4dCB4PSI5NjAiIHk9IjYwMCIgZm9udC1mYW1pbHk9IkFyaWFsLCBzYW5zLXNlcmlmIiBmb250LXNpemU9IjQyIiBmaWxsPSIjZmZmZmZmY2MiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGxldHRlci1zcGFjaW5nPSIyIj5Xb3JzaGlwIGJlZ2lucyBzaG9ydGx5PC90ZXh0PgogIDxyZWN0IHg9Ijg2MCIgeT0iNjYwIiB3aWR0aD0iMjAwIiBoZWlnaHQ9IjQiIGZpbGw9IiNlOGMyN2EiLz4KPC9zdmc+',
-  'data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxOTIwIiBoZWlnaHQ9IjEwODAiIHZpZXdCb3g9IjAgMCAxOTIwIDEwODAiPgogIDxkZWZzPgogICAgPGxpbmVhckdyYWRpZW50IGlkPSJnIiB4MT0iMCIgeTE9IjAiIHgyPSIxIiB5Mj0iMSI+CiAgICAgIDxzdG9wIG9mZnNldD0iMCIgc3RvcC1jb2xvcj0iIzNhMWYyZSIvPgogICAgICA8c3RvcCBvZmZzZXQ9IjEiIHN0b3AtY29sb3I9IiM1YzJmNDciLz4KICAgIDwvbGluZWFyR3JhZGllbnQ+CiAgPC9kZWZzPgogIDxyZWN0IHdpZHRoPSIxOTIwIiBoZWlnaHQ9IjEwODAiIGZpbGw9InVybCgjZykiLz4KICA8Y2lyY2xlIGN4PSIxNjUwIiBjeT0iMTgwIiByPSIyNjAiIGZpbGw9IiNmMGM5YTAiIG9wYWNpdHk9IjAuMDgiLz4KICA8Y2lyY2xlIGN4PSIyMjAiIGN5PSI5MjAiIHI9IjM0MCIgZmlsbD0iI2YwYzlhMCIgb3BhY2l0eT0iMC4wNiIvPgogIDx0ZXh0IHg9Ijk2MCIgeT0iNTAwIiBmb250LWZhbWlseT0iR2VvcmdpYSwgc2VyaWYiIGZvbnQtc2l6ZT0iMTUwIiBmaWxsPSIjZjBjOWEwIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXdlaWdodD0iNzAwIj5BTE1PU1QgVElNRTwvdGV4dD4KICA8dGV4dCB4PSI5NjAiIHk9IjYwMCIgZm9udC1mYW1pbHk9IkFyaWFsLCBzYW5zLXNlcmlmIiBmb250LXNpemU9IjQyIiBmaWxsPSIjZmZmZmZmY2MiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGxldHRlci1zcGFjaW5nPSIyIj5TaWxlbmNlIHlvdXIgcGhvbmVzPC90ZXh0PgogIDxyZWN0IHg9Ijg2MCIgeT0iNjYwIiB3aWR0aD0iMjAwIiBoZWlnaHQ9IjQiIGZpbGw9IiNmMGM5YTAiLz4KPC9zdmc+',
-];
-
 // A built-in theme's canvas filled with one of the bundled backgrounds
 // (src/backgrounds, see backgrounds/backgrounds.js). Its colour is the
 // picture's average — shown while it loads, and kept if the fill is switched
@@ -591,31 +575,6 @@ const DEFAULT_LOOKS = [
     ],
   },
   {
-    // Pre-service: a rotating slideshow (announcements, sponsor slides,
-    // event photos — whatever the operator loads into the Image Cycle
-    // layer via Theme Studio's "Cycle" button) filling most of the screen,
-    // with the countdown held in a fixed panel alongside it rather than
-    // floating over the images — legible no matter what's cycling behind
-    // it. Ships with the same placeholder frames "Load sample images"
-    // uses (renderImageCycleProps) pre-loaded, so this preset actually
-    // shows the cycle working the first time it's opened, not an empty
-    // slideshow with nothing to demonstrate — swap in real photos any
-    // time the same way (Upload… / From Library…).
-    id: 'timer-preservice-split', name: 'Timer — Pre-Service Split', layout: 'fullscreen', animation: 'cut',
-    groupId: 'grp-timer', groupName: 'Timer',
-    layers: [
-      poolCanvas('midnight'),
-      { id: 'cycle', type: 'image-cycle', name: 'Image Cycle', visible: true,
-        sources: [...SAMPLE_CYCLE_IMAGES], fit: 'cover', opacity: 100, radius: 0,
-        pos: { x: 0, y: 0, w: 1440, h: 1080 } },
-      { id: 'timer', type: 'text', name: 'Countdown', visible: true, binding: 'timer', customText: '',
-        pos: { x: 1440, y: 0, w: 480, h: 1080 },
-        font: { family: 'Manrope', size: 130, weight: 800, italic: false, lineHeight: 1, letterSpacing: 0, transform: 'none' },
-        color: '#ffffff', opacity: 100, align: 'center',
-        shadow: { ...TXT_SHADOW_SOFT }, outline: { ...NO_OUTLINE } },
-    ],
-  },
-  {
     // Each piece of the countdown as its OWN layer (timer-h/m/s bindings —
     // see renderTextProps' "Binds to" chips) instead of one fixed "H:MM:SS"
     // string, so they can be laid out however an operator wants — here,
@@ -836,25 +795,6 @@ let looks = (function loadLooks() {
     const runTextHeightMigration = !localStorage.getItem(TEXTHEIGHT_MIGRATION_KEY);
     if (runTextHeightMigration) localStorage.setItem(TEXTHEIGHT_MIGRATION_KEY, '1');
     let textHeightMigrated = false;
-    // Same idea as the Song Title migration above, for installs that
-    // already have their own stored copy of 'timer-preservice-split' from
-    // before it shipped with SAMPLE_CYCLE_IMAGES pre-loaded (the back-fill
-    // above only ADDS ids that are entirely missing — an id already known
-    // keeps its stored copy exactly as saved, empty sources included).
-    // Deliberately NOT gated by a one-time key like the migration above —
-    // a first version of this WAS, and that was itself the bug: it mutated
-    // `stored` in memory but nothing here calls saveLooks() to persist
-    // that, so the very next reload read the same still-empty sources
-    // back from localStorage — except now the key already existed, so the
-    // migration no-opped forever after, and the theme's Image Cycle layer
-    // just silently stayed empty (which looks exactly like "the background
-    // isn't changing", because there was nothing in it to cycle through).
-    // Instead this just re-checks "is it still empty" on every load, which
-    // is naturally idempotent once populated, self-heals from that earlier
-    // broken state with no manual fix needed, and cycleSampleMigrated
-    // (below) makes sure it's saveLooks()'d so it isn't relying on that
-    // recheck to run again either.
-    let cycleSampleMigrated = false;
     // Built-in themes that shipped on a flat default gradient now ship on a
     // bundled background picture (src/backgrounds). A stored copy whose
     // fills are all STILL exactly the old shipped ones takes the new
@@ -867,7 +807,7 @@ let looks = (function loadLooks() {
     const OLD_GRADIENT = { fill: 'gradient', color: '#0b0b0f', color2: '#1c1c30', angle: 160, opacity: 100 };
     const OLD_FILLS = {
       'full-bg': { bg: OLD_GRADIENT }, 'scroll-fill': { bg: OLD_GRADIENT },
-      'timer-big': { bg: OLD_GRADIENT }, 'timer-preservice-split': { bg: OLD_GRADIENT },
+      'timer-big': { bg: OLD_GRADIENT },
       'timer-stacked-min-sec': { bg: OLD_GRADIENT },
       'split-left': { panel: OLD_GRADIENT }, 'split-right': { panel: OLD_GRADIENT },
       'multi-language': { bg: OLD_GRADIENT, 'panel-left': OLD_GRADIENT,
@@ -893,10 +833,6 @@ let looks = (function loadLooks() {
         }
       }
       if (def && def.groupId && !l.groupId) { l.groupId = def.groupId; l.groupName = def.groupName; }
-      if (l.id === 'timer-preservice-split') {
-        const cycle = (l.layers || []).find(ly => ly.type === 'image-cycle');
-        if (cycle && !(cycle.sources || []).length) { cycle.sources = [...SAMPLE_CYCLE_IMAGES]; cycleSampleMigrated = true; }
-      }
       // Word/Activate/Karaoke/Typewriter/Impact/Bold Caption/Bounce/Highlight Box/
       // Shimmer used to be crammed into the same `animation` field as the
       // real Fade/Slide/Cut transitions — every install saved before that
@@ -963,7 +899,7 @@ let looks = (function loadLooks() {
     // does (the align one is gated, so without a forced write here it would
     // silently never actually persist on an install that never happens to
     // save an unrelated theme edit — the gate key alone doesn't get you that).
-    if (cycleSampleMigrated || alignMigrated || textHeightMigrated || backgroundMigrated) {
+    if (alignMigrated || textHeightMigrated || backgroundMigrated) {
       try { localStorage.setItem(LOOKS_KEY, JSON.stringify(result)); } catch {}
     }
     return result;
@@ -4749,7 +4685,6 @@ function galleryTile(grid, { name, blurb, art, active, onPick }) {
   t.className = 'ts-motion-tile' + (active ? ' active' : '');
   const a = document.createElement('div');
   a.className = 'ts-motion-tile-art';
-  art(a);
   const label = document.createElement('div');
   label.className = 'ts-motion-tile-label';
   label.innerHTML = '<strong></strong><span></span>';
@@ -4758,6 +4693,9 @@ function galleryTile(grid, { name, blurb, art, active, onPick }) {
   t.appendChild(a); t.appendChild(label);
   t.addEventListener('click', () => { closeGallery(); onPick(); });
   grid.appendChild(t);
+  // Painted once in the page, so a slide painted to fit (a template) takes
+  // the tile's real size rather than a stand-in's.
+  art(a);
 }
 
 // The gallery behind "Motion": every graphic, moving, grouped by what it's
@@ -4811,21 +4749,50 @@ function afterCanvasFill(bg) {
   up(); renderLayersList(); renderProps(); renderThemeCanvasSizeSelect();
 }
 
-// The gallery behind "Background": the bundled backgrounds, plus none and the
-// operator's own image. Picking one fills the canvas — the theme's, or in
-// Full-scale edit just this slide's — and selects it, so Darken and Opacity
-// are right there in the panel.
-function openBgGallery() {
-  const current = baseBgLayer();
-  const { group } = openGalleryShell('Background');
-  const pool = group('Backgrounds', 'Ship with Kairo — any theme or slide can use them', 'ts-bg-gallery-grid');
+// The gallery behind "Design" — one place for everything a slide can start
+// from: templates (whole slides — the pre-service set and the Announcements
+// pack, every layer editable), the bundled backgrounds, the operator's own
+// picture, or nothing behind the content. In Theme Studio a template starts a
+// new theme and a background fills this theme's canvas (in Full-scale edit,
+// this slide's, and templates aren't offered). From a countdown's "+ Add
+// Slide" every choice adds a slide: a template with the countdown on it, or a
+// background under a blank countdown.
+function openDesignGallery({ addSlideFor = null } = {}) {
+  const pack = window.KairoAnnouncements;
+  const current = addSlideFor ? null : baseBgLayer();
+  const { group } = openGalleryShell(addSlideFor ? 'Add a slide' : 'Design');
+  if (pack && (addSlideFor || tsMode !== 'item')) {
+    pack.designs().forEach(set => {
+      const grid = group(set.label, addSlideFor ? 'Added with the countdown on it' : 'Starts a new theme from it — every part editable', 'ts-bg-gallery-grid');
+      set.slides.forEach(slide => galleryTile(grid, {
+        name: slide.name,
+        blurb: slide.own ? 'Add your church\'s own details' : 'Ready to use',
+        art: a => paintTemplateTile(a, slide.layers),
+        onPick: () => addSlideFor
+          ? addTimerSlide(addSlideFor, pack.preserviceScene(slide.id))
+          : newThemeFromTemplate(slide),
+      }));
+    });
+  }
+  const pool = group('Backgrounds', addSlideFor ? 'A blank countdown slide on it' : 'Ship with Kairo — any theme or slide can use them', 'ts-bg-gallery-grid');
   (window.KairoBackgrounds || []).forEach(bg => galleryTile(pool, {
     name: bg.name,
     blurb: bg.tone === 'light' ? 'Light — use dark text' : bg.tags.join(' · ').replace(/^./, c => c.toUpperCase()),
     art: a => { a.style.background = `url("${bg.thumb}") center / cover no-repeat ${bg.color || '#000'}`; },
     active: current?.fill === 'image' && current.src === bg.src,
-    onPick: () => { const c = canvasFillLayer(); if (!c) return; useBackground(c, bg); delete c.fillBefore; afterCanvasFill(c); },
+    onPick: () => {
+      if (addSlideFor) { addTimerSlide(addSlideFor, blankSceneOn(bg)); return; }
+      const c = canvasFillLayer(); if (!c) return; useBackground(c, bg); delete c.fillBefore; afterCanvasFill(c);
+    },
   }));
+  if (addSlideFor) {
+    galleryTile(group('Other', 'The countdown on its own', 'ts-bg-gallery-grid'), {
+      name: 'Blank', blurb: 'The countdown, centred',
+      art: a => paintTemplateTile(a, defaultSceneLayers()),
+      onPick: () => addTimerSlide(addSlideFor),
+    });
+    return;
+  }
   const other = group('Other', 'Your own picture, or nothing behind the content', 'ts-bg-gallery-grid');
   galleryTile(other, {
     name: 'Your own image…', blurb: 'Fills the canvas, cropped to fit',
@@ -4834,7 +4801,7 @@ function openBgGallery() {
     onPick: () => { const c = canvasFillLayer(); if (c) pickOwnBackground(c, () => { delete c.fillBefore; afterCanvasFill(c); }); },
   });
   galleryTile(other, {
-    name: 'None', blurb: 'Transparent — for keying over cameras',
+    name: 'None', blurb: 'Nothing behind the content',
     art: a => a.classList.add('ts-bg-tile-none'),
     active: current?.fill === 'transparent',
     onPick: () => {
@@ -4844,7 +4811,34 @@ function openBgGallery() {
     },
   });
 }
-document.getElementById('ts-add-bg-btn')?.addEventListener('click', () => { if (activeLook) openBgGallery(); });
+// A whole slide painted to fit its tile (paintLookLayers scales to the tile's
+// own width; the themes list's fixed-size thumbnail would sit in a corner).
+function paintTemplateTile(tile, layers) {
+  window.KairoService.paintLookLayers(tile, { layers }, {}, { verseText: '', referenceText: '', translatedText: '', timerText: '10:00' });
+}
+// A new theme from a template — its own copy, every layer editable; the
+// template itself is never changed.
+function newThemeFromTemplate(slide) {
+  const look = { id: 'look-' + Date.now(), name: slide.name, layout: 'fullscreen', animation: 'fade', layers: deepClone(slide.layers) };
+  looks.push(look);
+  activeLook = look;
+  activeLayer = null; multiSelectedLayerIds.clear();
+  resetThemeHistory();
+  saveLooks();
+  renderLooksList();
+  renderLayersList();
+  renderThemeCanvasSizeSelect();
+  renderPreview();
+  renderProps();
+}
+// A countdown's blank slide, on one of the bundled backgrounds.
+function blankSceneOn(bg) {
+  const layers = defaultSceneLayers();
+  const canvas = layers.find(l => l.type === 'background' && !l.pos);
+  if (canvas) useBackground(canvas, bg);
+  return { id: 'scene-' + Date.now(), name: bg.name, durationSec: 60, layers };
+}
+document.getElementById('ts-add-bg-btn')?.addEventListener('click', () => { if (activeLook) openDesignGallery(); });
 document.getElementById('ts-play-anim-btn')?.addEventListener('click', () => { if (activeLook) tsPlayAnimations(); });
 
 // How the verse text reveals as it goes up (KairoWordSplit), separate from the
@@ -5585,29 +5579,20 @@ function renderItemSlidesList() {
     const addBtn = document.createElement('button');
     addBtn.className = 'ts-item-add-slide-btn';
     addBtn.textContent = '+ Add Slide';
-    // A blank countdown slide, or one of the Announcements designs with the
-    // countdown on it (the pre-service loop's own slides, Ways to Give and
-    // Bible Study included — the built-in Preservice leaves out the ones
-    // that need the church's own details until someone adds them here).
-    addBtn.addEventListener('click', () => {
-      const pack = window.KairoAnnouncements;
-      const r = addBtn.getBoundingClientRect();
-      const designs = pack ? pack.slides().map(s => ({ label: s.name, onClick: () => addTimerSlide(item, pack.preserviceScene(s.id)) })) : [];
-      window.KairoService.openContextMenu(r.left, r.bottom + 4, [
-        [{ label: 'Blank slide with the countdown', onClick: () => addTimerSlide(item) }],
-        ...(designs.length ? [designs] : []),
-      ]);
-    });
+    // The Design picker, adding: any template with the countdown on it (the
+    // pre-service set, the Announcements pack — Ways to Give and Bible Study
+    // included, which the built-in loops leave out until someone fills them
+    // in), a background under a blank countdown, or just the countdown.
+    addBtn.addEventListener('click', () => openDesignGallery({ addSlideFor: item }));
     el.appendChild(addBtn);
   }
 }
 
 // A fresh slide starts with one full-bleed background (a bundled picture) and
 // a centered Countdown, matching timer-big's own defaults — a real, visible
-// starting point rather than a blank canvas with nothing to select. The
-// operator's own Image Cycle layer(s)/captions get added from inside the
-// slide editor the same way any theme's do (the "Cycle"/Text/Image
-// buttons in Theme Studio's add-content bar).
+// starting point rather than a blank canvas with nothing to select. Captions
+// and pictures get added from inside the slide editor the same way any
+// theme's do (Theme Studio's toolbar).
 function defaultSceneLayers() {
   return [
     poolCanvas('midnight'),

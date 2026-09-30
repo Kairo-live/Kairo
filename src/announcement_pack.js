@@ -6,15 +6,18 @@
 // click it on the canvas), the colours, the photo (Replace…), each line's
 // shape and colour, what arrives when, and how it moves.
 //
-// The same designs are used two ways:
+// The same designs are used three ways:
 //   • Theme Studio lists each one as a built-in theme (the Announcements
 //     group), to use on a Slides item like any theme;
-//   • the Timer tab's "+ Pre-service loop" makes a countdown segment whose
-//     scenes are these slides, paced by the countdown (KairoMotion.sceneAt:
-//     the shorter the countdown, the faster they change), each carrying the
+//   • its Design picker offers them as templates (with the pre-service set
+//     below): a new theme from one, or a countdown's next slide;
+//   • the Timer tab's built-in Preservice is a countdown segment whose scenes
+//     are these slides, paced by the countdown (KairoMotion.sceneAt: the
+//     shorter the countdown, the faster they change), each carrying the
 //     countdown itself — a large, faded number up the right edge that the
 //     copy shines through. The last slide, Service Begins, holds the final
-//     minute with the countdown full size inside a progress ring.
+//     minute with the countdown full size inside a progress ring. Preservice
+//     2 is the same with the pre-service set.
 (function (root) {
   'use strict';
 
@@ -230,8 +233,53 @@
     ] },
   ];
 
+  // ── The pre-service set ───────────────────────────────────────────────────
+  // Four plain countdown slides — Welcome, Starting Soon, Pre-Service, Almost
+  // Time — each a deep two-tone gradient with two soft circles of light, a
+  // serif title in its accent colour, a short rule and a line under it. Every
+  // part is an ordinary layer, so all of it is editable. They open in stages:
+  // the light blooms, the title arrives letter by letter, its rule draws
+  // across, the line under it rises (and the countdown fades up after); then
+  // the light keeps drifting, slow enough to sit behind anything.
+  const PRE = [
+    { id: 'pre-welcome', name: 'Welcome', title: 'Welcome', line: 'We are glad you are here', c1: '#123b32', c2: '#1f5c4d', accent: '#e8c27a' },
+    { id: 'pre-starting', name: 'Starting Soon', title: 'Starting soon', line: 'Please find your seat', c1: '#5c3a1f', c2: '#8a5a2c', accent: '#f6e8cf' },
+    { id: 'pre-service', name: 'Pre-Service', title: 'Pre-service', line: 'Worship begins shortly', c1: '#0f2d3d', c2: '#1c4f63', accent: '#e8c27a' },
+    { id: 'pre-almost', name: 'Almost Time', title: 'Almost time', line: 'Silence your phones', c1: '#3a1f2e', c2: '#5c2f47', accent: '#f0c9a0' },
+  ];
+  const glow = (id, pos, color, opacity, delay, idle) => ({
+    id, type: 'background', name: 'Soft circle', visible: true, shape: 'ellipse', fill: 'solid', color, opacity,
+    color2: color, angle: 0, pos, build: { type: 'blur', delay, duration: 1.6 }, idle,
+  });
+  const preSlide = (d) => ({ id: d.id, name: d.name, layers: [
+    { id: 'bg', type: 'background', name: 'Canvas', visible: true, fill: 'gradient', color: d.c1, color2: d.c2, angle: 135, opacity: 100 },
+    glow('glow-1', box(1390, -80, 520, 520), d.accent, 8, 0, { type: 'drift', amount: 14, speed: 0.25 }),
+    glow('glow-2', box(-120, 580, 680, 680), d.accent, 6, 0.2, { type: 'breathe', amount: 16, speed: 0.3 }),
+    text('title', 'Title', d.title, box(160, 375, 1600, 170),
+      { family: 'Playfair Display', size: 150, weight: 700, lineHeight: 1, letterSpacing: 4, transform: 'uppercase' },
+      { color: d.accent, align: 'center', shadow: { ...SOFT_SHADOW }, build: { type: 'letters', delay: 0.3, duration: 1.1 } }),
+    { id: 'rule', type: 'background', name: 'Rule', visible: true, fill: 'solid', color: d.accent, opacity: 100,
+      color2: d.accent, angle: 0, radius: 2, pos: box(860, 658, 200, 4), build: { type: 'wipe', delay: 0.95, duration: 0.7 } },
+    text('subtitle', 'Line under it', d.line, box(360, 565, 1200, 60),
+      { size: 40, weight: 600, lineHeight: 1.2, letterSpacing: 3 },
+      { opacity: 80, align: 'center', build: { type: 'rise', delay: 1.15, duration: 0.8 } }),
+  ] });
+  const PRE_SLIDES = PRE.map(preSlide);
+  // Its countdown: under the rule, in the title's serif and colour, turning
+  // white for the last minute and red past zero.
+  const preCountdown = (accent) => text('countdown', 'Countdown', '', box(660, 715, 600, 120),
+    { family: 'Playfair Display', size: 96, weight: 600, lineHeight: 1, letterSpacing: 2 },
+    { binding: 'timer', color: accent, align: 'center', warnColor: '#ffffff', overtimeColor: '#e8404a',
+      build: { type: 'fade', delay: 1.4, duration: 0.9 } });
+
   const clone = (o) => JSON.parse(JSON.stringify(o));
   const slides = () => clone(SLIDES);
+
+  // Every design, in its set — what the Design picker offers as templates.
+  const designs = () => [
+    { id: 'pre-service', label: 'Pre-service', slides: clone(PRE_SLIDES) },
+    { id: 'announcements', label: 'Announcements', slides: clone(SLIDES) },
+  ];
 
   // As built-in themes (Theme Studio's Announcements group).
   function themes() {
@@ -277,11 +325,27 @@
     });
   }
 
-  // One slide as a timer scene, its countdown included — for adding it to a
-  // countdown's slides one at a time (Theme Studio's "+ Add Slide").
+  // The pre-service set as a timer's scenes — the built-in Preservice 2: each
+  // with its countdown, Almost Time last (the finale).
+  function preservice2Scenes() {
+    return PRE_SLIDES.map((s, i) => {
+      const layers = clone(s.layers);
+      layers.push(preCountdown(PRE[i].accent));
+      const finale = i === PRE_SLIDES.length - 1;
+      return { id: 'scene-' + s.id + '-' + i, name: s.name, durationSec: 30, layers, ...(finale ? { finale: true } : {}) };
+    });
+  }
+
+  // One design as a timer scene, its countdown included — for adding it to a
+  // countdown's slides one at a time (the Design picker from "+ Add Slide").
+  // Added one at a time, none is the finale.
   function preserviceScene(id) {
     const i = SLIDES.findIndex(s => s.id === id);
-    return i < 0 ? null : preserviceScenes()[i];
+    if (i >= 0) return preserviceScenes()[i];
+    const j = PRE_SLIDES.findIndex(s => s.id === id);
+    if (j < 0) return null;
+    const { finale, ...scene } = preservice2Scenes()[j];
+    return scene;
   }
 
   // How the pack's scenes share a countdown: the countdown sets the pace, no
@@ -289,7 +353,7 @@
   // and each change is a soft blur crossfade.
   const PACE = { mode: 'countdown', maxSec: 30, finaleSec: 60, transition: 'blur' };
 
-  const api = { slides, themes, preserviceScenes, preserviceScene, PACE, PALETTE: PAL };
+  const api = { slides, themes, designs, preserviceScenes, preservice2Scenes, preserviceScene, PACE, PALETTE: PAL };
   root.KairoAnnouncements = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this);

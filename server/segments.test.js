@@ -37,7 +37,37 @@ test('a new install\'s Preservice is the pre-service loop, Welcome to Church fir
   assert.ok(pre.scenes.every(sc => sc.layers.some(l => l.binding === 'timer')), 'every slide carries the countdown');
   assert.equal(pre.scenePace.mode, 'countdown');
   assert.ok(!pre.scenes.some(sc => /give|missed|weekly/i.test(sc.name)), 'no slide with stand-in details');
-  assert.deepEqual(list.filter(s => s.name !== 'Preservice').map(s => s.scenes.length), [0, 0, 0, 0, 0]);
+  assert.deepEqual(list.filter(s => !/^Preservice/.test(s.name)).map(s => s.scenes.length), [0, 0, 0, 0, 0]);
+});
+
+test('a new install\'s Preservice 2, right after Preservice, is the pre-service set: Welcome first, Almost Time last', () => {
+  const list = freshInstall();
+  assert.deepEqual(list.map(s => s.name), ['Preservice', 'Preservice 2', 'Prayer', 'Worship', 'The Word', 'Testimony', 'Ministration']);
+  const pre2 = list[1];
+  assert.deepEqual(pre2.scenes.map(sc => sc.name), ['Welcome', 'Starting Soon', 'Pre-Service', 'Almost Time']);
+  assert.ok(pre2.scenes[3].finale && !pre2.scenes.slice(0, 3).some(sc => sc.finale), 'Almost Time is the finale');
+  assert.ok(pre2.scenes.every(sc => sc.layers.some(l => l.binding === 'timer')), 'every slide carries the countdown');
+  assert.ok(pre2.scenes.every(sc => !sc.layers.some(l => l.type === 'image-cycle')), 'no slideshow layer — every part editable');
+  assert.equal(pre2.scenePace.mode, 'countdown');
+});
+
+test('an install from before Preservice 2 gets it right after Preservice, once; deleted, it stays deleted', () => {
+  let list = freshInstall([plain('Preservice', { loopSeeded: true }), plain('Prayer', { order: 1 }), plain('Worship', { order: 2 })]);
+  assert.deepEqual(list.map(s => s.name), ['Preservice', 'Preservice 2', 'Prayer', 'Worship']);
+  assert.equal(list[1].scenes[0].name, 'Welcome');
+  const saved = () => JSON.parse(fs.readFileSync(path.join(dirs[dirs.length - 1], 'segments', 'segments.json'), 'utf8'));
+  // Started again: still one.
+  list = freshInstall(saved());
+  assert.equal(list.filter(s => s.name === 'Preservice 2').length, 1);
+  // Deleted, then started again: stays deleted.
+  list = freshInstall(saved().filter(s => s.name !== 'Preservice 2'));
+  assert.deepEqual(list.map(s => s.name), ['Preservice', 'Prayer', 'Worship']);
+});
+
+test('an install that already has a Preservice 2 of its own is not given a second one', () => {
+  const list = freshInstall([plain('Preservice'), plain('Preservice 2', { order: 1, themeId: 'timer-big' })]);
+  assert.equal(list.filter(s => s.name === 'Preservice 2').length, 1);
+  assert.equal(list[1].themeId, 'timer-big');
 });
 
 test('an untouched Preservice from before becomes the loop, keeping its own look edits', () => {

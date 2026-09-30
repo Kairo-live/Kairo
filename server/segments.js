@@ -20,17 +20,20 @@ const triggers = require('./triggers');
 const APP_DATA = process.env.KAIRO_APP_DATA_DIR || path.join(__dirname, '..', 'databases');
 const SEGMENTS_FILE = path.join(APP_DATA, 'segments', 'segments.json');
 
-const DEFAULT_SEGMENTS = ['Preservice', 'Prayer', 'Worship', 'The Word', 'Testimony', 'Ministration'];
+const DEFAULT_SEGMENTS = ['Preservice', 'Preservice 2', 'Prayer', 'Worship', 'The Word', 'Testimony', 'Ministration'];
 
 // The built-in Preservice segment is the pre-service loop: Welcome to Church
 // and the pack's other ready-to-run slides, each carrying the countdown, paced
-// by it, ending on Service Begins (src/announcement_pack.js — the same loop
-// the Timer tab's "+ Pre-service loop" makes, less the slides that need the
-// church's own details). null if the pack can't be read: a plain countdown.
-function preserviceLoop() {
+// by it, ending on Service Begins (src/announcement_pack.js, less the slides
+// that need the church's own details). Preservice 2 is the same with the
+// pack's pre-service set: Welcome, Starting Soon, Pre-Service, ending on
+// Almost Time — every slide fully editable. null if the pack can't be read:
+// a plain countdown.
+const PRESERVICE_2 = 'Preservice 2';
+function preserviceLoop({ second = false } = {}) {
   try {
     const pack = require(path.join(__dirname, '..', 'src', 'announcement_pack.js'));
-    return { scenes: pack.preserviceScenes({ ready: true }), scenePace: { ...pack.PACE } };
+    return { scenes: second ? pack.preservice2Scenes() : pack.preserviceScenes({ ready: true }), scenePace: { ...pack.PACE } };
   } catch (err) {
     console.warn('[Segments] Pre-service loop unavailable:', err.message);
     return null;
@@ -82,11 +85,28 @@ function init() {
     Object.assign(s, loop, { loopSeeded: true });
     changed = true;
   });
+  // Installs from before Preservice 2: it goes in right after Preservice,
+  // once — a deleted Preservice 2 stays deleted.
+  const pre = segments.filter(s => isPreservice(s.name)).sort((a, b) => a.order - b.order)[0];
+  if (pre && !pre.preservice2Seeded) {
+    pre.preservice2Seeded = true;
+    changed = true;
+    const has = segments.some(s => String(s.name).trim().toLowerCase() === PRESERVICE_2.toLowerCase());
+    const loop = !has && preserviceLoop({ second: true });
+    if (loop) {
+      const { id } = addSegment(PRESERVICE_2, loop);
+      const added = segments.find(s => s.id === id);
+      segments.forEach(s => { if (s !== added && s.order > pre.order) s.order += 1; });
+      added.order = pre.order + 1;
+    }
+  }
   if (changed) saveSegments();
   if (!segments.length) {
     DEFAULT_SEGMENTS.forEach(name => {
-      const loop = isPreservice(name) && preserviceLoop();
-      addSegment(name, loop ? { ...loop, loopSeeded: true } : {});
+      const loop = isPreservice(name) ? preserviceLoop() : name === PRESERVICE_2 ? preserviceLoop({ second: true }) : null;
+      if (!loop) addSegment(name);
+      else if (isPreservice(name)) addSegment(name, { ...loop, loopSeeded: true, preservice2Seeded: true });
+      else addSegment(name, loop);
     });
   }
 }
@@ -126,8 +146,10 @@ function addSegment(name, opts = {}) {
     // the original behaviour: each scene's own durationSec, then hold.
     scenePace: opts.scenePace ?? null,
     // Set on a Preservice given the pre-service loop by default (init), so it
-    // is only ever given once.
+    // is only ever given once; preservice2Seeded, once Preservice 2 has been
+    // added beside it.
     ...(opts.loopSeeded ? { loopSeeded: true } : {}),
+    ...(opts.preservice2Seeded ? { preservice2Seeded: true } : {}),
   };
   segments.push(segment);
   saveSegments();
