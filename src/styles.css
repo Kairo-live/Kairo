@@ -5407,84 +5407,11 @@ mark.help-hit.is-current { background: rgba(255,255,255,0.38); }
 .ts-danger-btn:hover { background: #c9333d !important; }
 
 /* ── Tools (after Compositor) ──
-   The bar over the canvas holds the tool's options, in one row that wraps
-   when the column is narrow: its name, then its fields — the inspector's
-   quiet boxes, each as wide as its value needs. Under the canvas, the tools
-   (V, T, U) in one segmented group, what gets placed (Image, Design,
-   Motion), Play and the canvas size; under that, a line saying what the
-   tool does. */
-.ts-tool-header {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  height: 44px;
-  padding: 0 var(--space-4);
-  /* One row, always the same height, so the canvas never moves as the tool
-     changes; a column too narrow for it scrolls sideways. */
-  overflow-x: auto;
-  overflow-y: hidden;
-  scrollbar-width: none;
-  border-bottom: 1px solid var(--border);
-  background: var(--bg-panel);
-  flex: none;
-}
-.ts-tool-title {
-  font-size: var(--fs-sm);
-  font-weight: 600;
-  color: var(--text);
-  margin-right: 6px;
-  white-space: nowrap;
-}
-.ts-tool-note { font-size: var(--fs-sm); color: var(--text-3); white-space: nowrap; }
-.ts-tool-sep { width: 1px; height: 16px; background: var(--border-md); margin: 0 2px; flex: none; }
-.ts-tool-header > * { flex: none; }
-.ts-tool-header > .ts-field { width: auto; }
-/* A colour is its swatch here, as in Photoshop's options bar. */
-.ts-tool-header > .ts-color-field { padding: 0 5px; }
-.ts-tool-header > .ts-color-field .ts-hex { display: none; }
-.ts-tool-header > .ts-field input { width: 5ch; flex: none; }
-.ts-tool-header > .ts-select,
-.ts-tool-header > .ts-field-btn,
-.ts-tool-header > .ts-font-picker .ts-font-picker-btn {
-  height: 24px;
-  width: auto;
-  background-color: var(--ts-field-bg);
-  border-color: transparent;
-  border-radius: 5px;
-  font-size: 11px;
-}
-.ts-tool-header > .ts-select { flex: none; padding: 0 22px 0 8px; }
-.ts-tool-header > .ts-select:hover,
-.ts-tool-header > .ts-field-btn:hover,
-.ts-tool-header > .ts-font-picker .ts-font-picker-btn:hover { border-color: var(--border-md); }
-.ts-tool-header > .ts-select:focus { border-color: var(--blue); }
-.ts-tool-header > .ts-field-btn { flex: none; padding: 0 10px; }
-.ts-tool-header > .ts-font-picker { flex: none; }
-.ts-tool-header > .ts-font-picker .ts-font-picker-btn {
-  width: 150px;
-  padding: 0 24px 0 8px;
-  text-align: left;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%238e8e93' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
-  background-repeat: no-repeat;
-  background-position: right 7px center;
-}
-.ts-tool-header > .ts-align-group {
-  display: grid; grid-auto-flow: column; grid-auto-columns: 26px; gap: 0;
-  padding: 1px; background: var(--ts-field-bg); border: 0; border-radius: 5px;
-}
-.ts-tool-header > .ts-align-group .ts-align-btn {
-  width: 26px; height: 22px;
-  background: transparent; border: 0; border-radius: 4px;
-  color: var(--text-3);
-}
-.ts-tool-header > .ts-align-group .ts-align-btn:hover { background: var(--bg-hover); color: var(--text); }
-.ts-tool-header > .ts-align-group .ts-align-btn.active { background: var(--selected-dim); color: var(--selected-text); }
-.ts-tool-header > .ts-row-icon { width: 24px; height: 24px; padding: 0; flex: none; }
-.ts-tool-header > .ts-icon-toggle { width: 26px; height: 24px; border-color: transparent; background: var(--ts-field-bg); border-radius: 5px; }
-.ts-tool-header > .ts-icon-toggle:hover { border-color: var(--border-md); }
-.ts-tool-header > .ts-tool-done { margin-left: auto; }
-.ts-tool-header > .hidden { display: none; }
-
+   The tools (V, T, U) sit in one segmented group under the canvas, with what
+   gets placed (Image, Design), Play and the canvas size beside them; a line
+   under that says what the tool does. Their PROPERTIES are the panel on the
+   right's (renderLayoutProps, renderTextProps, renderBgProps) — nothing
+   floats over the canvas. */
 .ts-add-bar.ts-tool-bar { padding: var(--space-2) var(--space-4) 4px; }
 .ts-tools {
   display: inline-flex;
@@ -5523,7 +5450,6 @@ mark.help-hit.is-current { background: rgba(255,255,255,0.38); }
 }
 /* What Type and Shape draw on the canvas: a crosshair over it, and the box
    (or the shape) being dragged out. A box's own handles keep theirs. */
-.ts-tool-header::-webkit-scrollbar { display: none; }
 .ts-preview-wrap.ts-tool-type, .ts-preview-wrap.ts-tool-type [data-layer-id] { cursor: text !important; }
 .ts-preview-wrap.ts-tool-shape, .ts-preview-wrap.ts-tool-shape [data-layer-id] { cursor: crosshair !important; }
 .ts-draw-band {
@@ -5538,6 +5464,63 @@ mark.help-hit.is-current { background: rgba(255,255,255,0.38); }
 .ts-draw-band.is-pill { border-radius: 9999px; }
 .ts-draw-band.is-triangle { clip-path: polygon(50% 0, 100% 100%, 0 100%); background: rgba(255, 255, 255, 0.3); border: 0; }
 .ts-draw-band.is-diamond { clip-path: polygon(50% 0, 100% 50%, 50% 100%, 0 50%); background: rgba(255, 255, 255, 0.3); border: 0; }
+
+/* The Shape tool's own corner caret (a Photoshop flyout, not a dropdown): a
+   sliver glued to the tool button, opening TS_SHAPE_KINDS as icons. */
+.ts-tool-shape-group { position: relative; display: inline-flex; }
+.ts-tool-shape-caret {
+  position: absolute; right: -1px; bottom: -1px;
+  width: 11px; height: 11px;
+  display: flex; align-items: center; justify-content: center;
+  padding: 0;
+  background: rgba(30, 30, 32, 0.9);
+  border: 0; border-radius: 3px 0 7px 0;
+  color: var(--text-3);
+  cursor: pointer;
+}
+.ts-tool-shape-caret svg { width: 7px; height: 7px; }
+.ts-tool-shape-caret:hover { color: #fff; }
+/* A shape's kind and corners row in the panel on the right (renderBgProps),
+   and the flyout itself — shared with the tool's own caret above. */
+.ts-shape-picker-btn {
+  height: 24px;
+  display: flex; align-items: center; gap: 6px;
+  padding: 0 8px;
+  background: var(--ts-field-bg);
+  border: 1px solid transparent;
+  border-radius: 5px;
+  color: var(--text);
+  font-size: 11px;
+  font-family: inherit;
+  cursor: pointer;
+}
+.ts-shape-picker-btn:hover { border-color: var(--border-md); }
+.ts-shape-picker-btn svg:first-child { flex: none; }
+.ts-shape-picker-btn span { flex: 1; text-align: left; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ts-shape-picker-btn .ts-add-caret { flex: none; opacity: 0.6; }
+.ts-shape-picker-panel {
+  position: fixed;
+  z-index: 10000;
+  display: flex;
+  gap: 2px;
+  padding: 4px;
+  background: #232326;
+  border: 1px solid var(--border-md);
+  border-radius: 7px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+}
+.ts-shape-picker-tile {
+  width: 32px; height: 32px;
+  display: flex; align-items: center; justify-content: center;
+  padding: 0;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  color: var(--text-2);
+  cursor: pointer;
+}
+.ts-shape-picker-tile:hover { background: var(--bg-hover); color: var(--text); }
+.ts-shape-picker-tile.active { background: var(--selected-dim); border-color: var(--selected-border); color: var(--selected-text); }
 
 /* ── Rulers and guides (after Compositor) ──
    18px rulers along the top and left of the canvas area, in the canvas's
@@ -5569,21 +5552,6 @@ mark.help-hit.is-current { background: rgba(255,255,255,0.38); }
 .ts-preview-wrap.ts-guide-hover-h, .ts-preview-wrap.ts-guide-hover-h [data-layer-id] { cursor: row-resize !important; }
 body.ts-dragging-guide-v, body.ts-dragging-guide-v * { cursor: col-resize !important; }
 body.ts-dragging-guide-h, body.ts-dragging-guide-h * { cursor: row-resize !important; }
-/* A view switch beside the canvas size (Rulers). */
-.ts-view-btn {
-  width: 28px; height: 28px;
-  display: flex; align-items: center; justify-content: center;
-  padding: 0;
-  background: transparent;
-  border: 1px solid transparent;
-  border-radius: 7px;
-  color: var(--text-3);
-  cursor: pointer;
-  transition: background var(--trans), color var(--trans);
-}
-.ts-view-btn svg { width: 17px; height: 17px; }
-.ts-view-btn:hover { background: rgba(255, 255, 255, 0.06); color: var(--text); }
-.ts-view-btn.active { background: rgba(255, 255, 255, 0.12); border-color: rgba(255, 255, 255, 0.14); color: #fff; }
 
 /* ── Add-content buttons (in the tool bar under the canvas) ── */
 .ts-add-bar {
@@ -6505,7 +6473,7 @@ body.ts-dragging-guide-h, body.ts-dragging-guide-h * { cursor: row-resize !impor
   -moz-appearance: textfield;
 }
 .ts-field input::-webkit-inner-spin-button { -webkit-appearance: none; }
-.ts-field-row > .ts-select, .ts-field-row > .ts-select-btn { width: 100%; }
+.ts-field-row > .ts-select, .ts-field-row > .ts-select-btn, .ts-field-row > .ts-shape-picker-btn { width: 100%; }
 /* A control with its name inside the box (prop()): "Shows  The verse ⌄",
    "Name  Verse" — the dropdown or text fills the rest of the field. */
 .ts-labeled-field { cursor: default; }

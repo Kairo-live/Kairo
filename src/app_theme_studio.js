@@ -2779,7 +2779,7 @@ function tsDragEnd() {
 // (focus-stealing) renderProps rebuild.
 function tsSyncPosInputs(layer) {
   if (!layer.pos) return;
-  document.querySelectorAll('#ts-tool-header [data-pos-input], #ts-props-panel [data-pos-input]').forEach(inp => {
+  document.querySelectorAll('#ts-props-panel [data-pos-input]').forEach(inp => {
     const k = inp.dataset.posInput;
     if (document.activeElement === inp) return;
     if (k === 'rotation') inp.value = Math.round(layer.rotation || 0);
@@ -3094,15 +3094,13 @@ function beginInlineTextEdit(div, layer) {
     if (!isVerseSlide) layer.customText = original;
     if (tsFreshTextId === layer.id) { tsFreshTextId = null; deleteLayer(layer); return; }
     renderPreview();
-    renderToolHeader();
+    renderProps();
   };
   // Registered so every OTHER entry point that starts a new selection/drag
   // (tsDecorateLayerEl, tsBeginDrag) can force this to commit first — see
   // tsCommitActiveEdit and the comment on tsActiveEdit's declaration for
   // why the blur event below can't be relied on alone.
   tsActiveEdit = { layerId: layer.id, commit };
-  // Typing is the Type tool's, wherever it began (a double-click with Move).
-  if (tsTool !== 'type') selectTool('type'); else renderToolHeader();
   div.addEventListener('blur', commit, { once: true });
   div.addEventListener('keydown', (e) => {
     // Escape/Enter here must never reach the DOCUMENT-level handlers that
@@ -3128,15 +3126,16 @@ function beginInlineTextEdit(div, layer) {
 }
 
 // ── Render properties panel ───────────────────────────────────────────────
-// Which of the 3 props tabs a layer type actually has content for — a
-// background/image layer has nothing under Effects (no shadow/outline/
-// scroll), so that tab is hidden rather than shown-but-empty for them.
+// Which of the tabs a layer type actually has content for. Shadow/Outline/
+// Scroll are Style's too — not a separate "Effects" tab (the owner's call:
+// they're the same kind of thing as the rest of Style, and splitting them
+// off just cost a click to reach what's still right there).
 const PROPS_TABS_BY_LAYER_TYPE = {
   background:  ['layout', 'style', 'animate'],
   image:       ['layout', 'style', 'animate'],
   'image-cycle': ['layout', 'style', 'animate'],
   motion:      ['layout', 'style', 'animate'],
-  text:        ['layout', 'style', 'effects', 'animate'],
+  text:        ['layout', 'style', 'animate'],
 };
 // Persists across layer switches within one Edit/Theme Studio session
 // (picking a different layer doesn't jump you back to Layout every time) —
@@ -3154,10 +3153,7 @@ let activePropsTab = 'layout';
 // every render.
 let lastPropsLayerId = null;
 
-// The panel on the right, and the options over the canvas that follow the
-// same selection.
-function renderProps() { renderPropsPanel(); renderToolHeader(); }
-function renderPropsPanel() {
+function renderProps() {
   const empty = document.getElementById('ts-props-empty');
   const panel = document.getElementById('ts-props-panel');
   const tabs = document.getElementById('ts-props-tabs');
@@ -3739,6 +3735,61 @@ function makeFontSelect(current, onChange) {
   return wrap;
 }
 
+// Every shape a shape layer can be — the Shape tool's flyout and the Shape
+// section's own picker both draw from this one list, so the icon a shape is
+// picked by is the same icon it's later shown by.
+const TS_SHAPE_KINDS = [
+  { id: 'rect', label: 'Rectangle', icon: '<rect x="3.5" y="5.5" width="17" height="13" rx="1.5"/>' },
+  { id: 'ellipse', label: 'Ellipse', icon: '<ellipse cx="12" cy="12" rx="8.5" ry="6.5"/>' },
+  { id: 'pill', label: 'Pill', icon: '<rect x="2.5" y="7.5" width="19" height="9" rx="4.5"/>' },
+  { id: 'triangle', label: 'Triangle', icon: '<path d="M12 4.5l8 15h-16z" stroke-linejoin="round"/>' },
+  { id: 'diamond', label: 'Diamond', icon: '<path d="M12 3.5l8.5 8.5-8.5 8.5-8.5-8.5z" stroke-linejoin="round"/>' },
+];
+function tsShapeIconSvg(id, size = 15) {
+  const kind = TS_SHAPE_KINDS.find(k => k.id === id) || TS_SHAPE_KINDS[0];
+  return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">${kind.icon}</svg>`;
+}
+// A Photoshop-style shape flyout: the current shape's icon, opening a row of
+// every shape's icon to pick from — instead of a plain dropdown of names.
+// Used both by the Shape tool (what the next one is drawn as) and by a
+// selected shape's own Shape section (what it becomes).
+function shapeKindPicker(current, onChange) {
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'ts-shape-picker-btn';
+  const setBtn = (id) => {
+    const kind = TS_SHAPE_KINDS.find(k => k.id === id) || TS_SHAPE_KINDS[0];
+    btn.innerHTML = tsShapeIconSvg(id) + `<span>${kind.label}</span>` +
+      '<svg class="ts-add-caret" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>';
+  };
+  setBtn(current);
+
+  let panel = null;
+  function closePanel() { panel?.remove(); panel = null; document.removeEventListener('mousedown', onOutside, true); }
+  function onOutside(e) { if (panel && !panel.contains(e.target) && e.target !== btn && !btn.contains(e.target)) closePanel(); }
+  function openPanel() {
+    if (panel) { closePanel(); return; }
+    panel = document.createElement('div');
+    panel.className = 'ts-shape-picker-panel';
+    const rect = btn.getBoundingClientRect();
+    panel.style.left = rect.left + 'px';
+    panel.style.top = (rect.bottom + 4) + 'px';
+    TS_SHAPE_KINDS.forEach(k => {
+      const tile = document.createElement('button');
+      tile.type = 'button';
+      tile.className = 'ts-shape-picker-tile' + (k.id === current ? ' active' : '');
+      tile.title = k.label;
+      tile.innerHTML = tsShapeIconSvg(k.id, 20);
+      tile.addEventListener('click', () => { current = k.id; setBtn(k.id); onChange(k.id); closePanel(); });
+      panel.appendChild(tile);
+    });
+    document.body.appendChild(panel);
+    setTimeout(() => document.addEventListener('mousedown', onOutside, true), 0);
+  }
+  btn.addEventListener('click', openPanel);
+  return btn;
+}
+
 // A real <select> for a small fixed set of choices — same shape as
 // makeWeightSelect/makeFontSelect, generalized. Chips read fine for a
 // handful of options with room to spare (Fit Mode, alignment), but for
@@ -4105,10 +4156,12 @@ document.addEventListener('keydown', (e) => {
 // this one dimension".
 const layerAspectLock = new Map();
 
-// The Move tool's Transform options (renderToolHeader), after Compositor's
-// transform header: align to the canvas, X / Y / W / H with the W–H link,
+// A layer's Position: align to the canvas, X / Y / W / H with the W–H link,
 // the angle and Reset to layout — every one kept in step while the layer is
-// dragged, resized or turned on the canvas (tsSyncPosInputs).
+// dragged, resized or turned on the canvas (tsSyncPosInputs). The fields
+// themselves; renderLayoutProps below lays them out as the Position section,
+// and the multi-select Align/Transform panel (renderProps) builds its own
+// group equivalent from the same idea for several layers at once.
 function transformControls(layer) {
   const cur = measurePos(layer);
   const isText = layer.type === 'text';
@@ -4216,6 +4269,21 @@ function transformControls(layer) {
   }
   return parts;
 }
+// The Position section itself, in the panel on the right: align on its own
+// row, X/Y, then W/H with the link, then angle and reset sharing a row — the
+// same layout every layer type with a box gets (renderBgProps, renderImageProps,
+// renderImageCycleProps, renderMotionProps, renderTextProps).
+function renderLayoutProps(panel, layer) {
+  const t = transformControls(layer);
+  const kids = [
+    fieldRow([t.align]),
+    fieldRow([t.x, t.y]),
+    fieldRow([t.w, t.h, t.link]),
+  ];
+  const rotRow = [t.rotation, t.reset].filter(Boolean);
+  if (rotRow.length) kids.push(fieldRow(rotRow, { cols: 2 }));
+  panel.appendChild(section('layout', 'Position', ...kids));
+}
 
 // ── Animate tab ───────────────────────────────────────────────────────────
 // How a layer arrives when its slide goes live (build-in: its own animation,
@@ -4299,8 +4367,19 @@ function renderSlideLayout(panel) {
 // Background layer properties — a shape, or the canvas itself (always the
 // whole screen: its layout is the slide's, see renderSlideLayout).
 function renderBgProps(panel, layer) {
+  if (layer.pos) renderLayoutProps(panel, layer);
 
-  // (A shape's kind and corners are the Shape tool's, over the canvas.)
+  // Shape (a shape layer only — the canvas fill is always the whole screen):
+  // which shape, drawn as its icon (shapeKindPicker, the same flyout the
+  // Shape tool's own corner caret opens), and for a rectangle its corner
+  // radius (the other shapes have their own edges and ignore it).
+  if (layer.pos) {
+    const isRect = (layer.shape || 'rect') === 'rect';
+    panel.appendChild(section('style', 'Shape', fieldRow([
+      shapeKindPicker(layer.shape || 'rect', v => { layer.shape = v; up(); renderProps(); }),
+      isRect && numField('Corners', layer.radius || 0, { min: 0, max: 200, unit: 'px', onChange: v => { layer.radius = v ?? 0; up(); } }),
+    ])));
+  }
 
   // Fill: its kind, then what that kind needs — a colour and its opacity; a
   // gradient's two colours, angle and opacity; or a picture (the bundled
@@ -4396,6 +4475,7 @@ function layerNameSection(panel, layer) {
 }
 function renderImageProps(panel, layer) {
   layerNameSection(panel, layer);
+  renderLayoutProps(panel, layer);
 
   // The picture itself, and Replace… — swaps the picture and keeps
   // everything else: its box, fade, animation.
@@ -4455,6 +4535,7 @@ function renderPhotoLookProps(panel, layer) {
 // output, not in any preview surface.
 function renderImageCycleProps(panel, layer) {
   layerNameSection(panel, layer);
+  renderLayoutProps(panel, layer);
 
   // Timing — "Each": seconds per picture, only meaningful for a scene's own
   // slideshow (a countdown's slides); blank spreads them evenly across the
@@ -4598,6 +4679,7 @@ async function openCycleImagePicker(layer) {
 function renderMotionProps(panel, layer) {
   const M = window.KairoMotion;
   layerNameSection(panel, layer);
+  renderLayoutProps(panel, layer);
   if (!M) return;
 
   // Edited as a normalized copy, stored back only when something changes —
@@ -4679,44 +4761,7 @@ function renderMotionProps(panel, layer) {
   panel.appendChild(section('style', kind.label, ...rows));
 }
 
-// Where a new motion layer lands: a background fills the canvas; a timer or
-// element graphic gets a sensible box of its own, centred.
-function defaultMotionPos(kindId) {
-  const W = TS_DESIGN_W, H = TS_DESIGN_H;
-  const box = (w, h, y) => ({ x: Math.round((W - w) / 2), y: Math.round(y ?? (H - h) / 2), w, h });
-  switch (kindId) {
-    case 'ring':   return box(720, 720);
-    case 'dots':   return box(820, 820);
-    case 'bar':    return box(1200, 16, 900);
-    case 'line':   return box(900, 600);
-    case 'doodle': return box(320, 220);
-    default:       return { x: 0, y: 0, w: W, h: H };
-  }
-}
-
-function addMotionLayer(kindId) {
-  const M = window.KairoMotion;
-  if (!activeLook || !M) return;
-  const kind = M.kind(kindId);
-  const layer = {
-    id: 'motion-' + Date.now(), type: 'motion', name: kind.label, visible: true, opacity: 100,
-    pos: defaultMotionPos(kind.id), graphic: M.create(kind.id),
-  };
-  // A background graphic is a backdrop: it goes right above the canvas fill,
-  // behind the theme's shapes, images and text. Timer and element graphics go
-  // on top, like any newly added layer.
-  if (kind.family === 'ambient') {
-    const bgIdx = activeLook.layers.findIndex(l => l.type === 'background' && !l.pos);
-    activeLook.layers.splice(bgIdx + 1, 0, layer);
-  } else {
-    activeLook.layers.push(layer);
-  }
-  activeLayer = layer;
-  up();
-  renderProps();
-}
-
-// The shell both galleries (Motion, Background) open in: a titled panel over
+// The shell the Design gallery opens in: a titled panel over
 // the editor that closes on its Close button, a click outside it, or Esc.
 // Returns the scrolling body to fill, and a group(label, hint) that adds a
 // labelled grid of tiles to it.
@@ -4778,40 +4823,15 @@ function galleryTile(grid, { name, blurb, art, active, onPick }) {
   art(a);
 }
 
-// The gallery behind "Motion": every graphic, moving, grouped by what it's
-// for. Picking one adds it; everything about it stays editable afterwards.
-function openMotionGallery() {
-  const M = window.KairoMotion;
-  if (!M) return;
-  const { group } = openGalleryShell('Add motion');
-  const FAMILIES = [
-    { id: 'ambient', label: 'Backgrounds', hint: 'Fill the screen, behind everything else' },
-    { id: 'element', label: 'Elements', hint: 'Hand-drawn accents that draw themselves on' },
-    { id: 'timer', label: 'Timer', hint: 'Follow the live countdown' },
-  ];
-  FAMILIES.forEach(fam => {
-    const kinds = M.kinds().filter(k => k.family === fam.id);
-    if (!kinds.length) return;
-    const grid = group(fam.label, fam.hint);
-    kinds.forEach(k => galleryTile(grid, {
-      name: k.label, blurb: k.blurb,
-      art: (a) => {
-        // Elements are shown bigger and bolder here than they're added, so a
-        // hand-drawn line reads at tile size.
-        const tileBox = { line: { x: 280, y: 140, w: 1360, h: 800 }, doodle: { x: 610, y: 190, w: 700, h: 700 } }[k.id];
-        const p = tileBox || defaultMotionPos(k.id);
-        const graphic = M.create(k.id);
-        if (tileBox) graphic.thickness = 22;
-        const box = document.createElement('div');
-        box.style.cssText = `position:absolute;left:${p.x / TS_DESIGN_W * 100}%;top:${p.y / TS_DESIGN_H * 100}%;width:${p.w / TS_DESIGN_W * 100}%;height:${p.h / TS_DESIGN_H * 100}%;`;
-        box.appendChild(M.build(graphic, { mode: 'demo', box: { w: p.w, h: p.h } }));
-        a.appendChild(box);
-      },
-      onPick: () => addMotionLayer(k.id),
-    }));
-  });
-}
-document.getElementById('ts-add-motion-btn')?.addEventListener('click', () => { if (activeLook) openMotionGallery(); });
+// No browsable "Motion" gallery of pre-built graphics (rings, doodles,
+// drifting backgrounds) any more — the owner's call, 2026-09-30: a curated
+// library of decorative templates "doesn't add value" next to a model that
+// can just design the motion a slide actually needs (the Animate tab, and
+// the idle/build craft in motion_graphics.js). A theme that already has a
+// 'motion'-type layer (an older theme, or the announcement pack) keeps
+// rendering and editing exactly as before — renderMotionProps, paintLayer
+// and every other reader of type:'motion' are unchanged; only the add-a-new-
+// one gallery and its button are gone.
 
 // The theme's (or slide's) canvas fill, made if it has none.
 function canvasFillLayer() {
@@ -4952,9 +4972,10 @@ function revealRows() {
   return rows;
 }
 
-// Text layer properties: what the layer shows (Layout tab), how a verse
-// reveals and highlighted words (Style), its shadow and outline (Effects).
-// Its type is the Type tool's, over the canvas.
+// Text layer properties — laid out as a design tool's text inspector: what the
+// layer shows (Layout tab), then its position, then the type — family; weight
+// and size; line and letter spacing; alignment, italic and case — and its
+// colour (Style), its shadow and outline (Effects).
 function renderTextProps(panel, layer) {
   const nameInp = document.createElement('input');
   nameInp.type = 'text'; nameInp.className = 'ts-prop-input';
@@ -4995,44 +5016,67 @@ function renderTextProps(panel, layer) {
     ], activeLook.translateTo || '', v => { activeLook.translateTo = v || null; renderPreview(); scheduleThemeAutosave(); }))
   ].filter(Boolean)));
 
+  renderLayoutProps(panel, layer);
 
-  // The type itself — family, size, colour, spacing — is the Type tool's,
-  // over the canvas (renderToolHeader). Here: how the verse reveals (the
-  // theme's, so not in a slide's own editor), and for text typed in,
-  // highlighted words — words wrapped in *asterisks* show in the highlight
-  // colour, a two-tone headline ("*FIRST TIME* / WITH US?") in one layer.
-  if (tsMode !== 'item' && layer.binding === 'verse') panel.appendChild(section('style', 'Reveal', ...revealRows()));
+  // Type: the family on its own line, then weight and size, then line and
+  // letter spacing (exact numbers — 1.15, -0.5 — are what people reach for),
+  // then alignment with italic and case.
+  const caseSel = makeSelect([
+    { label: 'Aa  As typed', value: 'none' }, { label: 'AA  Uppercase', value: 'uppercase' }, { label: 'aa  Lowercase', value: 'lowercase' },
+  ], layer.font.transform || 'none', v => { layer.font.transform = v; up(); });
+  caseSel.title = 'Letter case';
+  const italic = iconToggle('I', layer.font.italic, 'Italic', v => { layer.font.italic = v; up(); }, { italic: true });
+  italic.classList.add('ts-row-icon');
+  panel.appendChild(section('style', 'Text',
+    fieldRow([makeFontSelect(layer.font.family, v => { layer.font.family = v; up(); })]),
+    fieldRow([
+      makeWeightSelect(layer.font.weight, v => { layer.font.weight = v; up(); }),
+      numField('Size', layer.font.size, { min: 8, max: 300, unit: 'px', onChange: v => { layer.font.size = v ?? layer.font.size; up(); } }),
+    ]),
+    fieldRow([
+      numField('Line', layer.font.lineHeight, { min: 0.5, max: 4, step: 0.05, title: 'Line spacing', onChange: v => { layer.font.lineHeight = parseFloat((v ?? 1.2).toFixed(2)); up(); } }),
+      numField('Letter', layer.font.letterSpacing, { min: -5, max: 30, step: 0.5, unit: 'px', title: 'Letter spacing', onChange: v => { layer.font.letterSpacing = parseFloat((v ?? 0).toFixed(1)); up(); } }),
+    ]),
+    fieldRow([makeAlignBtns(layer.align, v => { layer.align = v; up(); }), caseSel, italic]),
+    // How the verse reveals — the theme's, so not in a slide's own editor.
+    ...(tsMode !== 'item' && layer.binding === 'verse' ? revealRows() : [])));
+
+  // Colour: the text's; and — for text typed in, not a verse or the
+  // countdown — highlighted words: words wrapped in *asterisks* show in the
+  // highlight colour, a two-tone headline ("*FIRST TIME* / WITH US?") in one
+  // layer.
+  const colorKids = [fieldRow([colorField(layer.color, v => { layer.color = v; up(); })], { cols: 2 })];
   if (layer.binding === 'custom') {
-    const kids = [fieldRow([
+    colorKids.push(fieldRow([
       toggleField('Highlight', !!layer.accentColor, v => {
         if (v) layer.accentColor = layer.accentColor || '#e3cf6c'; else delete layer.accentColor;
         up(); renderProps();
       }, 'Colour chosen words differently — put *asterisks* around them'),
       layer.accentColor && colorField(layer.accentColor, v => { layer.accentColor = v; up(); }, 'The highlight colour'),
-    ], { cols: 2 })];
+    ], { cols: 2 }));
     if (layer.accentColor) {
       const hint = document.createElement('div');
       hint.className = 'ts-motion-blurb';
       hint.textContent = 'Put *asterisks* around the words to highlight.';
-      kids.push(hint);
+      colorKids.push(hint);
     }
-    panel.appendChild(section('style', 'Highlight', ...kids));
   }
+  panel.appendChild(section('style', 'Color', ...colorKids));
 
-  // Effects — each an on/off row (its name and a switch), with its settings
-  // under it while on, in one section.
+  // Effects — each an on/off row (its name and a switch), its settings
+  // always shown under it, on or off — every customization on screen, not
+  // only after a click finds it.
   function effectSection(name, enabled, onToggle, detailChildren) {
     const header = document.createElement('div');
     header.className = 'ts-prop-row ts-effect-header';
     const label = document.createElement('span');
     label.className = 'ts-props-section-label'; label.style.margin = '0'; label.textContent = name;
-    const toggle = makeToggle(enabled, v => { onToggle(v); details.style.display = v ? '' : 'none'; up(); });
+    const toggle = makeToggle(enabled, v => { onToggle(v); up(); });
     header.appendChild(label); header.appendChild(toggle);
     const details = document.createElement('div');
     details.className = 'ts-effect-details';
-    details.style.display = enabled ? '' : 'none';
     detailChildren.forEach(c => details.appendChild(c));
-    return section('effects', null, header, details);
+    return section('style', null, header, details);
   }
 
   // Shadow: its colour and opacity, then blur and offset.
@@ -5973,7 +6017,6 @@ const TS_TOOLS = {
   type: { key: 't', hint: 'Drag a text box, or click for one · Click text to edit it · Return or a click outside to finish · Esc to cancel' },
   shape: { key: 'u', hint: 'Drag to draw a shape on a new layer · Shift square or circle · Option from the centre · Shift-U next shape · Esc cancels' },
 };
-const TS_SHAPES = [['rect', 'Rectangle'], ['ellipse', 'Ellipse'], ['pill', 'Pill'], ['triangle', 'Triangle'], ['diamond', 'Diamond']];
 let tsTool = 'move';
 const tsTypeDefaults = { family: 'Manrope', size: 72, weight: 600, italic: false, lineHeight: 1.2, letterSpacing: 0, transform: 'none', color: '#ffffff', align: 'left' };
 const tsShapeDefaults = { shape: 'rect', color: '#e8404a', radius: 0 };
@@ -5987,118 +6030,46 @@ function selectTool(tool) {
   wrap?.classList.toggle('ts-tool-shape', tool === 'shape');
   const hint = document.getElementById('ts-tool-hint');
   if (hint) hint.textContent = TS_TOOLS[tool].hint;
-  renderToolHeader();
 }
 document.querySelectorAll('#ts-tool-bar .ts-tool-btn').forEach(b => b.addEventListener('click', () => selectTool(b.dataset.tool)));
 
-// The bar over the canvas: the tool's name, then its options in a row
-// (Compositor's tool headers). Built again only when what it shows changes —
-// the tool, the layer, a shape's kind — so a click into one of its fields
-// while typing on the canvas (which ends the typing and redraws the panels)
-// isn't pulled out from under the pointer; otherwise its values just follow.
-function renderToolHeader() {
-  const host = document.getElementById('ts-tool-header');
-  if (!host) return;
-  const one = activeLook && !multiSelectedLayerIds.size ? activeLayer : null;
-  const layer = tsTool === 'type' ? (one?.type === 'text' ? one : null)
-    : tsTool === 'shape' ? (one?.type === 'background' && one.pos ? one : null)
-    : one;
-  const sig = [tsTool, multiSelectedLayerIds.size, tsTool === 'shape' ? (layer || tsShapeDefaults).shape || 'rect' : '', !!layer?.pos].join('|');
-  if (host.firstChild && host._sig === sig && host._layer === layer) {
-    host.querySelector('.ts-tool-done')?.classList.toggle('hidden', !tsActiveEdit);
-    return;
-  }
-  host._sig = sig; host._layer = layer;
-  host.innerHTML = '';
-  const title = document.createElement('span');
-  title.className = 'ts-tool-title';
-  title.textContent = { move: 'Transform', type: 'Type', shape: 'Shape' }[tsTool];
-  host.appendChild(title);
-  if (tsTool === 'move') moveOptions(host, layer);
-  else if (tsTool === 'type') typeOptions(host, layer);
-  else shapeOptions(host, layer);
+// The Shape tool's own corner caret (Photoshop's flyout): which shape gets
+// drawn next, shown as icons rather than names — picking one also switches
+// to the Shape tool. TS_SHAPE_KINDS/tsShapeIconSvg are shared with the Shape
+// section's own picker (shapeKindPicker) so a shape reads the same icon
+// everywhere it's chosen.
+{
+  const caretBtn = document.getElementById('ts-tool-shape-caret');
+  let flyout = null;
+  function closeShapeFlyout() { flyout?.remove(); flyout = null; document.removeEventListener('mousedown', onOutside, true); }
+  function onOutside(e) { if (flyout && !flyout.contains(e.target) && e.target !== caretBtn && !caretBtn?.contains(e.target)) closeShapeFlyout(); }
+  caretBtn?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (flyout) { closeShapeFlyout(); return; }
+    flyout = document.createElement('div');
+    flyout.className = 'ts-shape-picker-panel';
+    const rect = caretBtn.getBoundingClientRect();
+    flyout.style.left = rect.left + 'px';
+    flyout.style.top = (rect.bottom + 4) + 'px';
+    TS_SHAPE_KINDS.forEach(k => {
+      const tile = document.createElement('button');
+      tile.type = 'button';
+      tile.className = 'ts-shape-picker-tile' + (k.id === tsShapeDefaults.shape ? ' active' : '');
+      tile.title = k.label;
+      tile.innerHTML = tsShapeIconSvg(k.id, 20);
+      tile.addEventListener('click', () => { tsShapeDefaults.shape = k.id; selectTool('shape'); closeShapeFlyout(); });
+      flyout.appendChild(tile);
+    });
+    document.body.appendChild(flyout);
+    setTimeout(() => document.addEventListener('mousedown', onOutside, true), 0);
+  });
 }
-function headerNote(host, text) {
-  const n = document.createElement('span');
-  n.className = 'ts-tool-note';
-  n.textContent = text;
-  host.appendChild(n);
-}
-function headerGap(host) {
-  const g = document.createElement('span');
-  g.className = 'ts-tool-sep';
-  host.appendChild(g);
-}
-function moveOptions(host, layer) {
-  if (!layer || layer === baseBgLayer()) {
-    headerNote(host, multiSelectedLayerIds.size ? `${multiSelectedLayerIds.size} layers — arrange them in the panel on the right` : 'Select a layer to move, size or turn it');
-    return;
-  }
-  const t = transformControls(layer);
-  host.append(t.align);
-  headerGap(host);
-  host.append(t.x, t.y);
-  headerGap(host);
-  host.append(t.w, t.link, t.h);
-  if (t.rotation) { headerGap(host); host.append(t.rotation); }
-  if (t.reset) host.append(t.reset);
-  if (layer.type === 'text') { headerGap(host); host.append(fieldBtn('Type…', () => selectTool('type'), 'Its font, size, colour and spacing (T)')); }
-  else if (layer.type === 'background' && layer.pos) { headerGap(host); host.append(fieldBtn('Shape…', () => selectTool('shape'), 'Its shape and corners (U)')); }
-}
-// The type: family, weight, size and colour; alignment, italic and case;
-// tracking and leading (Compositor's type header). With no text layer
-// selected, what the next text box is made with.
-function typeOptions(host, layer) {
-  const f = layer ? layer.font : tsTypeDefaults;
-  const set = (k, v) => {
-    if (!layer) { tsTypeDefaults[k] = v; return; }
-    if (k === 'color' || k === 'align') layer[k] = v; else layer.font[k] = v;
-    up();
-  };
-  const caseSel = makeSelect([
-    { label: 'Aa', value: 'none' }, { label: 'AA', value: 'uppercase' }, { label: 'aa', value: 'lowercase' },
-  ], f.transform || 'none', v => set('transform', v));
-  caseSel.title = 'Letter case: as typed, uppercase or lowercase';
-  caseSel.classList.add('ts-tool-case');
-  const font = makeFontSelect(f.family, v => set('family', v));
-  font.classList.add('ts-tool-font');
-  host.append(
-    font,
-    makeWeightSelect(f.weight, v => set('weight', v)),
-    numField('Size', f.size, { min: 8, max: 400, title: 'Size, in pixels on a 1920 × 1080 screen', onChange: v => { if (v) set('size', v); } }),
-    colorField(layer ? layer.color : tsTypeDefaults.color, v => set('color', v), 'Text colour'),
-  );
-  headerGap(host);
-  host.append(
-    makeAlignBtns(layer ? layer.align : tsTypeDefaults.align, v => set('align', v)),
-    iconToggle('I', !!f.italic, 'Italic', v => set('italic', v), { italic: true }),
-    caseSel,
-  );
-  headerGap(host);
-  host.append(
-    numField('Tracking', f.letterSpacing ?? 0, { min: -5, max: 60, step: 0.5, title: 'Space between the letters, in pixels', onChange: v => set('letterSpacing', parseFloat((v ?? 0).toFixed(1))) }),
-    numField('Leading', f.lineHeight ?? 1.2, { min: 0.5, max: 4, step: 0.05, title: 'Space between the lines', onChange: v => set('lineHeight', parseFloat((v ?? 1.2).toFixed(2))) }),
-  );
-  const done = fieldBtn('Done', () => { tsCommitActiveEdit(null); renderToolHeader(); }, 'Finish typing (Esc)');
-  done.classList.add('ts-tool-done');
-  done.classList.toggle('hidden', !tsActiveEdit);
-  host.append(done);
-}
-// Which shape, and a rectangle's corners (Compositor's shape header). Its
-// fill is the layer's, in the panel on the right. With no shape selected,
-// what the next one is drawn as.
-function shapeOptions(host, layer) {
-  const cur = layer || tsShapeDefaults;
-  const set = (k, v) => {
-    if (layer) { layer[k] = v; up(); } else tsShapeDefaults[k] = v;
-    if (k === 'shape') renderToolHeader();
-  };
-  const kind = makeSelect(TS_SHAPES.map(([value, label]) => ({ label, value })), cur.shape || 'rect', v => set('shape', v));
-  kind.title = 'Shift-U steps through the shapes';
-  host.append(kind);
-  if ((cur.shape || 'rect') === 'rect') host.append(numField('Corners', cur.radius || 0, { min: 0, max: 200, unit: 'px', title: 'Round the corners', onChange: v => set('radius', v ?? 0) }));
-  if (!layer) headerNote(host, 'Drag on the canvas to draw one');
-}
+
+// Move, Type and Shape are chosen here and pick the canvas's interaction —
+// drag to move/resize/turn, drag out a text box, drag out a shape (below).
+// Their PROPERTIES (Transform, the type, a shape's kind) live in the panel
+// on the right, the one surface for what's selected, whichever tool picked
+// it — see transformControls, renderTextProps and renderBgProps.
 
 // Drawing on the canvas with Type or Shape: a drag (or, for type, a click)
 // makes a new layer there. Captured ahead of the layers' own handlers.
@@ -6138,7 +6109,7 @@ function addTextBox(box, clicked) {
 }
 function addShape(box) {
   const d = tsShapeDefaults;
-  const label = (TS_SHAPES.find(([v]) => v === d.shape) || [])[1] || 'Shape';
+  const label = (TS_SHAPE_KINDS.find(k => k.id === d.shape) || {}).label || 'Shape';
   const layer = {
     id: 'shape-' + Date.now(), type: 'background', name: label, visible: true, shape: d.shape,
     fill: 'solid', color: d.color, opacity: 100, color2: d.color, angle: 135, radius: d.radius, pos: box,
@@ -6226,8 +6197,8 @@ document.addEventListener('keydown', (e) => {
   if (!mod && !e.altKey) {
     if (key === 'u' && e.shiftKey) {
       e.preventDefault();
-      const i = TS_SHAPES.findIndex(([v]) => v === tsShapeDefaults.shape);
-      tsShapeDefaults.shape = TS_SHAPES[(i + 1) % TS_SHAPES.length][0];
+      const i = TS_SHAPE_KINDS.findIndex(k => k.id === tsShapeDefaults.shape);
+      tsShapeDefaults.shape = TS_SHAPE_KINDS[(i + 1) % TS_SHAPE_KINDS.length].id;
       selectTool('shape');
       return;
     }
@@ -6382,11 +6353,12 @@ function tsPaintGuides() {
     host.appendChild(el);
   });
 }
+// No visible toggle for this — ⌘R/Shift-R (below) is the only switch, so it
+// doesn't compete with the canvas for a button.
 function setShowRulers(on) {
   tsShowRulers = on;
   try { localStorage.setItem('kairo-ts-rulers', on ? '1' : '0'); } catch {}
   document.querySelector('.ts-preview-wrap')?.classList.toggle('ts-has-rulers', on);
-  document.getElementById('ts-rulers-btn')?.classList.toggle('active', on);
   // The canvas takes the room the rulers leave, or give back.
   if (activeLook) renderPreview(); else tsPaintRulers();
 }
@@ -6396,8 +6368,6 @@ function setShowGuides(on) {
   tsPaintGuides();
 }
 document.querySelector('.ts-preview-wrap')?.classList.toggle('ts-has-rulers', tsShowRulers);
-document.getElementById('ts-rulers-btn')?.classList.toggle('active', tsShowRulers);
-document.getElementById('ts-rulers-btn')?.addEventListener('click', () => setShowRulers(!tsShowRulers));
 
 // The guide within reach of a point on the screen, if any.
 function tsGuideAt(clientX, clientY) {

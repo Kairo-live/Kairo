@@ -464,9 +464,19 @@ function handleTranscript(msg) {
     if (interimSpan) transcriptDiv.insertBefore(span, interimSpan);
     else transcriptDiv.appendChild(span);
     if (interimSpan) interimSpan.textContent = '';
-    const finals = transcriptDiv.querySelectorAll('.transcript-final');
-    if (finals.length > TRANSCRIPT_LOG_MAX_SPANS) {
-      for (let i = 0; i < finals.length - TRANSCRIPT_LOG_MAX_SPANS; i++) finals[i].remove();
+    // Only prune while the operator is following along at the bottom — the
+    // removed spans sit ABOVE whatever's on screen, and the browser doesn't
+    // shift scrollTop to compensate for content deleted above the viewport.
+    // Pruning mid-review (scrolled up reading something) yanked the exact
+    // text they scrolled up for out from under them — scrollTop stayed the
+    // same raw pixel value into a now-shorter log, which could land past
+    // the remaining content: scrolled deep into what read as an empty
+    // panel until they scrolled back down.
+    if (wasAtBottom) {
+      const finals = transcriptDiv.querySelectorAll('.transcript-final');
+      if (finals.length > TRANSCRIPT_LOG_MAX_SPANS) {
+        for (let i = 0; i < finals.length - TRANSCRIPT_LOG_MAX_SPANS; i++) finals[i].remove();
+      }
     }
     // Capture for Content Studio — finals only, never interim drafts.
     sessionTranscriptParts.push({ time: new Date().toLocaleTimeString(), at: Date.now(), text: msg.text });
