@@ -181,7 +181,7 @@
         SPEED,
       ] },
     { id: 'ring', label: 'Progress Ring', family: 'timer', blurb: 'A ring that runs down with the countdown',
-      colors: { min: 4, max: 4, labels: TIMER_COLOR_LABELS, def: ['#ffffff', '#ffffff', '#e8a64a', '#e8404a'] },
+      colors: { min: 4, max: 4, labels: TIMER_COLOR_LABELS, def: ['#ffffff', '#ffffff', '#e8a64a', '#ed1c24'] },
       params: [
         { key: 'thickness', label: 'Thickness', type: 'range', min: 1, max: 25, step: 1, def: 4 },
         { key: 'trackOpacity', label: 'Track', type: 'range', min: 0, max: 100, step: 1, unit: '%', def: 18 },
@@ -191,7 +191,7 @@
         STATE_COLORS,
       ] },
     { id: 'bar', label: 'Progress Bar', family: 'timer', blurb: 'A bar that runs down with the countdown',
-      colors: { min: 4, max: 4, labels: TIMER_COLOR_LABELS, def: ['#ffffff', '#ffffff', '#e8a64a', '#e8404a'] },
+      colors: { min: 4, max: 4, labels: TIMER_COLOR_LABELS, def: ['#ffffff', '#ffffff', '#e8a64a', '#ed1c24'] },
       params: [
         { key: 'trackOpacity', label: 'Track', type: 'range', min: 0, max: 100, step: 1, unit: '%', def: 18 },
         { key: 'radius', label: 'Rounding', type: 'range', min: 0, max: 100, step: 1, unit: '%', def: 100 },
@@ -200,7 +200,7 @@
         STATE_COLORS,
       ] },
     { id: 'dots', label: 'Seconds Dots', family: 'timer', blurb: 'A studio clock: one dot per second',
-      colors: { min: 4, max: 4, labels: ['Lit', 'Unlit', 'Last minute', 'Overtime'], def: ['#ffffff', '#ffffff', '#e8a64a', '#e8404a'] },
+      colors: { min: 4, max: 4, labels: ['Lit', 'Unlit', 'Last minute', 'Overtime'], def: ['#ffffff', '#ffffff', '#e8a64a', '#ed1c24'] },
       params: [
         { key: 'count', label: 'Dots', type: 'range', min: 12, max: 120, step: 1, def: 60 },
         { key: 'size', label: 'Dot size', type: 'range', min: 10, max: 100, step: 1, unit: '%', def: 45 },

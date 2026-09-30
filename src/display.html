@@ -164,8 +164,8 @@
         #timer-badge.hidden, #clock-badge.hidden { display: none; }
         /* Overtime — past the segment's end time but still running until
            explicitly stopped, so it reads as "running long," not broken. */
-        #timer-badge.is-overtime { color: #e8404a; text-shadow: 0 1px 6px rgba(232,64,74,0.35); }
-        #timer-badge.is-overtime .badge-label { color: rgba(232, 64, 74, 0.6); }
+        #timer-badge.is-overtime { color: #ed1c24; text-shadow: 0 1px 6px rgba(237,28,36,0.35); }
+        #timer-badge.is-overtime .badge-label { color: rgba(237,28,36, 0.6); }
         /* Warning — inside the last minute, still counting down. A step
            between "normal" and "overtime" so the operator sees it coming
            rather than the color jumping straight from plain to red at 0. */
@@ -177,7 +177,7 @@
            above, which is unthemed, still recolours since it has no theme to
            respect.) */
         [data-binding="timer"].is-warning  { text-shadow: 0 0 14px rgba(232,166,74,0.55); }
-        [data-binding="timer"].is-overtime { text-shadow: 0 0 16px rgba(232,64,74,0.6); animation: timer-otp 1s ease-in-out infinite; }
+        [data-binding="timer"].is-overtime { text-shadow: 0 0 16px rgba(237,28,36,0.6); animation: timer-otp 1s ease-in-out infinite; }
         @keyframes timer-otp { 50% { opacity: 0.55; } }
         #timer-badge .badge-label, #clock-badge .badge-label {
             display: block;
@@ -704,7 +704,7 @@
                     // At the layer's own opacity, so a countdown faded back
                     // behind the copy stays faded as it turns amber/red.
                     div.dataset.warnColor     = hexOpacity(ov.warnColor     || layer.warnColor     || '#e8a64a', opacity);
-                    div.dataset.overtimeColor = hexOpacity(ov.overtimeColor || layer.overtimeColor || '#e8404a', opacity);
+                    div.dataset.overtimeColor = hexOpacity(ov.overtimeColor || layer.overtimeColor || '#ed1c24', opacity);
                 }
 
                 // Positioning by layout
@@ -1954,7 +1954,7 @@
         const base = el.dataset.baseColor;
         if (base) {
             el.style.color = cleared ? base
-                : overtime ? (el.dataset.overtimeColor || '#e8404a')
+                : overtime ? (el.dataset.overtimeColor || '#ed1c24')
                 : warning  ? (el.dataset.warnColor || '#e8a64a')
                 : base;
         }

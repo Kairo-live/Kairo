@@ -28,8 +28,8 @@
      way for "this failed" to look different from "this is the live brand
      color", and no room for the brand to ever move without also recoloring
      every error state in the app. */
-  --red:         #e8404a;
-  --red-dim:     rgba(232,64,74,0.15);
+  --red:         #ed1c24;
+  --red-dim:     rgba(237,28,36,0.15);
   /* Success/confirmed/connected — .test-result.success, .bs-dot.connected,
      broadcasting indicators, "direct citation confirmed" tags, a toggle's
      "on" state. This used to be hardcoded to the EXACT SAME hex as --red
@@ -542,7 +542,7 @@ input[type="range"]:disabled { opacity: 0.4; cursor: default; }
   padding: 0 18px;
   min-width: 140px;
   background: transparent;
-  border: 1px solid rgba(232,64,74,0.55);
+  border: 1px solid rgba(237,28,36,0.55);
   border-radius: 999px;
   color: var(--brand);
   font-size: 11px;
@@ -613,8 +613,8 @@ input[type="range"]:disabled { opacity: 0.4; cursor: default; }
   flex-shrink: 0;
 }
 
-.pill-red  { background: var(--red-dim);   color: var(--red);   border: 1px solid rgba(232,64,74,0.3); }
-.pill-green{ background: var(--green-dim); color: var(--green); border: 1px solid rgba(232,64,74,0.3); }
+.pill-red  { background: var(--red-dim);   color: var(--red);   border: 1px solid rgba(237,28,36,0.3); }
+.pill-green{ background: var(--green-dim); color: var(--green); border: 1px solid rgba(237,28,36,0.3); }
 
 .pill-dot {
   width: 6px; height: 6px;
@@ -647,8 +647,8 @@ input[type="range"]:disabled { opacity: 0.4; cursor: default; }
 /* (Old left-panel, section-header, action-btn, btn-red removed — dead code) */
 
 @keyframes pulse-red {
-  0%, 100% { outline: 0px solid rgba(232,64,74,0.3); outline-offset: 0; }
-  50% { outline: 4px solid rgba(232,64,74,0); outline-offset: 0; }
+  0%, 100% { outline: 0px solid rgba(237,28,36,0.3); outline-offset: 0; }
+  50% { outline: 4px solid rgba(237,28,36,0); outline-offset: 0; }
 }
 
 /* (Old .icon-action-btn, .count-badge removed — dead code) */
@@ -901,7 +901,7 @@ input[type="range"]:disabled { opacity: 0.4; cursor: default; }
 /* ── Unified verse card (sent) ───────────────────────────────────────────── */
 .locked-verse-card {
   position: relative;
-  background: rgba(232,64,74,0.025);
+  background: rgba(237,28,36,0.025);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   padding: 12px 14px;
@@ -909,9 +909,9 @@ input[type="range"]:disabled { opacity: 0.4; cursor: default; }
   overflow: hidden;
   animation: fade-up 220ms ease-out;
   transition: border-color 0.15s, background 0.15s;
-  border-left: 2px solid rgba(232,64,74,0.4);
+  border-left: 2px solid rgba(237,28,36,0.4);
 }
-.locked-verse-card:hover { border-color: rgba(232,64,74,0.5); }
+.locked-verse-card:hover { border-color: rgba(237,28,36,0.5); }
 
 /* Inner layout */
 .lvc-ref {
@@ -984,7 +984,7 @@ input[type="range"]:disabled { opacity: 0.4; cursor: default; }
   letter-spacing: 0.05em;
   line-height: 1.4;
 }
-.conf-high  { background: rgba(61,8,10,0.8);   color: #fca5a5; border: 1px solid rgba(232,64,74,0.25); }
+.conf-high  { background: rgba(61,8,10,0.8);   color: #fca5a5; border: 1px solid rgba(237,28,36,0.25); }
 .conf-good  { background: rgba(42,42,46,0.8);  color: var(--blue); border: 1px solid rgba(255,255,255,0.28); }
 .conf-mid   { background: rgba(59,47,8,0.8);   color: #fde68a; border: 1px solid rgba(253,230,138,0.2);  }
 .conf-low   { background: rgba(59,15,15,0.8);  color: #fca5a5; border: 1px solid rgba(252,165,165,0.2);  }
@@ -1332,7 +1332,7 @@ input[type="range"]:disabled { opacity: 0.4; cursor: default; }
   transition: all var(--trans);
 }
 
-/* border-color was a hardcoded rgba(232,64,74,*) — --red's literal RGB,
+/* border-color was a hardcoded rgba(237,28,36,*) — --red's literal RGB,
    copy-paste leftover from some other toggle — ringing an otherwise all-
    green "Connected" toggle in a mismatched red/orange outline. */
 .sync-toggle input:checked ~ .sync-track { background: var(--green-dim); border-color: rgba(34,197,94,0.4); }
@@ -1361,7 +1361,7 @@ input[type="range"]:disabled { opacity: 0.4; cursor: default; }
 
 .bs-dot.active {
   background: var(--green);
-  box-shadow: 0 0 6px rgba(232,64,74,0.4);
+  box-shadow: 0 0 6px rgba(237,28,36,0.4);
 }
 
 /* (Old .bs-info, .bs-title, .bs-sub, .broadcast-settings, .bs-setting-*, .bs-input*, .bs-test-btn, .bs-link removed — dead code) */
@@ -1452,8 +1452,8 @@ input[type="range"]:disabled { opacity: 0.4; cursor: default; }
 }
 
 .test-result.hidden { display: none; }
-.test-result.success { background: var(--green-dim); color: var(--green); border: 1px solid rgba(232,64,74,0.25); }
-.test-result.error   { background: var(--red-dim); color: var(--red); border: 1px solid rgba(232,64,74,0.25); }
+.test-result.success { background: var(--green-dim); color: var(--green); border: 1px solid rgba(237,28,36,0.25); }
+.test-result.error   { background: var(--red-dim); color: var(--red); border: 1px solid rgba(237,28,36,0.25); }
 
 /* ══════════════════════════════════════
    SETTINGS MODAL (JS compat)
@@ -1627,7 +1627,7 @@ input[type="range"]:disabled { opacity: 0.4; cursor: default; }
 .display-output-row .modal-btn { padding: 6px 10px; font-size: var(--fs-xs); }
 .display-output-del {
   color: var(--red) !important;
-  border-color: rgba(232,64,74,0.3) !important;
+  border-color: rgba(237,28,36,0.3) !important;
   line-height: 1;
 }
 .display-output-del:disabled { opacity: 0.35; cursor: not-allowed; }
@@ -2741,7 +2741,7 @@ body > .lyric-follow-hud { position: fixed; left: 14px; bottom: 14px; z-index: 4
    button needs a fixed floor so it can't get squeezed/overlapped by a
    longer language name (found live: "Portuguese" ran into "Install"). */
 .lang-pack-row .modal-btn { padding: 5px 10px; font-size: var(--fs-xs); flex-shrink: 0; white-space: nowrap; }
-.lang-pack-remove { color: var(--red) !important; border-color: rgba(232,64,74,0.3) !important; }
+.lang-pack-remove { color: var(--red) !important; border-color: rgba(237,28,36,0.3) !important; }
 .settings-pane { display: none; }
 .settings-pane.active {
   display: flex;
@@ -3075,7 +3075,7 @@ mark.help-hit.is-current { background: rgba(255,255,255,0.38); }
    "connected/on" case, but .connected/.error never had rules of their own,
    so the ProPresenter dot in particular never actually changed color
    regardless of real connection state. */
-.bs-dot.connected { background: var(--green); box-shadow: 0 0 6px rgba(232,64,74,0.4); }
+.bs-dot.connected { background: var(--green); box-shadow: 0 0 6px rgba(237,28,36,0.4); }
 .bs-dot.error      { background: var(--red); }
 .bs-dot.warn       { background: var(--orange, #d9a441); }
 
@@ -3286,8 +3286,8 @@ mark.help-hit.is-current { background: rgba(255,255,255,0.38); }
   animation: toast-in 180ms ease-out;
 }
 
-.toast.success { border-color: rgba(232,64,74,0.3); color: var(--green); }
-.toast.error   { border-color: rgba(232,64,74,0.3);  color: var(--red);   }
+.toast.success { border-color: rgba(237,28,36,0.3); color: var(--green); }
+.toast.error   { border-color: rgba(237,28,36,0.3);  color: var(--red);   }
 
 @keyframes toast-in {
   from { opacity: 0; transform: translateX(12px); }
@@ -3974,7 +3974,7 @@ mark.help-hit.is-current { background: rgba(255,255,255,0.38); }
   gap: 5px;
   padding: 3px 9px;
   background: var(--brand-dim);
-  border: 1px solid rgba(232,64,74,0.3);
+  border: 1px solid rgba(237,28,36,0.3);
   border-radius: 20px;
   font-family: var(--font-head);
   font-size: 9px;
@@ -4011,7 +4011,7 @@ mark.help-hit.is-current { background: rgba(255,255,255,0.38); }
   cursor: pointer;
   transition: all var(--trans);
 }
-.cs-clear-btn:hover { background: rgba(232,64,74,0.1); border-color: var(--red); color: var(--red); }
+.cs-clear-btn:hover { background: rgba(237,28,36,0.1); border-color: var(--red); color: var(--red); }
 
 /* Live Queue card — fills all remaining center space */
 .cs-live-queue-section {
@@ -4863,7 +4863,7 @@ mark.help-hit.is-current { background: rgba(255,255,255,0.38); }
   flex-shrink: 0;
 }
 
-.rs-section-hdr--green { border-bottom-color: rgba(232,64,74,0.15); }
+.rs-section-hdr--green { border-bottom-color: rgba(237,28,36,0.15); }
 .rs-section-hdr--green .rs-section-title { color: var(--green); }
 
 .rs-section-title {
@@ -4892,7 +4892,7 @@ mark.help-hit.is-current { background: rgba(255,255,255,0.38); }
 .rs-badge--green {
   background: var(--green-dim);
   color: var(--green);
-  border: 1px solid rgba(232,64,74,0.25);
+  border: 1px solid rgba(237,28,36,0.25);
 }
 
 .rs-badge--neutral {
@@ -4935,7 +4935,7 @@ mark.help-hit.is-current { background: rgba(255,255,255,0.38); }
   transition: all var(--trans);
   margin-left: 2px;
 }
-.rs-clear-btn:hover { background: rgba(232,64,74,0.1); border-color: var(--red); color: var(--red); }
+.rs-clear-btn:hover { background: rgba(237,28,36,0.1); border-color: var(--red); color: var(--red); }
 
 .rs-empty-state {
   padding: 18px 14px;
@@ -5186,8 +5186,8 @@ mark.help-hit.is-current { background: rgba(255,255,255,0.38); }
 
 /* Auto-sent record in candidates — green left accent */
 .rs-candidates-body .candidate-sent {
-  border-left: 2px solid rgba(232,64,74,0.5) !important;
-  background: rgba(232,64,74,0.03) !important;
+  border-left: 2px solid rgba(237,28,36,0.5) !important;
+  background: rgba(237,28,36,0.03) !important;
 }
 .rs-candidates-body .candidate-sent .lvc-ref { color: var(--green) !important; }
 
@@ -5405,7 +5405,7 @@ mark.help-hit.is-current { background: rgba(255,255,255,0.38); }
   color: white !important;
   border-color: var(--red) !important;
 }
-.ts-danger-btn:hover { background: #c9333d !important; }
+.ts-danger-btn:hover { background: #c9181f !important; }
 
 /* ── Tools (after Compositor) ──
    The tools (V, T, U) sit in one segmented group under the canvas, with what
@@ -6056,6 +6056,16 @@ body.ts-dragging-guide-h, body.ts-dragging-guide-h * { cursor: row-resize !impor
   box-shadow: 0 1px 4px rgba(0,0,0,0.45);
 }
 .ts-handle::after { content: ''; position: absolute; inset: -6px; }
+/* A corner's hit area reaches much further out than the dot itself — the
+   ring beyond the dot rotates (tsBeginDrag's radius check), so it needs
+   real room to land in, not the few px every OTHER handle's ::after gives
+   it. JS toggles .ts-handle-rotatable live as the pointer crosses into that
+   ring, so the cursor itself shows which gesture is about to start
+   (2026-09-30: "I don't see the rotation from the corners" — the ring was
+   too thin to reliably land in, with no way to tell it was even there). */
+.ts-handle-nw::after, .ts-handle-ne::after, .ts-handle-se::after, .ts-handle-sw::after { inset: -14px; }
+.ts-handle-rotatable { cursor: grab !important; }
+.ts-handle-rotatable:active { cursor: grabbing !important; }
 /* Corners */
 .ts-handle-nw { left: -7px;  top: -7px;    cursor: nwse-resize; }
 .ts-handle-ne { right: -7px; top: -7px;    cursor: nesw-resize; }
@@ -7075,8 +7085,8 @@ body.ts-scrubbing, body.ts-scrubbing * { cursor: ew-resize !important; user-sele
 .osp-ok       .osp-dot { background: var(--green); box-shadow: 0 0 8px rgba(34,197,94,0.55); }
 .osp-warn     { border-color: rgba(245, 158, 11, 0.35); }
 .osp-warn     .osp-dot { background: var(--orange); box-shadow: 0 0 8px rgba(245,158,11,0.5); }
-.osp-err      { border-color: rgba(232, 64, 74, 0.35); }
-.osp-err      .osp-dot { background: var(--red); box-shadow: 0 0 8px rgba(232,64,74,0.5); }
+.osp-err      { border-color: rgba(237,28,36, 0.35); }
+.osp-err      .osp-dot { background: var(--red); box-shadow: 0 0 8px rgba(237,28,36,0.5); }
 .osp-progress { border-color: rgba(255,255,255,0.4); background: rgba(255,255,255,0.04); }
 .osp-progress .osp-dot { background: var(--blue); box-shadow: 0 0 8px rgba(255,255,255,0.5); }
 .osp-loading  .osp-dot { background: var(--text-3); }

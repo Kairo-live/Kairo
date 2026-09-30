@@ -269,7 +269,7 @@
   // white for the last minute and red past zero.
   const preCountdown = (accent) => text('countdown', 'Countdown', '', box(660, 715, 600, 120),
     { family: 'Playfair Display', size: 96, weight: 600, lineHeight: 1, letterSpacing: 2 },
-    { binding: 'timer', color: accent, align: 'center', warnColor: '#ffffff', overtimeColor: '#e8404a',
+    { binding: 'timer', color: accent, align: 'center', warnColor: '#ffffff', overtimeColor: '#ed1c24',
       build: { type: 'fade', delay: 1.4, duration: 0.9 } });
 
   const clone = (o) => JSON.parse(JSON.stringify(o));
@@ -296,18 +296,18 @@
   const sideCountdown = () => text('countdown', 'Countdown', '', box(1230, 380, 1000, 320),
     { family: 'Anton', size: 300, weight: 400, lineHeight: 1, letterSpacing: 8 },
     { binding: 'timer', color: PAL.cream, opacity: 13, align: 'center', rotation: 90,
-      warnColor: PAL.gold, overtimeColor: '#e8404a',
+      warnColor: PAL.gold, overtimeColor: '#ed1c24',
       build: { type: 'fade', delay: 0.1, duration: 1.4 }, idle: { type: 'float', amount: 25, speed: 0.4 } });
   // The finale's countdown: full size and full strength inside a ring that
   // runs down with it.
   const finaleCountdown = () => [
     { id: 'ring', type: 'motion', name: 'Countdown ring', visible: true, opacity: 100, pos: box(1180, 190, 620, 620),
       build: { type: 'pop', delay: 0.4, duration: 0.8 },
-      graphic: { kind: 'ring', colors: [PAL.gold, PAL.cream, PAL.gold, '#e8404a'], thickness: 3, trackOpacity: 16,
+      graphic: { kind: 'ring', colors: [PAL.gold, PAL.cream, PAL.gold, '#ed1c24'], thickness: 3, trackOpacity: 16,
         direction: 'deplete', caps: 'round', glow: 35, stateColors: true, seed: 1 } },
     text('countdown', 'Countdown', '', box(1180, 400, 620, 200),
       { family: 'Anton', size: 170, weight: 400, lineHeight: 1, letterSpacing: 4 },
-      { binding: 'timer', color: PAL.cream, align: 'center', warnColor: PAL.gold, overtimeColor: '#e8404a',
+      { binding: 'timer', color: PAL.cream, align: 'center', warnColor: PAL.gold, overtimeColor: '#ed1c24',
         build: { type: 'fade', delay: 0.6, duration: 0.8 } }),
   ];
 

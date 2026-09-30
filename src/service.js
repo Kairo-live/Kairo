@@ -3202,7 +3202,7 @@
         // recolours the element as the countdown enters warning / overtime.
         d.dataset.baseColor = hexA(color, opacity);
         d.dataset.warnColor = hexA(ov.warnColor || layer.warnColor || '#e8a64a', opacity);
-        d.dataset.overtimeColor = hexA(ov.overtimeColor || layer.overtimeColor || '#e8404a', opacity);
+        d.dataset.overtimeColor = hexA(ov.overtimeColor || layer.overtimeColor || '#ed1c24', opacity);
       }
       // Outline folded into this SAME text-shadow (a ring of sharp offset
       // shadows via outlineShadows — see layer_geometry.js) rather than
@@ -4984,7 +4984,7 @@
     const short = msg.length > 22 ? msg.slice(0, 21) + '…' : msg;
     readoutEl.textContent = short;
     readoutEl.title = msg;
-    readoutEl.style.color = '#e8404a';
+    readoutEl.style.color = '#ed1c24';
     setTimeout(() => {
       if (readoutEl.textContent === short) { readoutEl.textContent = prev; readoutEl.removeAttribute('title'); readoutEl.style.color = ''; }
     }, 2500);
@@ -5478,7 +5478,7 @@
         el.classList.toggle('is-overtime', ot);
         el.classList.toggle('is-warning', wn);
         const base = el.dataset.baseColor;
-        if (base) el.style.color = ot ? (el.dataset.overtimeColor || '#e8404a')
+        if (base) el.style.color = ot ? (el.dataset.overtimeColor || '#ed1c24')
           : wn ? (el.dataset.warnColor || '#e8a64a') : base;
       });
       // Individual hour/minute/second parts — same idea as display.html's
@@ -5496,7 +5496,7 @@
           el.classList.toggle('is-overtime', ot);
           el.classList.toggle('is-warning', wn);
           const base = el.dataset.baseColor;
-          if (base) el.style.color = ot ? (el.dataset.overtimeColor || '#e8404a')
+          if (base) el.style.color = ot ? (el.dataset.overtimeColor || '#ed1c24')
             : wn ? (el.dataset.warnColor || '#e8a64a') : base;
         });
       });

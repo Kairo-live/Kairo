@@ -187,7 +187,7 @@ const DEFAULT_LOOKS = [
         fill: 'solid', color: '#0a0e14', opacity: 95, color2: '#0a0e14', angle: 0, radius: 0,
         pos: { x: 0, y: 754, w: 1920, h: 206 } },
       { id: 'band-ref', type: 'background', name: 'Reference Band', visible: true,
-        fill: 'solid', color: '#e8404a', opacity: 100, color2: '#8a2128', angle: 90, radius: 0,
+        fill: 'solid', color: '#ed1c24', opacity: 100, color2: '#8a2128', angle: 90, radius: 0,
         pos: { x: 0, y: 960, w: 1920, h: 76 } },
       { id: 'verse', type: 'text', name: 'Verse', visible: true, binding: 'verse', customText: '',
         pos: { x: 96, y: 784, w: 1728, h: 150 },
@@ -615,7 +615,7 @@ const DEFAULT_LOOKS = [
       { id: 'light', type: 'motion', name: 'Aurora', visible: true, opacity: 100, pos: { x: 0, y: 0, w: 1920, h: 1080 },
         graphic: { kind: 'aurora', colors: ['#4f46e5', '#0ea5e9', '#a855f7'], count: 3, size: 90, intensity: 38, speed: 0.5, blend: 'glow', seed: 42 } },
       { id: 'ring', type: 'motion', name: 'Progress Ring', visible: true, opacity: 100, pos: { x: 600, y: 180, w: 720, h: 720 },
-        graphic: { kind: 'ring', colors: ['#ffffff', '#ffffff', '#e8a64a', '#e8404a'], thickness: 3, trackOpacity: 14, direction: 'deplete', caps: 'round', glow: 40, stateColors: true, seed: 1 } },
+        graphic: { kind: 'ring', colors: ['#ffffff', '#ffffff', '#e8a64a', '#ed1c24'], thickness: 3, trackOpacity: 14, direction: 'deplete', caps: 'round', glow: 40, stateColors: true, seed: 1 } },
       { id: 'timer', type: 'text', name: 'Countdown', visible: true, binding: 'timer', customText: '',
         pos: { x: 600, y: 440, w: 720, h: 200 },
         font: { family: 'Manrope', size: 150, weight: 800, italic: false, lineHeight: 1, letterSpacing: 0, transform: 'none' },
@@ -662,7 +662,7 @@ const DEFAULT_LOOKS = [
         color: '#ffffff', opacity: 100, align: 'center',
         shadow: { ...TXT_SHADOW_SOFT }, outline: { ...NO_OUTLINE } },
       { id: 'bar', type: 'motion', name: 'Progress Bar', visible: true, opacity: 100, pos: { x: 660, y: 720, w: 600, h: 10 },
-        graphic: { kind: 'bar', colors: ['#ffe7b0', '#ffffff', '#e8a64a', '#e8404a'], trackOpacity: 16, radius: 100, direction: 'deplete', glow: 30, stateColors: true, seed: 1 } },
+        graphic: { kind: 'bar', colors: ['#ffe7b0', '#ffffff', '#e8a64a', '#ed1c24'], trackOpacity: 16, radius: 100, direction: 'deplete', glow: 30, stateColors: true, seed: 1 } },
     ],
   },
   {
@@ -2808,22 +2808,32 @@ function tsDecorateLayerEl(div, layer, draggable) {
     // Eight-point selection frame: four corners (scale, proportions kept) +
     // four edge midpoints (stretch), each from the opposite anchor — and a
     // rotate handle under the layer, for anything with its own box. Every
-    // corner ALSO rotates, the way Keynote/PowerPoint/Slides do it: land
-    // on its dot and it resizes, land in the ring just outside — its hit
-    // area already reaches a bit further (.ts-handle::after) — and it
-    // rotates instead, so there's no need to hunt down for the one small
-    // rotate handle specifically.
+    // corner ALSO rotates, the way Keynote/PowerPoint/Slides do it: land on
+    // its dot and it resizes, land in the ring just outside — a wide one,
+    // its hit area reaching well past the dot (.ts-handle-nw::after etc.) —
+    // and it rotates instead, cursor already showing which as the pointer
+    // crosses the boundary, so there's no need to hunt for the one small
+    // rotate handle specifically (2026-09-30: the first version of this
+    // ring was only a few px wide with no way to feel where it was, so
+    // landing in it reliably enough to notice it working was pure luck).
     const CORNER_RESIZE_R = 7; // px — the visible dot's own radius
+    const cornerDist = (h, e) => {
+      const r = h.getBoundingClientRect();
+      return Math.hypot(e.clientX - (r.left + r.width / 2), e.clientY - (r.top + r.height / 2));
+    };
     ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'].forEach(dir => {
       const h = document.createElement('div');
       h.className = `ts-handle ts-handle-${dir}`;
       const isCorner = dir.length === 2;
+      if (isCorner) {
+        h.addEventListener('mousemove', (e) => {
+          if (tsDrag) return; // mid-gesture already — don't fight its own cursor
+          h.classList.toggle('ts-handle-rotatable', cornerDist(h, e) > CORNER_RESIZE_R);
+        });
+        h.addEventListener('mouseleave', () => h.classList.remove('ts-handle-rotatable'));
+      }
       h.addEventListener('mousedown', (e) => {
-        if (isCorner) {
-          const r = h.getBoundingClientRect();
-          const dist = Math.hypot(e.clientX - (r.left + r.width / 2), e.clientY - (r.top + r.height / 2));
-          if (dist > CORNER_RESIZE_R) { tsBeginDrag(e, layer, 'rotate'); return; }
-        }
+        if (isCorner && cornerDist(h, e) > CORNER_RESIZE_R) { tsBeginDrag(e, layer, 'rotate'); return; }
         tsBeginDrag(e, layer, 'resize', dir);
       });
       div.appendChild(h);
@@ -5389,7 +5399,7 @@ function renderItemTimerControls() {
   const timerLayer = (resolveItemBaseLook(item)?.layers || []).find(l => l.binding === 'timer');
   const colors = fieldRow([
     swatchField('Last minute', params.warnColor || timerLayer?.warnColor || '#e8a64a', (v) => save({ warnColor: v }), 'The countdown turns this colour for its final minute'),
-    swatchField('Overtime', params.overtimeColor || timerLayer?.overtimeColor || '#e8404a', (v) => save({ overtimeColor: v }), 'The colour once it passes zero and counts up'),
+    swatchField('Overtime', params.overtimeColor || timerLayer?.overtimeColor || '#ed1c24', (v) => save({ overtimeColor: v }), 'The colour once it passes zero and counts up'),
   ]);
   host.appendChild(section('item', 'Timer', prop('Counts down', modeSel), valueRow, colors));
 
@@ -6097,7 +6107,7 @@ document.addEventListener('keydown', (e) => {
 const TS_TOOLS = { move: { key: 'v' }, type: { key: 't' }, shape: { key: 'u' } };
 let tsTool = 'move';
 const tsTypeDefaults = { family: 'Manrope', size: 72, weight: 600, italic: false, lineHeight: 1.2, letterSpacing: 0, transform: 'none', color: '#ffffff', align: 'left' };
-const tsShapeDefaults = { shape: 'rect', color: '#e8404a', radius: 0 };
+const tsShapeDefaults = { shape: 'rect', color: '#ed1c24', radius: 0 };
 
 function selectTool(tool) {
   if (!TS_TOOLS[tool]) return;
