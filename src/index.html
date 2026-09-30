@@ -1112,14 +1112,12 @@
                          include what makes it a timer, not just its font. -->
                     <div class="ts-item-mode-header hidden" id="ts-item-timer-header"></div>
 
-                    <!-- Theme-level controls — always visible regardless of
-                         layer selection, same section/row convention as the
-                         per-layer properties below so the whole panel reads
-                         as one continuous inspector, not two different UIs
-                         stacked together. -->
-                    <div class="ts-props-section ts-theme-meta">
-                        <span class="ts-props-section-label">Layout</span>
+                    <!-- The theme's own settings (Theme Studio's Theme tab) — one
+                         section, one row each, the way the layer tabs lay out
+                         theirs. -->
+                    <div class="ts-props-section ts-theme-meta" id="ts-text-anim-section">
                         <div class="ts-prop-row">
+                            <span class="ts-prop-label">Layout</span>
                             <select class="ts-select" id="ts-layout-picker" title="Where the text sits on the screen">
                                 <option value="fullscreen">Full screen</option>
                                 <option value="lower-third">Lower third</option>
@@ -1127,12 +1125,9 @@
                                 <option value="split-right">Split, text right</option>
                             </select>
                         </div>
-                    </div>
-                    <div class="ts-props-section ts-theme-meta" data-tab="style" id="ts-text-anim-section">
-                        <span class="ts-props-section-label">Text Animation</span>
-                        <p class="setting-hint" style="margin:0 0 8px;">How the verse text itself reveals, separate from the transition between slides.</p>
-                        <div class="ts-prop-row">
-                            <select id="ts-text-anim-select" class="ts-size-select" style="width:100%;">
+                        <div class="ts-prop-row" title="How the verse text itself reveals, separate from the transition between slides">
+                            <span class="ts-prop-label">Text reveal</span>
+                            <select id="ts-text-anim-select" class="ts-select">
                                 <option value="none">None</option>
                                 <option value="word-in" title="Bold per-word reveal">Word</option>
                                 <option value="activate" title="Each word flashes from dim to fully lit">Activate</option>
@@ -1149,28 +1144,26 @@
                             <input type="range" id="ts-text-anim-speed" class="ts-anim-speed-slider" min="0.3" max="2.5" step="0.1" value="1" title="Text animation speed" style="width:100%;">
                         </div>
                         <div class="ts-prop-row hidden" id="ts-text-anim-color-row">
-                            <span class="ts-prop-label">Highlight color</span>
+                            <span class="ts-prop-label">Highlight</span>
                             <input type="color" id="ts-text-anim-color" class="ts-prop-color" value="#ffd23f">
                         </div>
                         <div class="ts-prop-row hidden" id="ts-text-anim-intensity-row">
                             <span class="ts-prop-label">Intensity</span>
                             <input type="range" id="ts-text-anim-intensity" class="ts-prop-slider" min="0.5" max="2" step="0.1" value="1" style="flex:1;">
                         </div>
-                    </div>
-                    <div class="ts-props-section ts-theme-meta">
-                        <span class="ts-props-section-label">Canvas</span>
                         <div class="ts-prop-row">
-                            <button id="ts-alpha-toggle" class="ts-chip" title="True alpha transparency. Works reliably through Syphon/NDI output (real per-pixel alpha). Most OBS/vMix &quot;Window Capture&quot; setups do NOT preserve real transparency from any app's window — if your keyed background isn't showing up there, use Chroma Key instead.">Transparent</button>
-                            <button id="ts-chroma-toggle" class="ts-chip" title="Solid chroma-green background (#00FF00) — key it out with a Chroma Key filter in OBS/vMix/whatever you're capturing with. Works with plain Window Capture, unlike Transparent — the standard, reliable choice unless you're on Syphon/NDI.">Chroma Key</button>
+                            <span class="ts-prop-label">Canvas</span>
+                            <div class="ts-chip-group">
+                                <button id="ts-alpha-toggle" class="ts-chip" title="True alpha transparency. Works reliably through Syphon/NDI output (real per-pixel alpha). Most OBS/vMix &quot;Window Capture&quot; setups do NOT preserve real transparency from any app's window — if your keyed background isn't showing up there, use Chroma Key instead.">Transparent</button>
+                                <button id="ts-chroma-toggle" class="ts-chip" title="Solid chroma-green background (#00FF00) — key it out with a Chroma Key filter in OBS/vMix/whatever you're capturing with. Works with plain Window Capture, unlike Transparent — the standard, reliable choice unless you're on Syphon/NDI.">Chroma key</button>
+                            </div>
                         </div>
-                    </div>
-                    <!-- Only shown for the Multi-Language layout — picks which language
-                         fills the right panel's preview here, and doubles as this
-                         theme's default when nothing else (a playlist item, the Bible
-                         tab) has already chosen one. -->
-                    <div class="ts-props-section ts-theme-meta hidden" id="ts-translate-group">
-                        <span class="ts-props-section-label">Translate to</span>
-                        <div class="ts-prop-row">
+                        <!-- Only shown for the Multi-Language layout — picks which
+                             language fills the right panel's preview here, and
+                             doubles as this theme's default when nothing else (a
+                             playlist item, the Bible tab) has already chosen one. -->
+                        <div class="ts-prop-row hidden" id="ts-translate-group">
+                            <span class="ts-prop-label">Translate to</span>
                             <select class="ts-select" id="ts-translate-picker">
                                 <option value="">None</option>
                                 <option value="fr">French</option>

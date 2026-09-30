@@ -5475,6 +5475,8 @@ mark.help-hit.is-current { background: rgba(255,255,255,0.38); }
 .ts-item-mode-header { padding: 12px 12px 8px; }
 .ts-item-mode-header .ts-add-btn { width: 100%; justify-content: center; }
 .ts-item-mode-header.ts-props-section { padding: 12px 14px; }
+/* A countdown's settings are sections of their own, with their own padding. */
+#ts-item-timer-header { padding: 0; }
 .ts-item-mode-header svg { width: 14px; height: 14px; }
 
 .ts-body {
@@ -6249,11 +6251,94 @@ mark.help-hit.is-current { background: rgba(255,255,255,0.38); }
   min-width: 52px;
   flex-shrink: 0;
 }
-/* A value's unit after its field ("10 minutes"). */
+/* The first label in a row names the row: one column wide, so every row's
+   control starts at the same place, as in any inspector. A second label mid-
+   row (Size … Weight) sits right after the control before it. */
+.ts-prop-row > .ts-prop-label:first-child { min-width: 76px; }
+.ts-prop-row > .ts-prop-label:not(:first-child) { min-width: 0; margin-left: 4px; }
+/* A value's unit after its field ("10 minutes", "15°"). */
 .ts-prop-unit {
   font-size: 11px;
   color: var(--text-3);
 }
+.ts-inline-field { display: flex; align-items: center; gap: 6px; }
+/* Design-tool fields (numField/fieldRow in app_theme_studio.js): a number box
+   with its name and unit inside, several to a line. */
+.ts-field-row {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(0, 1fr);
+  gap: 8px;
+  align-items: center;
+}
+.ts-field-row.ts-lead-auto { grid-template-columns: auto; }
+.ts-field-row.ts-trail-auto { grid-auto-columns: auto; grid-template-columns: minmax(0, 1fr); }
+.ts-field {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 26px;
+  padding: 0 7px;
+  min-width: 0;
+  background: #2c2c2e;
+  border: 1px solid var(--border-md);
+  border-radius: 4px;
+  cursor: text;
+  transition: border-color var(--trans);
+}
+.ts-field:focus-within { border-color: var(--blue); }
+.ts-field-label { font-size: 10px; color: var(--text-3); flex-shrink: 0; white-space: nowrap; }
+.ts-field-unit { font-size: 10px; color: var(--text-3); flex-shrink: 0; }
+.ts-field input {
+  flex: 1;
+  min-width: 0;
+  width: 100%;
+  padding: 0;
+  background: none;
+  border: 0;
+  outline: none;
+  color: var(--text);
+  font-size: 11px;
+  font-family: var(--mono);
+  text-align: right;
+  -moz-appearance: textfield;
+}
+.ts-field input::-webkit-inner-spin-button { -webkit-appearance: none; }
+.ts-field-row > .ts-select, .ts-field-row > .ts-select-btn { width: 100%; }
+.ts-field-row > .ts-prop-color { width: 34px; }
+/* A named colour and a named switch, field-sized (swatchField/toggleField). */
+.ts-swatch-field, .ts-toggle-field { justify-content: space-between; cursor: default; }
+.ts-field input.ts-swatch-mini {
+  flex: 0 0 22px;
+  width: 22px; height: 16px;
+  padding: 0; border: 0; border-radius: 3px;
+  background: none; cursor: pointer; flex-shrink: 0;
+}
+.ts-swatch-mini::-webkit-color-swatch-wrapper { padding: 0; }
+.ts-swatch-mini::-webkit-color-swatch { border: 1px solid rgba(255,255,255,0.15); border-radius: 3px; }
+.ts-toggle-field .ts-toggle { transform: scale(0.85); transform-origin: right center; }
+/* A picture's thumbnail beside its Replace… button. */
+.ts-image-thumb {
+  width: 46px; height: 26px;
+  border-radius: 4px;
+  border: 1px solid var(--border-md);
+  background: #111 center / cover no-repeat;
+}
+/* A small pressed/unpressed button (Italic). */
+.ts-icon-toggle {
+  width: 28px;
+  height: 26px;
+  flex-shrink: 0;
+  border: 1px solid var(--border-md);
+  border-radius: 4px;
+  background: #2c2c2e;
+  color: var(--text-2);
+  font: 600 12px var(--font);
+  cursor: pointer;
+  transition: background var(--trans), color var(--trans), border-color var(--trans);
+}
+.ts-icon-toggle:hover { color: var(--text); }
+.ts-icon-toggle.active { background: var(--selected-dim); color: var(--selected-text); border-color: var(--selected-border); }
 #ts-item-timer-header .ts-prop-number {
   width: 64px;
   font-family: inherit;

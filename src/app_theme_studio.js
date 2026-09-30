@@ -2164,7 +2164,9 @@ function renderPreview() {
       // can't break onto a new line (one long word, or any text at all
       // once the font is bigger than the box) does — exactly the case
       // that was reported.
-      if (layer.pos && div.scrollWidth > div.clientWidth + 1) {
+      // (Not scrolling text: a marquee runs past its box on purpose — growing
+      // it widened the box to the whole screen for good.)
+      if (layer.pos && !layer.scroll?.enabled && div.scrollWidth > div.clientWidth + 1) {
         const stageRectNow = stage.getBoundingClientRect();
         if (stageRectNow.width > 0) {
           // Capped at the canvas's own width — growing wasn't meant to be
@@ -2869,7 +2871,9 @@ function tsSyncPosInputs(layer) {
   if (!layer.pos) return;
   document.querySelectorAll('#ts-props-panel [data-pos-input]').forEach(inp => {
     const k = inp.dataset.posInput;
-    if (document.activeElement !== inp) inp.value = layer.pos[k];
+    if (document.activeElement === inp) return;
+    if (k === 'rotation') inp.value = Math.round(layer.rotation || 0);
+    else inp.value = k === 'h' && layer.type === 'text' && !layer.pos.h ? '' : layer.pos[k];
   });
 }
 
@@ -3379,7 +3383,8 @@ function renderProps() {
   if (!isCanvasFill) renderAnimateProps(panel, activeLayer);
 
   let available = PROPS_TABS_BY_LAYER_TYPE[activeLayer.type] || PROPS_TABS_BY_LAYER_TYPE.text;
-  if (isCanvasFill) available = available.filter(t => t !== 'animate');
+  // The canvas fill is always the whole screen: nothing to place, nothing to animate.
+  if (isCanvasFill) available = available.filter(t => t !== 'animate' && t !== 'layout');
   if (activePropsTab !== 'item' && !available.includes(activePropsTab)) activePropsTab = available[0];
   showTabs(['item', ...available]);
   panel.style.display = onItemTab() ? 'none' : 'block';
@@ -3459,6 +3464,98 @@ function makeColor(val, onChange) {
   return inp;
 }
 
+// ── Design-tool fields ────────────────────────────────────────────────────
+// The way design tools lay out an inspector: a number is a compact box with
+// its name inside ("X 140", "Delay 0.4 s"), two or three to a line, rather
+// than a whole row — label, slider, value — for each one.
+function numField(label, value, { min = -Infinity, max = Infinity, step = 1, unit = '', title = '', placeholder = '', onChange }) {
+  const wrap = document.createElement('label');
+  wrap.className = 'ts-field';
+  if (title) wrap.title = title;
+  if (label) {
+    const l = document.createElement('span');
+    l.className = 'ts-field-label';
+    l.textContent = label;
+    wrap.appendChild(l);
+  }
+  const inp = document.createElement('input');
+  inp.type = 'number'; inp.step = step;
+  if (Number.isFinite(min)) inp.min = min;
+  if (Number.isFinite(max)) inp.max = max;
+  inp.value = value ?? '';
+  if (placeholder) inp.placeholder = placeholder;
+  if (label || title) inp.setAttribute('aria-label', title || label);
+  inp.addEventListener('input', () => {
+    const v = parseFloat(inp.value);
+    if (inp.value === '') onChange(null);
+    else if (Number.isFinite(v)) onChange(Math.max(min, Math.min(max, v)));
+  });
+  wrap.appendChild(inp);
+  if (unit) {
+    const u = document.createElement('span');
+    u.className = 'ts-field-unit';
+    u.textContent = unit;
+    wrap.appendChild(u);
+  }
+  return wrap;
+}
+// Controls side by side on one line, sharing it equally; `lead` sizes the
+// first to its content (a colour swatch), `trail` the last (a button).
+function fieldRow(children, { lead = false, trail = false } = {}) {
+  const r = document.createElement('div');
+  r.className = 'ts-field-row' + (lead ? ' ts-lead-auto' : '') + (trail ? ' ts-trail-auto' : '');
+  children.filter(Boolean).forEach(c => r.appendChild(c));
+  return r;
+}
+// A small on/off button (Italic), pressed when on.
+function iconToggle(text, on, title, onChange, { italic = false } = {}) {
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.className = 'ts-icon-toggle' + (on ? ' active' : '');
+  b.textContent = text;
+  if (italic) b.style.fontStyle = 'italic';
+  b.title = title;
+  b.setAttribute('aria-pressed', String(!!on));
+  b.addEventListener('click', () => {
+    const now = !b.classList.contains('active');
+    b.classList.toggle('active', now);
+    b.setAttribute('aria-pressed', String(now));
+    onChange(now);
+  });
+  return b;
+}
+// A colour with its name, field-sized ("Overtime ■").
+function swatchField(label, color, onChange, title = '') {
+  const wrap = document.createElement('label');
+  wrap.className = 'ts-field ts-swatch-field';
+  if (title) wrap.title = title;
+  const l = document.createElement('span');
+  l.className = 'ts-field-label';
+  l.textContent = label;
+  const c = makeColor(color, onChange);
+  c.className = 'ts-swatch-mini';
+  wrap.append(l, c);
+  return wrap;
+}
+// A switch with its name, field-sized ("Finale ●").
+function toggleField(label, on, onChange, title = '') {
+  const wrap = document.createElement('div');
+  wrap.className = 'ts-field ts-toggle-field';
+  if (title) wrap.title = title;
+  const l = document.createElement('span');
+  l.className = 'ts-field-label';
+  l.textContent = label;
+  wrap.append(l, makeToggle(on, onChange));
+  return wrap;
+}
+// A colour, and its opacity beside it — a design tool's fill line.
+function colorOpacityRow(color, onColor, opacity, onOpacity) {
+  return fieldRow([
+    makeColor(color, onColor),
+    numField('Opacity', Math.round(opacity ?? 100), { min: 0, max: 100, unit: '%', onChange: v => onOpacity(v ?? 100) }),
+  ], { lead: true });
+}
+
 // `format` (optional) turns the raw slider value into its label ("1.25×").
 function makeSlider(val, min, max, onChange, format) {
   const wrap = document.createElement('div');
@@ -3510,7 +3607,7 @@ function makeAlignBtns(current, onChange) {
     const btn = document.createElement('button');
     btn.className = 'ts-align-btn' + (current === v ? ' active' : '');
     btn.innerHTML = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">${icon}</svg>`;
-    btn.title = v;
+    btn.title = 'Align ' + v;
     btn.addEventListener('click', () => {
       wrap.querySelectorAll('.ts-align-btn').forEach(b => b.classList.remove('active'));
       btn.classList.add('active');
@@ -4036,26 +4133,34 @@ const layerAspectLock = new Map();
 
 function renderLayoutProps(panel, layer) {
   const cur = measurePos(layer);
+  const isText = layer.type === 'text';
 
-  const posNum = (key, min, max, { aspect = false } = {}) => {
-    const inp = makeNumber(cur[key], min, max, 1, v => {
-      const p = ensurePos(layer);
-      const before = { w: p.w, h: p.h };
-      p[key] = Math.round(v);
-      if (aspect && (layerAspectLock.get(layer.id) ?? true) && before.w > 0 && before.h > 0) {
-        if (key === 'w') p.h = Math.max(1, Math.round(before.h * (p.w / before.w)));
-        else p.w = Math.max(1, Math.round(before.w * (p.h / before.h)));
-        tsSyncPosInputs(layer);
-      }
-      renderPreview();
-      // Pre-existing gap in theme mode: these inputs never called
-      // scheduleThemeAutosave() either — out of scope to fix here. Item
-      // mode needs this, additively — typing an exact position is one of
-      // the two ways (with drag) to set a position override.
-      if (tsMode === 'item') tsSave();
+  // X / Y / W / H as design tools show them: compact boxes, two to a line.
+  // (A text box's height of 0 means "as tall as its text": shown as auto.)
+  const posField = (key, label, min, max, { aspect = false } = {}) => {
+    const autoH = key === 'h' && isText;
+    const f = numField(label, autoH && !cur.h ? '' : cur[key], {
+      min, max, placeholder: autoH ? 'auto' : '',
+      title: autoH ? 'Height — leave empty to fit the text' : '',
+      onChange: (v) => {
+        const p = ensurePos(layer);
+        const before = { w: p.w, h: p.h };
+        p[key] = Math.round(v ?? 0);
+        if (aspect && (layerAspectLock.get(layer.id) ?? true) && before.w > 0 && before.h > 0) {
+          if (key === 'w') p.h = Math.max(1, Math.round(before.h * (p.w / before.w)));
+          else p.w = Math.max(1, Math.round(before.w * (p.h / before.h)));
+          tsSyncPosInputs(layer);
+        }
+        renderPreview();
+        // Pre-existing gap in theme mode: these inputs never called
+        // scheduleThemeAutosave() either — out of scope to fix here. Item
+        // mode needs this, additively — typing an exact position is one of
+        // the two ways (with drag) to set a position override.
+        if (tsMode === 'item') tsSave();
+      },
     });
-    inp.dataset.posInput = key;
-    return inp;
+    f.querySelector('input').dataset.posInput = key;
+    return f;
   };
 
   // Alignment: snap the box to canvas edges/center.
@@ -4074,37 +4179,10 @@ function renderLayoutProps(panel, layer) {
       act(p);
       renderPreview();
       tsSyncPosInputs(layer);
-      if (tsMode === 'item') tsSave(); // same pre-existing-gap note as posNum above
+      if (tsMode === 'item') tsSave(); // same pre-existing-gap note as posField above
     }));
   });
 
-  // Groups a label with its input so .ts-prop-row's own flex-wrap (needed
-  // so a crowded row doesn't clip against the panel edge) can only ever
-  // break BETWEEN whole pairs, never in the middle of one — that's exactly
-  // what was leaving the H field stranded on its own line with no visible
-  // "H" next to it: five separate flex children (W label, W input, the
-  // link button, H label, H input) in one row meant the row could wrap
-  // right between the H label and the H input, same as it could between
-  // any other two of those five.
-  const fieldGroup = (...children) => {
-    const g = document.createElement('span');
-    g.className = 'ts-field-group';
-    children.forEach(c => g.appendChild(c));
-    return g;
-  };
-
-  const xyRow = document.createElement('div');
-  xyRow.className = 'ts-prop-row'; xyRow.style.gap = '8px';
-  const xl = document.createElement('span'); xl.className = 'ts-prop-label'; xl.textContent = 'X';
-  const yl = document.createElement('span'); yl.className = 'ts-prop-label'; yl.textContent = 'Y';
-  xyRow.appendChild(fieldGroup(xl, posNum('x', -TS_DESIGN_W, TS_DESIGN_W)));
-  xyRow.appendChild(fieldGroup(yl, posNum('y', -TS_DESIGN_H, TS_DESIGN_H)));
-
-  const whRow = document.createElement('div');
-  whRow.className = 'ts-prop-row'; whRow.style.gap = '8px';
-  const wl = document.createElement('span'); wl.className = 'ts-prop-label'; wl.textContent = 'W';
-  const hl = document.createElement('span'); hl.className = 'ts-prop-label';
-  hl.textContent = layer.type === 'text' ? 'H (0 = auto)' : 'H';
   // Chain link — locked (default) means typing W or H scales the other
   // dimension to keep the box's current proportions; unlinked scales just
   // that one field. Per-layer, not persisted (see layerAspectLock's own
@@ -4121,36 +4199,43 @@ function renderLayoutProps(panel, layer) {
     linkBtn.classList.toggle('active', now);
     linkBtn.title = now ? 'Width/Height are linked — click to unlink' : 'Width/Height are unlinked — click to link';
   });
-  whRow.appendChild(fieldGroup(wl, posNum('w', 40, TS_DESIGN_W, { aspect: true }), linkBtn));
-  whRow.appendChild(fieldGroup(hl, posNum('h', 0, TS_DESIGN_H, { aspect: true })));
+  const whRow = fieldRow([posField('w', 'W', 40, TS_DESIGN_W, { aspect: true }), linkBtn, posField('h', 'H', 0, TS_DESIGN_H, { aspect: true })]);
+  whRow.style.gridTemplateColumns = 'minmax(0, 1fr) auto minmax(0, 1fr)';
 
-  const kids = [prop('Align', alignWrap), xyRow, whRow];
+  const kids = [alignWrap, fieldRow([posField('x', 'X', -TS_DESIGN_W, TS_DESIGN_W), posField('y', 'Y', -TS_DESIGN_H, TS_DESIGN_H)]), whRow];
 
+  // Rotation, about the layer's own centre — a countdown running up the side
+  // of the screen, a tilted photo, a slanted headline. Turned with the handle
+  // under the box on the canvas, as in any editor; this is the exact angle,
+  // kept in step while the handle turns (tsSyncPosInputs). Only for a layer
+  // with its own box: a layout-preset text layer centres itself with a
+  // transform, and the canvas fill is always the whole screen.
+  const isCanvasFill = layer.type === 'background' && !layer.pos;
+  const rotRow = [];
+  if ((layer.pos || !isText) && !isCanvasFill) {
+    const rot = numField('↻', Math.round(layer.rotation || 0), {
+      min: -180, max: 180, unit: '°', title: 'Rotation — or turn it with the round handle under the box',
+      onChange: (v) => { layer.rotation = v || 0; if (isText) ensurePos(layer); up(); },
+    });
+    rot.querySelector('input').dataset.posInput = 'rotation';
+    rotRow.push(rot);
+  }
   // Escape hatch back to the layout preset once a layer has been freed.
   if (layer.pos) {
     const reset = document.createElement('button');
     reset.className = 'ts-fill-chip';
-    reset.textContent = 'Use layout preset';
-    reset.title = 'Clear free position — this layer follows the theme layout again';
+    reset.textContent = 'Reset to layout';
+    reset.title = 'Put this layer back where the theme\'s layout places it';
     reset.addEventListener('click', () => {
       delete layer.pos;
       up();
       renderProps();
     });
-    kids.push(prop('Position', reset));
+    rotRow.push(reset);
   }
+  if (rotRow.length) kids.push(fieldRow(rotRow));
 
-  // Rotation, about the layer's own centre — a countdown running up the side
-  // of the screen, a tilted photo, a slanted headline. Only for a layer with
-  // its own box: a layout-preset text layer centres itself with a transform,
-  // and the canvas fill is always the whole screen.
-  const isCanvasFill = layer.type === 'background' && !layer.pos;
-  if ((layer.pos || layer.type !== 'text') && !isCanvasFill) {
-    kids.push(prop('Rotate', makeSlider(Math.round(layer.rotation || 0), -180, 180,
-      v => { layer.rotation = v || 0; if (layer.type === 'text') ensurePos(layer); up(); }, v => `${Math.round(v)}°`)));
-  }
-
-  panel.appendChild(section('layout', 'Layout', ...kids));
+  panel.appendChild(section('layout', 'Position', ...kids));
 }
 
 // ── Animate tab ───────────────────────────────────────────────────────────
@@ -4175,13 +4260,13 @@ function renderAnimateProps(panel, layer) {
   play.innerHTML = '<svg viewBox="0 0 24 24" fill="currentColor" width="11" height="11"><path d="M7 5v14l12-7z"/></svg><span>Play</span>';
   play.title = 'Replay this slide\'s animations';
   play.addEventListener('click', () => tsPlayAnimations());
-  panel.appendChild(section('animate', 'Arrives',
-    prop('Animation', makeSelect(builds, b.type, v => { setBuild({ type: v }); renderProps(); })),
-    ...(b.type === 'none' ? [] : [
-      prop('Delay', makeSlider(Math.round(b.delay * 10), 0, 100, v => setBuild({ delay: v / 10 }), v => `${(v / 10).toFixed(1)} s`)),
-      prop('Duration', makeSlider(Math.round(b.duration * 10), 1, 50, v => setBuild({ duration: v / 10 }), v => `${(v / 10).toFixed(1)} s`)),
-    ]),
-    prop('Preview', play)));
+  // The animation and its Play button on one line; its timing two to a line.
+  const arrives = [fieldRow([makeSelect(builds, b.type, v => { setBuild({ type: v }); renderProps(); }), play], { trail: true })];
+  if (b.type !== 'none') arrives.push(fieldRow([
+    numField('Delay', b.delay, { min: 0, max: 10, step: 0.1, unit: 's', title: 'How long after the slide appears', onChange: v => setBuild({ delay: v ?? 0 }) }),
+    numField('Length', b.duration, { min: 0.1, max: 5, step: 0.1, unit: 's', title: 'How long the animation takes', onChange: v => setBuild({ duration: v ?? 0.8 }) }),
+  ]));
+  panel.appendChild(section('animate', 'Arrives', ...arrives));
 
   const m = M.normalizeIdle(layer.idle);
   const setIdle = (patch) => {
@@ -4189,80 +4274,70 @@ function renderAnimateProps(panel, layer) {
     if (layer.idle.type === 'none') delete layer.idle;
     up();
   };
-  panel.appendChild(section('animate', 'Keeps moving',
-    prop('Motion', makeSelect(M.IDLES.map(x => ({ label: x.label, value: x.id })), m.type, v => { setIdle({ type: v }); renderProps(); })),
-    ...(m.type === 'none' ? [] : [
-      prop('Amount', makeSlider(m.amount, 1, 100, v => setIdle({ amount: v }), v => `${Math.round(v)}%`)),
-      prop('Speed', makeSlider(Math.round(m.speed * 100), 10, 300, v => setIdle({ speed: v / 100 }), v => `${(v / 100).toFixed(2)}×`)),
-    ])));
+  const moving = [makeSelect(M.IDLES.map(x => ({ label: x.label, value: x.id })), m.type, v => { setIdle({ type: v }); renderProps(); })];
+  if (m.type !== 'none') moving.push(fieldRow([
+    numField('Amount', m.amount, { min: 1, max: 100, unit: '%', onChange: v => setIdle({ amount: v ?? 20 }) }),
+    numField('Speed', m.speed, { min: 0.1, max: 3, step: 0.05, unit: '×', onChange: v => setIdle({ speed: v ?? 1 }) }),
+  ]));
+  panel.appendChild(section('animate', 'Keeps moving', ...moving));
 }
 
 // Background layer properties
 function renderBgProps(panel, layer) {
   renderLayoutProps(panel, layer);
 
-  // Shape — "Add Shape" only ever made a plain rectangle; layer.shape picks
-  // from the same set applyShapeGeometry renders (this file, service.js's
-  // thumbnails, and display.html's real output all read it the same way).
-  // Corner Radius only means anything for 'rect' (the other shapes ignore
-  // layer.radius entirely — pill/ellipse/triangle/diamond are already fully
-  // rounded or already have their own hard edges), so it's hidden otherwise
-  // rather than left sitting there doing nothing.
-  // The canvas fill itself is always the whole screen — only shapes have one.
-  const shapeRow = section('style', 'Shape',
-    makeSelect([
-      { label: 'Rectangle', value: 'rect' },
-      { label: 'Ellipse',   value: 'ellipse' },
-      { label: 'Pill',      value: 'pill' },
-      { label: 'Triangle',  value: 'triangle' },
-      { label: 'Diamond',   value: 'diamond' },
-    ], layer.shape || 'rect', v => { layer.shape = v; radiusRow.style.display = v === 'rect' ? '' : 'none'; up(); })
-  );
-  const radiusRow = section('style', 'Corners',
-    prop('Radius', makeSlider(layer.radius || 0, 0, 200, v => { layer.radius = v; up(); }))
-  );
-  if ((layer.shape || 'rect') !== 'rect') radiusRow.style.display = 'none';
-  if (layer.pos) { panel.appendChild(shapeRow); panel.appendChild(radiusRow); }
+  // Shape (a shape layer only — the canvas fill is always the whole screen):
+  // which shape, and for a rectangle its corner radius (the other shapes
+  // have their own edges and ignore it).
+  if (layer.pos) {
+    const isRect = (layer.shape || 'rect') === 'rect';
+    panel.appendChild(section('style', 'Shape', fieldRow([
+      makeSelect([
+        { label: 'Rectangle', value: 'rect' },
+        { label: 'Ellipse',   value: 'ellipse' },
+        { label: 'Pill',      value: 'pill' },
+        { label: 'Triangle',  value: 'triangle' },
+        { label: 'Diamond',   value: 'diamond' },
+      ], layer.shape || 'rect', v => { layer.shape = v; up(); renderProps(); }),
+      isRect && numField('Corners', layer.radius || 0, { min: 0, max: 200, unit: 'px', onChange: v => { layer.radius = v ?? 0; up(); } }),
+    ])));
+  }
 
-  // Fill: its kind, then its colour (a gradient's two and their angle) and
-  // opacity. Picking Image with no picture yet starts on the first bundled
-  // background, so the canvas changes the moment it's clicked. Changing the
-  // kind rebuilds the panel, so only the rows it uses are here.
-  const fillRows = [makeFillChips(layer.fill, v => {
+  // Fill: its kind, then what that kind needs — a colour and its opacity; a
+  // gradient's two colours, angle and opacity; or a picture (the bundled
+  // backgrounds or the operator's own), darkened for legible text. Picking
+  // Picture with none yet starts on the first bundled background, so the
+  // canvas changes the moment it's chosen.
+  const rows = [makeFillChips(layer.fill, v => {
     layer.fill = v;
     if (v === 'image' && !layer.src && (window.KairoBackgrounds || []).length) useBackground(layer, window.KairoBackgrounds[0]);
     up(); renderProps();
   })];
+  const opacityField = () => numField('Opacity', layer.opacity ?? 100, { min: 0, max: 100, unit: '%', onChange: v => { layer.opacity = v ?? 100; up(); } });
   if (layer.fill === 'gradient') {
-    const colors = document.createElement('div');
-    colors.className = 'ts-prop-row';
-    const lbl = document.createElement('span');
-    lbl.className = 'ts-prop-label'; lbl.textContent = 'Colors';
-    colors.appendChild(lbl);
-    colors.appendChild(makeColor(layer.color, v => { layer.color = v; up(); }));
-    colors.appendChild(makeColor(layer.color2 || '#1a1a2e', v => { layer.color2 = v; up(); }));
-    fillRows.push(colors, prop('Angle', makeNumber(layer.angle || 160, 0, 360, 5, v => { layer.angle = v; up(); })));
-  } else if (layer.fill !== 'transparent' && layer.fill !== 'image') {
-    fillRows.push(prop('Color', makeColor(layer.color, v => { layer.color = v; up(); })));
-  }
-  if (layer.fill !== 'transparent' && layer.fill !== 'image') {
-    fillRows.push(prop('Opacity', makeSlider(layer.opacity, 0, 100, v => { layer.opacity = v; up(); })));
-  }
-  panel.appendChild(section('style', 'Fill', ...fillRows));
-
-  // Picture: the bundled backgrounds, or the operator's own image.
-  if (layer.fill === 'image') {
+    const colors = fieldRow([
+      makeColor(layer.color, v => { layer.color = v; up(); }),
+      makeColor(layer.color2 || '#1a1a2e', v => { layer.color2 = v; up(); }),
+      numField('Angle', layer.angle ?? 160, { min: 0, max: 360, unit: '°', onChange: v => { layer.angle = v ?? 0; up(); } }),
+    ]);
+    colors.style.gridTemplateColumns = 'auto auto minmax(0, 1fr)';
+    rows.push(colors, fieldRow([opacityField()]));
+  } else if (layer.fill === 'image') {
     const own = document.createElement('button');
     own.className = 'ts-add-btn ts-add-btn-compact';
     own.textContent = 'Your own image…';
     own.addEventListener('click', () => pickOwnBackground(layer));
-    panel.appendChild(section('style', 'Picture',
+    rows.push(
       makeBackgroundGrid(layer.src, bg => { useBackground(layer, bg); up(); }),
       own,
-      prop('Darken', makeSlider(layer.dim || 0, 0, 80, v => { layer.dim = v; up(); }, v => Math.round(v) + '%')),
-      prop('Opacity', makeSlider(layer.opacity ?? 100, 0, 100, v => { layer.opacity = v; up(); }))
-    ));
+      fieldRow([
+        numField('Darken', layer.dim || 0, { min: 0, max: 80, unit: '%', title: 'Darken the picture so text on it reads', onChange: v => { layer.dim = v ?? 0; up(); } }),
+        opacityField(),
+      ]));
+  } else if (layer.fill !== 'transparent') {
+    rows.push(colorOpacityRow(layer.color, v => { layer.color = v; up(); }, layer.opacity, v => { layer.opacity = v; up(); }));
   }
+  panel.appendChild(section('style', 'Fill', ...rows));
 }
 
 // ── Background pool ───────────────────────────────────────────────────────
@@ -4314,36 +4389,32 @@ function pickOwnBackground(layer, after) {
   });
 }
 
-// Image layer properties
-function renderImageProps(panel, layer) {
+// Image layer properties: the picture (with Replace…), how it fits its box,
+// its corners and opacity, and a slow zoom; then its photo look.
+const IMAGE_FITS = [
+  { label: 'Fill the box (crop)', value: 'cover' },
+  { label: 'Fit inside the box', value: 'contain' },
+  { label: 'Stretch to the box', value: 'fill' },
+];
+const IMAGE_MOTIONS = [
+  { label: 'Still', value: 'none' }, { label: 'Slow zoom (Ken Burns)', value: 'kenburns' },
+];
+function layerNameSection(panel, layer) {
   const nameInp = document.createElement('input');
   nameInp.type = 'text'; nameInp.className = 'ts-prop-input';
   nameInp.value = layer.name; nameInp.placeholder = 'Layer name';
   nameInp.addEventListener('input', () => { layer.name = nameInp.value; renderLayersList(); });
   panel.appendChild(section('layout', 'Layer', prop('Name', nameInp)));
-
+}
+function renderImageProps(panel, layer) {
+  layerNameSection(panel, layer);
   renderLayoutProps(panel, layer);
 
-  panel.appendChild(section('style', 'Image',
-    prop('Fit', makeChips([
-      { label: 'Contain', value: 'contain' },
-      { label: 'Cover',   value: 'cover' },
-      { label: 'Stretch', value: 'fill' },
-    ], layer.fit || 'contain', v => { layer.fit = v; up(); })),
-    prop('Opacity', makeSlider(layer.opacity ?? 100, 0, 100, v => { layer.opacity = v; up(); })),
-    prop('Radius', makeSlider(layer.radius || 0, 0, 200, v => { layer.radius = v; up(); })),
-    // A slow continuous zoom/pan while this image sits on screen — same
-    // option Image Cycle has, and the same reason it's a plain CSS
-    // animation rather than anything frame-rendered (see display.html's
-    // matching branch): a single still background still benefits from
-    // feeling alive, not just a slideshow of several.
-    prop('Motion', makeSelect([
-      { label: 'None', value: 'none' }, { label: 'Ken Burns (slow zoom)', value: 'kenburns' },
-    ], layer.motion || 'none', v => { layer.motion = v; up(); }))
-  ));
-  renderPhotoLookProps(panel, layer);
-
-  // Swap the picture and keep everything else — its box, fade, animation.
+  // The picture itself, and Replace… — swaps the picture and keeps
+  // everything else: its box, fade, animation.
+  const thumb = document.createElement('div');
+  thumb.className = 'ts-image-thumb';
+  thumb.style.backgroundImage = `url("${String(layer.src || '').replace(/["\\\n\r]/g, c => encodeURIComponent(c))}")`;
   const replace = document.createElement('button');
   replace.className = 'ts-add-btn ts-add-btn-compact';
   replace.textContent = 'Replace…';
@@ -4351,7 +4422,18 @@ function renderImageProps(panel, layer) {
     layer.src = src; layer.naturalW = w; layer.naturalH = h;
     up(); renderProps();
   }));
-  panel.appendChild(section('style', 'Picture', prop('Image', replace)));
+  // A slow continuous zoom/pan while this image sits on screen — same option
+  // Image Cycle has, a plain CSS animation (see display.html's matching
+  // branch): a single still background still benefits from feeling alive.
+  panel.appendChild(section('style', 'Image',
+    fieldRow([thumb, replace], { lead: true }),
+    makeSelect(IMAGE_FITS, layer.fit || 'contain', v => { layer.fit = v; up(); }),
+    fieldRow([
+      numField('Corners', layer.radius || 0, { min: 0, max: 200, unit: 'px', onChange: v => { layer.radius = v ?? 0; up(); } }),
+      numField('Opacity', layer.opacity ?? 100, { min: 0, max: 100, unit: '%', onChange: v => { layer.opacity = v ?? 100; up(); } }),
+    ]),
+    makeSelect(IMAGE_MOTIONS, layer.motion || 'none', v => { layer.motion = v; up(); })));
+  renderPhotoLookProps(panel, layer);
 
   // The color-key "Remove background" cutout used to live here — pulled per
   // operator report that it doesn't key cleanly (a flat-color-tolerance
@@ -4366,17 +4448,19 @@ function renderImageProps(panel, layer) {
 // (layer_geometry.js) everywhere the layer is shown.
 function renderPhotoLookProps(panel, layer) {
   const side = layer.fade?.side || 'none';
+  const fadeSel = makeSelect([
+    { label: 'No fade', value: 'none' }, { label: 'Fade from the left', value: 'left' }, { label: 'Fade from the right', value: 'right' },
+    { label: 'Fade from the top', value: 'top' }, { label: 'Fade from the bottom', value: 'bottom' },
+  ], side, v => {
+    if (v === 'none') delete layer.fade; else layer.fade = { side: v, amount: layer.fade?.amount ?? 45 };
+    up(); renderProps();
+  });
   panel.appendChild(section('style', 'Photo look',
     prop('Black & white', makeSlider(layer.grayscale || 0, 0, 100, v => { layer.grayscale = v; up(); }, v => `${Math.round(v)}%`)),
-    prop('Fade from', makeSelect([
-      { label: 'None', value: 'none' }, { label: 'Left', value: 'left' }, { label: 'Right', value: 'right' },
-      { label: 'Top', value: 'top' }, { label: 'Bottom', value: 'bottom' },
-    ], side, v => {
-      if (v === 'none') delete layer.fade; else layer.fade = { side: v, amount: layer.fade?.amount ?? 45 };
-      up(); renderProps();
-    })),
-    ...(side === 'none' ? [] : [prop('Fade length', makeSlider(layer.fade.amount ?? 45, 5, 100, v => { layer.fade.amount = v; up(); }, v => `${Math.round(v)}%`))])
-  ));
+    fieldRow([
+      fadeSel,
+      side !== 'none' && numField('Length', layer.fade.amount ?? 45, { min: 5, max: 100, unit: '%', title: 'How much of the picture the fade covers', onChange: v => { layer.fade.amount = v ?? 45; up(); } }),
+    ])));
 }
 
 // Image Cycle layer properties — a slideshow of stills that advances on its
@@ -4391,55 +4475,39 @@ function renderPhotoLookProps(panel, layer) {
 // live advance only happens against a real running countdown on the actual
 // output, not in any preview surface.
 function renderImageCycleProps(panel, layer) {
-  const nameInp = document.createElement('input');
-  nameInp.type = 'text'; nameInp.className = 'ts-prop-input';
-  nameInp.value = layer.name; nameInp.placeholder = 'Layer name';
-  nameInp.addEventListener('input', () => { layer.name = nameInp.value; renderLayersList(); });
-  panel.appendChild(section('layout', 'Layer', prop('Name', nameInp)));
-
+  layerNameSection(panel, layer);
   renderLayoutProps(panel, layer);
 
-  panel.appendChild(section('style', 'Image',
-    prop('Fit', makeChips([
-      { label: 'Contain', value: 'contain' },
-      { label: 'Cover',   value: 'cover' },
-      { label: 'Stretch', value: 'fill' },
-    ], layer.fit || 'cover', v => { layer.fit = v; up(); })),
-    prop('Opacity', makeSlider(layer.opacity ?? 100, 0, 100, v => { layer.opacity = v; up(); })),
-    prop('Radius', makeSlider(layer.radius || 0, 0, 200, v => { layer.radius = v; up(); }))
-  ));
-
-  // Timing/transition — only meaningful for a scene's own Image Cycle
-  // layer (a segment's "Scenes" list, see renderItemTimerControls); the
-  // plain single-theme case ignores intervalSec entirely and keeps
-  // spacing sources evenly across the whole countdown instead (see
-  // display.html's handleActionBadge for exactly which of the two applies
-  // and why). 0/blank = "use the whole-countdown spacing", not "instant".
-  panel.appendChild(section('style', 'Timing',
-    prop('Seconds/image', makeNumber(layer.intervalSec || '', 0, 600, 1, v => { layer.intervalSec = v > 0 ? v : undefined; up(); })),
-    prop('Change', makeSelect([
-      { label: 'Cut', value: 'cut' }, { label: 'Slide (left to right)', value: 'slide' },
-      { label: 'Crossfade', value: 'crossfade' },
-    ], layer.transition || 'cut', v => { layer.transition = v; up(); })),
-    // A continuous slow zoom/pan while the image sits there — the same
-    // idea Remotion/HyperFrames-style motion primitives are built for,
-    // reimplemented here as a plain CSS animation (see display.html's
-    // startCycleMotion) so it keeps running live against a countdown that
-    // can be re-timed at any moment, instead of a pre-rendered timeline.
-    prop('Motion', makeSelect([
-      { label: 'None', value: 'none' }, { label: 'Ken Burns (slow zoom)', value: 'kenburns' },
-    ], layer.motion || 'none', v => { layer.motion = v; up(); }))
-  ));
-  renderPhotoLookProps(panel, layer);
+  // Timing — "Each": seconds per picture, only meaningful for a scene's own
+  // slideshow (a countdown's slides); blank spreads them evenly across the
+  // whole countdown instead (see display.html's handleActionBadge for which
+  // applies). A continuous slow zoom while each picture is up is the same
+  // plain CSS animation the Image layer's has (display.html's
+  // startCycleMotion), so it keeps running against a countdown that can be
+  // re-timed at any moment.
+  const cycleSettings = [
+    makeSelect(IMAGE_FITS, layer.fit || 'cover', v => { layer.fit = v; up(); }),
+    fieldRow([
+      numField('Each', layer.intervalSec || '', { min: 0, max: 600, unit: 's', placeholder: 'auto', title: 'Seconds per picture — empty spreads them over the countdown', onChange: v => { layer.intervalSec = v > 0 ? v : undefined; up(); } }),
+      makeSelect([
+        { label: 'Cut', value: 'cut' }, { label: 'Slide across', value: 'slide' }, { label: 'Crossfade', value: 'crossfade' },
+      ], layer.transition || 'cut', v => { layer.transition = v; up(); }),
+    ]),
+    fieldRow([
+      numField('Corners', layer.radius || 0, { min: 0, max: 200, unit: 'px', onChange: v => { layer.radius = v ?? 0; up(); } }),
+      numField('Opacity', layer.opacity ?? 100, { min: 0, max: 100, unit: '%', onChange: v => { layer.opacity = v ?? 100; up(); } }),
+    ]),
+    makeSelect(IMAGE_MOTIONS, layer.motion || 'none', v => { layer.motion = v; up(); }),
+  ];
 
   const listWrap = document.createElement('div');
   listWrap.className = 'ts-cycle-list';
   const addBtns = document.createElement('div');
   addBtns.className = 'ts-cycle-add-row';
   const uploadBtn = document.createElement('button');
-  uploadBtn.className = 'modal-btn'; uploadBtn.textContent = 'Upload…';
+  uploadBtn.className = 'ts-add-btn ts-add-btn-compact'; uploadBtn.textContent = 'Upload…';
   const libBtn = document.createElement('button');
-  libBtn.className = 'modal-btn'; libBtn.textContent = 'From Library…';
+  libBtn.className = 'ts-add-btn ts-add-btn-compact'; libBtn.textContent = 'From Library…';
   const fileInp = document.createElement('input');
   fileInp.type = 'file'; fileInp.accept = 'image/*'; fileInp.multiple = true; fileInp.style.display = 'none';
   uploadBtn.addEventListener('click', () => fileInp.click());
@@ -4461,8 +4529,8 @@ function renderImageCycleProps(panel, layer) {
   // sample set on top would just be clutter, not a preview aid anymore.
   if (!(layer.sources || []).length) {
     const sampleBtn = document.createElement('button');
-    sampleBtn.className = 'modal-btn secondary';
-    sampleBtn.textContent = 'Load sample images';
+    sampleBtn.className = 'ts-add-btn ts-add-btn-compact';
+    sampleBtn.textContent = 'Load samples';
     sampleBtn.title = 'Placeholder frames so you can see the cycle in action before adding your own';
     sampleBtn.addEventListener('click', () => {
       layer.sources = [...SAMPLE_CYCLE_IMAGES];
@@ -4500,7 +4568,9 @@ function renderImageCycleProps(panel, layer) {
     grid.appendChild(empty);
   }
   listWrap.appendChild(grid);
-  panel.appendChild(section('style', `Images (${(layer.sources || []).length})`, listWrap));
+  // The pictures first — they are the slideshow — then how they play.
+  panel.appendChild(section('style', `Slideshow · ${(layer.sources || []).length} picture${(layer.sources || []).length === 1 ? '' : 's'}`, listWrap, ...cycleSettings));
+  renderPhotoLookProps(panel, layer);
 }
 
 // Reuses fetchAllMediaItems (Theme Studio's own Media Library browser) but
@@ -4581,11 +4651,7 @@ function motionFormat(p) {
 }
 function renderMotionProps(panel, layer) {
   const M = window.KairoMotion;
-  const nameInp = document.createElement('input');
-  nameInp.type = 'text'; nameInp.className = 'ts-prop-input';
-  nameInp.value = layer.name; nameInp.placeholder = 'Layer name';
-  nameInp.addEventListener('input', () => { layer.name = nameInp.value; renderLayersList(); });
-  panel.appendChild(section('layout', 'Layer', prop('Name', nameInp)));
+  layerNameSection(panel, layer);
   renderLayoutProps(panel, layer);
   if (!M) return;
 
@@ -4610,11 +4676,11 @@ function renderMotionProps(panel, layer) {
   blurb.className = 'ts-motion-blurb';
   blurb.textContent = kind.blurb;
   panel.appendChild(section('style', 'Motion',
-    prop('Graphic', makeGroupedSelect([
+    makeGroupedSelect([
       family('ambient', 'Moving backgrounds'),
       family('timer', 'Countdown'),
       family('element', 'Hand-drawn'),
-    ], g.kind, pickKind)),
+    ], g.kind, pickKind),
     blurb));
 
   // Colours — one swatch per element colour, named where the kind names them.
@@ -4662,18 +4728,21 @@ function renderMotionProps(panel, layer) {
     if (p.type === 'chips') return prop(p.label, (p.options.length > 3 ? makeSelect : makeChips)(p.options, g[p.key], v => { g[p.key] = v; changed(); }));
     return prop(p.label, makeToggle(!!g[p.key], v => { g[p.key] = v; changed(); }));
   });
-  panel.appendChild(section('style', kind.label, ...rows));
-
-  const look = [prop('Opacity', makeSlider(layer.opacity ?? 100, 0, 100, v => { layer.opacity = v; up(); }))];
+  // …and, last, the layer's opacity with Shuffle (a new arrangement of the
+  // same elements, for the kinds scattered at random) beside it.
+  let shuffle = null;
   if (kind.shuffle) {
-    const btn = document.createElement('button');
-    btn.className = 'ts-add-btn ts-add-btn-compact';
-    btn.textContent = 'Shuffle';
-    btn.title = 'A new arrangement of the same elements';
-    btn.addEventListener('click', () => { g.seed = M.newSeed(); changed(); });
-    look.push(prop('Arrangement', btn));
+    shuffle = document.createElement('button');
+    shuffle.className = 'ts-add-btn ts-add-btn-compact';
+    shuffle.textContent = 'Shuffle';
+    shuffle.title = 'A new arrangement of the same elements';
+    shuffle.addEventListener('click', () => { g.seed = M.newSeed(); changed(); });
   }
-  panel.appendChild(section('style', 'Layer look', ...look));
+  rows.push(fieldRow([
+    numField('Opacity', layer.opacity ?? 100, { min: 0, max: 100, unit: '%', onChange: v => { layer.opacity = v ?? 100; up(); } }),
+    shuffle,
+  ], { trail: !!shuffle }));
+  panel.appendChild(section('style', kind.label, ...rows));
 }
 
 // Where a new motion layer lands: a background fills the canvas; a timer or
@@ -4860,13 +4929,22 @@ function openBgGallery() {
 document.getElementById('ts-add-bg-btn')?.addEventListener('click', () => { if (activeLook) openBgGallery(); });
 document.getElementById('ts-play-anim-btn')?.addEventListener('click', () => { if (activeLook) tsPlayAnimations(); });
 
-// Text layer properties
+// Text layer properties — laid out as a design tool's text inspector: what the
+// layer shows (Layout tab), then the type — family; weight and size; line and
+// letter spacing; alignment, italic and case — and its colour (Style), its
+// shadow and outline (Effects).
 function renderTextProps(panel, layer) {
-  // Name + binding
   const nameInp = document.createElement('input');
   nameInp.type = 'text'; nameInp.className = 'ts-prop-input';
   nameInp.value = layer.name; nameInp.placeholder = 'Layer name';
   nameInp.addEventListener('input', () => { layer.name = nameInp.value; renderLayersList(); });
+
+  const customInp = document.createElement('input');
+  customInp.type = 'text'; customInp.className = 'ts-prop-input';
+  customInp.value = layer.customText || ''; customInp.placeholder = 'Type the text — or double-click it on the canvas';
+  customInp.addEventListener('input', () => { layer.customText = customInp.value; up(); });
+  const customRow = prop('Text', customInp);
+  customRow.style.display = layer.binding === 'custom' ? '' : 'none';
 
   panel.appendChild(section('layout', 'Layer',
     prop('Name', nameInp),
@@ -4884,109 +4962,65 @@ function renderTextProps(panel, layer) {
       { label: 'Countdown minutes', value: 'timer-m' },
       { label: 'Countdown seconds', value: 'timer-s' },
       { label: 'Text you type', value: 'custom' },
-    ], layer.binding, v => { layer.binding = v; customRow.style.display = v === 'custom' ? '' : 'none'; up(); }))
-  ));
+    ], layer.binding, v => { layer.binding = v; up(); renderProps(); })),
+    customRow));
 
   renderLayoutProps(panel, layer);
 
-  const customInp = document.createElement('input');
-  customInp.type = 'text'; customInp.className = 'ts-prop-input';
-  customInp.value = layer.customText || ''; customInp.placeholder = 'Custom text…';
-  customInp.addEventListener('input', () => { layer.customText = customInp.value; up(); });
-  const customRow = section('layout', null, prop('Text', customInp));
-  customRow.style.display = layer.binding === 'custom' ? '' : 'none';
-  panel.appendChild(customRow);
+  // Type: the family on its own line, then weight and size, then line and
+  // letter spacing (exact numbers — 1.15, -0.5 — are what people reach for),
+  // then alignment with italic and case.
+  const caseSel = makeSelect([
+    { label: 'Aa  As typed', value: 'none' }, { label: 'AA  Uppercase', value: 'uppercase' }, { label: 'aa  Lowercase', value: 'lowercase' },
+  ], layer.font.transform || 'none', v => { layer.font.transform = v; up(); });
+  caseSel.title = 'Letter case';
+  const alignRow = fieldRow([
+    makeAlignBtns(layer.align, v => { layer.align = v; up(); }),
+    iconToggle('I', layer.font.italic, 'Italic', v => { layer.font.italic = v; up(); }, { italic: true }),
+    caseSel,
+  ]);
+  alignRow.style.gridTemplateColumns = 'auto auto minmax(0, 1fr)';
+  panel.appendChild(section('style', 'Text',
+    makeFontSelect(layer.font.family, v => { layer.font.family = v; up(); }),
+    fieldRow([
+      makeWeightSelect(layer.font.weight, v => { layer.font.weight = v; up(); }),
+      numField('Size', layer.font.size, { min: 8, max: 300, unit: 'px', onChange: v => { layer.font.size = v ?? layer.font.size; up(); } }),
+    ]),
+    fieldRow([
+      numField('Line', layer.font.lineHeight, { min: 0.5, max: 4, step: 0.05, title: 'Line spacing', onChange: v => { layer.font.lineHeight = parseFloat((v ?? 1.2).toFixed(2)); up(); } }),
+      numField('Letter', layer.font.letterSpacing, { min: -5, max: 30, step: 0.5, unit: 'px', title: 'Letter spacing', onChange: v => { layer.font.letterSpacing = parseFloat((v ?? 0).toFixed(1)); up(); } }),
+    ]),
+    alignRow));
 
-  // Font
-  panel.appendChild(section('style', 'Font',
-    prop('Family', makeFontSelect(layer.font.family, v => { layer.font.family = v; up(); })),
-    (() => {
-      const row = document.createElement('div');
-      row.className = 'ts-prop-row';
-      row.style.gap = '8px';
-      const szLabel = document.createElement('span'); szLabel.className = 'ts-prop-label'; szLabel.textContent = 'Size';
-      const szInp = makeNumber(layer.font.size, 8, 300, 1, v => { layer.font.size = v; up(); });
-      const wtLabel = document.createElement('span'); wtLabel.className = 'ts-prop-label'; wtLabel.textContent = 'Weight';
-      const wtInp = makeWeightSelect(layer.font.weight, v => { layer.font.weight = v; up(); });
-      row.appendChild(szLabel); row.appendChild(szInp);
-      row.appendChild(wtLabel); row.appendChild(wtInp);
-      return row;
-    })(),
-    (() => {
-      const row = document.createElement('div');
-      row.className = 'ts-prop-row'; row.style.gap = '8px';
-      const itLabel = document.createElement('span'); itLabel.className = 'ts-prop-label'; itLabel.textContent = 'Italic';
-      const itToggle = makeToggle(layer.font.italic, v => { layer.font.italic = v; up(); });
-      const trLabel = document.createElement('span'); trLabel.className = 'ts-prop-label'; trLabel.style.marginLeft = '8px'; trLabel.textContent = 'Case';
-      const trSelect = makeSelect([
-        { label: 'None', value: 'none' }, { label: 'UPPERCASE', value: 'uppercase' }, { label: 'lowercase', value: 'lowercase' },
-      ], layer.font.transform, v => { layer.font.transform = v; up(); });
-      row.appendChild(itLabel); row.appendChild(itToggle);
-      row.appendChild(trLabel); row.appendChild(trSelect);
-      return row;
-    })(),
-    prop('Align', makeAlignBtns(layer.align, v => { layer.align = v; up(); }))
-  ));
-
-  // Spacing — both as plain number entries, same row (mirrors the
-  // Size+Weight row above), not sliders. An exact value like 1.15 line
-  // height or -0.5 letter spacing is what people actually reach for; a
-  // slider makes hitting one precisely more fiddly, not less, and two
-  // separate rows for two related, similarly-sized numbers was just
-  // taking up more vertical space than the content needed.
-  panel.appendChild(section('style', 'Spacing',
-    (() => {
-      const row = document.createElement('div');
-      row.className = 'ts-prop-row'; row.style.gap = '8px';
-      const lhLabel = document.createElement('span'); lhLabel.className = 'ts-prop-label'; lhLabel.textContent = 'Lines';
-      lhLabel.title = 'Space between lines';
-      const lhInp = makeNumber(layer.font.lineHeight, 0.5, 4, 0.05, v => { layer.font.lineHeight = parseFloat(v.toFixed(2)); up(); });
-      const ltLabel = document.createElement('span'); ltLabel.className = 'ts-prop-label'; ltLabel.textContent = 'Letters';
-      ltLabel.title = 'Space between letters';
-      const ltInp = makeNumber(layer.font.letterSpacing, -5, 30, 0.5, v => { layer.font.letterSpacing = parseFloat(v.toFixed(1)); up(); });
-      row.appendChild(lhLabel); row.appendChild(lhInp);
-      row.appendChild(ltLabel); row.appendChild(ltInp);
-      return row;
-    })()
-  ));
-
-  // Color — the text's own, and (for text typed in, not a verse or the
-  // countdown) highlighted words: words wrapped in *asterisks* show in the
-  // highlight colour, a two-tone headline ("*FIRST TIME* / WITH US?") in one
-  // layer.
-  const colorRows = [
-    prop('Text', makeColor(layer.color, v => { layer.color = v; up(); })),
-    prop('Opacity', makeSlider(layer.opacity, 0, 100, v => { layer.opacity = v; up(); })),
-  ];
+  // Colour: the text's, with its opacity; and — for text typed in, not a
+  // verse or the countdown — highlighted words: words wrapped in
+  // *asterisks* show in the highlight colour, a two-tone headline
+  // ("*FIRST TIME* / WITH US?") in one layer.
+  const colorKids = [colorOpacityRow(layer.color, v => { layer.color = v; up(); }, layer.opacity, v => { layer.opacity = v; up(); })];
   if (layer.binding === 'custom') {
     const hl = document.createElement('div');
     hl.className = 'ts-prop-row';
+    hl.title = 'Colour chosen words differently — put *asterisks* around them';
     const hlLabel = document.createElement('span');
-    hlLabel.className = 'ts-prop-label'; hlLabel.textContent = 'Highlight words';
+    hlLabel.className = 'ts-prop-label'; hlLabel.textContent = 'Highlight';
     hl.appendChild(hlLabel);
     hl.appendChild(makeToggle(!!layer.accentColor, v => {
       if (v) layer.accentColor = layer.accentColor || '#e3cf6c'; else delete layer.accentColor;
       up(); renderProps();
     }));
     if (layer.accentColor) hl.appendChild(makeColor(layer.accentColor, v => { layer.accentColor = v; up(); }));
-    colorRows.push(hl);
+    colorKids.push(hl);
     if (layer.accentColor) {
       const hint = document.createElement('div');
       hint.className = 'ts-motion-blurb';
       hint.textContent = 'Put *asterisks* around the words to highlight.';
-      colorRows.push(hint);
+      colorKids.push(hint);
     }
   }
-  panel.appendChild(section('style', 'Color', ...colorRows));
+  panel.appendChild(section('style', 'Color', ...colorKids));
 
-  // Effects (Shadow/Outline/Scroll) — each one used to be TWO separate
-  // .ts-props-section blocks (a header-only section, then a second section
-  // for its detail rows), which meant two full padding+border-bottom
-  // boxes per effect: an unwanted divider splitting a toggle from the
-  // very controls it toggles, and double the visual weight for one
-  // logical group. Building an on/off effect's row now merges both into
-  // one real section, with just an inner wrapper (not a section of its
-  // own) collapsing for the detail rows.
+  // Effects — each an on/off row (its name and a switch), with its settings
+  // under it while on, in one section.
   function effectSection(name, enabled, onToggle, detailChildren) {
     const header = document.createElement('div');
     header.className = 'ts-prop-row ts-effect-header';
@@ -5001,49 +5035,39 @@ function renderTextProps(panel, layer) {
     return section('effects', null, header, details);
   }
 
-  // Shadow
+  // Shadow: its colour and opacity, then blur and offset.
   panel.appendChild(effectSection('Shadow', layer.shadow.enabled, v => { layer.shadow.enabled = v; }, [
-    prop('Color', makeColor(layer.shadow.color, v => { layer.shadow.color = v; up(); })),
-    prop('Opacity', makeSlider(layer.shadow.opacity, 0, 100, v => { layer.shadow.opacity = v; up(); })),
-    prop('Blur', makeSlider(layer.shadow.blur, 0, 60, v => { layer.shadow.blur = v; up(); })),
-    (() => {
-      const row = document.createElement('div'); row.className = 'ts-prop-row'; row.style.gap = '8px';
-      const xl = document.createElement('span'); xl.className = 'ts-prop-label'; xl.textContent = 'X';
-      const yl = document.createElement('span'); yl.className = 'ts-prop-label'; yl.textContent = 'Y';
-      const xi = makeNumber(layer.shadow.x, -50, 50, 1, v => { layer.shadow.x = v; up(); });
-      const yi = makeNumber(layer.shadow.y, -50, 50, 1, v => { layer.shadow.y = v; up(); });
-      row.appendChild(xl); row.appendChild(xi); row.appendChild(yl); row.appendChild(yi);
-      return row;
-    })(),
+    colorOpacityRow(layer.shadow.color, v => { layer.shadow.color = v; up(); }, layer.shadow.opacity, v => { layer.shadow.opacity = v; up(); }),
+    fieldRow([
+      numField('Blur', layer.shadow.blur, { min: 0, max: 60, onChange: v => { layer.shadow.blur = v ?? 0; up(); } }),
+      numField('X', layer.shadow.x, { min: -50, max: 50, title: 'Horizontal offset', onChange: v => { layer.shadow.x = v ?? 0; up(); } }),
+      numField('Y', layer.shadow.y, { min: -50, max: 50, title: 'Vertical offset', onChange: v => { layer.shadow.y = v ?? 0; up(); } }),
+    ]),
   ]));
 
-  // Outline
+  // Outline: its colour and width.
   panel.appendChild(effectSection('Outline', layer.outline.enabled, v => { layer.outline.enabled = v; }, [
-    prop('Color', makeColor(layer.outline.color, v => { layer.outline.color = v; up(); })),
-    prop('Width', makeSlider(layer.outline.width, 1, 10, v => { layer.outline.width = v; up(); })),
+    fieldRow([
+      makeColor(layer.outline.color, v => { layer.outline.color = v; up(); }),
+      numField('Width', layer.outline.width, { min: 1, max: 10, unit: 'px', onChange: v => { layer.outline.width = v ?? 2; up(); } }),
+    ], { lead: true }),
   ]));
 
   // Scroll — continuous horizontal marquee (news-ticker / large-scroll
   // layers, see the Ticker and Scroll — Fill Screen presets). Independent of
   // layout: works on the Ticker preset's bottom strip or a free-canvas box
-  // just as well. Speed is seconds per full loop — lower is faster.
+  // just as well. Its speed is the seconds one full loop takes.
   if (!layer.scroll) layer.scroll = { enabled: false, speed: 15 };
   panel.appendChild(effectSection('Scroll', layer.scroll.enabled, v => { layer.scroll.enabled = v; }, [
-    prop('Speed', makeSlider(layer.scroll.speed, 3, 60, v => { layer.scroll.speed = v; up(); })),
+    fieldRow([numField('One loop', layer.scroll.speed, { min: 3, max: 60, unit: 's', title: 'Seconds for one full loop — lower is faster', onChange: v => { layer.scroll.speed = v ?? 15; up(); } })]),
   ]));
 
-  // Entrance — a one-time fade + rise the moment this slide/scene first
-  // shows, not a continuous effect like Ken Burns (Image/Image Cycle's own
-  // Motion option). Plays in every render context (real output, editor
-  // canvas, operator preview) the same simple way: a CSS animation added
-  // when the element is first created, since "the slide just appeared" IS
-  // "this element was just created" in all three.
-  panel.appendChild(effectSection('Entrance', (layer.entrance || 'none') !== 'none',
-    v => { layer.entrance = v ? 'fade-up' : 'none'; }, [
-      prop('Style', makeSelect([
-        { label: 'Fade + Rise', value: 'fade-up' },
-      ], layer.entrance === 'fade-up' ? 'fade-up' : 'fade-up', v => { layer.entrance = v; up(); })),
-    ]));
+  // Entrance — the one-time fade + rise older themes used before build-ins
+  // (Animate → Arrives) existed. Shown only on a layer that still has it, so
+  // it can be switched off; new layers use Arrives.
+  if ((layer.entrance || 'none') !== 'none') {
+    panel.appendChild(effectSection('Entrance (fade + rise)', true, v => { layer.entrance = v ? 'fade-up' : 'none'; }, []));
+  }
 }
 
 // ── Wire modal open/close ─────────────────────────────────────────────────
@@ -5192,32 +5216,21 @@ function renderItemTimerControls() {
   const params = item.trigger?.params || {};
   const mode = params.mode === 'duration' ? 'duration' : 'endAt';
 
-  const label = document.createElement('div');
-  label.className = 'ts-props-section-label';
-  label.textContent = 'Timer';
-  host.appendChild(label);
-
-  const modeRow = document.createElement('div');
-  modeRow.className = 'ts-prop-row';
-  modeRow.appendChild(makeChips([
-    { label: 'Ends at', value: 'endAt' },
-    { label: 'Duration', value: 'duration' },
+  // One label and one control per row, as in any inspector: how it counts
+  // down, then its length or its end time, then the colours it turns.
+  const modeSel = makeSelect([
+    { label: 'For a length of time', value: 'duration' },
+    { label: 'To a time of day', value: 'endAt' },
   ], mode, (v) => {
-    // A countdown with no length yet starts at ten minutes, so choosing
-    // Duration always leaves a timer that runs.
+    // A countdown with no length yet starts at ten minutes, so choosing a
+    // length always leaves a timer that runs.
     const unset = !(item.trigger?.params?.durationSec > 0);
     save(v === 'duration' && unset ? { mode: v, durationSec: 600 } : { mode: v });
     renderItemTimerControls(); renderPreview();
-  }));
-  host.appendChild(modeRow);
+  });
 
-  const fieldRow = document.createElement('div');
-  fieldRow.className = 'ts-prop-row';
+  let valueRow;
   if (mode === 'duration') {
-    const setMinutes = (min) => {
-      save({ mode: 'duration', durationSec: Math.round(min * 60) });
-      renderItemTimerControls(); renderPreview();
-    };
     const minutes = document.createElement('input');
     minutes.type = 'number'; minutes.min = '1'; minutes.max = '600'; minutes.className = 'ts-prop-number';
     minutes.placeholder = '10';
@@ -5225,20 +5238,15 @@ function renderItemTimerControls() {
     minutes.value = params.durationSec ? String(Math.round(params.durationSec / 60)) : '';
     minutes.addEventListener('change', () => {
       const min = parseFloat(minutes.value);
-      if (min > 0) setMinutes(min);
+      if (min > 0) { save({ mode: 'duration', durationSec: Math.round(min * 60) }); renderPreview(); }
     });
     const unit = document.createElement('span');
     unit.className = 'ts-prop-unit';
     unit.textContent = 'minutes';
-    fieldRow.appendChild(minutes);
-    fieldRow.appendChild(unit);
-    host.appendChild(fieldRow);
-    // The usual lengths, one click each.
-    const presetRow = document.createElement('div');
-    presetRow.className = 'ts-prop-row';
-    presetRow.appendChild(makeChips([5, 10, 15, 30].map(n => ({ label: `${n} min`, value: n })),
-      params.durationSec ? params.durationSec / 60 : null, setMinutes));
-    host.appendChild(presetRow);
+    const field = document.createElement('div');
+    field.className = 'ts-inline-field';
+    field.append(minutes, unit);
+    valueRow = prop('Length', field);
   } else {
     // Plain validated text, not <input type="time"> — WebKit's native time
     // control (Tauri's real webview on macOS) can show a complete-looking
@@ -5264,45 +5272,24 @@ function renderItemTimerControls() {
       const resolved = resolveFlexibleTime(timeInp.value);
       if (resolved) { save({ mode: 'endAt', endAtTime: resolved }); timeInp.value = clockTime(resolved); renderPreview(); }
     });
-    fieldRow.appendChild(timeInp);
-    host.appendChild(fieldRow);
+    valueRow = prop('Ends at', timeInp);
   }
 
   // Warning / overtime colours — the countdown recolours through these as it
   // runs down (last minute → warning, past zero → overtime). The base colour
   // is the timer text layer's own colour, edited on the canvas like any layer.
   const timerLayer = (resolveItemBaseLook(item)?.layers || []).find(l => l.binding === 'timer');
-  const colorRow = document.createElement('div');
-  colorRow.className = 'ts-prop-row';
-  const warnLbl = document.createElement('span');
-  warnLbl.className = 'ts-prop-label'; warnLbl.textContent = 'Last minute';
-  warnLbl.title = 'The countdown turns this colour for its final minute';
-  colorRow.appendChild(warnLbl);
-  colorRow.appendChild(makeColor(params.warnColor || timerLayer?.warnColor || '#e8a64a',
-    (v) => save({ warnColor: v })));
-  const otLbl = document.createElement('span');
-  otLbl.className = 'ts-prop-label'; otLbl.textContent = 'Overtime';
-  otLbl.title = 'The colour once it passes zero and counts up';
-  otLbl.style.marginLeft = '10px';
-  colorRow.appendChild(otLbl);
-  colorRow.appendChild(makeColor(params.overtimeColor || timerLayer?.overtimeColor || '#e8404a',
-    (v) => save({ overtimeColor: v })));
-  host.appendChild(colorRow);
+  const colors = fieldRow([
+    swatchField('Last minute', params.warnColor || timerLayer?.warnColor || '#e8a64a', (v) => save({ warnColor: v }), 'The countdown turns this colour for its final minute'),
+    swatchField('Overtime', params.overtimeColor || timerLayer?.overtimeColor || '#e8404a', (v) => save({ overtimeColor: v }), 'The colour once it passes zero and counts up'),
+  ]);
+  host.appendChild(section('item', 'Timer', prop('Counts down', modeSel), valueRow, colors));
 
   // Scenes (segment.scenes — a storyboard, see segments.js) are managed
-  // as real SLIDES in the Slides panel to the left now (renderItemSlidesList/
+  // as real SLIDES in the Slides panel to the left (renderItemSlidesList/
   // addTimerSlide) — one thumbnail per scene, click to edit its layers,
-  // "+ Add Slide" to add another, a duration field right on each slide's
-  // own row for "the player controls speed" — rather than a separate list
-  // tucked away in here. This section used to hold that whole list.
-  if (item.scenes && item.scenes.length) {
-    const scenesNote = document.createElement('p');
-    scenesNote.className = 'setting-hint';
-    scenesNote.style.margin = '4px 0 0';
-    scenesNote.textContent = `Playing ${item.scenes.length} slide${item.scenes.length === 1 ? '' : 's'} in sequence — manage them in the Slides panel to the left.`;
-    host.appendChild(scenesNote);
-    renderScenePaceControls(host, item);
-  }
+  // "+ Add Slide" to add another; how they share the countdown is here.
+  if (item.scenes && item.scenes.length) renderScenePaceControls(host, item);
 
   // Local echo so the field reflects the change immediately even before
   // the PUT round-trips — item.trigger is the same live segmentList
@@ -5350,37 +5337,30 @@ function renderScenePaceControls(host, item) {
     return `About ${per} s per slide on this ${Math.round(totalSec / 60)}-minute countdown`
       + (finale ? `, then “${item.scenes[item.scenes.length - 1].name || 'the last slide'}” to finish.` : '.');
   };
-  const label = document.createElement('div');
-  label.className = 'ts-props-section-label';
-  label.textContent = 'Slides';
-  label.style.marginTop = '10px';
-  host.appendChild(label);
-  const row = (name, control) => {
-    const r = document.createElement('div');
-    r.className = 'ts-prop-row';
-    const l = document.createElement('span');
-    l.className = 'ts-prop-label';
-    l.textContent = name;
-    r.appendChild(l);
-    r.appendChild(control);
-    host.appendChild(r);
-  };
-  row('Pace', makeSelect([
+  const note = document.createElement('p');
+  note.className = 'setting-hint';
+  note.style.margin = '0';
+  note.textContent = `${item.scenes.length} slide${item.scenes.length === 1 ? '' : 's'}, in order — add, remove and reorder them in the list on the left.`;
+  const rows = [note, prop('Pace', makeSelect([
     { label: 'The countdown sets it', value: 'countdown' },
     { label: 'Each slide\'s own time', value: 'fixed' },
-  ], pace.mode, v => savePace({ mode: v }, true)));
+  ], pace.mode, v => savePace({ mode: v }, true)))];
   if (pace.mode === 'countdown') {
-    row('Longest on screen', makeSlider(pace.maxSec, 5, 120, v => savePace({ maxSec: v }), v => `${Math.round(v)} s`));
-    row('Finale', makeToggle(pace.finaleSec > 0, v => savePace({ finaleSec: v ? 60 : 0 }, true)));
+    rows.push(prop('Longest slide', makeSlider(pace.maxSec, 5, 120, v => savePace({ maxSec: v }), v => `${Math.round(v)} s`)));
   }
-  row('Change', makeSelect([
-    { label: 'Blur', value: 'blur' }, { label: 'Fade', value: 'fade' }, { label: 'Cut', value: 'cut' },
-  ], pace.transition, v => savePace({ transition: v }, true)));
+  const transition = makeSelect([
+    { label: 'Blur between slides', value: 'blur' }, { label: 'Fade between slides', value: 'fade' }, { label: 'Cut between slides', value: 'cut' },
+  ], pace.transition, v => savePace({ transition: v }, true));
+  rows.push(fieldRow([
+    pace.mode === 'countdown' && toggleField('Finale', pace.finaleSec > 0, v => savePace({ finaleSec: v ? 60 : 0 }, true), 'The last slide holds the final minute'),
+    transition,
+  ]));
   const readout = document.createElement('p');
   readout.className = 'setting-hint';
-  readout.style.margin = '4px 0 0';
+  readout.style.margin = '0';
   readout.textContent = paceReadout();
-  host.appendChild(readout);
+  rows.push(readout);
+  host.appendChild(section('item', 'Slides', ...rows));
 }
 
 document.getElementById('ts-item-theme-picker-btn')?.addEventListener('click', (e) => {

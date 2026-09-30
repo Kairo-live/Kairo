@@ -2109,9 +2109,10 @@ async function restartAudioCapture(reason, allowDeviceFallback = true) {
 // this app's fully dark UI (owner feedback, live). The CSS track gradient
 // (::-webkit-slider-runnable-track in styles.css) needs a --progress custom
 // property to know where the fill/unfilled split falls; this keeps it in
-// sync on load and on every drag. Covers every <input type="range"> in the
-// document (svc-scale, media-seek/volume, Theme Studio's transition speed/
-// intensity sliders) — one wiring point rather than one per slider.
+// sync on load, on every drag and on every value set from code. Covers every
+// <input type="range"> in the document (svc-scale, media-seek/volume, Theme
+// Studio's transition speed/intensity sliders) — one wiring point rather
+// than one per slider.
 function wireRangeSliders() {
   const setProgress = (el) => {
     const min = parseFloat(el.min) || 0;
@@ -2120,10 +2121,22 @@ function wireRangeSliders() {
     const pct = max > min ? ((val - min) / (max - min)) * 100 : 0;
     el.style.setProperty('--progress', Math.max(0, Math.min(100, pct)) + '%');
   };
-  document.querySelectorAll('input[type="range"]').forEach((el) => {
-    setProgress(el);
-    el.addEventListener('input', () => setProgress(el));
+  const isRange = (el) => el instanceof HTMLInputElement && el.type === 'range';
+  // Drags: one listener for the whole document, so sliders built after
+  // startup (every Theme Studio makeSlider) are covered too — per-slider
+  // listeners only ever reached the ones already in the page.
+  document.addEventListener('input', (e) => { if (isRange(e.target)) setProgress(e.target); }, true);
+  // Values set from code fire no 'input' event: the seek bar during
+  // playback, the transition speed read back from settings, a panel filled
+  // in for the selected theme, a slider built with its value. Each of those
+  // left the fill where it was (a 0% slider drawn half full), so the fill
+  // follows the value property itself rather than each place remembering.
+  const value = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
+  Object.defineProperty(HTMLInputElement.prototype, 'value', {
+    ...value,
+    set(v) { value.set.call(this, v); if (isRange(this)) setProgress(this); },
   });
+  document.querySelectorAll('input[type="range"]').forEach(setProgress);
 }
 
 // ── Custom Select Dropdowns ───────────────────────────────────────────────
