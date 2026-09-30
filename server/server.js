@@ -1063,6 +1063,13 @@ const DIRECT_REF_SUPPRESS_MS = 4000;
 // been unambiguous.
 let prevFinalTranscript   = '';
 let prevFinalTranscriptAt = 0;
+// The offline engine locks a few words at a time, so one citation can span
+// three locks ("of Acts of" | "Apostle one verse" | "eight when the…"). While
+// speech runs on from lock to lock, the join keeps the last JOIN_CARRY_WORDS
+// locked words rather than only the last lock. Deepgram's segments never
+// continue live, so they join exactly as before.
+let prevFinalContinues = false;
+const JOIN_CARRY_WORDS = 12;
 
 // A chapter got named with no verse yet ("Jeremiah chapter 17...") — once a
 // verse is successfully resolved for this book+chapter via the preacher's
@@ -3535,7 +3542,7 @@ async function handleTranscriptSegment(transcript, isFinal, confidence, speechFi
   // Snapshot BEFORE processForReferences replaces prevFinalTranscript with this
   // segment — announcesDifferentBook below needs the real previous segment.
   const prevFinalBefore = { text: prevFinalTranscript, at: prevFinalTranscriptAt };
-  let foundRef = await processForReferences(transcript, true, sentFromInterim);
+  let foundRef = await processForReferences(transcript, true, sentFromInterim, continuesLive);
   await checkCitationSiblings(transcript, true);
   if (!foundRef) offerNamedPassages(transcript).catch(() => {});
 
@@ -4844,7 +4851,7 @@ function endsMidCitation(text) {
   return /\d$/.test(t) || !!consumeNumber([tail], 0);
 }
 
-async function processForReferences(transcript, isFinal, sentFromInterim = null) {
+async function processForReferences(transcript, isFinal, sentFromInterim = null, continuesLive = false) {
   if (!workerBasicReady) return false;
   let refs = await resolveAmbiguousRefs(parseAllSpokenReferences(transcript, inBibleMode));
 
@@ -4894,7 +4901,13 @@ async function processForReferences(transcript, isFinal, sentFromInterim = null)
       joinedText = `${prevFinalTranscript} ${transcript}`;
     }
   }
-  if (isFinal) { prevFinalTranscript = transcript; prevFinalTranscriptAt = Date.now(); }
+  if (isFinal) {
+    prevFinalTranscript = prevFinalContinues
+      ? `${prevFinalTranscript} ${transcript}`.split(RE_SPACES).slice(-JOIN_CARRY_WORDS).join(' ')
+      : transcript;
+    prevFinalContinues = continuesLive;
+    prevFinalTranscriptAt = Date.now();
+  }
   // Not an unresolved ambiguous guess: the primary never sends one, so marking it
   // primary-owned would stop the extra streams from ever promoting the resolved book.
   for (const r of refs) if (!r.ambiguousUnresolved) citationVoting.recordPrimaryCitation(r);

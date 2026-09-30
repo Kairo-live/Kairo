@@ -439,3 +439,11 @@ test('"revelation" as a common noun is not a mention of the book; a cued one sti
   assert.deepEqual(detectBookMentions('the book of Revelation says'), ['Revelation']);
   assert.deepEqual(parseAllSpokenReferences('Revelation 3:20').map(r => `${r.book} ${r.chapter}:${r.verse}`), ['Revelation 3:20']);
 });
+
+test('an ordinal right after a chapter is not its verse: "Matthew eleven second to me… twenty eight" still waits for the verse', () => {
+  const f = (t) => parseAllSpokenReferences(t).map(r => `${r.book} ${r.chapter}:${r.verse ?? ''}`);
+  assert.deepEqual(f('possible in Matthew eleven second to me twenty eight all you'), ['Matthew 11:']);
+  assert.deepEqual(f('Matthew eleven two'), ['Matthew 11:2']);          // a plain number still is
+  assert.deepEqual(f('Genesis one second verse'), ['Genesis 1:2']);     // and so is "the second verse"
+});
+

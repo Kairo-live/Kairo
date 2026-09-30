@@ -55,6 +55,15 @@ const POLL_INTERVAL_MS = 120;
 const LIVE_TAIL_WORDS = 4;   // newest words kept live (interim)
 const MIN_LOCK_WORDS  = 3;   // lock in runs of at least this many words
 
+// A lock never ends on a number: what it means depends on the words after it.
+// "twenty" | "eight" is 28, and "third John five" | "verse nineteen" is
+// 1 John 5:19 misheard — locked on its own, "third John five" went out as
+// 3 John 5 (2026-09-30). The number stays live until the next word, keeping
+// the live words to MAX_LIVE_WORDS at most. A number the model closed with
+// punctuation ("six.") has nothing more coming, so it locks.
+const MAX_LIVE_WORDS = LIVE_TAIL_WORDS + 4;
+const NUMBER_WORD = /^(\d+|zero|oh|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|first|second|third|fourth|fifth)$/i;
+
 // Resetting the stream costs the model its context: the words right after a
 // reset come out wrong or go missing. Resetting at every 1.2 s pause (10 min
 // of sermon audio) lost 107 words — 28.6% word difference from Deepgram's
@@ -265,7 +274,8 @@ class SherpaEngine {
         return;
       }
 
-      const upTo = words.length - LIVE_TAIL_WORDS;
+      let upTo = words.length - LIVE_TAIL_WORDS;
+      while (upTo > this._locked && words.length - upTo < MAX_LIVE_WORDS && NUMBER_WORD.test(words[upTo - 1])) upTo--;
       if (upTo - this._locked >= MIN_LOCK_WORDS) {
         this.onFinal(words.slice(this._locked, upTo).join(' '), { speechFinal: false });
         this._locked = upTo;

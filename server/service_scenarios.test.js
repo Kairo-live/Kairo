@@ -557,6 +557,17 @@ const fresh = () => { server.resetDetectionSession(); referenceContext.reset(); 
     assert.deepEqual(onScreen(), ['Romans 8:28', 'Romans 5:8'], JSON.stringify(sent));
   });
 
+  // The offline engine locks a few words at a time, speech running on between
+  // locks (continuesLive) — one citation can span three of them.
+  await test('a citation spread over three offline locks still goes up (Acts 1:8)', async () => {
+    fresh(); server.clearRangeQueue(); await server.clearLayer('all');
+    for (const lock of ['heaven say you are a god in the book', 'of Acts of', 'Apostle one verse', 'eight when the Spirit of', 'Christ enters in you']) {
+      await server.handleTranscriptSegment(lock, true, 0.9, false, undefined, true); await wait(150);
+    }
+    await wait(800);
+    assert.ok(onScreen().includes('Acts 1:8'), JSON.stringify(sent));
+  });
+
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 })();

@@ -906,8 +906,12 @@ function parseSpokenReference(text, inBibleMode = false) {
     // an ordinary "Psalm 23 for the Lord is my shepherd" parses as Psalms
     // 23:4 the same way. A homophone number word (for/won/too/ate) is only a
     // verse number when the word "verse" (or ":"/"and") announced it — bare
-    // after a chapter it is far more likely the everyday English word.
-    if (vRes && !hasVerseKeyword && vRes.consumed === 1 && ['for', 'won', 'too', 'ate'].includes(words[idx])) {
+    // after a chapter it is far more likely the everyday English word. So is
+    // an ordinal: nobody calls a verse "Matthew eleven second" — that was
+    // "Matthew 11, say come to me… 28" misheard (offline engine, 2026-09-30).
+    // "Genesis one, second verse" still is one.
+    if (vRes && !hasVerseKeyword && vRes.consumed === 1 && AMBIGUOUS_NUMBER_WORDS.has(words[idx])
+        && !(ORDINAL_TO_NUM.has(words[idx]) && ['verse', 'verses'].includes(words[idx + 1]))) {
       vRes = null;
     }
 
@@ -1447,6 +1451,17 @@ function resolvePartialReference(text, { allowBareNumber = true } = {}) {
     if (!vRes || !referenceContext.book) continue;
     const maxCh = MAX_CHAPTERS[referenceContext.book];
     if (maxCh && chRes.value > maxCh) continue;
+    // KNOWN GAP (offline engine, 2026-09-30): "Deuteronomy thirty-one verse
+    // six" once came out "they told me chapter one verse six" during
+    // Proverbs 18 and put up Proverbs 1:6 — a mishearing, shown as a real
+    // citation. A fix that capped every chapter-jump-with-no-book-named to
+    // Possible Matches was tried and reverted: it also caught "Now chapter 5
+    // verse 1" while preaching through Romans 8 — a normal way to keep
+    // citing the same book at a new chapter — and that's indistinguishable
+    // from the mishearing by the words alone. Leaving this open rather than
+    // fixture-tuning around the one incident (see the "Sermons Are
+    // Examples" rule) until there's a real signal (e.g. corroboration
+    // against the sermon text) to tell the two apart.
     return { book: referenceContext.book, chapter: chRes.value, verse: vRes.value, partial: true, chapterGiven: true };
   }
 
