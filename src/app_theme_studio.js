@@ -1732,7 +1732,9 @@ function tsImageArt(layer, src, fit, kenBurns) {
   return clip;
 }
 
-function renderPreview() {
+// The canvas, then the rulers and guides around it (tsPaintRulers).
+function renderPreview() { renderStage(); tsPaintRulers(); }
+function renderStage() {
   const stage = document.getElementById('looks-preview-stage');
   if (!stage || !activeLook) return;
 
@@ -2386,7 +2388,7 @@ let tsSnapGuides = { x: null, y: null };
 
 const TS_SNAP_TOLERANCE = 14; // design px — same feel as the old center-only snap
 
-// The ONE set of align icons, shared by renderLayoutProps' single-layer
+// The ONE set of align icons, shared by transformControls' single-layer
 // "align to canvas" row and the multi-select Align panel (renderProps) —
 // those used to be two different controls (one icon-based, one plain text
 // chips), which read as two different features instead of the same one
@@ -2414,12 +2416,12 @@ function tsAlignIconBtn(kind, onClick) {
 // the marks a slide deck's safe margins and balanced layouts actually land on.
 const TS_BREAKPOINT_FRACTIONS = [0, 0.25, 0.5, 0.75, 1];
 
-// Snap targets along one axis: this theme's breakpoints plus every other
-// visible layer's near/center/far edge — so a box can also line up with a
-// sibling (e.g. the reference sitting flush under the verse), not just the
-// canvas itself.
+// Snap targets along one axis: this theme's breakpoints and guides, plus
+// every other visible layer's near/center/far edge — so a box can also line
+// up with a sibling (e.g. the reference sitting flush under the verse), not
+// just the canvas itself.
 function tsSnapTargetsX(excludeId) {
-  const targets = TS_BREAKPOINT_FRACTIONS.map(f => f * TS_DESIGN_W);
+  const targets = [...TS_BREAKPOINT_FRACTIONS.map(f => f * TS_DESIGN_W), ...tsGuideSnapTargets('vertical')];
   (activeLook?.layers || []).forEach(l => {
     if (l.id === excludeId || !l.pos || l.visible === false) return;
     targets.push(l.pos.x, l.pos.x + l.pos.w, l.pos.x + l.pos.w / 2);
@@ -2427,7 +2429,7 @@ function tsSnapTargetsX(excludeId) {
   return targets;
 }
 function tsSnapTargetsY(excludeId) {
-  const targets = TS_BREAKPOINT_FRACTIONS.map(f => f * TS_DESIGN_H);
+  const targets = [...TS_BREAKPOINT_FRACTIONS.map(f => f * TS_DESIGN_H), ...tsGuideSnapTargets('horizontal')];
   (activeLook?.layers || []).forEach(l => {
     if (l.id === excludeId || !l.pos || l.visible === false) return;
     const h = l.pos.h > 0 ? l.pos.h : tsEffectiveH(l, l.pos);
@@ -2777,7 +2779,7 @@ function tsDragEnd() {
 // (focus-stealing) renderProps rebuild.
 function tsSyncPosInputs(layer) {
   if (!layer.pos) return;
-  document.querySelectorAll('#ts-props-panel [data-pos-input]').forEach(inp => {
+  document.querySelectorAll('#ts-tool-header [data-pos-input], #ts-props-panel [data-pos-input]').forEach(inp => {
     const k = inp.dataset.posInput;
     if (document.activeElement === inp) return;
     if (k === 'rotation') inp.value = Math.round(layer.rotation || 0);
@@ -3071,6 +3073,14 @@ function beginInlineTextEdit(div, layer) {
       // here only.
       layer.customText = div.innerText.replace(/\r?\n/g, ' ').trim();
       up();
+      // A text box made and left as it was comes away again; one typed in is
+      // named after its words — both as in Photoshop.
+      if (tsFreshTextId === layer.id) {
+        tsFreshTextId = null;
+        if (!layer.customText || layer.customText === TS_TEXT_PLACEHOLDER) { deleteLayer(layer); return; }
+        layer.name = layer.customText.length > 28 ? layer.customText.slice(0, 27).trimEnd() + '…' : layer.customText;
+        renderLayersList();
+      }
     }
     renderProps();
   };
@@ -3082,13 +3092,17 @@ function beginInlineTextEdit(div, layer) {
     div.contentEditable = 'false';
     div.classList.remove('ts-el-editing');
     if (!isVerseSlide) layer.customText = original;
+    if (tsFreshTextId === layer.id) { tsFreshTextId = null; deleteLayer(layer); return; }
     renderPreview();
+    renderToolHeader();
   };
   // Registered so every OTHER entry point that starts a new selection/drag
   // (tsDecorateLayerEl, tsBeginDrag) can force this to commit first — see
   // tsCommitActiveEdit and the comment on tsActiveEdit's declaration for
   // why the blur event below can't be relied on alone.
   tsActiveEdit = { layerId: layer.id, commit };
+  // Typing is the Type tool's, wherever it began (a double-click with Move).
+  if (tsTool !== 'type') selectTool('type'); else renderToolHeader();
   div.addEventListener('blur', commit, { once: true });
   div.addEventListener('keydown', (e) => {
     // Escape/Enter here must never reach the DOCUMENT-level handlers that
@@ -3140,7 +3154,10 @@ let activePropsTab = 'layout';
 // every render.
 let lastPropsLayerId = null;
 
-function renderProps() {
+// The panel on the right, and the options over the canvas that follow the
+// same selection.
+function renderProps() { renderPropsPanel(); renderToolHeader(); }
+function renderPropsPanel() {
   const empty = document.getElementById('ts-props-empty');
   const panel = document.getElementById('ts-props-panel');
   const tabs = document.getElementById('ts-props-tabs');
@@ -3213,7 +3230,7 @@ function renderProps() {
     header.textContent = `${count} layers selected`;
     panel.appendChild(header);
     // Same icon set and behavior as a single layer's own "align to canvas"
-    // row (renderLayoutProps/TS_ALIGN_ICONS) — this used to be a separate
+    // row (transformControls/TS_ALIGN_ICONS) — this used to be a separate
     // plain-text-chip control, which read as a different feature instead
     // of the same alignment tool just given more than one layer to work on.
     const alignWrap = document.createElement('div');
@@ -3289,6 +3306,8 @@ function renderProps() {
   let available = PROPS_TABS_BY_LAYER_TYPE[activeLayer.type] || PROPS_TABS_BY_LAYER_TYPE.text;
   // The canvas fill is always the whole screen: nothing to place, nothing to animate.
   if (isCanvasFill) available = available.filter(t => t !== 'animate' && t !== 'layout');
+  // …and a tab with nothing in it for this layer isn't offered.
+  available = available.filter(t => panel.querySelector(`[data-tab="${t}"]`));
   if (activePropsTab !== 'item' && !available.includes(activePropsTab)) activePropsTab = available[0];
   showTabs(inItem ? ['item', ...available] : available);
   panel.style.display = onItemTab() ? 'none' : 'block';
@@ -4076,7 +4095,7 @@ document.addEventListener('keydown', (e) => {
 });
 
 // ── Layout (free-canvas) props — Alignment / Position / Dimension ─────────
-// Chain-link state for the W/H fields (renderLayoutProps) — whether typing
+// Chain-link state for the W/H fields (transformControls) — whether typing
 // one dimension scales the other proportionally, same idea as corner-drag
 // already locking aspect ratio for an image (tsDragMove), just extended to
 // the numeric fields. Transient UI preference, not theme data, so it's
@@ -4086,7 +4105,11 @@ document.addEventListener('keydown', (e) => {
 // this one dimension".
 const layerAspectLock = new Map();
 
-function renderLayoutProps(panel, layer) {
+// The Move tool's Transform options (renderToolHeader), after Compositor's
+// transform header: align to the canvas, X / Y / W / H with the W–H link,
+// the angle and Reset to layout — every one kept in step while the layer is
+// dragged, resized or turned on the canvas (tsSyncPosInputs).
+function transformControls(layer) {
   const cur = measurePos(layer);
   const isText = layer.type === 'text';
 
@@ -4154,12 +4177,12 @@ function renderLayoutProps(panel, layer) {
     linkBtn.classList.toggle('active', now);
     linkBtn.title = now ? 'Width/Height are linked — click to unlink' : 'Width/Height are unlinked — click to link';
   });
-  // W under X and H under Y; the link sits in the row's icon column.
-  const kids = [
-    fieldRow([alignWrap]),
-    fieldRow([posField('x', 'X', -TS_DESIGN_W, TS_DESIGN_W), posField('y', 'Y', -TS_DESIGN_H, TS_DESIGN_H)]),
-    fieldRow([posField('w', 'W', 40, TS_DESIGN_W, { aspect: true }), posField('h', 'H', 0, TS_DESIGN_H, { aspect: true }), linkBtn]),
-  ];
+  const parts = {
+    align: alignWrap,
+    x: posField('x', 'X', -TS_DESIGN_W, TS_DESIGN_W), y: posField('y', 'Y', -TS_DESIGN_H, TS_DESIGN_H),
+    w: posField('w', 'W', 40, TS_DESIGN_W, { aspect: true }), h: posField('h', 'H', 0, TS_DESIGN_H, { aspect: true }),
+    link: linkBtn, rotation: null, reset: null,
+  };
 
   // Rotation, about the layer's own centre — a countdown running up the side
   // of the screen, a tilted photo, a slanted headline. Turned with the handle
@@ -4168,14 +4191,13 @@ function renderLayoutProps(panel, layer) {
   // with its own box: a layout-preset text layer centres itself with a
   // transform, and the canvas fill is always the whole screen.
   const isCanvasFill = layer.type === 'background' && !layer.pos;
-  const rotRow = [];
   if ((layer.pos || !isText) && !isCanvasFill) {
     const rot = numField('↻', Math.round(layer.rotation || 0), {
       min: -180, max: 180, unit: '°', title: 'Rotation — or turn it with the round handle under the box',
       onChange: (v) => { layer.rotation = v || 0; if (isText) ensurePos(layer); up(); },
     });
     rot.querySelector('input').dataset.posInput = 'rotation';
-    rotRow.push(rot);
+    parts.rotation = rot;
   }
   // Escape hatch back to the layout preset once a layer has been freed — an
   // icon in the row's icon column, as a design tool's small actions are.
@@ -4190,11 +4212,9 @@ function renderLayoutProps(panel, layer) {
       up();
       renderProps();
     });
-    rotRow.push(reset);
+    parts.reset = reset;
   }
-  if (rotRow.length) kids.push(fieldRow(rotRow, { cols: 2 }));
-
-  panel.appendChild(section('layout', 'Position', ...kids));
+  return parts;
 }
 
 // ── Animate tab ───────────────────────────────────────────────────────────
@@ -4279,24 +4299,8 @@ function renderSlideLayout(panel) {
 // Background layer properties — a shape, or the canvas itself (always the
 // whole screen: its layout is the slide's, see renderSlideLayout).
 function renderBgProps(panel, layer) {
-  if (layer.pos) renderLayoutProps(panel, layer);
 
-  // Shape (a shape layer only — the canvas fill is always the whole screen):
-  // which shape, and for a rectangle its corner radius (the other shapes
-  // have their own edges and ignore it).
-  if (layer.pos) {
-    const isRect = (layer.shape || 'rect') === 'rect';
-    panel.appendChild(section('style', 'Shape', fieldRow([
-      makeSelect([
-        { label: 'Rectangle', value: 'rect' },
-        { label: 'Ellipse',   value: 'ellipse' },
-        { label: 'Pill',      value: 'pill' },
-        { label: 'Triangle',  value: 'triangle' },
-        { label: 'Diamond',   value: 'diamond' },
-      ], layer.shape || 'rect', v => { layer.shape = v; up(); renderProps(); }),
-      isRect && numField('Corners', layer.radius || 0, { min: 0, max: 200, unit: 'px', onChange: v => { layer.radius = v ?? 0; up(); } }),
-    ])));
-  }
+  // (A shape's kind and corners are the Shape tool's, over the canvas.)
 
   // Fill: its kind, then what that kind needs — a colour and its opacity; a
   // gradient's two colours, angle and opacity; or a picture (the bundled
@@ -4392,7 +4396,6 @@ function layerNameSection(panel, layer) {
 }
 function renderImageProps(panel, layer) {
   layerNameSection(panel, layer);
-  renderLayoutProps(panel, layer);
 
   // The picture itself, and Replace… — swaps the picture and keeps
   // everything else: its box, fade, animation.
@@ -4445,14 +4448,13 @@ function renderPhotoLookProps(panel, layer) {
 // evenly spacing `sources.length` images across the whole countdown so the
 // last one lands right as it hits zero. Built for the "image left / timer
 // right" pre-service layout, but positioned/sized like any other layer
-// (renderLayoutProps), so it isn't tied to one specific split. Editing here
+// (the Move tool's transform), so it isn't tied to one specific split. Editing here
 // (and every static preview: the canvas below, paintLookLayers,
 // buildLayerDOM's non-ticking initial paint) always shows sources[0] — the
 // live advance only happens against a real running countdown on the actual
 // output, not in any preview surface.
 function renderImageCycleProps(panel, layer) {
   layerNameSection(panel, layer);
-  renderLayoutProps(panel, layer);
 
   // Timing — "Each": seconds per picture, only meaningful for a scene's own
   // slideshow (a countdown's slides); blank spreads them evenly across the
@@ -4596,7 +4598,6 @@ async function openCycleImagePicker(layer) {
 function renderMotionProps(panel, layer) {
   const M = window.KairoMotion;
   layerNameSection(panel, layer);
-  renderLayoutProps(panel, layer);
   if (!M) return;
 
   // Edited as a normalized copy, stored back only when something changes —
@@ -4951,10 +4952,9 @@ function revealRows() {
   return rows;
 }
 
-// Text layer properties — laid out as a design tool's text inspector: what the
-// layer shows (Layout tab), then the type — family; weight and size; line and
-// letter spacing; alignment, italic and case — and its colour (Style), its
-// shadow and outline (Effects).
+// Text layer properties: what the layer shows (Layout tab), how a verse
+// reveals and highlighted words (Style), its shadow and outline (Effects).
+// Its type is the Type tool's, over the canvas.
 function renderTextProps(panel, layer) {
   const nameInp = document.createElement('input');
   nameInp.type = 'text'; nameInp.className = 'ts-prop-input';
@@ -4995,52 +4995,29 @@ function renderTextProps(panel, layer) {
     ], activeLook.translateTo || '', v => { activeLook.translateTo = v || null; renderPreview(); scheduleThemeAutosave(); }))
   ].filter(Boolean)));
 
-  renderLayoutProps(panel, layer);
 
-  // Type: the family on its own line, then weight and size, then line and
-  // letter spacing (exact numbers — 1.15, -0.5 — are what people reach for),
-  // then alignment with italic and case.
-  const caseSel = makeSelect([
-    { label: 'Aa  As typed', value: 'none' }, { label: 'AA  Uppercase', value: 'uppercase' }, { label: 'aa  Lowercase', value: 'lowercase' },
-  ], layer.font.transform || 'none', v => { layer.font.transform = v; up(); });
-  caseSel.title = 'Letter case';
-  const italic = iconToggle('I', layer.font.italic, 'Italic', v => { layer.font.italic = v; up(); }, { italic: true });
-  italic.classList.add('ts-row-icon');
-  panel.appendChild(section('style', 'Text',
-    fieldRow([makeFontSelect(layer.font.family, v => { layer.font.family = v; up(); })]),
-    fieldRow([
-      makeWeightSelect(layer.font.weight, v => { layer.font.weight = v; up(); }),
-      numField('Size', layer.font.size, { min: 8, max: 300, unit: 'px', onChange: v => { layer.font.size = v ?? layer.font.size; up(); } }),
-    ]),
-    fieldRow([
-      numField('Line', layer.font.lineHeight, { min: 0.5, max: 4, step: 0.05, title: 'Line spacing', onChange: v => { layer.font.lineHeight = parseFloat((v ?? 1.2).toFixed(2)); up(); } }),
-      numField('Letter', layer.font.letterSpacing, { min: -5, max: 30, step: 0.5, unit: 'px', title: 'Letter spacing', onChange: v => { layer.font.letterSpacing = parseFloat((v ?? 0).toFixed(1)); up(); } }),
-    ]),
-    fieldRow([makeAlignBtns(layer.align, v => { layer.align = v; up(); }), caseSel, italic]),
-    // How the verse reveals — the theme's, so not in a slide's own editor.
-    ...(tsMode !== 'item' && layer.binding === 'verse' ? revealRows() : [])));
-
-  // Colour: the text's, with its opacity; and — for text typed in, not a
-  // verse or the countdown — highlighted words: words wrapped in
-  // *asterisks* show in the highlight colour, a two-tone headline
-  // ("*FIRST TIME* / WITH US?") in one layer.
-  const colorKids = [fieldRow([colorField(layer.color, v => { layer.color = v; up(); })], { cols: 2 })];
+  // The type itself — family, size, colour, spacing — is the Type tool's,
+  // over the canvas (renderToolHeader). Here: how the verse reveals (the
+  // theme's, so not in a slide's own editor), and for text typed in,
+  // highlighted words — words wrapped in *asterisks* show in the highlight
+  // colour, a two-tone headline ("*FIRST TIME* / WITH US?") in one layer.
+  if (tsMode !== 'item' && layer.binding === 'verse') panel.appendChild(section('style', 'Reveal', ...revealRows()));
   if (layer.binding === 'custom') {
-    colorKids.push(fieldRow([
+    const kids = [fieldRow([
       toggleField('Highlight', !!layer.accentColor, v => {
         if (v) layer.accentColor = layer.accentColor || '#e3cf6c'; else delete layer.accentColor;
         up(); renderProps();
       }, 'Colour chosen words differently — put *asterisks* around them'),
       layer.accentColor && colorField(layer.accentColor, v => { layer.accentColor = v; up(); }, 'The highlight colour'),
-    ], { cols: 2 }));
+    ], { cols: 2 })];
     if (layer.accentColor) {
       const hint = document.createElement('div');
       hint.className = 'ts-motion-blurb';
       hint.textContent = 'Put *asterisks* around the words to highlight.';
-      colorKids.push(hint);
+      kids.push(hint);
     }
+    panel.appendChild(section('style', 'Highlight', ...kids));
   }
-  panel.appendChild(section('style', 'Color', ...colorKids));
 
   // Effects — each an on/off row (its name and a switch), with its settings
   // under it while on, in one section.
@@ -5100,7 +5077,6 @@ const newLookBtn   = document.getElementById('new-look-btn');
 // (No global "apply" button — themes are assigned per output in Settings.
 // No delete button here either — deleting a theme happens on its own row
 // in the themes list now, see renderLooksList/deleteLook.)
-const tsAddLayerBtn = document.getElementById('ts-add-layer-btn');
 
 // Theme Studio is a full in-window view, not an overlay: opening it swaps the
 // dashboard out so the canvas gets the whole content region.
@@ -5912,12 +5888,26 @@ document.addEventListener('keydown', (e) => {
   if (key === 'a') { e.preventDefault(); selectAllLayers(); }
   else if (key === 'c') { if (multiSelectedLayerIds.size || activeLayer) { e.preventDefault(); copyLayers(); } }
   else if (key === 'v') { if (layerClipboard.length) { e.preventDefault(); pasteLayers(); } }
-  // Cmd/Ctrl+D — duplicate in place (Canva/Figma/Keynote's own shortcut for
-  // this), same result as copy-then-paste but one keystroke: copyLayers
-  // already snapshots the whole current selection, pasteLayers already
-  // clones with fresh ids and selects the new copies.
-  else if (key === 'd') { if (multiSelectedLayerIds.size || activeLayer) { e.preventDefault(); copyLayers(); pasteLayers(); } }
+  // Cmd/Ctrl+D (Figma, Keynote) or Cmd/Ctrl+J (Photoshop) — duplicate.
+  else if (key === 'd' || key === 'j') { if (multiSelectedLayerIds.size || activeLayer) { e.preventDefault(); duplicateLayers(); } }
 });
+// A copy of the selection right above it, selected — Photoshop's Layer via
+// Copy. The clipboard is left as it was.
+function duplicateLayers() {
+  const src = multiSelectedLayerIds.size
+    ? activeLook.layers.filter(l => multiSelectedLayerIds.has(l.id))
+    : (activeLayer ? [activeLayer] : []);
+  if (!src.length) return;
+  const copies = deepClone(src).map((l, i) => {
+    l.id = `layer-${Date.now()}-${i}-${Math.random().toString(36).slice(2, 7)}`;
+    return l;
+  });
+  const top = Math.max(...src.map(l => activeLook.layers.indexOf(l)));
+  activeLook.layers.splice(top + 1, 0, ...copies);
+  multiSelectedLayerIds = new Set(copies.length > 1 ? copies.map(l => l.id) : []);
+  activeLayer = copies[copies.length - 1];
+  up(); renderProps(); renderThemeCanvasSizeSelect();
+}
 
 // Delete/Backspace for the selected layer(s) — same gesture as removing a
 // file in Finder or a shape in Figma. Not folded into the Cmd/Ctrl block
@@ -5965,6 +5955,548 @@ document.addEventListener('keydown', (e) => {
   });
   up();
 });
+
+// ── Tools, after Compositor ───────────────────────────────────────────────
+// The editor works the way Photoshop and Compositor (github.com/robbietilton/
+// Compositor, MIT) do, so a designer's hands already know it: a tool is picked
+// in the bar under the canvas or by its key, the bar over the canvas holds
+// that tool's options, and the line under the tools says what it does.
+//   Move (V)  — select, drag, resize, turn. Options: Transform.
+//   Type (T)  — drag a text box, or click for one, and type; click text to
+//               edit it. Options: the type.
+//   Shape (U) — drag a shape on a new layer: Shift for a square or circle,
+//               Option from its centre; Shift-U steps through the shapes.
+// With nothing of the tool's kind selected, its options are what the next
+// text box or shape is made with.
+const TS_TOOLS = {
+  move: { key: 'v', hint: 'Drag to move · Handles to resize · Circle to rotate · Arrows nudge, Shift ×10 · 1–0 opacity · Double-click text to type' },
+  type: { key: 't', hint: 'Drag a text box, or click for one · Click text to edit it · Return or a click outside to finish · Esc to cancel' },
+  shape: { key: 'u', hint: 'Drag to draw a shape on a new layer · Shift square or circle · Option from the centre · Shift-U next shape · Esc cancels' },
+};
+const TS_SHAPES = [['rect', 'Rectangle'], ['ellipse', 'Ellipse'], ['pill', 'Pill'], ['triangle', 'Triangle'], ['diamond', 'Diamond']];
+let tsTool = 'move';
+const tsTypeDefaults = { family: 'Manrope', size: 72, weight: 600, italic: false, lineHeight: 1.2, letterSpacing: 0, transform: 'none', color: '#ffffff', align: 'left' };
+const tsShapeDefaults = { shape: 'rect', color: '#e8404a', radius: 0 };
+
+function selectTool(tool) {
+  if (!TS_TOOLS[tool]) return;
+  tsTool = tool;
+  document.querySelectorAll('#ts-tool-bar .ts-tool-btn').forEach(b => b.classList.toggle('active', b.dataset.tool === tool));
+  const wrap = document.querySelector('.ts-preview-wrap');
+  wrap?.classList.toggle('ts-tool-type', tool === 'type');
+  wrap?.classList.toggle('ts-tool-shape', tool === 'shape');
+  const hint = document.getElementById('ts-tool-hint');
+  if (hint) hint.textContent = TS_TOOLS[tool].hint;
+  renderToolHeader();
+}
+document.querySelectorAll('#ts-tool-bar .ts-tool-btn').forEach(b => b.addEventListener('click', () => selectTool(b.dataset.tool)));
+
+// The bar over the canvas: the tool's name, then its options in a row
+// (Compositor's tool headers). Built again only when what it shows changes —
+// the tool, the layer, a shape's kind — so a click into one of its fields
+// while typing on the canvas (which ends the typing and redraws the panels)
+// isn't pulled out from under the pointer; otherwise its values just follow.
+function renderToolHeader() {
+  const host = document.getElementById('ts-tool-header');
+  if (!host) return;
+  const one = activeLook && !multiSelectedLayerIds.size ? activeLayer : null;
+  const layer = tsTool === 'type' ? (one?.type === 'text' ? one : null)
+    : tsTool === 'shape' ? (one?.type === 'background' && one.pos ? one : null)
+    : one;
+  const sig = [tsTool, multiSelectedLayerIds.size, tsTool === 'shape' ? (layer || tsShapeDefaults).shape || 'rect' : '', !!layer?.pos].join('|');
+  if (host.firstChild && host._sig === sig && host._layer === layer) {
+    host.querySelector('.ts-tool-done')?.classList.toggle('hidden', !tsActiveEdit);
+    return;
+  }
+  host._sig = sig; host._layer = layer;
+  host.innerHTML = '';
+  const title = document.createElement('span');
+  title.className = 'ts-tool-title';
+  title.textContent = { move: 'Transform', type: 'Type', shape: 'Shape' }[tsTool];
+  host.appendChild(title);
+  if (tsTool === 'move') moveOptions(host, layer);
+  else if (tsTool === 'type') typeOptions(host, layer);
+  else shapeOptions(host, layer);
+}
+function headerNote(host, text) {
+  const n = document.createElement('span');
+  n.className = 'ts-tool-note';
+  n.textContent = text;
+  host.appendChild(n);
+}
+function headerGap(host) {
+  const g = document.createElement('span');
+  g.className = 'ts-tool-sep';
+  host.appendChild(g);
+}
+function moveOptions(host, layer) {
+  if (!layer || layer === baseBgLayer()) {
+    headerNote(host, multiSelectedLayerIds.size ? `${multiSelectedLayerIds.size} layers — arrange them in the panel on the right` : 'Select a layer to move, size or turn it');
+    return;
+  }
+  const t = transformControls(layer);
+  host.append(t.align);
+  headerGap(host);
+  host.append(t.x, t.y);
+  headerGap(host);
+  host.append(t.w, t.link, t.h);
+  if (t.rotation) { headerGap(host); host.append(t.rotation); }
+  if (t.reset) host.append(t.reset);
+  if (layer.type === 'text') { headerGap(host); host.append(fieldBtn('Type…', () => selectTool('type'), 'Its font, size, colour and spacing (T)')); }
+  else if (layer.type === 'background' && layer.pos) { headerGap(host); host.append(fieldBtn('Shape…', () => selectTool('shape'), 'Its shape and corners (U)')); }
+}
+// The type: family, weight, size and colour; alignment, italic and case;
+// tracking and leading (Compositor's type header). With no text layer
+// selected, what the next text box is made with.
+function typeOptions(host, layer) {
+  const f = layer ? layer.font : tsTypeDefaults;
+  const set = (k, v) => {
+    if (!layer) { tsTypeDefaults[k] = v; return; }
+    if (k === 'color' || k === 'align') layer[k] = v; else layer.font[k] = v;
+    up();
+  };
+  const caseSel = makeSelect([
+    { label: 'Aa', value: 'none' }, { label: 'AA', value: 'uppercase' }, { label: 'aa', value: 'lowercase' },
+  ], f.transform || 'none', v => set('transform', v));
+  caseSel.title = 'Letter case: as typed, uppercase or lowercase';
+  caseSel.classList.add('ts-tool-case');
+  const font = makeFontSelect(f.family, v => set('family', v));
+  font.classList.add('ts-tool-font');
+  host.append(
+    font,
+    makeWeightSelect(f.weight, v => set('weight', v)),
+    numField('Size', f.size, { min: 8, max: 400, title: 'Size, in pixels on a 1920 × 1080 screen', onChange: v => { if (v) set('size', v); } }),
+    colorField(layer ? layer.color : tsTypeDefaults.color, v => set('color', v), 'Text colour'),
+  );
+  headerGap(host);
+  host.append(
+    makeAlignBtns(layer ? layer.align : tsTypeDefaults.align, v => set('align', v)),
+    iconToggle('I', !!f.italic, 'Italic', v => set('italic', v), { italic: true }),
+    caseSel,
+  );
+  headerGap(host);
+  host.append(
+    numField('Tracking', f.letterSpacing ?? 0, { min: -5, max: 60, step: 0.5, title: 'Space between the letters, in pixels', onChange: v => set('letterSpacing', parseFloat((v ?? 0).toFixed(1))) }),
+    numField('Leading', f.lineHeight ?? 1.2, { min: 0.5, max: 4, step: 0.05, title: 'Space between the lines', onChange: v => set('lineHeight', parseFloat((v ?? 1.2).toFixed(2))) }),
+  );
+  const done = fieldBtn('Done', () => { tsCommitActiveEdit(null); renderToolHeader(); }, 'Finish typing (Esc)');
+  done.classList.add('ts-tool-done');
+  done.classList.toggle('hidden', !tsActiveEdit);
+  host.append(done);
+}
+// Which shape, and a rectangle's corners (Compositor's shape header). Its
+// fill is the layer's, in the panel on the right. With no shape selected,
+// what the next one is drawn as.
+function shapeOptions(host, layer) {
+  const cur = layer || tsShapeDefaults;
+  const set = (k, v) => {
+    if (layer) { layer[k] = v; up(); } else tsShapeDefaults[k] = v;
+    if (k === 'shape') renderToolHeader();
+  };
+  const kind = makeSelect(TS_SHAPES.map(([value, label]) => ({ label, value })), cur.shape || 'rect', v => set('shape', v));
+  kind.title = 'Shift-U steps through the shapes';
+  host.append(kind);
+  if ((cur.shape || 'rect') === 'rect') host.append(numField('Corners', cur.radius || 0, { min: 0, max: 200, unit: 'px', title: 'Round the corners', onChange: v => set('radius', v ?? 0) }));
+  if (!layer) headerNote(host, 'Drag on the canvas to draw one');
+}
+
+// Drawing on the canvas with Type or Shape: a drag (or, for type, a click)
+// makes a new layer there. Captured ahead of the layers' own handlers.
+function tsDrawBox(a, b, square, fromCentre) {
+  let w = b.x - a.x, h = b.y - a.y;
+  if (square) { const m = Math.max(Math.abs(w), Math.abs(h)); w = Math.sign(w || 1) * m; h = Math.sign(h || 1) * m; }
+  let x = a.x, y = a.y;
+  if (fromCentre) { x -= w; y -= h; w *= 2; h *= 2; }
+  if (w < 0) { x += w; w = -w; }
+  if (h < 0) { y += h; h = -h; }
+  return { x: Math.round(x), y: Math.round(y), w: Math.round(w), h: Math.round(h) };
+}
+const TS_TEXT_PLACEHOLDER = 'Type here';
+let tsFreshTextId = null;   // the text box just made, until its first typing ends
+function addTextBox(box, clicked) {
+  const d = tsTypeDefaults;
+  const layer = {
+    id: 'layer-' + Date.now(), type: 'text', name: 'Text', visible: true, binding: 'custom', customText: TS_TEXT_PLACEHOLDER,
+    font: { family: d.family, size: d.size, weight: d.weight, italic: d.italic, lineHeight: d.lineHeight, letterSpacing: d.letterSpacing, transform: d.transform },
+    color: d.color, opacity: 100, align: d.align,
+    shadow: { enabled: false, color: '#000000', opacity: 70, blur: 8, x: 0, y: 2 },
+    outline: { enabled: false, color: '#000000', width: 2 },
+    // A click is a box as wide as a line needs; a drag is the box drawn. Height
+    // 0 is "as tall as the text".
+    pos: clicked ? { x: box.x, y: box.y, w: Math.min(900, TS_DESIGN_W - box.x), h: 0 } : { ...box, h: 0 },
+  };
+  activeLook.layers.push(layer);
+  activeLayer = layer; multiSelectedLayerIds.clear();
+  up(); renderProps();
+  // Straight into typing, the placeholder selected so the first key replaces it.
+  const div = tsStageEl()?.querySelector(`[data-layer-id="${CSS.escape(layer.id)}"]`);
+  if (!div) return;
+  tsFreshTextId = layer.id;
+  beginInlineTextEdit(div, layer);
+  const r = document.createRange(); r.selectNodeContents(div);
+  const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(r);
+}
+function addShape(box) {
+  const d = tsShapeDefaults;
+  const label = (TS_SHAPES.find(([v]) => v === d.shape) || [])[1] || 'Shape';
+  const layer = {
+    id: 'shape-' + Date.now(), type: 'background', name: label, visible: true, shape: d.shape,
+    fill: 'solid', color: d.color, opacity: 100, color2: d.color, angle: 135, radius: d.radius, pos: box,
+  };
+  activeLook.layers.push(layer);
+  activeLayer = layer; multiSelectedLayerIds.clear();
+  up(); renderProps();
+}
+document.querySelector('.ts-preview-wrap')?.addEventListener('mousedown', (e) => {
+  if (tsTool === 'move' || e.button !== 0 || !activeLook) return;
+  const stage = tsStageEl();
+  // A box's own handles still resize and turn it; the rulers lay guides.
+  if (!stage || e.target.closest?.('.ts-handle, .ts-rulers')) return;
+  const hit = e.target.closest?.('[data-layer-id]');
+  const hitLayer = hit && activeLook.layers.find(l => l.id === hit.dataset.layerId);
+  if (tsActiveEdit) {
+    // Placing the caret in the text being typed; anywhere else, the click
+    // finishes the typing (as in Photoshop) — the next one draws.
+    if (hitLayer && tsActiveEdit.layerId === hitLayer.id) return;
+    if (!(tsTool === 'type' && hitLayer?.type === 'text')) {
+      e.preventDefault(); e.stopPropagation();
+      tsCommitActiveEdit(null);
+      return;
+    }
+  }
+  if (tsTool === 'type' && hitLayer?.type === 'text') {
+    e.preventDefault(); e.stopPropagation();
+    tsCommitActiveEdit(null);
+    activeLayer = hitLayer; multiSelectedLayerIds.clear();
+    renderLayersList(); renderProps();
+    const typable = hitLayer.binding === 'custom' || (hitLayer.binding === 'verse' && tsMode === 'item');
+    const div = tsStageEl()?.querySelector(`[data-layer-id="${CSS.escape(hitLayer.id)}"]`);
+    if (div && typable) beginInlineTextEdit(div, hitLayer);
+    return;
+  }
+  e.preventDefault(); e.stopPropagation();
+  const geo = tsCanvasGeometry();
+  const at = (ev) => tsDesignPoint(ev, geo);
+  const start = at(e);
+  const startPx = { x: e.clientX, y: e.clientY };
+  const band = document.createElement('div');
+  band.className = 'ts-draw-band' + (tsTool === 'shape' ? ' is-' + tsShapeDefaults.shape : '');
+  stage.appendChild(band);
+  let box = null;
+  const move = (ev) => {
+    box = tsDrawBox(start, at(ev), ev.shiftKey, ev.altKey);
+    Object.assign(band.style, {
+      left: box.x / TS_DESIGN_W * 100 + '%', top: box.y / TS_DESIGN_H * 100 + '%',
+      width: box.w / TS_DESIGN_W * 100 + '%', height: box.h / TS_DESIGN_H * 100 + '%',
+    });
+  };
+  const finish = (ev, cancelled) => {
+    document.removeEventListener('mousemove', move);
+    document.removeEventListener('mouseup', onUp);
+    document.removeEventListener('keydown', onKey, true);
+    band.remove();
+    if (cancelled) return;
+    const clicked = Math.hypot(ev.clientX - startPx.x, ev.clientY - startPx.y) < 4;
+    if (tsTool === 'type') addTextBox(!clicked && box ? box : { x: Math.round(start.x), y: Math.round(start.y), w: 0, h: 0 }, clicked || !box || box.w < 40);
+    else if (box && box.w >= 4 && box.h >= 4) addShape(box);
+  };
+  const onUp = (ev) => finish(ev, false);
+  const onKey = (ev) => { if (ev.key === 'Escape') { ev.preventDefault(); ev.stopPropagation(); finish(ev, true); } };
+  document.addEventListener('mousemove', move);
+  document.addEventListener('mouseup', onUp);
+  document.addEventListener('keydown', onKey, true);
+}, true);
+
+// The tools' keys, and Photoshop's own for layers and the view: V / T / U pick a tool
+// (Shift-U the next shape); 1–9 set the layer's opacity to 10–90% and 0 to
+// 100% (two quick digits for an exact value); Shift + and Shift − step
+// through the blend modes; ⌘] and ⌘[ move a layer up or down the stack (⌘J,
+// duplicate, is with ⌘D). Never while typing.
+let tsOpacityDigits = '';
+let tsOpacityDigitsAt = 0;
+document.addEventListener('keydown', (e) => {
+  if (looksModal?.classList.contains('hidden') || !activeLook) return;
+  const t = e.target;
+  if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return;
+  const mod = e.metaKey || e.ctrlKey;
+  const key = e.key.toLowerCase();
+  // ⌘R (Photoshop) or Shift-R (Figma): the rulers. ⌘;: the guides.
+  if ((mod && key === 'r' && !e.shiftKey && !e.altKey) || (!mod && !e.altKey && e.shiftKey && key === 'r')) { e.preventDefault(); setShowRulers(!tsShowRulers); return; }
+  if (mod && e.key === ';') { e.preventDefault(); setShowGuides(!tsShowGuides); return; }
+  if (!mod && !e.altKey) {
+    if (key === 'u' && e.shiftKey) {
+      e.preventDefault();
+      const i = TS_SHAPES.findIndex(([v]) => v === tsShapeDefaults.shape);
+      tsShapeDefaults.shape = TS_SHAPES[(i + 1) % TS_SHAPES.length][0];
+      selectTool('shape');
+      return;
+    }
+    const tool = Object.keys(TS_TOOLS).find(k => TS_TOOLS[k].key === key);
+    if (tool && !e.shiftKey) { e.preventDefault(); selectTool(tool); return; }
+    const layer = !multiSelectedLayerIds.size ? activeLayer : null;
+    if (/^[0-9]$/.test(e.key) && layer) {
+      e.preventDefault();
+      const now = Date.now();
+      tsOpacityDigits = now - tsOpacityDigitsAt < 600 && tsOpacityDigits.length === 1 ? tsOpacityDigits + e.key : e.key;
+      tsOpacityDigitsAt = now;
+      const n = parseInt(tsOpacityDigits, 10);
+      layer.opacity = tsOpacityDigits.length === 2 ? Math.max(1, n) : (n === 0 ? 100 : n * 10);
+      up(); renderLayerAppearance();
+      return;
+    }
+    if ((e.key === '+' || e.key === '_' || (e.shiftKey && (key === '=' || key === '-'))) && layer && layer !== baseBgLayer()) {
+      e.preventDefault();
+      const i = Math.max(0, BLEND_MODES.indexOf(layer.blendMode || 'Normal'));
+      const dir = (e.key === '+' || key === '=') ? 1 : -1;
+      setLayerBlend(layer, BLEND_MODES[(i + dir + BLEND_MODES.length) % BLEND_MODES.length]);
+      return;
+    }
+  }
+  // ⌘] / ⌘[ one step up or down the stack, with Shift to the top or bottom.
+  // The canvas stays at the bottom.
+  if (mod && (e.code === 'BracketRight' || e.code === 'BracketLeft') && activeLayer && !multiSelectedLayerIds.size) {
+    e.preventDefault();
+    const canvas = baseBgLayer();
+    if (activeLayer === canvas) return;
+    const list = activeLook.layers.filter(l => l !== canvas);
+    const i = list.indexOf(activeLayer);
+    const raise = e.code === 'BracketRight';
+    const target = e.shiftKey ? list[raise ? list.length - 1 : 0] : list[raise ? i + 1 : i - 1];
+    if (target && target !== activeLayer) reorderLayer(activeLayer.id, target.id, !raise);
+  }
+});
+
+// ── Rulers and guides, after Compositor ──────────────────────────────────
+// Rulers along the top and left of the canvas area, in the design pixels X,
+// Y, W and H are in, 0 at the canvas's corner: numbered ticks about 70
+// points apart on a 1–2–5 scale, a tenth between, and a mark where the
+// pointer is. Drag out of a ruler to lay a guide; with Move, drag a guide to
+// move it, or back onto a ruler to take it away. Guides are the theme's,
+// saved with it (in a playlist item's editor, only for as long as it's
+// open), and layers snap to them. ⌘R shows or hides the rulers, ⌘; the
+// guides.
+const TS_RULER = 18;       // px, as Compositor's
+const TS_GUIDE_HIT = 4;    // px either side of a guide that picks it up
+let tsShowRulers = true, tsShowGuides = true;
+try {
+  tsShowRulers = localStorage.getItem('kairo-ts-rulers') !== '0';
+  tsShowGuides = localStorage.getItem('kairo-ts-guides') !== '0';
+} catch {}
+let tsGuideDrag = null;    // the guide being laid or moved: { id, axis, position }
+
+// Guides as shown: the theme's, with one being dragged in place of its own.
+// A 'vertical' guide stands at an X, a 'horizontal' one at a Y.
+function tsShownGuides() {
+  if (!tsShowGuides && !tsGuideDrag) return [];
+  const saved = (Array.isArray(activeLook?.guides) ? activeLook.guides : []).filter(g => g.id !== tsGuideDrag?.id);
+  return tsGuideDrag ? [...saved, tsGuideDrag] : saved;
+}
+function tsGuideSnapTargets(axis) {
+  return tsShownGuides().filter(g => g.axis === axis && g !== tsGuideDrag).map(g => g.position);
+}
+
+// Where the canvas is inside its area, and how many screen pixels a design
+// pixel is along each axis (a canvas shaped other than 16:9 stretches).
+function tsCanvasGeometry() {
+  const wrap = document.querySelector('.ts-preview-wrap'), stage = tsStageEl();
+  if (!wrap || !stage || !stage.clientWidth || !stage.clientHeight) return null;
+  const w = wrap.getBoundingClientRect(), s = stage.getBoundingClientRect();
+  return {
+    wrap: w,
+    x0: s.left - w.left + stage.clientLeft, y0: s.top - w.top + stage.clientTop,
+    sx: stage.clientWidth / TS_DESIGN_W, sy: stage.clientHeight / TS_DESIGN_H,
+  };
+}
+// A pointer's place on the canvas, in design pixels.
+function tsDesignPoint(ev, g = tsCanvasGeometry()) {
+  return g ? { x: (ev.clientX - g.wrap.left - g.x0) / g.sx, y: (ev.clientY - g.wrap.top - g.y0) / g.sy } : { x: 0, y: 0 };
+}
+
+function tsRulerStep(pxPerUnit) {
+  const target = 70 / Math.max(pxPerUnit, 0.0001);
+  return [1, 2, 5, 10, 20, 25, 50, 100, 200, 250, 500, 1000, 2000, 2500, 5000, 10000].find(n => n >= target) || 25000;
+}
+function tsPaintRuler(canvas, horizontal, g) {
+  if (!canvas) return;
+  const dpr = window.devicePixelRatio || 1;
+  const W = horizontal ? Math.round(g.wrap.width) : TS_RULER, H = horizontal ? TS_RULER : Math.round(g.wrap.height);
+  if (canvas.width !== Math.round(W * dpr) || canvas.height !== Math.round(H * dpr)) {
+    canvas.width = Math.round(W * dpr); canvas.height = Math.round(H * dpr);
+    canvas.style.width = W + 'px'; canvas.style.height = H + 'px';
+  }
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.fillStyle = '#333333';
+  ctx.fillRect(0, 0, W, H);
+  const scale = horizontal ? g.sx : g.sy, origin = horizontal ? g.x0 : g.y0;
+  const minor = tsRulerStep(scale) / 10;
+  const hair = 1 / dpr;
+  ctx.font = '8px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
+  ctx.textBaseline = 'top';
+  // Counted in tenths of a step from 0, so the numbered ticks never drift.
+  const first = Math.floor(-origin / scale / minor), last = Math.ceil(((horizontal ? W : H) - origin) / scale / minor);
+  for (let i = first; i <= last; i++) {
+    const at = origin + i * minor * scale;
+    const major = i % 10 === 0, mid = !major && i % 5 === 0;
+    const len = major ? 8 : mid ? 5 : 3;
+    ctx.fillStyle = '#9e9e9e';
+    if (horizontal) ctx.fillRect(at - hair / 2, H - len, hair, len);
+    else ctx.fillRect(W - len, at - hair / 2, len, hair);
+    if (!major) continue;
+    const text = String(Math.round(i * minor));
+    ctx.fillStyle = '#c7c7c7';
+    if (horizontal) ctx.fillText(text, at + 2, 1);
+    else {
+      // Along the tick, turned to read up the ruler.
+      ctx.save();
+      ctx.translate(1, at + 2);
+      ctx.rotate(-Math.PI / 2);
+      ctx.fillText(text, -ctx.measureText(text).width, 0);
+      ctx.restore();
+    }
+  }
+  ctx.fillStyle = '#141414';
+  if (horizontal) ctx.fillRect(0, H - hair, W, hair); else ctx.fillRect(W - hair, 0, hair, H);
+}
+function tsPaintRulers() {
+  tsPaintGuides();
+  const host = document.getElementById('ts-rulers');
+  if (!host) return;
+  host.classList.toggle('hidden', !tsShowRulers);
+  const g = tsShowRulers && activeLook ? tsCanvasGeometry() : null;
+  if (!g) return;
+  tsPaintRuler(document.getElementById('ts-ruler-h'), true, g);
+  tsPaintRuler(document.getElementById('ts-ruler-v'), false, g);
+}
+function tsPaintGuides() {
+  const host = document.getElementById('ts-guides');
+  if (!host) return;
+  host.innerHTML = '';
+  const g = activeLook ? tsCanvasGeometry() : null;
+  if (!g) return;
+  tsShownGuides().forEach(gd => {
+    const el = document.createElement('div');
+    el.className = 'ts-user-guide ' + (gd.axis === 'vertical' ? 'is-v' : 'is-h');
+    if (gd.axis === 'vertical') el.style.left = Math.round(g.x0 + gd.position * g.sx) + 'px';
+    else el.style.top = Math.round(g.y0 + gd.position * g.sy) + 'px';
+    host.appendChild(el);
+  });
+}
+function setShowRulers(on) {
+  tsShowRulers = on;
+  try { localStorage.setItem('kairo-ts-rulers', on ? '1' : '0'); } catch {}
+  document.querySelector('.ts-preview-wrap')?.classList.toggle('ts-has-rulers', on);
+  document.getElementById('ts-rulers-btn')?.classList.toggle('active', on);
+  // The canvas takes the room the rulers leave, or give back.
+  if (activeLook) renderPreview(); else tsPaintRulers();
+}
+function setShowGuides(on) {
+  tsShowGuides = on;
+  try { localStorage.setItem('kairo-ts-guides', on ? '1' : '0'); } catch {}
+  tsPaintGuides();
+}
+document.querySelector('.ts-preview-wrap')?.classList.toggle('ts-has-rulers', tsShowRulers);
+document.getElementById('ts-rulers-btn')?.classList.toggle('active', tsShowRulers);
+document.getElementById('ts-rulers-btn')?.addEventListener('click', () => setShowRulers(!tsShowRulers));
+
+// The guide within reach of a point on the screen, if any.
+function tsGuideAt(clientX, clientY) {
+  const g = tsCanvasGeometry();
+  if (!g) return null;
+  const x = clientX - g.wrap.left, y = clientY - g.wrap.top;
+  let best = null, bestD = TS_GUIDE_HIT + 0.5;
+  tsShownGuides().forEach(gd => {
+    const d = gd.axis === 'vertical' ? Math.abs(x - (g.x0 + gd.position * g.sx)) : Math.abs(y - (g.y0 + gd.position * g.sy));
+    if (d < bestD) { bestD = d; best = gd; }
+  });
+  return best;
+}
+// Lay a new guide (from a ruler) or move one. It snaps to the canvas's edges,
+// quarters and centre, the layers' edges and centres, and the other guides;
+// let go over a ruler, or outside the canvas area, and it's gone.
+function tsDragGuide(e, axis, guide) {
+  e.preventDefault(); e.stopPropagation();
+  tsCommitActiveEdit(null);
+  const original = guide ? guide.position : null;
+  tsGuideDrag = { id: guide ? guide.id : 'guide-' + Date.now().toString(36), axis, position: original ?? 0 };
+  const cls = axis === 'vertical' ? 'ts-dragging-guide-v' : 'ts-dragging-guide-h';
+  document.body.classList.add(cls);
+  const place = (ev) => {
+    const p = tsDesignPoint(ev);
+    const raw = axis === 'vertical' ? p.x : p.y;
+    const targets = axis === 'vertical' ? tsSnapTargetsX(null) : tsSnapTargetsY(null);
+    tsGuideDrag.position = Math.round(tsClosestSnap(raw, targets, TS_SNAP_TOLERANCE) ?? raw);
+    tsPaintGuides();
+  };
+  const gone = (ev) => {
+    const g = tsCanvasGeometry();
+    if (!g) return true;
+    const x = ev.clientX - g.wrap.left, y = ev.clientY - g.wrap.top;
+    return x < 0 || y < 0 || x > g.wrap.width || y > g.wrap.height || (tsShowRulers && (x < TS_RULER || y < TS_RULER));
+  };
+  const end = (ev, cancelled) => {
+    document.removeEventListener('mousemove', place);
+    document.removeEventListener('mouseup', onUp);
+    document.removeEventListener('keydown', onKey, true);
+    document.body.classList.remove(cls);
+    const drag = tsGuideDrag;
+    tsGuideDrag = null;
+    if (!cancelled && activeLook) {
+      const list = Array.isArray(activeLook.guides) ? activeLook.guides : (activeLook.guides = []);
+      if (gone(ev)) {
+        if (guide) { activeLook.guides = list.filter(x => x.id !== guide.id); tsSave(); }
+      } else if (!guide) {
+        list.push(drag);
+        if (!tsShowGuides) setShowGuides(true);
+        tsSave();
+      } else if (drag.position !== original) {
+        guide.position = drag.position;
+        tsSave();
+      }
+    }
+    tsPaintGuides();
+  };
+  const onUp = (ev) => end(ev, false);
+  const onKey = (ev) => { if (ev.key === 'Escape') { ev.preventDefault(); ev.stopPropagation(); end(ev, true); } };
+  place(e);
+  document.addEventListener('mousemove', place);
+  document.addEventListener('mouseup', onUp);
+  document.addEventListener('keydown', onKey, true);
+}
+document.getElementById('ts-ruler-h')?.addEventListener('mousedown', (e) => { if (e.button === 0 && activeLook) tsDragGuide(e, 'horizontal', null); });
+document.getElementById('ts-ruler-v')?.addEventListener('mousedown', (e) => { if (e.button === 0 && activeLook) tsDragGuide(e, 'vertical', null); });
+{
+  const wrap = document.querySelector('.ts-preview-wrap');
+  const markX = document.querySelector('.ts-ruler-mark-x'), markY = document.querySelector('.ts-ruler-mark-y');
+  // With Move, a guide under the pointer is picked up ahead of the layers.
+  wrap?.addEventListener('mousedown', (e) => {
+    if (e.button !== 0 || !activeLook || tsTool !== 'move' || e.target.closest?.('.ts-rulers, .ts-handle')) return;
+    const gd = tsGuideAt(e.clientX, e.clientY);
+    if (gd) tsDragGuide(e, gd.axis, activeLook.guides.find(x => x.id === gd.id));
+  }, true);
+  // Where the pointer is, on both rulers; and over a guide, the cursor that
+  // says it can be moved.
+  wrap?.addEventListener('mousemove', (e) => {
+    const r = wrap.getBoundingClientRect();
+    if (markX) { markX.style.transform = `translateX(${Math.round(e.clientX - r.left)}px)`; markX.classList.add('on'); }
+    if (markY) { markY.style.transform = `translateY(${Math.round(e.clientY - r.top)}px)`; markY.classList.add('on'); }
+    const gd = tsTool === 'move' && !tsDrag && !tsGuideDrag && !e.buttons ? tsGuideAt(e.clientX, e.clientY) : null;
+    wrap.classList.toggle('ts-guide-hover-v', gd?.axis === 'vertical');
+    wrap.classList.toggle('ts-guide-hover-h', gd?.axis === 'horizontal');
+  });
+  wrap?.addEventListener('mouseleave', () => { markX?.classList.remove('on'); markY?.classList.remove('on'); });
+  // Kept in step with the canvas area as the window or the panels change size.
+  if (wrap && window.ResizeObserver) {
+    let queued = false;
+    new ResizeObserver(() => {
+      if (queued) return;
+      queued = true;
+      requestAnimationFrame(() => { queued = false; if (!looksModal?.classList.contains('hidden')) tsPaintRulers(); });
+    }).observe(wrap);
+  }
+}
+
+selectTool('move');
 
 // Deselect on a click that lands outside any layer — the grey margin around
 // the stage, or empty space within the stage itself not covered by a layer
@@ -6096,51 +6628,8 @@ initVerticalSplitter({
 // fields on already-saved themes rather than migrating every stored look
 // just to strip them.
 
-// Add text layer
-tsAddLayerBtn?.addEventListener('click', () => {
-  if (!activeLook) return;
-  const id = 'layer-' + Date.now();
-  const newLayer = {
-    id, type: 'text', name: 'Text', visible: true,
-    binding: 'custom', customText: 'New text layer',
-    font: { family: 'Manrope', size: 36, weight: 500, italic: false, lineHeight: 1.3, letterSpacing: 0, transform: 'none' },
-    color: '#ffffff', opacity: 100, align: 'center',
-    shadow: { enabled: false, color: '#000000', opacity: 70, blur: 8, x: 0, y: 2 },
-    outline: { enabled: false, color: '#000000', width: 2 },
-    // Explicit free-canvas box from the moment it's created — every OTHER
-    // new layer (Add Shape, Add Image) already gets one; this was the one
-    // left to fall back to a layout-preset rule instead (full canvas
-    // width, centered, per the 'fullscreen' branch), which rendered and
-    // dragged/resized completely differently from every other layer type
-    // and from what its own selection handles implied.
-    pos: { x: 460, y: 480, w: 1000, h: 0 },
-  };
-  activeLook.layers.push(newLayer);
-  activeLayer = newLayer;
-  // up() (not a bare render) so a brand-new layer is actually persisted
-  // immediately — in item mode, switching slides right after adding one
-  // must not silently drop it before any other edit triggers the first save.
-  up();
-  renderProps();
-});
-
-// Add shape layer — a positioned background rect (bar, panel, badge…)
-document.getElementById('ts-add-shape-btn')?.addEventListener('click', () => {
-  if (!activeLook) return;
-  const newLayer = {
-    id: 'shape-' + Date.now(), type: 'background', name: 'Shape', visible: true,
-    fill: 'solid', color: '#e8404a', opacity: 90, color2: '#8a2128', angle: 135,
-    radius: 8,
-    pos: { x: 560, y: 800, w: 800, h: 120 },
-  };
-  activeLook.layers.push(newLayer);
-  activeLayer = newLayer;
-  // up() (not a bare render), same reason as the Text button — persist
-  // immediately so switching slides right after adding one in Full-scale
-  // edit doesn't silently drop it before any other edit triggers a save.
-  up();
-  renderProps();
-});
+// Text and shapes are drawn with the Type and Shape tools (see "Tools, after
+// Compositor"): addTextBox / addShape.
 
 // ── Image layers ──────────────────────────────────────────────────────────
 // Images are stored inline as data URLs so a theme stays a single portable

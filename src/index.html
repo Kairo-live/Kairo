@@ -1011,16 +1011,45 @@
                 <!-- Col 2: Preview + Layers -->
                 <div class="ts-center-col">
 
-                    <!-- Add content bar -->
-                    <div class="ts-add-bar">
-                        <button id="ts-add-layer-btn" class="ts-add-btn" title="Add a text layer">
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 7 4 4 20 4 20 7"/><line x1="9" y1="20" x2="15" y2="20"/><line x1="12" y1="4" x2="12" y2="20"/></svg>
-                            <span>Text</span>
-                        </button>
-                        <button id="ts-add-shape-btn" class="ts-add-btn" title="Add a shape / colour block">
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="6" width="16" height="12" rx="2"/></svg>
-                            <span>Shape</span>
-                        </button>
+                    <!-- The active tool's options, across the top of the canvas, as
+                         in Compositor and Photoshop (renderToolHeader). -->
+                    <div class="ts-tool-header" id="ts-tool-header"></div>
+
+                    <!-- Preview stage -->
+                    <div class="ts-preview-wrap">
+                        <div class="ts-preview-stage" id="looks-preview-stage">
+                            <!-- layers rendered here by JS -->
+                        </div>
+                        <!-- Guides and rulers (after Compositor): drag out of a ruler
+                             to lay a guide; ⌘R shows or hides the rulers, ⌘; the
+                             guides. Painted by tsPaintRulers in app_theme_studio.js. -->
+                        <div class="ts-guides" id="ts-guides" aria-hidden="true"></div>
+                        <div class="ts-rulers" id="ts-rulers">
+                            <canvas class="ts-ruler ts-ruler-h" id="ts-ruler-h" title="Drag down to lay a guide" aria-label="Horizontal ruler"></canvas>
+                            <canvas class="ts-ruler ts-ruler-v" id="ts-ruler-v" title="Drag across to lay a guide" aria-label="Vertical ruler"></canvas>
+                            <div class="ts-ruler-corner" aria-hidden="true"></div>
+                            <div class="ts-ruler-mark ts-ruler-mark-x" aria-hidden="true"></div>
+                            <div class="ts-ruler-mark ts-ruler-mark-y" aria-hidden="true"></div>
+                        </div>
+                    </div>
+
+                    <!-- The tools, under the canvas (after Compositor): Move, Type and
+                         Shape — V, T, U — then what gets placed rather than drawn (a
+                         picture, a design, motion) and Play; the canvas size on the
+                         right. The line under them says what the tool does. -->
+                    <div class="ts-add-bar ts-tool-bar" id="ts-tool-bar">
+                        <div class="ts-tools" role="toolbar" aria-label="Tools">
+                            <button class="ts-tool-btn" data-tool="move" title="Move (V)" aria-label="Move (V)">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3l6.5 17 2.2-7.3L21 10.5z"/></svg>
+                            </button>
+                            <button class="ts-tool-btn" data-tool="type" title="Type (T)" aria-label="Type (T)">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 7 4 4 20 4 20 7"/><line x1="9" y1="20" x2="15" y2="20"/><line x1="12" y1="4" x2="12" y2="20"/></svg>
+                            </button>
+                            <button class="ts-tool-btn" data-tool="shape" title="Shape (U)" aria-label="Shape (U)">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="11" height="11" rx="1.5"/><circle cx="15.5" cy="15.5" r="5.5"/></svg>
+                            </button>
+                        </div>
+                        <span class="ts-add-divider" aria-hidden="true"></span>
                         <!-- Image ▾: from the computer or from the Media Library —
                              the Library button below stays only as its target. -->
                         <button id="ts-add-image-btn" class="ts-add-btn" title="Add a picture — from your computer or your Media Library">
@@ -1046,27 +1075,15 @@
                             <span>Play</span>
                         </button>
                         <input type="file" id="ts-image-file" accept="image/*" style="display:none">
-                        <!-- Right-aligned on the same row as Add content, rather
-                             than buried in the meta row below or floating loose
-                             over the canvas. Defaults to 1920x1080 like every
-                             theme; picking a configured output here (matches
-                             ProPresenter's per-slide Size field) is purely a
-                             preview-shape hint for authoring a theme against a
-                             specific screen — layer positions stay
-                             percentage-based, so nothing about existing themes
-                             changes. -->
                         <div class="ts-canvas-size-group">
+                            <button class="ts-view-btn" id="ts-rulers-btn" title="Rulers (⌘R)" aria-label="Rulers">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="7.5" width="19" height="9" rx="1.5"/><path d="M6.5 7.5v3M10.5 7.5v4.5M14.5 7.5v3M18.5 7.5v4.5"/></svg>
+                            </button>
                             <span class="ts-meta-label">Size</span>
                             <select id="ts-canvas-size-select" class="ts-size-select" title="Preview shape while designing this theme"></select>
                         </div>
                     </div>
-
-                    <!-- Preview stage -->
-                    <div class="ts-preview-wrap">
-                        <div class="ts-preview-stage" id="looks-preview-stage">
-                            <!-- layers rendered here by JS -->
-                        </div>
-                    </div>
+                    <div class="ts-tool-hint" id="ts-tool-hint"></div>
 
                 </div>
 
