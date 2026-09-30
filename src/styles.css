@@ -5439,6 +5439,9 @@ mark.help-hit.is-current { background: rgba(255,255,255,0.38); }
   color: var(--blue);
 }
 .ts-add-btn svg { width: 14px; height: 14px; }
+.ts-add-btn svg.ts-add-caret { width: 10px; height: 10px; margin-left: -2px; opacity: 0.7; }
+/* Sets Play (a preview, not something added) apart from the add buttons. */
+.ts-add-divider { width: 1px; height: 18px; background: var(--border-md); margin: 0 4px; flex-shrink: 0; }
 
 .ts-layers-hint {
   font-size: var(--fs-xs);
@@ -5471,6 +5474,7 @@ mark.help-hit.is-current { background: rgba(255,255,255,0.38); }
 /* Item-mode (Full Edit) header: replaces the themes header wholesale. */
 .ts-item-mode-header { padding: 12px 12px 8px; }
 .ts-item-mode-header .ts-add-btn { width: 100%; justify-content: center; }
+.ts-item-mode-header.ts-props-section { padding: 12px 14px; }
 .ts-item-mode-header svg { width: 14px; height: 14px; }
 
 .ts-body {
@@ -6178,7 +6182,13 @@ mark.help-hit.is-current { background: rgba(255,255,255,0.38); }
 .ts-props-tabs {
   display: flex;
   gap: 4px;
-  padding: 10px 14px 0;
+  padding: 10px 14px 8px;
+  /* At the top of the panel, and staying there as it scrolls. */
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
 }
 .ts-props-tabs .ts-tab-btn {
   flex: 1;
@@ -6474,8 +6484,11 @@ mark.help-hit.is-current { background: rgba(255,255,255,0.38); }
    just under a name that's actually scoped to what uses it. */
 .ts-select {
   flex: 1;
-  padding: 5px 8px;
-  background: #2c2c2e;
+  min-width: 0;
+  padding: 5px 24px 5px 8px;
+  /* The native arrow is hidden (appearance: none), so it draws its own —
+     without one a dropdown reads as a text box. */
+  background: #2c2c2e url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%238e8e93' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E") no-repeat right 7px center;
   border: 1px solid var(--border-md);
   border-radius: 4px;
   color: var(--text);
@@ -6488,6 +6501,25 @@ mark.help-hit.is-current { background: rgba(255,255,255,0.38); }
   transition: border-color var(--trans);
 }
 .ts-select:focus { border-color: var(--blue); }
+/* A button that opens a chooser (an item's theme) drawn as the same field. */
+.ts-select-btn {
+  flex: 1;
+  min-width: 0;
+  padding: 5px 24px 5px 8px;
+  background: #2c2c2e url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%238e8e93' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E") no-repeat right 7px center;
+  border: 1px solid var(--border-md);
+  border-radius: 4px;
+  color: var(--text);
+  font-size: 11px;
+  font-family: inherit;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+  transition: border-color var(--trans);
+}
+.ts-select-btn:hover { border-color: var(--selected-border); }
 
 /* A label+input pair (X/Y, W/H — renderLayoutProps) that must wrap as ONE
    unit within .ts-prop-row's own flex-wrap, never split across two lines —

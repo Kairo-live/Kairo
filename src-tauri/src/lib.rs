@@ -50,8 +50,10 @@ fn build_app_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry
         .accelerator("CmdOrCtrl+,")
         .build(app)?;
 
+    // Check for Updates… sits under the app's own name, as on every Mac app.
     let app_menu = SubmenuBuilder::new(app, "KAIRO")
         .about(Some(about_metadata))
+        .text("menu-check-updates", "Check for Updates…")
         .separator()
         .item(&settings_item)
         .separator()
@@ -64,10 +66,31 @@ fn build_app_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry
         .quit()
         .build()?;
 
+    // File: what an operator makes, brings in and takes away — a playlist, a
+    // theme, content to import, and the service's own exports (the toolbar's
+    // Export menu) plus the current theme.
+    let new_playlist_item = MenuItemBuilder::with_id("menu-new-playlist", "New Playlist")
+        .accelerator("CmdOrCtrl+N")
+        .build(app)?;
+    let import_item = MenuItemBuilder::with_id("menu-import", "Import…")
+        .accelerator("CmdOrCtrl+O")
+        .build(app)?;
+    let export_notes_item = MenuItemBuilder::with_id("menu-export-notes", "Sermon Notes (PDF)…")
+        .accelerator("CmdOrCtrl+E")
+        .build(app)?;
+    let export_menu = SubmenuBuilder::new(app, "Export")
+        .item(&export_notes_item)
+        .text("menu-export-transcript", "Transcript")
+        .text("menu-export-verses", "Verses Shown")
+        .separator()
+        .text("menu-export-theme", "Current Theme…")
+        .build()?;
     let file_menu = SubmenuBuilder::new(app, "File")
+        .item(&new_playlist_item)
         .text("menu-new-theme", "New Theme")
-        .text("menu-import", "Import…")
-        .text("menu-export-theme", "Export Current Theme")
+        .separator()
+        .item(&import_item)
+        .item(&export_menu)
         .separator()
         .close_window()
         .build()?;
@@ -92,26 +115,42 @@ fn build_app_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry
         .item(&find_item)
         .build()?;
 
-    let view_menu = SubmenuBuilder::new(app, "View")
+    // View: the app's own tabs, one shortcut each (the toolbar's order), and
+    // what the Monitor shows.
+    let mut view_builder = SubmenuBuilder::new(app, "View");
+    for (id, label, keys) in [
+        ("menu-view-bible", "Bible", "CmdOrCtrl+1"),
+        ("menu-view-slides", "Slides", "CmdOrCtrl+2"),
+        ("menu-view-timer", "Timer", "CmdOrCtrl+3"),
+        ("menu-view-songs", "Songs", "CmdOrCtrl+4"),
+        ("menu-view-media", "Media", "CmdOrCtrl+5"),
+        ("menu-view-studio", "Theme Studio", "CmdOrCtrl+6"),
+    ] {
+        view_builder = view_builder.item(&MenuItemBuilder::with_id(id, label).accelerator(keys).build(app)?);
+    }
+    let view_menu = view_builder
+        .separator()
+        .text("menu-monitor-grid", "Show or Hide All Outputs in the Monitor")
+        .separator()
         .fullscreen()
         .build()?;
 
     // Operator-facing live controls — everything here has an existing
     // toolbar button already wired up with the real logic (dedup, WS
-    // broadcast, etc.); like File's New Theme/Import/Export above, Rust's
-    // job is only to tell the frontend which one fired (see
-    // initNativeMenuBridge in app.js), not to reimplement any of it.
-    // Accelerators picked to avoid the Edit/Window menus' defaults above.
-    let toggle_listening_item = MenuItemBuilder::with_id("menu-toggle-listening", "Start/Stop Listening")
+    // broadcast, etc.); like File's items above, Rust's job is only to tell
+    // the frontend which one fired (see initNativeMenuBridge in
+    // app_startup.js), not to reimplement any of it. Accelerators picked to
+    // avoid the Edit/Window menus' defaults above.
+    let toggle_listening_item = MenuItemBuilder::with_id("menu-toggle-listening", "Start or Stop Listening")
         .accelerator("CmdOrCtrl+L")
         .build(app)?;
-    let range_next_item = MenuItemBuilder::with_id("menu-range-next", "Next")
+    let range_next_item = MenuItemBuilder::with_id("menu-range-next", "Next Verse")
         .accelerator("CmdOrCtrl+Right")
         .build(app)?;
     // Back (undo the last change to the screen) mirrors Next; Clear Bible is
     // what gets cleared most during a sermon, so it owns Cmd+K. Clear Slide
     // (only the slide under a verse since the layered output) has no default.
-    let output_back_item = MenuItemBuilder::with_id("menu-output-back", "Back")
+    let output_back_item = MenuItemBuilder::with_id("menu-output-back", "Back to the Previous Screen")
         .accelerator("CmdOrCtrl+Left")
         .build(app)?;
     let clear_bible_item = MenuItemBuilder::with_id("menu-clear-bible", "Clear Bible")
@@ -138,17 +177,24 @@ fn build_app_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry
         .item(&clear_all_item)
         .build()?;
 
+    // Window: the app's other windows — the Monitor (every output, live) and
+    // where outputs are set up. Close Window is under File, as on every Mac app.
     let window_menu = SubmenuBuilder::new(app, "Window")
         .minimize()
         .maximize_with_text("Zoom")
         .separator()
+        .text("menu-monitor-window", "Monitor")
+        .text("menu-outputs", "Outputs…")
+        .separator()
         .bring_all_to_front()
-        .close_window()
         .build()?;
 
     let help_menu = SubmenuBuilder::new(app, "Help")
-        .text("menu-learn-more", "KAIRO on GitHub")
-        .text("menu-check-updates", "Check for Updates…")
+        .text("menu-getting-started", "Getting Started")
+        .text("menu-shortcuts", "Keyboard Shortcuts")
+        .text("menu-help", "Kairo Help")
+        .separator()
+        .text("menu-learn-more", "Kairo on GitHub")
         .build()?;
 
     MenuBuilder::new(app)
@@ -884,11 +930,10 @@ pub fn run() {
             match id {
                 "menu-check-updates" => check_for_updates(app.clone(), true),
                 "menu-learn-more" => { let _ = app.shell().open("https://github.com/Kairo-live/Kairo", None); }
-                "menu-new-theme" | "menu-import" | "menu-export-theme" | "menu-settings" | "menu-find"
-                | "menu-toggle-listening" | "menu-range-next" | "menu-range-end"
-                | "menu-clear-slide" | "menu-clear-bible" | "menu-output-back"
-                | "menu-clear-media" | "menu-clear-timer" | "menu-clear-all" => {
-                    let _ = app.emit(id, ());
+                // Every other item of ours ("menu-…") is the frontend's to
+                // carry out (see initNativeMenuBridge in app_startup.js).
+                other if other.starts_with("menu-") => {
+                    let _ = app.emit(other, ());
                 }
                 _ => {}
             }

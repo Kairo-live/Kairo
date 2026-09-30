@@ -1393,8 +1393,15 @@ document.getElementById('ts-canvas-size-select')?.addEventListener('change', (e)
 
 function syncMetaRow() {
   if (!activeLook) return;
-  document.querySelectorAll('#ts-layout-picker .ts-chip').forEach(b =>
-    b.classList.toggle('active', b.dataset.layout === activeLook.layout));
+  const layoutSel = document.getElementById('ts-layout-picker');
+  if (layoutSel) {
+    // A theme on a layout the list doesn't offer (a lower-third card, two
+    // languages…) shows it as it is rather than as something else.
+    if (activeLook.layout && ![...layoutSel.options].some(o => o.value === activeLook.layout)) {
+      layoutSel.add(new Option(activeLook.layout.replace(/-/g, ' ').replace(/^./, c => c.toUpperCase()), activeLook.layout));
+    }
+    layoutSel.value = activeLook.layout || 'fullscreen';
+  }
   const alphaBtn = document.getElementById('ts-alpha-toggle');
   if (alphaBtn) alphaBtn.classList.toggle('active', isAlphaCanvas());
   const chromaBtn = document.getElementById('ts-chroma-toggle');
@@ -1440,8 +1447,8 @@ function syncMetaRow() {
   if (translateGroup) {
     const needsTranslation = (activeLook.layers || []).some(l => l.type === 'text' && l.binding === 'verse_translated');
     translateGroup.classList.toggle('hidden', !needsTranslation);
-    document.querySelectorAll('#ts-translate-picker .ts-chip').forEach(b =>
-      b.classList.toggle('active', b.dataset.lang === activeLook.translateTo));
+    const translateSel = document.getElementById('ts-translate-picker');
+    if (translateSel) translateSel.value = activeLook.translateTo || '';
   }
 }
 
@@ -3208,7 +3215,10 @@ const PROPS_TABS_BY_LAYER_TYPE = {
 // Persists across layer switches within one Edit/Theme Studio session
 // (picking a different layer doesn't jump you back to Layout every time) —
 // reset only when it lands on a tab the newly-selected layer doesn't have.
-let activePropsTab = 'layout';
+// 'item' is the first tab: the whole thing being edited (#ts-props-item-pane
+// — a countdown's timer and slides, an item's theme, or in Theme Studio the
+// theme's own layout, text animation and canvas).
+let activePropsTab = 'item';
 
 // Which layer renderProps last drew the panel for — lets it tell "a new
 // layer just got selected" apart from "the same layer's props panel is
@@ -3221,18 +3231,32 @@ function renderProps() {
   const empty = document.getElementById('ts-props-empty');
   const panel = document.getElementById('ts-props-panel');
   const tabs = document.getElementById('ts-props-tabs');
+  const itemPane = document.getElementById('ts-props-item-pane');
   if (!panel || !empty) return;
+  // The tabs are always at the top: the first names the whole thing being
+  // edited; the layer tabs follow (with nothing selected they say so).
+  const itemTab = document.getElementById('ts-props-tab-item');
+  if (itemTab) itemTab.textContent = tsMode === 'item' ? (tsItemCtx?.item?.type === 'timer' ? 'Timer' : 'Look') : 'Theme';
+  const showTabs = (available) => {
+    tabs?.classList.remove('hidden');
+    tabs?.querySelectorAll('.ts-tab-btn').forEach(btn => {
+      btn.classList.toggle('hidden', !available.includes(btn.dataset.tab));
+      btn.classList.toggle('active', btn.dataset.tab === activePropsTab);
+    });
+  };
+  const onItemTab = () => {
+    itemPane?.classList.toggle('ts-tab-hidden', activePropsTab !== 'item');
+    return activePropsTab === 'item';
+  };
 
   if (!activeLayer) {
-    empty.style.display = 'flex';
+    lastPropsLayerId = null;
+    if (!['item', 'layout', 'style', 'animate'].includes(activePropsTab)) activePropsTab = 'item';
+    showTabs(['item', 'layout', 'style', 'animate']);
+    const item = onItemTab();
+    empty.style.display = item ? 'none' : 'flex';
     panel.style.display = 'none';
     panel.innerHTML = '';
-    tabs?.classList.add('hidden');
-    lastPropsLayerId = null;
-    // Text Animation lives under the Style tab now (see below) — with
-    // nothing selected there's no tab bar to gate it, so it should just
-    // show, same as it always did before it moved in here.
-    document.getElementById('ts-text-anim-section')?.classList.remove('ts-tab-hidden');
     return;
   }
 
@@ -3247,6 +3271,7 @@ function renderProps() {
     panel.style.display = 'block';
     panel.innerHTML = '';
     tabs?.classList.add('hidden');
+    itemPane?.classList.add('ts-tab-hidden');
     lastPropsLayerId = null;
     const count = tsSelectedLayers().length;
     const header = document.createElement('div');
@@ -3323,21 +3348,19 @@ function renderProps() {
       up(); renderProps();
     }));
     panel.appendChild(section(null, 'Transform', xyRow, whRow));
-
-    document.getElementById('ts-text-anim-section')?.classList.add('ts-tab-hidden');
     return;
   }
 
   // Text is what an operator almost always opens Full-scale edit/Theme
   // Studio to actually change (a font, a color, a size) — landing on
   // Layout for a freshly-selected text layer meant an extra click to get
-  // anywhere useful nearly every time. Only fires on an actual NEW
+  // anywhere useful nearly every time; and a layer picked while the first
+  // tab was showing opens on its own Style. Only fires on an actual NEW
   // selection, not every re-render of the panel for the layer already open.
-  if (activeLayer.id !== lastPropsLayerId && activeLayer.type === 'text') activePropsTab = 'style';
+  if (activeLayer.id !== lastPropsLayerId && (activeLayer.type === 'text' || activePropsTab === 'item')) activePropsTab = 'style';
   lastPropsLayerId = activeLayer.id;
 
   empty.style.display = 'none';
-  panel.style.display = 'block';
   panel.innerHTML = '';
 
   if (activeLayer.type === 'background') {
@@ -3357,26 +3380,15 @@ function renderProps() {
 
   let available = PROPS_TABS_BY_LAYER_TYPE[activeLayer.type] || PROPS_TABS_BY_LAYER_TYPE.text;
   if (isCanvasFill) available = available.filter(t => t !== 'animate');
-  if (!available.includes(activePropsTab)) activePropsTab = available[0];
-  if (tabs) {
-    tabs.classList.remove('hidden');
-    tabs.querySelectorAll('.ts-tab-btn').forEach(btn => {
-      const has = available.includes(btn.dataset.tab);
-      btn.classList.toggle('hidden', !has);
-      btn.classList.toggle('active', btn.dataset.tab === activePropsTab);
-    });
-  }
+  if (activePropsTab !== 'item' && !available.includes(activePropsTab)) activePropsTab = available[0];
+  showTabs(['item', ...available]);
+  panel.style.display = onItemTab() ? 'none' : 'block';
   // A class, not a direct style write — see the .ts-tab-hidden comment in
   // styles.css for why this has to compose with, not clobber, each
   // section's own enabled/disabled inline display (Shadow/Outline/Scroll).
-  // #ts-text-anim-section lives outside `panel` (a static, always-in-DOM
-  // theme-level control, not one of the per-layer sections panel.innerHTML
-  // rebuilds every render) but still opts into the exact same tab gating —
-  // included explicitly since panel.querySelectorAll can't reach it.
   panel.querySelectorAll('[data-tab]').forEach(el => {
     el.classList.toggle('ts-tab-hidden', el.dataset.tab !== activePropsTab);
   });
-  document.getElementById('ts-text-anim-section')?.classList.toggle('ts-tab-hidden', activePropsTab !== 'style');
 }
 
 document.querySelectorAll('#ts-props-tabs .ts-tab-btn').forEach(btn => {
@@ -3478,20 +3490,13 @@ function makeSlider(val, min, max, onChange, format) {
 }
 
 function makeFillChips(current, onChange) {
-  const wrap = document.createElement('div');
-  wrap.className = 'ts-fill-group';
-  ['solid','transparent','blur','gradient','image'].forEach(f => {
-    const btn = document.createElement('button');
-    btn.className = 'ts-fill-chip' + (current === f ? ' active' : '');
-    btn.textContent = f.charAt(0).toUpperCase() + f.slice(1);
-    btn.addEventListener('click', () => {
-      wrap.querySelectorAll('.ts-fill-chip').forEach(b => b.classList.remove('active'));
-      btn.classList.add('active');
-      onChange(f);
-    });
-    wrap.appendChild(btn);
-  });
-  return wrap;
+  return makeSelect([
+    { label: 'Solid colour', value: 'solid' },
+    { label: 'Gradient', value: 'gradient' },
+    { label: 'Picture', value: 'image' },
+    { label: 'Blur what\'s behind', value: 'blur' },
+    { label: 'None (transparent)', value: 'transparent' },
+  ], current || 'solid', onChange);
 }
 
 function makeAlignBtns(current, onChange) {
@@ -3678,6 +3683,19 @@ function makeSelect(options, current, onChange) {
     opt.textContent = label;
     if (value === current) opt.selected = true;
     sel.appendChild(opt);
+  });
+  sel.addEventListener('change', () => onChange(sel.value));
+  return sel;
+}
+// The same, in labelled groups: [{ label, options: [{ label, value }] }].
+function makeGroupedSelect(groups, current, onChange) {
+  const sel = document.createElement('select');
+  sel.className = 'ts-select';
+  groups.forEach(g => {
+    const og = document.createElement('optgroup');
+    og.label = g.label;
+    g.options.forEach(({ label, value }) => og.appendChild(new Option(label, value, false, value === current)));
+    sel.appendChild(og);
   });
   sel.addEventListener('change', () => onChange(sel.value));
   return sel;
@@ -4172,7 +4190,7 @@ function renderAnimateProps(panel, layer) {
     up();
   };
   panel.appendChild(section('animate', 'Keeps moving',
-    prop('Motion', makeChips(M.IDLES.map(x => ({ label: x.label, value: x.id })), m.type, v => { setIdle({ type: v }); renderProps(); })),
+    prop('Motion', makeSelect(M.IDLES.map(x => ({ label: x.label, value: x.id })), m.type, v => { setIdle({ type: v }); renderProps(); })),
     ...(m.type === 'none' ? [] : [
       prop('Amount', makeSlider(m.amount, 1, 100, v => setIdle({ amount: v }), v => `${Math.round(v)}%`)),
       prop('Speed', makeSlider(Math.round(m.speed * 100), 10, 300, v => setIdle({ speed: v / 100 }), v => `${(v / 100).toFixed(2)}×`)),
@@ -4192,7 +4210,7 @@ function renderBgProps(panel, layer) {
   // rather than left sitting there doing nothing.
   // The canvas fill itself is always the whole screen — only shapes have one.
   const shapeRow = section('style', 'Shape',
-    makeChips([
+    makeSelect([
       { label: 'Rectangle', value: 'rect' },
       { label: 'Ellipse',   value: 'ellipse' },
       { label: 'Pill',      value: 'pill' },
@@ -4350,7 +4368,7 @@ function renderPhotoLookProps(panel, layer) {
   const side = layer.fade?.side || 'none';
   panel.appendChild(section('style', 'Photo look',
     prop('Black & white', makeSlider(layer.grayscale || 0, 0, 100, v => { layer.grayscale = v; up(); }, v => `${Math.round(v)}%`)),
-    prop('Fade from', makeChips([
+    prop('Fade from', makeSelect([
       { label: 'None', value: 'none' }, { label: 'Left', value: 'left' }, { label: 'Right', value: 'right' },
       { label: 'Top', value: 'top' }, { label: 'Bottom', value: 'bottom' },
     ], side, v => {
@@ -4587,15 +4605,16 @@ function renderMotionProps(panel, layer) {
     if (wasDefaultName) layer.name = M.kind(v).label;
     up(); renderProps();
   };
-  const kindChips = (family) => makeChips(
-    M.kinds().filter(k => k.family === family).map(k => ({ label: k.label, value: k.id })), g.kind, pickKind);
+  const family = (id, label) => ({ label, options: M.kinds().filter(k => k.family === id).map(k => ({ label: k.label, value: k.id })) });
   const blurb = document.createElement('div');
   blurb.className = 'ts-motion-blurb';
   blurb.textContent = kind.blurb;
   panel.appendChild(section('style', 'Motion',
-    prop('Background', kindChips('ambient')),
-    prop('Timer', kindChips('timer')),
-    prop('Element', kindChips('element')),
+    prop('Graphic', makeGroupedSelect([
+      family('ambient', 'Moving backgrounds'),
+      family('timer', 'Countdown'),
+      family('element', 'Hand-drawn'),
+    ], g.kind, pickKind)),
     blurb));
 
   // Colours — one swatch per element colour, named where the kind names them.
@@ -4606,7 +4625,7 @@ function renderMotionProps(panel, layer) {
     cell.className = 'ts-motion-color';
     cell.appendChild(makeColor(c, v => { g.colors[i] = v; changed(); }));
     const lbl = document.createElement('span');
-    lbl.textContent = kind.colors.labels?.[i] || `Colour ${i + 1}`;
+    lbl.textContent = kind.colors.labels?.[i] || `Color ${i + 1}`;
     cell.appendChild(lbl);
     if (g.colors.length > kind.colors.min) {
       const rm = document.createElement('button');
@@ -4640,7 +4659,7 @@ function renderMotionProps(panel, layer) {
       return prop(p.label, makeSlider(Math.round(g[p.key] * f), Math.round(p.min * f), Math.round(p.max * f),
         v => { g[p.key] = v / f; changed(); }, v => fmt(v / f)));
     }
-    if (p.type === 'chips') return prop(p.label, makeChips(p.options, g[p.key], v => { g[p.key] = v; changed(); }));
+    if (p.type === 'chips') return prop(p.label, (p.options.length > 3 ? makeSelect : makeChips)(p.options, g[p.key], v => { g[p.key] = v; changed(); }));
     return prop(p.label, makeToggle(!!g[p.key], v => { g[p.key] = v; changed(); }));
   });
   panel.appendChild(section('style', kind.label, ...rows));
@@ -4851,20 +4870,20 @@ function renderTextProps(panel, layer) {
 
   panel.appendChild(section('layout', 'Layer',
     prop('Name', nameInp),
-    prop('Binds to', makeChips([
-      { label: 'Verse', value: 'verse' },
-      { label: 'Ref', value: 'reference' },
-      { label: 'Timer', value: 'timer' },
+    prop('Shows', makeSelect([
+      { label: 'The verse or lyrics', value: 'verse' },
+      { label: 'The reference', value: 'reference' },
+      { label: 'The countdown', value: 'timer' },
       // Hour/Minute/Second — the individual zero-padded pieces (see
       // display.html's timeParts) instead of one fixed "H:MM:SS" string,
       // so the countdown can be laid out as separately positioned/sized/
       // styled elements — e.g. the hour stacked directly above the
       // minute — rather than only ever one text box with no layout
       // control over its own pieces.
-      { label: 'Hour', value: 'timer-h' },
-      { label: 'Minute', value: 'timer-m' },
-      { label: 'Second', value: 'timer-s' },
-      { label: 'Custom', value: 'custom' },
+      { label: 'Countdown hours', value: 'timer-h' },
+      { label: 'Countdown minutes', value: 'timer-m' },
+      { label: 'Countdown seconds', value: 'timer-s' },
+      { label: 'Text you type', value: 'custom' },
     ], layer.binding, v => { layer.binding = v; customRow.style.display = v === 'custom' ? '' : 'none'; up(); }))
   ));
 
@@ -5045,7 +5064,14 @@ function openThemeStudio() {
   // switched back to the themes list below, desyncing every mode-aware
   // check (renderLayersList's text-only filter, undo/redo routing, etc.)
   // from what's actually on screen.
-  if (tsMode === 'item') { tsMode = 'theme'; tsItemCtx = null; toggleItemModeChrome(false); }
+  // Leaving it also puts back what closeItemStyleEditor does — a theme on the
+  // canvas, not the item's slide, and nothing selected.
+  if (tsMode === 'item') {
+    tsMode = 'theme'; tsItemCtx = null; toggleItemModeChrome(false);
+    activeLook = looks[0];
+    activeLayer = null; multiSelectedLayerIds.clear();
+  }
+  activePropsTab = 'item';
   document.querySelector('.main-layout')?.classList.add('hidden-el');
   // Only one full-window view at a time.
   document.getElementById('service-view')?.classList.add('hidden');
@@ -5100,7 +5126,10 @@ function toggleItemModeChrome(isItem) {
   document.querySelector('.ts-canvas-size-group')?.classList.toggle('hidden', isItem);
   const hint = document.querySelector('.ts-layers-hint');
   if (hint) hint.style.visibility = isItem ? 'hidden' : '';
-  if (isItem) { updateItemThemeLabel(); renderItemTimerControls(); }
+  if (isItem) updateItemThemeLabel();
+  renderItemTimerControls();   // hides itself outside a countdown's editor
+  activePropsTab = 'item';
+  renderProps();
 }
 document.getElementById('ts-item-back-btn')?.addEventListener('click', () => closeItemStyleEditor());
 
@@ -5336,15 +5365,15 @@ function renderScenePaceControls(host, item) {
     r.appendChild(control);
     host.appendChild(r);
   };
-  row('Pace', makeChips([
-    { label: 'Countdown sets it', value: 'countdown' },
+  row('Pace', makeSelect([
+    { label: 'The countdown sets it', value: 'countdown' },
     { label: 'Each slide\'s own time', value: 'fixed' },
   ], pace.mode, v => savePace({ mode: v }, true)));
   if (pace.mode === 'countdown') {
     row('Longest on screen', makeSlider(pace.maxSec, 5, 120, v => savePace({ maxSec: v }), v => `${Math.round(v)} s`));
     row('Finale', makeToggle(pace.finaleSec > 0, v => savePace({ finaleSec: v ? 60 : 0 }, true)));
   }
-  row('Change', makeChips([
+  row('Change', makeSelect([
     { label: 'Blur', value: 'blur' }, { label: 'Fade', value: 'fade' }, { label: 'Cut', value: 'cut' },
   ], pace.transition, v => savePace({ transition: v }, true)));
   const readout = document.createElement('p');
@@ -5641,7 +5670,19 @@ function renderItemSlidesList() {
     const addBtn = document.createElement('button');
     addBtn.className = 'ts-item-add-slide-btn';
     addBtn.textContent = '+ Add Slide';
-    addBtn.addEventListener('click', () => addTimerSlide(item));
+    // A blank countdown slide, or one of the Announcements designs with the
+    // countdown on it (the pre-service loop's own slides, Ways to Give and
+    // Bible Study included — the built-in Preservice leaves out the ones
+    // that need the church's own details until someone adds them here).
+    addBtn.addEventListener('click', () => {
+      const pack = window.KairoAnnouncements;
+      const r = addBtn.getBoundingClientRect();
+      const designs = pack ? pack.slides().map(s => ({ label: s.name, onClick: () => addTimerSlide(item, pack.preserviceScene(s.id)) })) : [];
+      window.KairoService.openContextMenu(r.left, r.bottom + 4, [
+        [{ label: 'Blank slide with the countdown', onClick: () => addTimerSlide(item) }],
+        ...(designs.length ? [designs] : []),
+      ]);
+    });
     el.appendChild(addBtn);
   }
 }
@@ -5662,7 +5703,7 @@ function defaultSceneLayers() {
       shadow: { ...TXT_SHADOW_SOFT }, outline: { ...NO_OUTLINE } },
   ];
 }
-function addTimerSlide(item) {
+function addTimerSlide(item, template = null) {
   if (!item.scenes || !item.scenes.length) {
     // Carry over whatever the segment's single slide already had (a real
     // theme, custom layers) as scene 0, rather than discarding it the
@@ -5690,10 +5731,18 @@ function addTimerSlide(item) {
     });
     item.scenes = [{ id: 'scene-' + Date.now(), name: item.name || 'Slide 1', durationSec: 60, layers: first }];
   }
-  item.scenes.push({ id: 'scene-' + (Date.now() + 1), name: `Slide ${item.scenes.length + 1}`, durationSec: 60, layers: defaultSceneLayers() });
+  const scene = template
+    ? { ...deepClone(template), id: 'scene-' + (Date.now() + 1) }
+    : { id: 'scene-' + (Date.now() + 1), name: `Slide ${item.scenes.length + 1}`, durationSec: 60, layers: defaultSceneLayers() };
+  // The pre-service loop ends on Service Begins, which holds the final
+  // minute — a new slide goes in before it, so it stays the finale.
+  const last = item.scenes[item.scenes.length - 1];
+  const beforeFinale = /^scene-begins-/.test(last?.id || '') && !/^scene-begins-/.test(template?.id || '');
+  const at = beforeFinale ? item.scenes.length - 1 : item.scenes.length;
+  item.scenes.splice(at, 0, scene);
   window.KairoService.saveTimerScenes(item);
   renderItemSlidesList();
-  selectItemSlide(item.scenes.length - 1);
+  selectItemSlide(at);
 }
 function duplicateTimerScene(item, index) {
   const src = item.scenes[index];
@@ -5964,24 +6013,19 @@ window.addEventListener('resize', () => {
   if (!looksModal?.classList.contains('hidden')) renderPreview();
 });
 
-// Layout chips
-document.getElementById('ts-layout-picker')?.addEventListener('click', e => {
-  const btn = e.target.closest('.ts-chip');
-  if (!btn || !activeLook) return;
-  document.querySelectorAll('#ts-layout-picker .ts-chip').forEach(b => b.classList.remove('active'));
-  btn.classList.add('active');
-  activeLook.layout = btn.dataset.layout;
+// Layout
+document.getElementById('ts-layout-picker')?.addEventListener('change', e => {
+  if (!activeLook) return;
+  activeLook.layout = e.target.value;
   syncMetaRow();
   renderPreview();
   scheduleThemeAutosave();
 });
 
-// Translate-to language chips (Multi-Language layout only)
-document.getElementById('ts-translate-picker')?.addEventListener('click', e => {
-  const btn = e.target.closest('.ts-chip');
-  if (!btn || !activeLook) return;
-  const same = activeLook.translateTo === btn.dataset.lang;
-  activeLook.translateTo = same ? null : btn.dataset.lang; // click again to clear
+// Translate-to language (Multi-Language layout only); None clears it.
+document.getElementById('ts-translate-picker')?.addEventListener('change', e => {
+  if (!activeLook) return;
+  activeLook.translateTo = e.target.value || null;
   syncMetaRow();
   renderPreview();
   scheduleThemeAutosave();
@@ -6457,7 +6501,17 @@ document.getElementById('ts-add-media-lib-btn')?.addEventListener('click', () =>
 });
 
 const tsImageFile = document.getElementById('ts-image-file');
-document.getElementById('ts-add-image-btn')?.addEventListener('click', () => tsImageFile?.click());
+// Image ▾ — a picture from the computer or the Media Library, or a slideshow
+// of pictures (an image-cycle layer).
+document.getElementById('ts-add-image-btn')?.addEventListener('click', (e) => {
+  const r = e.currentTarget.getBoundingClientRect();
+  window.KairoService.openContextMenu(r.left, r.bottom + 4, [[
+    { label: 'From your computer…', onClick: () => tsImageFile?.click() },
+    { label: 'From your Media Library…', onClick: () => document.getElementById('ts-add-media-lib-btn')?.click() },
+  ], [
+    { label: 'Slideshow of pictures', onClick: () => document.getElementById('ts-add-cycle-btn')?.click() },
+  ]]);
+});
 tsImageFile?.addEventListener('change', async () => {
   const file = tsImageFile.files?.[0];
   tsImageFile.value = '';

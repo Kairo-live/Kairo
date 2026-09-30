@@ -126,6 +126,26 @@
   window.__TAURI__.event.listen('menu-clear-media',      () => clickDirect('clear-media-layer-btn'));
   window.__TAURI__.event.listen('menu-clear-timer',      () => clickDirect('clear-timer-layer-btn'));
   window.__TAURI__.event.listen('menu-clear-all',        () => clickDirect('clear-all-layers-btn'));
+
+  // File — a new playlist, and the service's exports (the toolbar's Export
+  // menu, whose items do the work).
+  window.__TAURI__.event.listen('menu-new-playlist', () => clickDirect('svc-add-menu-btn'));
+  const exportItem = (kind) => document.querySelector(`#download-menu [data-download="${kind}"]`)?.click();
+  window.__TAURI__.event.listen('menu-export-notes',      () => exportItem('notes'));
+  window.__TAURI__.event.listen('menu-export-transcript', () => exportItem('transcript'));
+  window.__TAURI__.event.listen('menu-export-verses',     () => exportItem('verses'));
+  // View — the toolbar's tabs (Cmd+1…6), and what the Monitor shows.
+  [['bible', 'bible-btn'], ['slides', 'slides-btn'], ['timer', 'timer-btn'],
+   ['songs', 'songs-btn'], ['media', 'media-btn'], ['studio', 'looks-btn']]
+    .forEach(([view, btnId]) => window.__TAURI__.event.listen(`menu-view-${view}`, () => clickDirect(btnId)));
+  window.__TAURI__.event.listen('menu-monitor-grid', () => clickDirect('monitor-grid-toggle-btn'));
+  // Window and Help — the Monitor window, and Settings opened where asked.
+  const openSettingsAt = (pane) => { settingsModal?.classList.remove('hidden'); showSettingsPane(pane); };
+  window.__TAURI__.event.listen('menu-monitor-window',  () => clickDirect('monitor-popout-btn'));
+  window.__TAURI__.event.listen('menu-outputs',         () => openSettingsAt('outputs'));
+  window.__TAURI__.event.listen('menu-getting-started', () => openOnboardingWizard());
+  window.__TAURI__.event.listen('menu-shortcuts',       () => openSettingsAt('shortcuts'));
+  window.__TAURI__.event.listen('menu-help',            () => openSettingsAt('help'));
 })();
 
 // ── Remappable in-app hotkeys ───────────────────────────────────────────

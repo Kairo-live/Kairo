@@ -5394,32 +5394,6 @@
     segmentList.slice().sort((a, b) => a.order - b.order).forEach(seg => grid.appendChild(buildSegmentCard(seg)));
   }
 
-  // A pre-service countdown built from the Announcements pack
-  // (announcement_pack.js): its slides as scenes, each carrying the
-  // countdown, paced by it — the shorter the countdown, the faster they
-  // change — with Service Begins holding the last minute. Ten minutes to
-  // start; every slide, the pace and the time are editable like any segment.
-  document.getElementById('segment-add-preservice-btn')?.addEventListener('click', async () => {
-    const pack = window.KairoAnnouncements;
-    if (!pack) return;
-    try {
-      const r = await fetchWithTimeout(`${SERVER}/api/segments`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: 'Pre-service', scenes: pack.preserviceScenes(), scenePace: { ...pack.PACE } }),
-      });
-      const j = await r.json();
-      if (j.segment) {
-        await fetchWithTimeout(`${SERVER}/api/segments/${j.segment.id}`, {
-          method: 'PUT', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ params: { ...(j.segment.trigger?.params || {}), mode: 'duration', durationSec: 600 } }),
-        });
-      }
-    } catch (err) {
-      console.warn('[Timer] Could not create the pre-service loop:', err.message);
-    }
-    await loadSegments(); renderTimerGrid();
-  });
-
   document.getElementById('segment-add-btn')?.addEventListener('click', async () => {
     await fetchWithTimeout(`${SERVER}/api/segments`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'New Segment' }),

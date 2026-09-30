@@ -277,12 +277,19 @@
     });
   }
 
+  // One slide as a timer scene, its countdown included — for adding it to a
+  // countdown's slides one at a time (Theme Studio's "+ Add Slide").
+  function preserviceScene(id) {
+    const i = SLIDES.findIndex(s => s.id === id);
+    return i < 0 ? null : preserviceScenes()[i];
+  }
+
   // How the pack's scenes share a countdown: the countdown sets the pace, no
   // slide stays up longer than 30 s, Service Begins holds the final minute,
   // and each change is a soft blur crossfade.
   const PACE = { mode: 'countdown', maxSec: 30, finaleSec: 60, transition: 'blur' };
 
-  const api = { slides, themes, preserviceScenes, PACE, PALETTE: PAL };
+  const api = { slides, themes, preserviceScenes, preserviceScene, PACE, PALETTE: PAL };
   root.KairoAnnouncements = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this);

@@ -487,7 +487,6 @@
                             <input type="checkbox" id="clock-toggle">
                             Live clock
                         </label>
-                        <button id="segment-add-preservice-btn" class="modal-btn secondary svc-edit-btn" title="A pre-service countdown that plays the announcement slides — the countdown sets how fast they change">+ Pre-service loop</button>
                         <button id="segment-add-btn" class="modal-btn secondary svc-edit-btn">+ Add Segment</button>
                     </div>
                 </div>
@@ -1020,15 +1019,20 @@
                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="6" width="16" height="12" rx="2"/></svg>
                             <span>Shape</span>
                         </button>
-                        <button id="ts-add-image-btn" class="ts-add-btn" title="Add an image">
+                        <!-- Image ▾: from the computer, from the Media Library, or
+                             a slideshow of pictures (an image-cycle layer, which
+                             changes on its own through a countdown) — the Library
+                             and Slideshow buttons below stay only as targets. -->
+                        <button id="ts-add-image-btn" class="ts-add-btn" title="Add a picture — from your computer, your Media Library, or a slideshow of pictures">
                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="8.5" cy="9.5" r="1.5"/><polyline points="21 15 16 10 5 20"/></svg>
                             <span>Image</span>
+                            <svg class="ts-add-caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
                         </button>
-                        <button id="ts-add-media-lib-btn" class="ts-add-btn" title="Add an image from your Media Library">
+                        <button id="ts-add-media-lib-btn" class="ts-add-btn hidden" title="Add an image from your Media Library">
                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>
                             <span>Library</span>
                         </button>
-                        <button id="ts-add-cycle-btn" class="ts-add-btn" title="Add an image cycle (slideshow that advances across a Timer segment's countdown)">
+                        <button id="ts-add-cycle-btn" class="ts-add-btn hidden" title="Add a slideshow of pictures that changes on its own">
                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="6" width="14" height="12" rx="2"/><rect x="8" y="2" width="14" height="12" rx="2" opacity="0.5"/></svg>
                             <span>Cycle</span>
                         </button>
@@ -1040,6 +1044,7 @@
                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17c3-6 6-6 9 0s6 6 9 0"/><path d="M3 11c3-6 6-6 9 0s6 6 9 0" opacity="0.5"/></svg>
                             <span>Motion</span>
                         </button>
+                        <span class="ts-add-divider" aria-hidden="true"></span>
                         <button id="ts-play-anim-btn" class="ts-add-btn" title="Play this slide's animations — each layer arriving in turn">
                             <svg viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M7 5v14l12-7z"/></svg>
                             <span>Play</span>
@@ -1071,15 +1076,32 @@
 
                 <!-- Col 3: Properties panel -->
                 <div class="ts-props-col" id="ts-props-col">
+                    <!-- The panel's tabs, at the top: the first is the whole
+                         thing being edited (Timer for a countdown, Look for
+                         any other item, Theme in Theme Studio — its sections
+                         are #ts-props-item-pane below); Layout/Style/Effects/
+                         Animate are the selected layer's (see PROPS_TABS/
+                         renderProps in app_theme_studio.js). Effects hides
+                         itself for layer types with nothing to put there. -->
+                    <div class="ts-props-tabs" id="ts-props-tabs">
+                        <button class="ts-tab-btn" data-tab="item" id="ts-props-tab-item">Theme</button>
+                        <button class="ts-tab-btn active" data-tab="layout" id="ts-props-tab-layout">Layout</button>
+                        <button class="ts-tab-btn" data-tab="style" id="ts-props-tab-style">Style</button>
+                        <button class="ts-tab-btn" data-tab="effects" id="ts-props-tab-effects">Effects</button>
+                        <button class="ts-tab-btn" data-tab="animate" id="ts-props-tab-animate">Animate</button>
+                    </div>
+                    <div id="ts-props-item-pane">
                     <!-- Item mode only — lets an operator switch this item's
                          base theme without leaving Full-scale edit. Hidden in
                          normal Theme Studio (theme picking lives in the
                          Themes list instead). -->
-                    <div class="ts-item-mode-header hidden" id="ts-item-theme-header">
-                        <button id="ts-item-theme-picker-btn" class="ts-add-btn" title="Theme for this item" style="width:100%;justify-content:center;">
-                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="13.5" cy="6.5" r="2.5"/><circle cx="17.5" cy="13.5" r="2.5"/><circle cx="8.5" cy="13.5" r="2.5"/><path d="M12 21a9 9 0 1 1 0-18"/></svg>
-                            <span id="ts-item-theme-picker-label">Theme</span>
-                        </button>
+                    <div class="ts-item-mode-header ts-props-section hidden" id="ts-item-theme-header">
+                        <div class="ts-prop-row">
+                            <span class="ts-prop-label">Theme</span>
+                            <button id="ts-item-theme-picker-btn" class="ts-select-btn" title="Choose the theme this item uses">
+                                <span id="ts-item-theme-picker-label">Theme</span>
+                            </button>
+                        </div>
                     </div>
 
                     <!-- Timer segments only (item.type === 'timer', see
@@ -1098,17 +1120,17 @@
                     <div class="ts-props-section ts-theme-meta">
                         <span class="ts-props-section-label">Layout</span>
                         <div class="ts-prop-row">
-                            <div class="ts-chip-group" id="ts-layout-picker">
-                                <button class="ts-chip active" data-layout="fullscreen">Full</button>
-                                <button class="ts-chip" data-layout="lower-third">Lower Third</button>
-                                <button class="ts-chip" data-layout="split-left">Split L</button>
-                                <button class="ts-chip" data-layout="split-right">Split R</button>
-                            </div>
+                            <select class="ts-select" id="ts-layout-picker" title="Where the text sits on the screen">
+                                <option value="fullscreen">Full screen</option>
+                                <option value="lower-third">Lower third</option>
+                                <option value="split-left">Split, text left</option>
+                                <option value="split-right">Split, text right</option>
+                            </select>
                         </div>
                     </div>
                     <div class="ts-props-section ts-theme-meta" data-tab="style" id="ts-text-anim-section">
                         <span class="ts-props-section-label">Text Animation</span>
-                        <p class="setting-hint" style="margin:0 0 8px;">How the verse text itself reveals — independent of the Transition above.</p>
+                        <p class="setting-hint" style="margin:0 0 8px;">How the verse text itself reveals, separate from the transition between slides.</p>
                         <div class="ts-prop-row">
                             <select id="ts-text-anim-select" class="ts-size-select" style="width:100%;">
                                 <option value="none">None</option>
@@ -1149,28 +1171,19 @@
                     <div class="ts-props-section ts-theme-meta hidden" id="ts-translate-group">
                         <span class="ts-props-section-label">Translate to</span>
                         <div class="ts-prop-row">
-                            <div class="ts-chip-group" id="ts-translate-picker">
-                                <button class="ts-chip" data-lang="fr">French</button>
-                                <button class="ts-chip" data-lang="es">Spanish</button>
-                                <button class="ts-chip" data-lang="pt">Portuguese</button>
-                            </div>
+                            <select class="ts-select" id="ts-translate-picker">
+                                <option value="">None</option>
+                                <option value="fr">French</option>
+                                <option value="es">Spanish</option>
+                                <option value="pt">Portuguese</option>
+                            </select>
                         </div>
                     </div>
 
+                    </div>
                     <div class="ts-props-empty" id="ts-props-empty">
                         <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" opacity="0.3"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="9" y1="9" x2="15" y2="9"/><line x1="9" y1="13" x2="15" y2="13"/><line x1="9" y1="17" x2="12" y2="17"/></svg>
                         <span>Select a layer<br>to edit its properties</span>
-                    </div>
-                    <!-- Layout/Style/Effects — groups the (previously one
-                         long stack of) per-layer sections below into tabs,
-                         see PROPS_TABS/renderProps in app.js. Effects hides
-                         itself for layer types with nothing to put there
-                         (image/background have no shadow/outline/scroll). -->
-                    <div class="ts-props-tabs hidden" id="ts-props-tabs">
-                        <button class="ts-tab-btn active" data-tab="layout" id="ts-props-tab-layout">Layout</button>
-                        <button class="ts-tab-btn" data-tab="style" id="ts-props-tab-style">Style</button>
-                        <button class="ts-tab-btn" data-tab="effects" id="ts-props-tab-effects">Effects</button>
-                        <button class="ts-tab-btn" data-tab="animate" id="ts-props-tab-animate">Animate</button>
                     </div>
                     <!-- Properties injected by JS -->
                     <div id="ts-props-panel" style="display:none;"></div>
