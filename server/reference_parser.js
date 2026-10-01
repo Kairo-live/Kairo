@@ -591,6 +591,7 @@ function normalizeChapterOfBook(text) {
 }
 
 // "verse 28 of Romans 8" / "verse 28 of Romans chapter 8" -> "romans chapter 8 verse 28".
+const VERSE_OF_FILLER = new Set(['that', 'the', 'this']);
 function normalizeVerseOfBook(words) {
   const out = [];
   for (let i = 0; i < words.length; i++) {
@@ -598,7 +599,9 @@ function normalizeVerseOfBook(words) {
       const v = consumeNumber(words, i + 1);
       const of = v ? i + 1 + v.consumed : -1;
       if (v && words[of] === 'of') {
-        const b = of + 1;
+        // "verse eight of THAT Isaiah chapter 58" (live run) — a pointing word
+        // between "of" and the book.
+        const b = of + 1 + (VERSE_OF_FILLER.has(words[of + 1]) ? 1 : 0);
         const num = getNumberedPrefix(words[b]);
         const bookTokens = num && BOOK_ALIASES[`${num} ${words[b + 1]}`] ? [words[b], words[b + 1]]
           : SINGLE_WORD_BOOKS.has(words[b]) ? [words[b]] : null;
@@ -1488,6 +1491,14 @@ function resolvePartialReference(text, { allowBareNumber = true } = {}) {
     if (!chapter) return null;
     if (namesOtherPassageBefore(words, i)) return null;
     let j = i + 1 + vRes.consumed;
+    // "verse eight of ..." names its own passage — the book and chapter are
+    // still coming ("In verse eight of that Isaiah chapter 58", live run: an
+    // interim of just "In verse eight of" put Romans 8:8 up from the Romans
+    // chapter on screen). Only "of this/that/the same chapter" is the one in play.
+    if (words[j] === 'of') {
+      const k = j + 1 + (['this', 'that', 'the', 'same'].includes(words[j + 1]) ? 1 : 0) + (words[j + 2] === 'same' ? 1 : 0);
+      if (!(k > j + 1 && ['chapter', 'passage'].includes(words[k]))) return null;
+    }
     if (['to','through','-'].includes(words[j])) {
       let a = j + 1;
       if (['verse','verses'].includes(words[a])) a++;

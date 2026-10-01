@@ -178,6 +178,9 @@ const ALIGN_CONFIRM_AT   = 6;     // words aligned to escalate from anchor → c
 // added 0–0.8. 1.5 was tried (to let "…the deep things of God", +1.9, through)
 // and brought back "…the goodness of the Lord" (+1.5) and others — 2.0 holds.
 const ALIGN_EXTENSION_MIN_IDF = 2.0;
+// A word with this much identifying weight is more than glue ("the", "into",
+// "saying" all sit below it; "able", "enter", "world", "raised" above).
+const STREAM_WEIGHTY_IDF = 3.0;
 // IDF floor for confirmation, on top of the word-count floor above — found
 // necessary from a real false-positive: liturgical/prayer language ("in the
 // name of Jesus", "we give you the glory", "receive our thanks") is dense
@@ -1073,7 +1076,11 @@ function streamWord(raw) {
       const viaBackwardExtension = cand.backwardSeedMatched > 0
         && !(cand.matched - cand.backwardSeedMatched >= ALIGN_CONFIRM_AT
              && cand.matchedIdf - cand.backwardSeedIdf >= ANCHOR_CONFIRM_IDF);
-      confirmed.push({ verseIdx: cand.idx, matched: cand.matched, matchedIdf: cand.matchedIdf, viaBackwardExtension });
+      // How many of the aligned words carry real weight (see STREAM_WEIGHTY_IDF)
+      // — server.js asks for three before a match nothing points at goes up alone.
+      let weightyWords = 0;
+      for (const w of cand.contributedWords) if ((idfMap.get(w) || 0) >= STREAM_WEIGHTY_IDF) weightyWords++;
+      confirmed.push({ verseIdx: cand.idx, matched: cand.matched, matchedIdf: cand.matchedIdf, viaBackwardExtension, weightyWords });
     }
     kept.push(cand);
   }
@@ -2161,7 +2168,7 @@ parentPort.on('message', async (msg) => {
               // backward extension, prefer that — it's strictly stronger
               // evidence (see streamWord's own comment on what this flag
               // means) than an earlier one that did.
-              confirmedByVerse.set(c.verseIdx, { matched: c.matched, matchedIdf: c.matchedIdf, viaBackwardExtension: c.viaBackwardExtension });
+              confirmedByVerse.set(c.verseIdx, { matched: c.matched, matchedIdf: c.matchedIdf, viaBackwardExtension: c.viaBackwardExtension, weightyWords: c.weightyWords });
             }
           }
         }
@@ -2181,13 +2188,14 @@ parentPort.on('message', async (msg) => {
 
         const results = [];
         const seen = new Set();
-        for (const [idx, { matched, matchedIdf, viaBackwardExtension }] of confirmedByVerse) {
+        for (const [idx, { matched, matchedIdf, viaBackwardExtension, weightyWords }] of confirmedByVerse) {
           const similarity = Math.min(0.97, 0.90 + (matched - ALIGN_CONFIRM_AT) * 0.01);
           results.push({
             ...formatVerse(verseMetadata[idx], similarity, 'stream'),
             depth: matched,
             matched,
             matchedIdf,
+            weightyWords,
             df: 0,
             confirmed: true,
             viaBackwardExtension: !!viaBackwardExtension,

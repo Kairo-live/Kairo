@@ -1454,11 +1454,16 @@ function rangeMoved(from = null) {
   rangeSpentWords = currentInterimText ? currentInterimText.split(RE_SPACES).filter(Boolean).length : 0;
 }
 
-// Notes a segment for the range checks and returns its unspent words.
-function noteRangeSpeech(transcript, isFinal) {
-  const fresh = (transcript || '').split(RE_SPACES).filter(Boolean).slice(rangeSpentWords).join(' ');
+// Notes a segment for the range checks and returns its unspent words. The
+// offline engine locks a few words at a time while the sentence runs on
+// (continuesLive): the live text after a lock holds only the words past it,
+// so what was spent beyond the lock carries over to them — the same carry-over
+// streamNewWords gives its watermark.
+function noteRangeSpeech(transcript, isFinal, continuesLive = false) {
+  const words = (transcript || '').split(RE_SPACES).filter(Boolean);
+  const fresh = words.slice(rangeSpentWords).join(' ');
   if (!isFinal) { rangeHeardOpen = fresh; return fresh; }
-  rangeSpentWords = 0;
+  rangeSpentWords = continuesLive ? Math.max(0, rangeSpentWords - words.length) : 0;
   rangeHeardOpen  = '';
   if (fresh && rangeCurrentVerse) {
     rangeHeard.push(fresh);
@@ -2125,20 +2130,39 @@ const CONTEXT_MAX_CITED  = 8;                // keep last 8 cited verses
 const recentCitations = [];   // [{ book, chapter, verse, time, cited }, ...]
 
 // cited: false for a strong text match (a passage read, not named).
+//
+// Text matches don't crowd out what the preacher named. Every reading
+// re-matches the verse it's on (verbatim ≥92%, fingerprint ≥87%, pass after
+// pass), and each match used to be its own entry — eight of them pushed a
+// citation out of this list within a minute, long before its five minutes
+// were up, and with it every guard that asks "was this verse just named?"
+// Real incident (owner's live test, 2026-09-30): "Matthew chapter 17 and
+// verse 21" went up, a minute later the commentary ("...can come... and go
+// away") traded it for its near-twin Mark 9:29 ("this kind can come forth"),
+// fifteen times in eighteen seconds — the twin resolver no longer saw it as
+// cited. A repeat match refreshes its own entry instead of adding one, a
+// reading of a named verse leaves the citation as it was (named, and when),
+// and over the cap text matches go first.
 function updateSermonContext(ref, { fromText = false } = {}) {
   const now = Date.now();
-  recentCitations.push({
+  const entry = {
     book:    ref.book,
     chapter: ref.chapter || null,
     verse:   ref.verse   || ref.verseStart || null,
     time:    now,
     cited:   !fromText,
-  });
-  // Keep only the last N within the window
+  };
+  const i = recentCitations.findIndex(c => c.book === entry.book && c.chapter === entry.chapter && c.verse === entry.verse);
+  if (i !== -1) {
+    if (fromText && recentCitations[i].cited) return;
+    recentCitations.splice(i, 1);
+  }
+  recentCitations.push(entry);
   const cutoff = now - CONTEXT_WINDOW_MS;
-  while (recentCitations.length > CONTEXT_MAX_CITED ||
-         (recentCitations.length > 0 && recentCitations[0].time < cutoff)) {
-    recentCitations.shift();
+  while (recentCitations.length > 0 && recentCitations[0].time < cutoff) recentCitations.shift();
+  while (recentCitations.length > CONTEXT_MAX_CITED) {
+    const textMatch = recentCitations.findIndex(c => !c.cited);
+    recentCitations.splice(textMatch === -1 ? 0 : textMatch, 1);
   }
 }
 
@@ -3518,7 +3542,22 @@ async function handleTranscriptSegment(transcript, isFinal, confidence, speechFi
         // "One attribute..."/"...number two?", caught a fleeting interim
         // snapshot that was momentarily just a lone number). Pattern 2
         // (explicit "verse N") stays fully enabled on interim.
-        const partial = announcesDifferentBook(transcript) ? null : resolvePartialReference(transcript, { allowBareNumber: false });
+        let partial = announcesDifferentBook(transcript) ? null : resolvePartialReference(transcript, { allowBareNumber: false });
+        // A bare "verse N" at the very end of an interim is as half-heard as a
+        // full citation there (see the interim gate in processForReferences):
+        // "In verse eight" (live run) was still becoming "...of that Isaiah
+        // chapter 58" — a growable number waits for the next word, any other
+        // for the next update to agree.
+        if (partial && partial.verse && interimLooksIncomplete(transcript)) {
+          if (endsOnGrowableNumber(transcript)) partial = null;
+          else {
+            const stableKey = `partial|${partial.book}|${partial.chapter}|${partial.verse}`;
+            const nowStable = Date.now();
+            const seenAt = interimSeenAt.get(stableKey);
+            interimSeenAt.set(stableKey, nowStable);
+            if (seenAt === undefined || nowStable - seenAt >= INTERIM_STABLE_WINDOW_MS) partial = null;
+          }
+        }
         if (partial && partial.verse) {
           try {
             const msg = await workerCall('directLookup', { book: partial.book, chapter: partial.chapter, verse: partial.verse }, 3000);
@@ -3613,7 +3652,7 @@ async function handleTranscriptSegment(transcript, isFinal, confidence, speechFi
   accumulateTopicWords(transcript);
   maybeRebuildTopicLibrary();
 
-  const rangeSpeech = noteRangeSpeech(transcript, true);
+  const rangeSpeech = noteRangeSpeech(transcript, true, continuesLive);
   maybeAdvanceRangeOnLastWords();
   maybeAdvanceRangeOnNextVersePrefix(rangeSpeech);
   maybeAdvanceRangeByContent().catch(() => {});
@@ -4431,6 +4470,15 @@ function settleStreamTie(tied) {
   return { winner: top[0].r, losers: tied.filter(r => r !== top[0].r), why: 'the passage in play' };
 }
 
+const STREAM_MIN_WEIGHTY_WORDS = 3;   // see processStreamText's confirmed path
+
+// A stream match that went up with nothing pointing at its passage: if verses
+// sharing its wording are also in play, the citation check decides between
+// them on what follows (see startCitationCheck).
+async function checkStreamSiblings(verse) {
+  const relatives = streamAnchorsNear(verse);
+  if (relatives.length) await startCitationCheck(verse, '', false, { siblings: relatives });
+}
 async function processStreamText(text) {
   if (!workerBasicReady || !text) return;
   try {
@@ -4619,14 +4667,35 @@ async function processStreamText(text) {
       }
 
       const pointedAt = passagePointedAt(top[0].book, top[0].chapter, top[0].verse);   // before the send puts it on screen
-      const sent = await broadcastDetection(top, 'stream', top[0].similarity || 0.90, streamTarget, { verbatimDisagreed });
+      // With nothing pointing at the passage (no citation, range or chapter on
+      // screen behind it), the alignment alone has to carry real words of the
+      // verse — at least three that are more than glue. Real incidents (owner's
+      // live test, 2026-09-30): the refrain "Can I hear a loud amen? ... say in"
+      // aligned with Revelation 12:10 ("And I heard a loud voice saying in
+      // heaven") on "heard" and "loud", and "for you to be able to enter into
+      // that" with Revelation 15:8 ("no man was able to enter into the temple")
+      // on "able" and "enter" — both went up. Every real quote from memory in
+      // the same sermon aligned on three or more (1 Corinthians 10:11: whom,
+      // ends, world; 3 John 1:2: wish, above, things; Romans 8:11: christ, dead,
+      // raised, quicken). Held, not dropped: a second method on the same verse
+      // (verbatim, fingerprint, the reranked meaning search) still sends it.
+      // capAtSuggestions: a confirmed stream match scores 0.90+ and the scoring
+      // model would put it straight back on screen.
+      const thinOnItsOwn = streamTarget === 'viewer' && !pointedAt && (top[0].weightyWords ?? STREAM_MIN_WEIGHTY_WORDS) < STREAM_MIN_WEIGHTY_WORDS
+        && !evidenceLedger.hasCorroboration({ book: top[0].book, chapter: top[0].chapter, verse: top[0].verse });
+      if (thinOnItsOwn) {
+        console.log(`[Stream] "${top[0].reference}" aligned on ${top[0].weightyWords} weighty word(s) with nothing pointing at it — waits in Candidates for a second method`);
+        streamTarget = 'suggestions';
+        // checkSiblings: released later by a second method, it still gets the
+        // check below that it would have had going up now (Luke 22:20 → the
+        // Matthew 26:28 actually quoted, "...for the remission of sins").
+        awaitingCorroboration.set(`${top[0].book}|${top[0].chapter}|${top[0].verse}`, { verses: top, score: top[0].similarity || 0.90, at: Date.now(), checkSiblings: !((top[0].matchedIdf ?? 0) >= VERBATIM_CERTAIN_IDF) });
+      }
+      const sent = await broadcastDetection(top, 'stream', top[0].similarity || 0.90, streamTarget, { verbatimDisagreed, capAtSuggestions: thinOnItsOwn });
       if (sent === 'viewer') console.log(`[Stream] "${top[0].reference}" confirmed-alignment (matchedIdf=${(top[0].matchedIdf ?? 0).toFixed(1)}) → viewer`);
       // Not for a match that's already certain on its words alone — that's the
       // verse being read, and each check costs model time.
-      if (sent === 'viewer' && !pointedAt && !((top[0].matchedIdf ?? 0) >= VERBATIM_CERTAIN_IDF)) {
-        const relatives = streamAnchorsNear(top[0]);
-        if (relatives.length) await startCitationCheck(top[0], '', false, { siblings: relatives });
-      }
+      if (sent === 'viewer' && !pointedAt && !((top[0].matchedIdf ?? 0) >= VERBATIM_CERTAIN_IDF)) await checkStreamSiblings(top[0]);
       else if (streamTarget === 'suggestions' && top[0].viaBackwardExtension) console.log(`[Stream] "${top[0].reference}" confirmed only via backward-extension credit, no independent corroboration yet — demoted to Candidates`);
     }
     if (anchors.length) {
@@ -4905,6 +4974,22 @@ function interimLooksIncomplete(text) {
   return /^\d+$/.test(w) || WORD_TO_NUM[w] !== undefined || w === 'hundred' || DANGLING_CONTINUATION_WORDS.has(w);
 }
 
+// A number at the end of an interim that its own sound can still grow from:
+// "four"/"six"/"seven"/"eight"/"nine" begin fourteen–nineteen and forty–
+// ninety, a round ten takes a unit after it, a hundred takes the rest. For
+// these, two interim updates agreeing proves nothing — the end of the word is
+// still arriving. Real incident (owner's live test, 2026-09-30): "In Isaiah
+// chapter 41 from verse seventeen" read "verse 7" across two updates, and
+// Isaiah 41:7 was on screen for two seconds before 41:17.
+const GROWABLE_NUMBERS = new Set([4, 6, 7, 8, 9, 20, 30, 40, 50, 60, 70, 80, 90, 100]);
+function endsOnGrowableNumber(text) {
+  const last = String(text || '').trim().split(RE_SPACES).pop() || '';
+  if (/[,.;!?]$/.test(last)) return false;
+  const w = last.toLowerCase().replace(/[^a-z0-9]/g, '');
+  if (w === 'hundred') return true;
+  return GROWABLE_NUMBERS.has(/^\d+$/.test(w) ? Number(w) : WORD_TO_NUM[w]);
+}
+
 // ── Multi-stream citation voting (see citation_voting.js) ────────────────
 const citationVoting = createCitationVoting({
   workerCall, parseAllSpokenReferences, resolveAmbiguousRefs, broadcastDetection,
@@ -5125,6 +5210,19 @@ async function processForReferences(transcript, isFinal, sentFromInterim = null,
       // for the retry branch above; skip re-attempting here too once it's
       // set, rather than letting every stale re-parse get a fresh guess.
       if (chapter && chapterKeywordResolvedFor === `${book}|${chapter}`) { continue; }
+      // The chapter of the verse on screen, named again, is the preacher
+      // pointing back at what's up, not a citation waiting for its verse. Real
+      // incident (owner's live test, 2026-09-30): Isaiah 58:6 cited and on
+      // screen, then "it's good for us to also know that Isaiah chapter 58 is
+      // the text" armed the chapter, and "...this is the way I want the fast to
+      // be" was keyword-matched to 58:3, which replaced the verse being taught.
+      // Another verse of it read next is still found: the stream and verbatim
+      // layers follow the chapter on screen without this.
+      if (chapter && lastOutputVerse && lastOutputVerse.book === book && lastOutputVerse.chapter === chapter
+          && Date.now() - lastOutputVerseAt < SAME_BOOK_WINDOW_MS) {
+        chapterOnlyPending = null;
+        continue;
+      }
       // Finals only: an interim can't send anything from here, and searching
       // (two worker round-trips) or recording pending text for every growing
       // interim prefix is wasted work that also pollutes the pending window.
@@ -5236,6 +5334,9 @@ async function processForReferences(transcript, isFinal, sentFromInterim = null,
       // Only the citation at the END of the interim can be half-heard — an
       // earlier one in the same text is already followed by more words.
       if (!isFinal && !ref.ambiguousUnresolved && ref === refs[refs.length - 1] && interimLooksIncomplete(transcript)) {
+        // A number its own sound may still be growing from waits for the word
+        // after it (or the final) — see endsOnGrowableNumber.
+        if (endsOnGrowableNumber(transcript)) continue;
         const stableKey = citationKey(ref);
         const nowStable = Date.now();
         const seenAt = interimSeenAt.get(stableKey);
@@ -5509,6 +5610,16 @@ function hasComparableDifferentBookAlternate(topMatch, alternates) {
 function maybeCorrectMiscitation(topMatch, sourceText, alternates) {
   if (settings.autoCorrect === false) return false;
   if (!lastDirectSentVerse) return false;
+  // A correction replaces the cited verse on screen. Once something else has
+  // replaced it there (the stream following the reading, the range moving on,
+  // an operator's send), a "correction" would replace THAT instead, past every
+  // guard an ordinary send goes through. Real incident (replay of the owner's
+  // 2026-09-30 test): "Psalm one one one one zero one to three" went up as
+  // Psalm 111:1, the stream moved the screen to the verse being read (110:1),
+  // and the corrector then replaced "111:1" — 110:1 by then — with Acts 2:35
+  // on "...until I make thy enemies thy footstool".
+  if (lastOutputVerse && (lastOutputVerse.book !== lastDirectSentVerse.book
+      || lastOutputVerse.chapter !== lastDirectSentVerse.chapter || lastOutputVerse.verse !== lastDirectSentVerse.verse)) return false;
   const now = Date.now();
   if (wordsHeard - lastDirectSentWords > CORRECTION_WINDOW_WORDS) return false;
   if (now - lastDirectSentTime < CORRECTION_IMMUNITY_MS) return false;
@@ -6229,18 +6340,27 @@ function onScreenExplainsSpeechBetter(candidate) {
 }
 
 // Whether what was said fits verse A at least as well as verse B, counting
-// only the words one of them has and the other doesn't — shared words can't
-// tell them apart. Only on real evidence for A: the speech holds words unique
-// to it, at least as many as unique to B. 0 vs 0 means the words don't
-// separate them.
+// the words one of them has and the other doesn't — shared words can't tell
+// them apart. Two ways A holds: the speech has words unique to A, at least as
+// many as unique to B; or it has nothing of B's own at all, only words A says
+// too — then A already explains everything said, and B is a near-duplicate
+// matched on A's own words. Real incident (replay of the owner's 2026-09-30
+// test): Psalm 110:1 on screen, read on to "...until I make thy enemies thy
+// footstool", and Hebrews 1:13 (which ends with the same words) replaced it,
+// that being "0 against 0, no reason to block". Speech with no words of either
+// verse decides nothing.
 function speechFitsFirstAtLeastAsWell(aText, bText, speechText) {
   const speech = evidenceWords(speechText);
   if (!speech.size) return false;
   const aWords = evidenceWords(aText || '');
   const bWords = evidenceWords(bText || '');
-  let aOnly = 0, bOnly = 0;
-  for (const w of aWords) if (!bWords.has(w) && speech.has(w)) aOnly++;
+  let aOnly = 0, bOnly = 0, shared = 0;
+  for (const w of aWords) {
+    if (!speech.has(w)) continue;
+    if (bWords.has(w)) shared++; else aOnly++;
+  }
   for (const w of bWords) if (!aWords.has(w) && speech.has(w)) bOnly++;
+  if (bOnly === 0) return aOnly + shared > 0;
   return aOnly > 0 && aOnly >= bOnly;
 }
 
@@ -6785,7 +6905,9 @@ async function broadcastDetection(verses, method, topScore, target, opts = {}) {
         awaitingCorroboration.delete(topKey);
         if (now - held.at < LATE_CORROBORATION_WINDOW_MS) {
           console.log(`[Stream] "${held.verses[0].reference}" now corroborated by ${method} — re-evaluating`);
-          setImmediate(() => broadcastDetection(held.verses, 'stream', held.score, 'viewer').catch(() => {}));
+          setImmediate(() => broadcastDetection(held.verses, 'stream', held.score, 'viewer')
+            .then(sent => (sent === 'viewer' && held.checkSiblings ? checkStreamSiblings(held.verses[0]) : null))
+            .catch(() => {}));
         }
       }
       const decided = detectionScoring.decideTarget(finalScore, method, { corroborated, veryHighConfidence: breakdown.veryHighConfidence });

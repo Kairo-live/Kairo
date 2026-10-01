@@ -614,7 +614,7 @@ input[type="range"]:disabled { opacity: 0.4; cursor: default; }
 }
 
 .pill-red  { background: var(--red-dim);   color: var(--red);   border: 1px solid rgba(237,28,36,0.3); }
-.pill-green{ background: var(--green-dim); color: var(--green); border: 1px solid rgba(237,28,36,0.3); }
+.pill-green{ background: var(--green-dim); color: var(--green); border: 1px solid rgba(34,197,94,0.3); }
 
 .pill-dot {
   width: 6px; height: 6px;
@@ -1364,9 +1364,13 @@ input[type="range"]:disabled { opacity: 0.4; cursor: default; }
   flex-shrink: 0;
 }
 
+/* Green with a green glow — these (and .pill-green, .test-result.success,
+   .bs-dot.connected, .toast.success) kept a red rgba glow/border from when
+   --green was a copy of --red's hex; the brand-red pass then carried the
+   mismatch over to the new red. */
 .bs-dot.active {
   background: var(--green);
-  box-shadow: 0 0 6px rgba(237,28,36,0.4);
+  box-shadow: 0 0 6px rgba(34,197,94,0.4);
 }
 
 /* (Old .bs-info, .bs-title, .bs-sub, .broadcast-settings, .bs-setting-*, .bs-input*, .bs-test-btn, .bs-link removed — dead code) */
@@ -1462,7 +1466,7 @@ input[type="range"]:disabled { opacity: 0.4; cursor: default; }
 }
 
 .test-result.hidden { display: none; }
-.test-result.success { background: var(--green-dim); color: var(--green); border: 1px solid rgba(237,28,36,0.25); }
+.test-result.success { background: var(--green-dim); color: var(--green); border: 1px solid rgba(34,197,94,0.25); }
 .test-result.error   { background: var(--red-dim); color: var(--red); border: 1px solid rgba(237,28,36,0.25); }
 
 /* ══════════════════════════════════════
@@ -3085,7 +3089,7 @@ mark.help-hit.is-current { background: rgba(255,255,255,0.38); }
    "connected/on" case, but .connected/.error never had rules of their own,
    so the ProPresenter dot in particular never actually changed color
    regardless of real connection state. */
-.bs-dot.connected { background: var(--green); box-shadow: 0 0 6px rgba(237,28,36,0.4); }
+.bs-dot.connected { background: var(--green); box-shadow: 0 0 6px rgba(34,197,94,0.4); }
 .bs-dot.error      { background: var(--red); }
 .bs-dot.warn       { background: var(--orange, #d9a441); }
 
@@ -3296,7 +3300,7 @@ mark.help-hit.is-current { background: rgba(255,255,255,0.38); }
   animation: toast-in 180ms ease-out;
 }
 
-.toast.success { border-color: rgba(237,28,36,0.3); color: var(--green); }
+.toast.success { border-color: rgba(34,197,94,0.3); color: var(--green); }
 .toast.error   { border-color: rgba(237,28,36,0.3);  color: var(--red);   }
 
 @keyframes toast-in {

@@ -625,6 +625,89 @@ const fresh = () => { server.resetDetectionSession(); referenceContext.reset(); 
     assert.equal(onScreen().at(-1), 'Acts 1:8', JSON.stringify(sent));
   });
 
+  await test('naming the chapter of the verse on screen again doesn\'t guess a new verse of it (Isaiah 58:6 stays, not 58:3)', async () => {
+    fresh(); server.clearRangeQueue(); await server.clearLayer('all');
+    await read('Outbreak of what? The anointing. In Isaiah chapter 58,');
+    await read('verse six,');
+    assert.equal(onScreen().at(-1), 'Isaiah 58:6', JSON.stringify(sent));
+    await read("it's good for us to also know that Isaiah chapter 58 is the text.");
+    await read("For this season. It's not this the fast that I have chosen.");
+    await read('No. That is to say, this is the way I want the fast to be. This is a template.');
+    await wait(1500);
+    assert.ok(!onScreen().includes('Isaiah 58:3'), JSON.stringify(sent));
+    assert.equal(onScreen().at(-1), 'Isaiah 58:6', JSON.stringify(sent));
+  });
+
+  await test('a misheard chapter read on stays on the verse being read, not a verse that quotes its last words (Psalm 110:1)', async () => {
+    fresh(); server.clearRangeQueue(); await server.clearLayer('all');
+    // At the live segments' own spacing (ms between finals): the long citation
+    // segment's interims spread over 8 s are what let Hebrews 1:13 and Acts
+    // 2:35 in, in the replay.
+    const paced = async (text, gap) => {
+      const w = text.split(' ');
+      const steps = [];
+      for (let i = 3; i < w.length; i += 3) steps.push(w.slice(0, i).join(' '));
+      for (const st of steps) { await server.handleTranscriptSegment(st, false, 0.9, false); await wait(Math.max(120, (gap - 800) / steps.length)); }
+      await wait(800);
+      await server.handleTranscriptSegment(text, true, 0.9, true);
+    };
+    await paced('where prayer and fasting shall be required for anyone to secure his place.', 4994);
+    await paced('In this great move of the spirit.', 1718);
+    await paced('We have understanding from Psalm one one one one zero one to three. He said, the Lord said unto my Lord, sit thou at my right hand', 8001);
+    await paced('until I make thy enemies thy footstool.', 4999);
+    await paced('The Lord shall send the rod of thy strength out of Zion,', 3206);
+    await wait(1500);
+    for (const quoter of ['Hebrews 1:13', 'Acts 2:35', 'Matthew 22:44', 'Mark 12:36', 'Luke 20:43']) assert.ok(!onScreen().includes(quoter), JSON.stringify(sent));
+    assert.ok(onScreen().includes('Psalms 110:1'), JSON.stringify(sent));
+  });
+
+  await test('a verse number still being spoken waits for its end ("verse 7…teen" is Isaiah 41:17, never 41:7)', async () => {
+    fresh(); server.clearRangeQueue(); await server.clearLayer('all');
+    const seg = async (t, fin, ms) => { await server.handleTranscriptSegment(t, fin, 0.95, fin); await wait(ms); };
+    await seg('thee in the sanctuary because thy loving kindness is better than life.', true, 800);
+    await seg('In Isaiah chapter 41 from verse 7', false, 400);
+    await seg('In Isaiah chapter 41 from verse 7', false, 400);
+    await seg('In Isaiah chapter 41 from verse 17 to 18, it said', false, 600);
+    await seg('In Isaiah chapter 41 from verse 17 to 18, it said when the poor', true, 1000);
+    assert.ok(!onScreen().includes('Isaiah 41:7'), JSON.stringify(sent));
+    assert.ok(onScreen().includes('Isaiah 41:17'), JSON.stringify(sent));
+  });
+
+  await test('everyday words that happen to run like a verse don\'t put it up with nothing pointing at it (Revelation 15:8, 12:10)', async () => {
+    fresh(); server.clearRangeQueue(); await server.clearLayer('all');
+    await read('is dominating and having it the way he wants it. Can I hear a loud amen?');
+    await read('That is the kind of church Jesus Christ is coming for. And for that to happen,');
+    await read('for you to be able to enter into that, one of the key prescriptions');
+    await read("He's overtaken by the power of the holy ghost.");
+    await read('And suddenly he starts speaking in your favor.');
+    await read('Power has come. Can I hear a loud amen? Because say in the day of his');
+    await wait(1500);
+    assert.ok(!onScreen().includes('Revelation 15:8'), JSON.stringify(sent));
+    assert.ok(!onScreen().includes('Revelation 12:10'), JSON.stringify(sent));
+  });
+
+  await test('a verse quoted from memory with no citation still goes up (1 Corinthians 10:11)', async () => {
+    fresh(); server.clearRangeQueue(); await server.clearLayer('all');
+    await read('In other words, he is trying to redirect us. Can I hear loud amen?');
+    await read('Scriptures makes us understand that the things that are written in scriptures,');
+    await read('is that unto us is an example unto us whom the end of the world has come.');
+    await wait(1500);
+    assert.ok(onScreen().includes('1 Corinthians 10:11'), JSON.stringify(sent));
+  });
+
+  await test('"verse eight of that Isaiah chapter 58" is Isaiah 58:8, not verse 8 of the chapter in play (Romans 8)', async () => {
+    fresh(); server.clearRangeQueue(); await server.clearLayer('all');
+    await say('Romans 8 verse 11.'); await wait(1500);
+    const seg = async (t, fin, ms) => { await server.handleTranscriptSegment(t, fin, 0.95, fin); await wait(ms); };
+    await seg('In verse eight', false, 400);
+    await seg('In verse eight', false, 400);
+    await seg('In verse eight of that', false, 400);
+    await seg('In verse eight of that Isaiah chapter 58', false, 400);
+    await seg('In verse eight of that Isaiah chapter 58, said then shall thy light break forth.', true, 1200);
+    assert.ok(!onScreen().includes('Romans 8:8'), JSON.stringify(sent));
+    assert.equal(onScreen().at(-1), 'Isaiah 58:8', JSON.stringify(sent));
+  });
+
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 })();
