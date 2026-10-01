@@ -1429,6 +1429,49 @@ let rangeAdvancing      = false;
 let rangeLastAdvanceAt  = 0;   // timestamp of last advance — prevents rapid re-fires
 const RANGE_ADVANCE_COOLDOWN_MS = 1200;  // min gap between advances (fast readers)
 
+// What has been said since the range last moved — the only speech that can
+// move it again. Real incident (owner's live test, 2026-09-30, Ezekiel 47:1-5
+// read aloud): the interim "...from the right side of the house at the south
+// side of the" ended 47:1 and the range moved to 47:2, then that same
+// sentence's final arrived 1.5 s later and was checked again, this time
+// against 47:2's ending "...waters on the right side", words 47:1 says too.
+// The range jumped to 47:3 with 47:2 unread and stayed ahead of the reader
+// for the rest of the passage, the other layers pulling the screen back each
+// time. A stretch of speech moves the range once: the words of the open
+// segment already said when it moved are spent, and finals before it are gone.
+let rangeHeard      = [];   // finals since the range last moved (their unspent words)
+let rangeHeardOpen  = '';   // the open segment's unspent words
+let rangeSpentWords = 0;    // words of the open segment already said when the range moved
+let rangeLeftVerse  = null; // the verse the range last moved on from
+let rangeMovedAt    = 0;
+const RANGE_HEARD_MAX_WORDS = 160;
+
+function rangeMoved(from = null) {
+  rangeLeftVerse  = from;
+  rangeMovedAt    = Date.now();
+  rangeHeard      = [];
+  rangeHeardOpen  = '';
+  rangeSpentWords = currentInterimText ? currentInterimText.split(RE_SPACES).filter(Boolean).length : 0;
+}
+
+// Notes a segment for the range checks and returns its unspent words.
+function noteRangeSpeech(transcript, isFinal) {
+  const fresh = (transcript || '').split(RE_SPACES).filter(Boolean).slice(rangeSpentWords).join(' ');
+  if (!isFinal) { rangeHeardOpen = fresh; return fresh; }
+  rangeSpentWords = 0;
+  rangeHeardOpen  = '';
+  if (fresh && rangeCurrentVerse) {
+    rangeHeard.push(fresh);
+    let words = rangeHeard.reduce((n, t) => n + t.split(RE_SPACES).length, 0);
+    while (rangeHeard.length > 1 && words > RANGE_HEARD_MAX_WORDS) words -= rangeHeard.shift().split(RE_SPACES).length;
+  }
+  return fresh;
+}
+
+function rangeHeardWords() {
+  return [...rangeHeard, rangeHeardOpen].join(' ').split(RE_SPACES).filter(Boolean);
+}
+
 // ── Last-2-words end-of-verse detection ──────────────────────────────────────
 // Much more reliable than similarity search: we know exactly which words end
 // the current verse, so we just watch for them in the rolling transcript.
@@ -1477,6 +1520,7 @@ async function setRangeQueue(verses) {
   rangeQueue          = verses.slice(1);
   rangeQueueTotal     = verses.length;
   rangeAdvancing      = false;
+  rangeMoved();
   broadcastRangeState();
   // Send all verses to UI so the full range is visible in history
   broadcast({ type: 'range-verses', verses: rangeAllVerses, activeRef: rangeCurrentVerse?.reference || null });
@@ -1498,7 +1542,9 @@ function loadRangePrefixIdf(verses) {
 async function advanceRangeQueue() {
   if (!rangeQueue.length) return null;
   const next = rangeQueue.shift();
+  const from = rangeCurrentVerse;
   rangeCurrentVerse   = next;
+  rangeMoved(from);
   broadcastRangeState();
   await sendToOutputs(next);
   broadcast({ type: 'detection', verses: [next], method: 'direct', topScore: 1.0, target: 'viewer', timestamp: Date.now() });
@@ -1526,6 +1572,7 @@ function clearRangeQueue() {
   rangeAllVerses    = [];
   rangeCurrentVerse = null;
   rangeAdvancing    = false;
+  rangeMoved();
   broadcastRangeState();
 }
 
@@ -1755,7 +1802,7 @@ function markVerseEndIfJustFinished(transcript) {
 // target's meaningful words are present" — order-and-gap tolerant, same
 // spirit as the anchor trie's own mismatch budget elsewhere in this file.
 function mostMeaningfulWordsPresent(targetPhrase, transcript, minCount) {
-  const target = meaningfulWords(targetPhrase);
+  const target = [...new Set(meaningfulWords(targetPhrase))];
   if (target.length < minCount) return false;
   const present = new Set(meaningfulWords(transcript));
   let hits = 0;
@@ -1778,16 +1825,35 @@ function mostMeaningfulWordsPresent(targetPhrase, transcript, minCount) {
 // independent — a real, separate safety net for when the current verse's
 // ending is paraphrased or too garbled for even a fuzzy match to catch, not
 // something this path depends on or waits for.
-function maybeAdvanceRangeOnLastWords(transcript) {
+//
+// An ending word counts once it has been heard as many times as the verse
+// says it, and alongside the others, just now. Same incident as rangeHeard
+// above (Ezekiel 47, owner: "unique words in multiple verses"): 47:3 ends
+// "...the waters; the waters were to the ankles", so "waters" made two of
+// its three last words and the first "waters" anywhere finished the verse;
+// 47:4 says "brought me through the waters" halfway and ends "brought me
+// through; the waters were to the loins", so its middle finished it. The
+// ending is a phrase, so its words land within a few words of each other
+// however the segments fell — older speech in the window is the reading of
+// the verse, there only to count the earlier times the verse says a word.
+const RANGE_ENDING_SPAN  = 8;    // meaningful words the ending's words must fall within
+const RANGE_READING_SLACK = 15;  // words beyond the verse's own length a reading of it may run to
+function maybeAdvanceRangeOnLastWords() {
   const now = Date.now();
   if (!(rangeCurrentVerse && rangeQueue.length && !rangeAdvancing
       && now - rangeLastAdvanceAt >= RANGE_ADVANCE_COOLDOWN_MS)) return;
-  const last3 = getLastMeaningfulWords(
-    rangeCurrentVerse.text || rangeCurrentVerse.kjv_text || '', 3
-  );
-  if (!last3) return;
-  if (mostMeaningfulWordsPresent(last3, transcript, Math.min(2, meaningfulWords(last3).length))) {
-    requestRangeAdvance(`Last-words advance: "${last3}" (fuzzy match) detected`);
+  const verseText  = rangeCurrentVerse.text || rangeCurrentVerse.kjv_text || '';
+  const verseWords = meaningfulWords(verseText);
+  const last3  = verseWords.slice(-3);
+  const ending = [...new Set(last3)];
+  if (!ending.length) return;
+  const reading = rangeHeardWords().slice(-(verseText.split(RE_SPACES).length + RANGE_READING_SLACK));
+  const heard   = meaningfulWords(reading.join(' '));
+  const recent  = new Set(heard.slice(-RANGE_ENDING_SPAN));
+  const times   = (list, w) => list.reduce((n, x) => n + (x === w), 0);
+  const reached = ending.filter(w => recent.has(w) && times(heard, w) >= times(verseWords, w));
+  if (reached.length >= Math.min(2, ending.length)) {
+    requestRangeAdvance(`Last-words advance: "${last3.join(' ')}" (fuzzy match) detected`);
   }
 }
 
@@ -1867,16 +1933,23 @@ function maybeAdvanceRangeOnNextVersePrefix(transcript) {
   // the Bible — 2 Samuel 5:19's "David enquired of the LORD" advanced on the
   // "Lord" in the next citation's quote ("I'm the Lord that leadeth…") in the
   // eval. With no identifying word to go on, two of the opening words must be
-  // heard, not one.
+  // heard, not one — and neither may be a word of the current verse, which is
+  // the same non-evidence the one-word path above already excludes: Ezekiel
+  // 47:4 opens "Again he measured a thousand, and brought me", every word of it
+  // but "again" said by 47:3 ("he measured a thousand cubits, and he brought
+  // me through"), so reading 47:3 alone would have shown 47:4. A verse opening
+  // on the current verse's own words can't be told from it by its opening;
+  // its ending (above) and the content check are left to call it.
   const identifying = (w) => (rangePrefixIdf.has(w) ? rangePrefixIdf.get(w) >= RANGE_PREFIX_MIN_IDF : w.length >= 4);
   const currentVerseWords = new Set(meaningfulWords(rangeCurrentVerse.text || rangeCurrentVerse.kjv_text || ''));
-  const distinctivePrefixWords = meaningfulWords(prefix4)
-    .filter(w => identifying(w) && !currentVerseWords.has(w));
+  const newPrefixWords = meaningfulWords(prefix4).filter(w => !currentVerseWords.has(w));
+  const distinctivePrefixWords = newPrefixWords.filter(identifying);
+  if (!distinctivePrefixWords.length && newPrefixWords.length < 2) return;
   // A segment naming another book is a new citation, not the next verse.
   if (detectBookMentions(transcript, true).some(b => b !== rangeCurrentVerse.book)) return;
   const matched = distinctivePrefixWords.length
     ? mostMeaningfulWordsPresent(distinctivePrefixWords.join(' '), transcript, 1)
-    : mostMeaningfulWordsPresent(prefix4, transcript, 2);
+    : mostMeaningfulWordsPresent(newPrefixWords.join(' '), transcript, 2);
   if (matched) {
     requestRangeAdvance(`Next-verse-prefix advance: "${prefix4}" (fuzzy match) detected`);
   }
@@ -2797,9 +2870,10 @@ app.post('/api/range/clear', (_, res) => {
 // in play, so its later verses are the only candidates: distinctive words of
 // one of them ("they fell backward" is John 18:6) show it is being read even
 // when the opening words the next-verse-prefix check needs were paraphrased
-// away. Scored by the worker's IDF ranking over the last two segments, with the
-// chapter resolver's own floor and margin; the winner must beat the verse on
-// screen, and any verse it jumps over is left out.
+// away. Scored by the worker's IDF ranking over the last two segments said
+// since the range last moved (see rangeHeard), with the chapter resolver's own
+// floor and margin; the winner must beat the verse on screen, and any verse it
+// jumps over is left out.
 const RANGE_CONTENT_LOOKAHEAD = 3;
 async function maybeAdvanceRangeByContent() {
   const current = rangeCurrentVerse;
@@ -2808,7 +2882,8 @@ async function maybeAdvanceRangeByContent() {
   const ahead = rangeQueue.slice(0, RANGE_CONTENT_LOOKAHEAD)
     .filter(v => v.book === current.book && v.chapter === current.chapter);
   if (!ahead.length) return;
-  const text = transcriptBuffer.slice(-2).map(t => t.text).join(' ');
+  const text = rangeHeard.slice(-2).join(' ');   // only what was said since the range last moved
+  if (!text) return;
   if (detectBookMentions(text, true).some(b => b !== current.book)) return;   // a new citation, not the reading
   const scored = (await workerCall('scoreChapterText', { book: current.book, chapter: current.chapter, text }, 3000)).results || [];
   if (rangeCurrentVerse !== current || rangeAdvancing) return;                 // moved on while scoring
@@ -2823,9 +2898,11 @@ function jumpRangeTo(book, chapter, verse) {
   if (!rangeAllVerses.length) return false;
   const idx = rangeAllVerses.findIndex(v => v.book === book && v.chapter === chapter && v.verse === verse);
   if (idx === -1) return false;
+  const from = rangeCurrentVerse;
   rangeCurrentVerse = rangeAllVerses[idx];
   rangeQueue        = rangeAllVerses.slice(idx + 1);
   rangeAdvancing     = false;
+  rangeMoved(from);
   broadcastRangeState();
   broadcast({ type: 'range-active', activeRef: rangeCurrentVerse.reference });
   return true;
@@ -3429,8 +3506,9 @@ async function handleTranscriptSegment(transcript, isFinal, confidence, speechFi
     // "offline == unstable" assumption.
     streamNewWords(transcript, false);
     maybeHandleNextVerseTrigger(transcript).catch(() => {});
-    maybeAdvanceRangeOnLastWords(transcript);
-    maybeAdvanceRangeOnNextVersePrefix(transcript);
+    const rangeSpeech = noteRangeSpeech(transcript, false);
+    maybeAdvanceRangeOnLastWords();
+    maybeAdvanceRangeOnNextVersePrefix(rangeSpeech);
     if (workerBasicReady) {
       let foundRef = await processForReferences(transcript, false);
       await checkCitationSiblings(transcript, false);
@@ -3535,8 +3613,9 @@ async function handleTranscriptSegment(transcript, isFinal, confidence, speechFi
   accumulateTopicWords(transcript);
   maybeRebuildTopicLibrary();
 
-  maybeAdvanceRangeOnLastWords(transcript);
-  maybeAdvanceRangeOnNextVersePrefix(transcript);
+  const rangeSpeech = noteRangeSpeech(transcript, true);
+  maybeAdvanceRangeOnLastWords();
+  maybeAdvanceRangeOnNextVersePrefix(rangeSpeech);
   maybeAdvanceRangeByContent().catch(() => {});
 
   // Snapshot BEFORE processForReferences replaces prevFinalTranscript with this
@@ -3816,6 +3895,7 @@ function resetDetectionSession({ keepContinuity = false } = {}) {
   streamWatermark       = 0;
   sentenceBuffer = new SentenceBuffer(4000);
   currentInterimText = '';
+  rangeHeard = []; rangeHeardOpen = ''; rangeSpentWords = 0;
   speechMsSinceTranscript = 0;
   citationVoting.reset();
 
@@ -4198,7 +4278,7 @@ function tryRangeAdvanceByRef(verses) {
 // constant's own comment for the real paraphrase-lag incident that fixed
 // this from mistakenly reusing SUGGESTION_MIN_SCORE), purely to filter out
 // pure noise, not because a stronger bar is actually needed here.
-function tryRangeAdvanceByDetection(verses, topScore) {
+function tryRangeAdvanceByDetection(verses, topScore, method) {
   if (!rangeCurrentVerse || !rangeQueue.length || rangeAdvancing || !verses?.length) return false;
   if (topScore < RANGE_ADVANCE_MIN_SCORE) return false;
   // NINETEENTH real regression, found live (owner testing, 2026-09-07): this
@@ -4222,6 +4302,22 @@ function tryRangeAdvanceByDetection(verses, topScore) {
   const hit = verses.find(v => nextInQueue && v.book === nextInQueue.book &&
     v.chapter === nextInQueue.chapter && v.verse === nextInQueue.verse);
   if (!hit) return false;
+  // The match has to rest on something only the next verse says, heard since
+  // the range last moved. Ezekiel 47 (owner's live test, 2026-09-30): "he
+  // measured a thousand cubits", read in 47:3, scored 47:4 at 90% — 47:4
+  // says "he measured a thousand" twice — and moved the range on with half
+  // of 47:3 still to read. Words both verses say are the current verse being
+  // read just as much as the next one; the same rule the next-verse-prefix
+  // check applies to the next verse's opening words.
+  // Held, not dropped: it waits in Possible Matches (see broadcastDetection)
+  // while the range moves on when the reading gets there. Text matches only —
+  // a spoken reference ("verse two") names the verse, it carries no words of it.
+  const currentWords = new Set(meaningfulWords(rangeCurrentVerse.text || rangeCurrentVerse.kjv_text || ''));
+  const nextOnly = new Set(meaningfulWords(hit.text || hit.kjv_text || nextInQueue.text || '').filter(w => !currentWords.has(w)));
+  if (TEXT_MATCH_METHODS.has(method) && !meaningfulWords(rangeHeardWords().join(' ')).some(w => nextOnly.has(w))) {
+    console.log(`[Range] "${hit.reference}" detected only on words "${rangeCurrentVerse.reference}" says too — held for Possible Matches`);
+    return 'held';
+  }
   return requestRangeAdvance(`Detected "${hit.reference}" (${(topScore*100).toFixed(0)}%) matches range's next verse`);
 }
 
@@ -5587,6 +5683,30 @@ function maybeCorrectMiscitation(topMatch, sourceText, alternates) {
     }
   }
 
+  // The same question over everything said since the citation went up, not
+  // only the few words this match came from: a mis-citation is reading
+  // something OTHER than what was cited, so the reading as a whole has to
+  // favour the new verse. Real incident (owner's live test, 2026-09-30, both
+  // runs of the sermon): "In Acts chapter one and verse eight, it said, but
+  // you shall receive power after the Holy Ghost is come upon you and you
+  // shall be witnesses unto me both in Jerusalem and in Judea and in Samaria
+  // and in the utmost parts of the earth" — Acts 1:8 read out word for word,
+  // but "utmost parts of the earth" is Luke 11:31's own wording (Acts 1:8
+  // says "uttermost part"), and that stream hit, on the last few words alone,
+  // replaced the correct verse. The citation's own segment counts (the words
+  // after the reference in it are the reading's start), hence the second of
+  // slack before the send.
+  if (lastDirectSentVerse.text) {
+    const sinceCitation = [
+      ...transcriptBuffer.filter(t => t.time >= lastDirectSentTime - 1000).map(t => t.text),
+      currentInterimText,
+    ].join(' ');
+    if (speechFitsFirstAtLeastAsWell(lastDirectSentVerse.text, topMatch.text || topMatch.kjv_text || '', sinceCitation)) {
+      console.log(`[Correct] Refusing to correct "${lastDirectSentVerse.reference}" to "${topMatch.reference}" — what's been read since the citation fits it at least as well`);
+      return false;
+    }
+  }
+
   // No book/chapter/distance restriction — this app is meant to be a
   // source of truth for what was actually SAID, not what was CITED. A
   // preacher citing "John 10:1" but actually reading Psalm 121:1 needs to
@@ -6076,6 +6196,28 @@ function shownVerseReturnsWithoutNewEvidence(candidate) {
   return candOnly === 0 || candOnly <= curOnly;
 }
 
+// The verse the range just moved on from comes back only on words of it said
+// since the move — not its own last words: the range moves on two of a verse's
+// three last words, so the reader is often still saying the third, and that
+// sentence's final (verbatim runs on it) arrives after the move. Real incident
+// (owner's live test, 2026-09-30, both runs): Luke 4:19 ended "...the acceptable
+// year of the" → 4:20, then the final "...the acceptable year of the Lord" put
+// 4:19 back up for three seconds before the reading of 4:20 took it away again.
+// Words both verses say don't count either; neither does anything before the move.
+// Only while that sentence's final can still be landing — a verse too short to
+// have words of its own beyond its ending isn't kept off the screen for good.
+const RANGE_LEFT_VERSE_HOLD_MS = 8000;
+function rangeLeftVerseReturnsWithoutNewEvidence(candidate) {
+  const left = rangeLeftVerse;
+  if (!left || !rangeCurrentVerse || Date.now() - rangeMovedAt > RANGE_LEFT_VERSE_HOLD_MS) return false;
+  if (left.book !== candidate.book || left.chapter !== candidate.chapter || left.verse !== candidate.verse) return false;
+  const words  = meaningfulWords(left.text || left.kjv_text || '');
+  const ending = new Set(words.slice(-3));
+  const current = new Set(meaningfulWords(rangeCurrentVerse.text || rangeCurrentVerse.kjv_text || ''));
+  const own = new Set(words.filter(w => !ending.has(w) && !current.has(w)));
+  return !meaningfulWords(rangeHeardWords().join(' ')).some(w => own.has(w));
+}
+
 function onScreenExplainsSpeechBetter(candidate) {
   const shown = lastOutputVerse;
   if (!shown?.book || !(shown.text || shown.kjv_text)) return false;
@@ -6083,17 +6225,23 @@ function onScreenExplainsSpeechBetter(candidate) {
   if (shown.book === candidate.book && shown.chapter === candidate.chapter && shown.verse === candidate.verse) return false;
   if (rangeAllVerses.some(v => v.book === candidate.book && v.chapter === candidate.chapter && v.verse === candidate.verse)) return false;
   const nowText = currentInterimText || (transcriptBuffer.length ? transcriptBuffer[transcriptBuffer.length - 1].text : '');
-  const speech = evidenceWords(nowText);
+  return speechFitsFirstAtLeastAsWell(shown.text || shown.kjv_text, candidate.text || candidate.kjv_text || '', nowText);
+}
+
+// Whether what was said fits verse A at least as well as verse B, counting
+// only the words one of them has and the other doesn't — shared words can't
+// tell them apart. Only on real evidence for A: the speech holds words unique
+// to it, at least as many as unique to B. 0 vs 0 means the words don't
+// separate them.
+function speechFitsFirstAtLeastAsWell(aText, bText, speechText) {
+  const speech = evidenceWords(speechText);
   if (!speech.size) return false;
-  const shownWords = evidenceWords(shown.text || shown.kjv_text);
-  const candWords  = evidenceWords(candidate.text || candidate.kjv_text || '');
-  let shownOnly = 0, candOnly = 0;
-  for (const w of shownWords) if (!candWords.has(w) && speech.has(w)) shownOnly++;
-  for (const w of candWords) if (!shownWords.has(w) && speech.has(w)) candOnly++;
-  // Hold only on real evidence for what's on screen: the speech contains words
-  // unique to it, at least as many as unique to the new verse. 0 vs 0 means
-  // the words just said don't separate them — no reason to block.
-  return shownOnly > 0 && shownOnly >= candOnly;
+  const aWords = evidenceWords(aText || '');
+  const bWords = evidenceWords(bText || '');
+  let aOnly = 0, bOnly = 0;
+  for (const w of aWords) if (!bWords.has(w) && speech.has(w)) aOnly++;
+  for (const w of bWords) if (!aWords.has(w) && speech.has(w)) bOnly++;
+  return aOnly > 0 && aOnly >= bOnly;
 }
 
 // ── What the sermon has in play ─────────────────────────────────────────────
@@ -6525,7 +6673,9 @@ async function broadcastDetection(verses, method, topScore, target, opts = {}) {
   // candidate that would otherwise be demoted or dropped by the checks
   // below — being the range's known next verse is stronger evidence than
   // any of those generic heuristics can see.
-  if (tryRangeAdvanceByDetection(verses, topScore)) return 'viewer';
+  const rangeAdvance = tryRangeAdvanceByDetection(verses, topScore, method);
+  if (rangeAdvance === true) return 'viewer';
+  if (rangeAdvance === 'held') opts = { ...opts, capAtSuggestions: true };
 
   // Computed once, used twice below — this needs to both PROMOTE a
   // fingerprint/semantic hit (which arrives with target already fixed at
@@ -6702,6 +6852,9 @@ async function broadcastDetection(verses, method, topScore, target, opts = {}) {
       target = 'suggestions';
     } else if (shownVerseReturnsWithoutNewEvidence(verses[0])) {
       console.log(`[Guard] "${verses[0].reference}" (${method}) was already shown and replaced by "${lastOutputVerse.reference}"; nothing said since points back to it — held for the operator`);
+      target = 'suggestions';
+    } else if (rangeLeftVerseReturnsWithoutNewEvidence(verses[0])) {
+      console.log(`[Guard] "${verses[0].reference}" (${method}) — the range just moved on from it and nothing said since is more of it than its last words — held for the operator`);
       target = 'suggestions';
     } else if (!(method === 'verbatim' && verses[0].similarity >= ON_SCREEN_GUARD_MAX_COVERAGE) && onScreenExplainsSpeechBetter(verses[0])) {
       console.log(`[Guard] "${verses[0].reference}" would replace "${lastOutputVerse.reference}", but what's being said fits the verse on screen at least as well — held for the operator`);

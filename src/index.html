@@ -1027,46 +1027,41 @@
                             <div class="ts-ruler-mark ts-ruler-mark-x" aria-hidden="true"></div>
                             <div class="ts-ruler-mark ts-ruler-mark-y" aria-hidden="true"></div>
                         </div>
-                        <!-- The tools — Move, Type, Shape (V/T/U) — float centred over
-                             the top of the canvas, after Figma and Compositor. -->
+                        <!-- The tools — Move, Type, Shape, Image (V/T/U/I) — float
+                             centred over the top of the canvas, after Figma and
+                             Compositor. data-tool-name is the quick label
+                             ts-tool-tooltip shows on hover (app_theme_studio.js) —
+                             a name every time, instantly, not just whichever
+                             tools happen to keep their pointer still long enough
+                             for the OS's own title tooltip. -->
                         <div class="ts-tool-float">
                             <div class="ts-tools" role="toolbar" aria-label="Tools">
-                                <button class="ts-tool-btn" data-tool="move" title="Move (V) — drag to move, handles to resize, circle to rotate · Arrows nudge, Shift ×10 · 1–0 opacity · Double-click text to type" aria-label="Move (V)">
+                                <button class="ts-tool-btn" data-tool="move" data-tool-name="Move · V" title="Move (V) — drag to move, handles to resize, circle to rotate · Arrows nudge, Shift ×10 · 1–0 opacity · Double-click text to type" aria-label="Move (V)">
                                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3l6.5 17 2.2-7.3L21 10.5z"/></svg>
                                 </button>
-                                <button class="ts-tool-btn" data-tool="type" title="Type (T) — drag a text box, or click for one · Click text to edit it · Return or a click outside to finish, Esc to cancel" aria-label="Type (T)">
+                                <button class="ts-tool-btn" data-tool="type" data-tool-name="Type · T" title="Type (T) — drag a text box, or click for one · Click text to edit it · Return or a click outside to finish, Esc to cancel" aria-label="Type (T)">
                                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 7 4 4 20 4 20 7"/><line x1="9" y1="20" x2="15" y2="20"/><line x1="12" y1="4" x2="12" y2="20"/></svg>
                                 </button>
-                                <span class="ts-tool-shape-group">
-                                    <button class="ts-tool-btn" id="ts-tool-shape-btn" data-tool="shape" title="Shape (U) — drag to draw on a new layer · Shift square or circle, Option from the centre · Shift-U next shape, Esc cancels · the corner picks which one" aria-label="Shape (U)">
-                                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="11" height="11" rx="1.5"/><circle cx="15.5" cy="15.5" r="5.5"/></svg>
-                                    </button>
-                                    <button class="ts-tool-shape-caret" id="ts-tool-shape-caret" title="Choose a shape (Shift-U cycles)" aria-label="Choose a shape">
-                                        <svg viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M3 4l6 6 6-6z"/></svg>
-                                    </button>
-                                </span>
+                                <!-- Choosing it opens every shape it draws (the list
+                                     under it, app_theme_studio.js's tsShapeFlyout);
+                                     its icon is the shape picked. -->
+                                <button class="ts-tool-btn" id="ts-tool-shape-btn" data-tool="shape" data-tool-name="Shape · U" title="Shape (U) — pick a shape from the list it opens, then drag to draw it on a new layer · Shift square or circle, Option from the centre · Shift-U next shape, Esc cancels" aria-label="Shape (U)" aria-haspopup="menu">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="3.5" y="5.5" width="17" height="13" rx="1.5"/></svg>
+                                </button>
+                                <span class="ts-tool-sep" aria-hidden="true"></span>
+                                <!-- Not a drag-on-canvas tool like the three above — click
+                                     opens the same from-computer/Media-Library choice it
+                                     always has (ts-add-image-btn's own handler,
+                                     app_theme_studio.js) — grouped here because it's
+                                     picked the same way they are, not tucked in a bar
+                                     under the canvas on its own. -->
+                                <button class="ts-tool-btn" id="ts-add-image-btn" data-tool-name="Image" title="Add a picture — from your computer or your Media Library" aria-label="Add a picture">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2.5"/><circle cx="8.5" cy="9.5" r="1.5"/><path d="M21 15.5l-5.5-5.5a1.5 1.5 0 0 0-2.1 0L5 18"/></svg>
+                                </button>
                             </div>
+                            <div class="ts-tool-tooltip" id="ts-tool-tooltip"></div>
                         </div>
-                    </div>
-
-                    <!-- What gets placed rather than drawn: a picture, or a design —
-                         templates, backgrounds, your own image, or none. -->
-                    <div class="ts-add-bar ts-tool-bar" id="ts-tool-bar">
-                        <!-- Image ▾: from the computer or from the Media Library —
-                             the Library button below stays only as its target. -->
-                        <button id="ts-add-image-btn" class="ts-add-btn" title="Add a picture — from your computer or your Media Library">
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="8.5" cy="9.5" r="1.5"/><polyline points="21 15 16 10 5 20"/></svg>
-                            <span>Image</span>
-                            <svg class="ts-add-caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
-                        </button>
-                        <button id="ts-add-media-lib-btn" class="ts-add-btn hidden" title="Add an image from your Media Library">
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>
-                            <span>Library</span>
-                        </button>
-                        <button id="ts-add-bg-btn" class="ts-add-btn" title="Design — templates to start from, backgrounds, your own image, or none">
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="21" x2="9" y2="9"/></svg>
-                            <span>Design</span>
-                        </button>
+                        <button id="ts-add-media-lib-btn" class="hidden" title="Add an image from your Media Library"></button>
                         <input type="file" id="ts-image-file" accept="image/*" style="display:none">
                     </div>
 

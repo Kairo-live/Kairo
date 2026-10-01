@@ -547,9 +547,7 @@
                 if (layer.fill === 'solid') {
                     div.style.background = hexOpacity(layer.color, layer.opacity);
                 } else if (layer.fill === 'gradient') {
-                    const c1 = hexOpacity(layer.color,  layer.opacity);
-                    const c2 = hexOpacity(layer.color2, layer.opacity);
-                    div.style.background = `linear-gradient(${layer.angle}deg, ${c1}, ${c2})`;
+                    div.style.background = gradientCss(layer, c => hexOpacity(c, layer.opacity));
                 } else if (layer.fill === 'blur') {
                     div.style.background = hexOpacity(layer.color, layer.opacity);
                     div.style.backdropFilter    = 'blur(24px)';
@@ -672,13 +670,19 @@
                 // update path below can reveal/re-hide it as verseText
                 // changes, without a full rebuild every slide.
                 const isCaptionOfVerse = hasVerseLayer && (layer.binding === 'reference' || layer.binding === 'verse_translated');
+                // A per-item override (ov.color) is this slide's own solid
+                // colour — it wins over the theme's gradient, same as it
+                // already wins over the theme's plain colour.
+                const colorCss = (layer.colorFill === 'gradient' && !ov.color)
+                    ? `background: ${gradientCss(layer, c => hexOpacity(c, opacity))}; -webkit-background-clip: text; background-clip: text; color: transparent;`
+                    : `color: ${hexOpacity(color, opacity)};`;
 
                 div.style.cssText = `
                     position: absolute;
                     display: ${isCaptionOfVerse && !String(verseText || '').trim() ? 'none' : 'flex'};
                     flex-direction: column;
                     justify-content: center;
-                    color: ${hexOpacity(color, opacity)};
+                    ${colorCss}
                     font-family: '${fs.family}', system-ui, sans-serif;
                     font-size: ${fs.size}px;
                     font-weight: ${fs.weight};

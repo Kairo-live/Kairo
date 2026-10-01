@@ -244,3 +244,33 @@ window.applyShapeGeometry = applyShapeGeometry;
 window.applyLayerOrder    = applyLayerOrder;
 window.resolveFlexibleTime = resolveFlexibleTime;
 window.outlineShadows     = outlineShadows;
+
+// ── Gradients — Photoshop's own points, not just two colours ──────────────
+// layer.gradientStops: [{pos, color}, …], pos 0–100. A layer never taken
+// through the stops editor (every theme before 2026-09-30, or one whose
+// gradient was only ever set via its two plain colour fields) has none —
+// gradientStops() then synthesizes the same two-point gradient from
+// layer.color/color2 it always rendered as, so nothing needs migrating and
+// nothing already saved changes how it looks.
+function gradientStops(layer) {
+  if (Array.isArray(layer.gradientStops) && layer.gradientStops.length >= 2) {
+    return layer.gradientStops.slice().sort((a, b) => a.pos - b.pos);
+  }
+  // The second stop is never just a repeat of the first (no visible
+  // gradient at all the moment Gradient is switched on, until the operator
+  // happens to go change it) — layer.color2 if this fill's had one before,
+  // else the same dark-navy default a fresh shape/canvas gradient always
+  // started from.
+  return [{ pos: 0, color: layer.color || '#ffffff' }, { pos: 100, color: layer.color2 || '#1a1a2e' }];
+}
+// The CSS gradient string for a layer's fill or text colour — every stop in
+// order, each colour run through `colorFn` (hexOpacity/hexA/…) so a caller
+// keeps using its own existing opacity handling rather than this needing to
+// know about it; plain passthrough when none is given.
+function gradientCss(layer, colorFn) {
+  const fn = colorFn || (c => c);
+  const stops = gradientStops(layer).map(s => `${fn(s.color)} ${s.pos}%`).join(', ');
+  return `linear-gradient(${layer.angle ?? 135}deg, ${stops})`;
+}
+window.gradientStops = gradientStops;
+window.gradientCss   = gradientCss;

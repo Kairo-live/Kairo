@@ -568,6 +568,63 @@ const fresh = () => { server.resetDetectionSession(); referenceContext.reset(); 
     assert.ok(onScreen().includes('Acts 1:8'), JSON.stringify(sent));
   });
 
+  // ── Owner's live test, 2026-09-30 ──
+  // At Deepgram's own pace — interims as the words come, the final a beat after
+  // the last — since the range's 1.2 s between advances otherwise hides a second
+  // advance off the same sentence (an interim, then its final).
+  async function read(text) {
+    const w = text.split(' ');
+    for (let i = 3; i < w.length; i += 3) { await server.handleTranscriptSegment(w.slice(0, i).join(' '), false, 0.9, false); await wait(250); }
+    await wait(1300);
+    await server.handleTranscriptSegment(text, true, 0.9, true); await wait(200);
+  }
+
+  await test('a range whose verses share their words steps one verse at a time, each at its own end (Ezekiel 47:1-5)', async () => {
+    fresh(); server.clearRangeQueue(); await server.clearLayer('all');
+    await read('really happens and the levels of power. Ezekiel chapter forty seven one to five.');
+    for (const s of ['Afterwards,', 'he brought me again', 'onto the door of the house, and behold,', 'waters issued out from under the threshold',
+      'of the house eastward. For the forefront of the house stood forward', 'the east, and the waters came down from under']) await read(s);
+    // 47:1 ends "...the right side of the house, at the south side of the altar";
+    // 47:2 ends "...waters on the right side" — its ending is in 47:1's words.
+    await read('from the right side of the house at the south side of the altar.');
+    assert.equal(onScreen().at(-1), 'Ezekiel 47:2', JSON.stringify(sent));
+    for (const s of ['Then brought he me out of the way of the gate northwards.', 'And led me about the way without',
+      'onto the other gates by the way that looketh eastward.', 'And behold, there ran out waters on the right side.']) await read(s);
+    assert.equal(onScreen().at(-1), 'Ezekiel 47:3', JSON.stringify(sent));
+    // "he measured a thousand" is 47:4's opening as well as 47:3's middle.
+    await read('And when the man that had the line in his hand');
+    await read('went forth eastward, he measured a thousand cubits.');
+    assert.equal(onScreen().at(-1), 'Ezekiel 47:3', JSON.stringify(sent));
+    await read('And he brought me through the waters, and the waters were to the ankles.');
+    // 47:4 says "brought me through the waters" halfway, and ends "...through; the waters were to the loins".
+    await read('Again, he measured a thousand');
+    await read('and brought me through the waters. The waters were on the knees.');
+    assert.equal(onScreen().at(-1), 'Ezekiel 47:4', JSON.stringify(sent));
+    await read('Again, he measured a thousand,');
+    await read('and brought me through the waters where to the loins. Afterwards,');
+    await read('he measured a thousand and it was a river I could not pass over.');
+    await wait(1500);
+    const seq = onScreen().filter((r, i, a) => r !== a[i - 1]);
+    assert.deepEqual(seq, ['Ezekiel 47:1', 'Ezekiel 47:2', 'Ezekiel 47:3', 'Ezekiel 47:4', 'Ezekiel 47:5'], JSON.stringify(sent));
+  });
+
+  await test('a verse read word for word after its citation is not "corrected" to one sharing its last phrase (Acts 1:8, not Luke 11:31)', async () => {
+    fresh(); server.clearRangeQueue(); await server.clearLayer('all');
+    const seg = async (t, fin, ms) => { await server.handleTranscriptSegment(t, fin, 0.95, fin); await wait(ms); };
+    await seg('I want that amen to be born again. Amen. Praise the lord.', true, 1200);
+    await seg('In acts chapter one and verse eight, it said', false, 900);
+    await seg('In acts chapter one and verse eight, it said, but you shall receive power after the holy', false, 900);
+    await seg('In Acts chapter one and verse eight, it said, but you shall receive power after the Holy Ghost', true, 1500);
+    await seg('is come upon you and you shall be witnesses unto', true, 1200);
+    await seg('me both in Jerusalem and in Judea and in Samaria and in the utmost', false, 900);
+    // Live, this interim was revised a moment later ("in other most parts"), but
+    // "utmost parts of the earth" is word for word Luke 11:31 — Acts 1:8 says "uttermost part".
+    await seg('me both in Jerusalem and in Judea and in Samaria and in the utmost parts of the earth', false, 1000);
+    await seg('me both in Jerusalem and in Judea and in Samaria and in other most parts of the earth. So irrespective of where you are scattered to,', true, 1500);
+    assert.ok(!onScreen().includes('Luke 11:31'), JSON.stringify(sent));
+    assert.equal(onScreen().at(-1), 'Acts 1:8', JSON.stringify(sent));
+  });
+
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 })();

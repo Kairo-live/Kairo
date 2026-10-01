@@ -1409,14 +1409,19 @@ function renderLayersList() {
     // 'hidden' utility class (display:none !important) — that collision
     // used to make the toggle button itself vanish the moment a layer was
     // switched off, leaving no way to turn it back on.
+    // The canvas is the artboard — always visible, same as Photoshop's
+    // Background layer (no eye to click off, nothing to hide it with).
+    if (isBg) layer.visible = true;
     const visBtn = document.createElement('button');
-    visBtn.className = 'ts-layer-vis' + (layer.visible ? '' : ' is-off');
-    visBtn.title = layer.visible ? 'Hide' : 'Show';
+    visBtn.className = 'ts-layer-vis' + (layer.visible ? '' : ' is-off') + (isBg ? ' is-locked' : '');
+    visBtn.title = isBg ? 'The canvas is always visible — it\'s the artboard' : (layer.visible ? 'Hide' : 'Show');
     visBtn.innerHTML = layer.visible
       ? `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>`
       : `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>`;
+    if (isBg) visBtn.disabled = true;
     visBtn.addEventListener('click', e => {
       e.stopPropagation();
+      if (isBg) return;
       layer.visible = !layer.visible;
       renderLayersList();
       renderPreview();
@@ -1737,9 +1742,7 @@ function renderStage() {
       if (layer.fill === 'solid') {
         div.style.background = hexOpacity(layer.color, layer.opacity);
       } else if (layer.fill === 'gradient') {
-        const c1 = hexOpacity(layer.color, layer.opacity);
-        const c2 = hexOpacity(layer.color2, layer.opacity);
-        div.style.background = `linear-gradient(${layer.angle}deg, ${c1}, ${c2})`;
+        div.style.background = gradientCss(layer, c => hexOpacity(c, layer.opacity));
       } else if (layer.fill === 'image') {
         div.style.background = imageFillCss(layer);
         if ((layer.opacity ?? 100) < 100) div.style.opacity = String((layer.opacity ?? 100) / 100);
@@ -1910,12 +1913,15 @@ function renderStage() {
 
     if (layer.type === 'text') {
       const div = document.createElement('div');
+      const colorCss = layer.colorFill === 'gradient'
+        ? `background: ${gradientCss(layer, c => hexOpacity(c, layer.opacity))}; -webkit-background-clip: text; background-clip: text; color: transparent;`
+        : `color: ${hexOpacity(layer.color, layer.opacity)};`;
       div.style.cssText = `
         position: absolute;
         display: flex;
         flex-direction: column;
         justify-content: center;
-        color: ${hexOpacity(layer.color, layer.opacity)};
+        ${colorCss}
         font-family: '${layer.font.family}', system-ui, sans-serif;
         font-size: ${(layer.font.size * pxScale).toFixed(1)}px;
         font-weight: ${layer.font.weight};
@@ -2498,6 +2504,8 @@ function tsBeginDrag(e, layer, mode, dir) {
     tsDrag.startAngle = Math.atan2(e.clientY - tsDrag.cy, e.clientX - tsDrag.cx) * 180 / Math.PI;
     tsDrag.startRot = layer.rotation || 0;
     tsDrag.armed = true;
+    // The rotate cursor for the whole turn, wherever the pointer goes.
+    document.documentElement.classList.add('ts-rotating');
   }
   document.addEventListener('mousemove', tsDragMove);
   document.addEventListener('mouseup', tsDragEnd);
@@ -2714,6 +2722,7 @@ function tsScheduleDragRender(layer) {
 function tsDragEnd() {
   document.removeEventListener('mousemove', tsDragMove);
   document.removeEventListener('mouseup', tsDragEnd);
+  document.documentElement.classList.remove('ts-rotating');
   if (tsDrag) {
     tsDrag = null;
     tsSnapGuides = { x: null, y: null };
@@ -2992,6 +3001,7 @@ function tsHandleLayerDblClick(e, div, layer) {
 function tsCancelDrag() {
   document.removeEventListener('mousemove', tsDragMove);
   document.removeEventListener('mouseup', tsDragEnd);
+  document.documentElement.classList.remove('ts-rotating');
   tsDrag = null;
 }
 
@@ -4357,7 +4367,13 @@ function renderSlideLayout(panel) {
   }
   const layoutSel = makeSelect(layouts, activeLook.layout || 'fullscreen', v => { activeLook.layout = v; renderPreview(); scheduleThemeAutosave(); });
   layoutSel.title = 'Where the text sits on the screen';
-  panel.appendChild(section('layout', 'Slide', prop('Layout', layoutSel)));
+  // Design — templates, backgrounds, your own image, or none — used to be
+  // its own button in the tool bar under the canvas; that bar's gone now
+  // that Image sits with the tools, and Design was never a tool (nothing to
+  // drag on the canvas with it), it's a whole-slide choice, same as Layout
+  // right above it, so it moved in here with it (2026-09-30).
+  const designBtn = fieldBtn('Design…', () => { if (activeLook) openDesignGallery(); }, 'Templates to start from, backgrounds, your own image, or none');
+  panel.appendChild(section('layout', 'Slide', prop('Layout', layoutSel), fieldRow([designBtn])));
 
   // Size — was a plain preset dropdown off in the tool bar under the canvas;
   // here with the rest of the slide's own layout, and a real W/H a size the
@@ -4418,12 +4434,7 @@ function renderBgProps(panel, layer) {
   })])];
   // (The layer's opacity is in the Layers panel, with its blend mode.)
   if (layer.fill === 'gradient') {
-    rows.push(
-      fieldRow([
-        colorField(layer.color, v => { layer.color = v; up(); }, 'Where the gradient starts'),
-        colorField(layer.color2 || '#1a1a2e', v => { layer.color2 = v; up(); }, 'Where it ends'),
-      ]),
-      fieldRow([numField('Angle', layer.angle ?? 160, { min: 0, max: 360, unit: '°', onChange: v => { layer.angle = v ?? 0; up(); } })], { cols: 2 }));
+    rows.push(...gradientEditorRows(layer, () => up()));
   } else if (layer.fill === 'image') {
     rows.push(
       fieldRow([makeMediaBinGrid(layer.src, item => { layer.fill = 'image'; layer.src = item.url; up(); })]),
@@ -4474,6 +4485,144 @@ function renderInertTextStyle(panel) {
 // background layer can be filled with one, by path, so the pictures ship with
 // the app, stay out of the saved themes, and one picture serves any number
 // of themes and slides.
+// ── Gradient points, after Photoshop's own gradient editor ────────────────
+// A bar with the live gradient across it and a marker for every stop along
+// its bottom edge: click the bar to add one where you clicked, drag a
+// marker to move it, click one to edit its exact colour and position, and
+// a stop can come off again (at least two always stay — a gradient needs
+// both ends). Shared by a shape/the canvas's Fill and a text layer's
+// Color (gradientStops/gradientCss, layer_geometry.js, do the actual
+// rendering everywhere this shows up).
+function lerpHexColor(c1, c2, t) {
+  const a = hexToRgb(c1), b = hexToRgb(c2);
+  const mix = (x, y) => Math.round(x + (y - x) * t);
+  return '#' + [mix(a.r, b.r), mix(a.g, b.g), mix(a.b, b.b)].map(v => v.toString(16).padStart(2, '0')).join('');
+}
+function colorAtStop(stops, pos) {
+  const sorted = stops.slice().sort((a, b) => a.pos - b.pos);
+  if (pos <= sorted[0].pos) return sorted[0].color;
+  if (pos >= sorted[sorted.length - 1].pos) return sorted[sorted.length - 1].color;
+  for (let i = 0; i < sorted.length - 1; i++) {
+    const a = sorted[i], b = sorted[i + 1];
+    if (pos >= a.pos && pos <= b.pos) {
+      const t = b.pos === a.pos ? 0 : (pos - a.pos) / (b.pos - a.pos);
+      return lerpHexColor(a.color, b.color, t);
+    }
+  }
+  return sorted[0].color;
+}
+// `getLayer`/`onChange` read and write wherever the stops actually live —
+// layer.gradientStops/.angle for a fill, the same fields under a different
+// name for text (renderTextProps passes its own pair) — so this one editor
+// serves both without knowing which it's editing.
+function gradientEditorRows(layer, onChange) {
+  const bar = document.createElement('div');
+  bar.className = 'ts-gradient-bar';
+  let selected = 0;
+
+  const paint = () => {
+    const stops = gradientStops(layer);
+    bar.style.background = `linear-gradient(90deg, ${stops.map(s => `${s.color} ${s.pos}%`).join(', ')})`;
+    bar.querySelectorAll('.ts-gradient-stop').forEach(el => el.remove());
+    stops.forEach((s, i) => {
+      const m = document.createElement('div');
+      m.className = 'ts-gradient-stop' + (i === selected ? ' active' : '');
+      m.style.left = s.pos + '%';
+      m.style.setProperty('--stop-color', s.color);
+      m.title = s.color + ' at ' + Math.round(s.pos) + '%';
+      m.addEventListener('mousedown', (e) => {
+        e.preventDefault(); e.stopPropagation();
+        selected = i;
+        paint(); renderFields();
+        const startX = e.clientX;
+        const barRect = bar.getBoundingClientRect();
+        const startPos = s.pos;
+        // A stable copy, sorted once — re-deriving via gradientStops() (it
+        // always sorts) on every tick would swap which INDEX is "this"
+        // stop the moment a drag carries it past a neighbour, moving the
+        // wrong one from then on. Mutate the one real object directly
+        // instead, and sort only once the drag actually ends.
+        const working = gradientStops(layer);
+        const stop = working[i];
+        let moved = false;
+        const move = (ev) => {
+          const dx = ev.clientX - startX;
+          if (Math.abs(dx) > 2) moved = true;
+          stop.pos = Math.max(0, Math.min(100, startPos + (dx / barRect.width) * 100));
+          layer.gradientStops = working;
+          paint(); onChange();
+        };
+        const up_ = () => {
+          document.removeEventListener('mousemove', move);
+          document.removeEventListener('mouseup', up_);
+          if (moved) {
+            working.sort((a, b) => a.pos - b.pos);
+            selected = working.indexOf(stop);
+            layer.gradientStops = working;
+            paint(); renderFields();
+          }
+        };
+        document.addEventListener('mousemove', move);
+        document.addEventListener('mouseup', up_);
+      });
+      bar.appendChild(m);
+    });
+  };
+  bar.addEventListener('mousedown', (e) => {
+    if (e.target !== bar) return; // a stop's own handler already ran
+    const r = bar.getBoundingClientRect();
+    const pos = Math.max(0, Math.min(100, ((e.clientX - r.left) / r.width) * 100));
+    const stops = gradientStops(layer);
+    const color = colorAtStop(stops, pos);
+    layer.gradientStops = [...stops, { pos, color }].sort((a, b) => a.pos - b.pos);
+    selected = layer.gradientStops.findIndex(s => s.pos === pos && s.color === color);
+    paint(); renderFields(); onChange();
+  });
+
+  const fieldsRow = document.createElement('div');
+  fieldsRow.className = 'ts-field-row';
+  fieldsRow.style.setProperty('--cols', 3);
+  function renderFields() {
+    fieldsRow.innerHTML = '';
+    const stops = gradientStops(layer);
+    const s = stops[selected] || stops[0];
+    fieldsRow.append(
+      colorField(s.color, v => {
+        layer.gradientStops = gradientStops(layer);
+        layer.gradientStops[selected] = { ...layer.gradientStops[selected], color: v };
+        paint(); onChange();
+      }, 'This stop\'s colour'),
+      numField('At', Math.round(s.pos), { min: 0, max: 100, unit: '%', title: 'This stop\'s position', onChange: v => {
+        const arr = gradientStops(layer);
+        const updated = { ...arr[selected], pos: v ?? 0 };
+        arr[selected] = updated;
+        arr.sort((a, b) => a.pos - b.pos);
+        selected = arr.indexOf(updated);
+        layer.gradientStops = arr;
+        paint(); renderFields(); onChange();
+      } }),
+    );
+    const del = document.createElement('button');
+    del.type = 'button';
+    del.className = 'ts-row-icon';
+    del.title = 'Remove this stop';
+    del.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/></svg>';
+    del.disabled = stops.length <= 2;
+    del.addEventListener('click', () => {
+      layer.gradientStops = gradientStops(layer).filter((_, i) => i !== selected);
+      selected = Math.max(0, selected - 1);
+      paint(); renderFields(); onChange();
+    });
+    fieldsRow.appendChild(del);
+  }
+  paint(); renderFields();
+  return [
+    fieldRow([bar]),
+    fieldsRow,
+    fieldRow([numField('Angle', layer.angle ?? 135, { min: 0, max: 360, unit: '°', onChange: v => { layer.angle = v ?? 0; onChange(); } })], { cols: 2 }),
+  ];
+}
+
 function useBackground(layer, bg) {
   layer.fill = 'image';
   layer.src = bg.src;
@@ -5026,7 +5175,6 @@ function blankSceneOn(bg) {
   if (canvas) useBackground(canvas, bg);
   return { id: 'scene-' + Date.now(), name: bg.name, durationSec: 60, layers };
 }
-document.getElementById('ts-add-bg-btn')?.addEventListener('click', () => { if (activeLook) openDesignGallery(); });
 
 // How the verse text reveals as it goes up (KairoWordSplit), separate from the
 // transition between slides — the theme's setting, shown with the type of the
@@ -5128,12 +5276,22 @@ function renderTextProps(panel, layer) {
     // How the verse reveals — the theme's, so not in a slide's own editor.
     ...(tsMode !== 'item' && layer.binding === 'verse' ? revealRows() : [])));
 
-  // Colour: the text's; and — for text typed in, not a verse or the
-  // countdown — highlighted words: words wrapped in *asterisks* show in the
-  // highlight colour, a two-tone headline ("*FIRST TIME* / WITH US?") in one
-  // layer.
-  const colorKids = [fieldRow([colorField(layer.color, v => { layer.color = v; up(); })], { cols: 2 })];
-  if (layer.binding === 'custom') {
+  // Colour: solid (plain, with the highlight option below) or a gradient —
+  // the same points editor a shape/the canvas's Fill uses (gradientStops/
+  // gradientCss render it everywhere, text included, via background-clip).
+  // For text typed in, not a verse or the countdown — highlighted words:
+  // words wrapped in *asterisks* show in the highlight colour, a two-tone
+  // headline ("*FIRST TIME* / WITH US?") in one layer; solid only, since a
+  // highlight is itself already a second colour on top of the layer's own.
+  const colorKids = [fieldRow([makeSelect([
+    { label: 'Solid colour', value: 'solid' }, { label: 'Gradient', value: 'gradient' },
+  ], layer.colorFill || 'solid', v => { layer.colorFill = v === 'gradient' ? 'gradient' : undefined; up(); renderProps(); })])];
+  if ((layer.colorFill || 'solid') === 'gradient') {
+    colorKids.push(...gradientEditorRows(layer, () => up()));
+  } else {
+    colorKids.push(fieldRow([colorField(layer.color, v => { layer.color = v; up(); })], { cols: 2 }));
+  }
+  if (layer.binding === 'custom' && (layer.colorFill || 'solid') === 'solid') {
     colorKids.push(fieldRow([
       toggleField('Highlight', !!layer.accentColor, v => {
         if (v) layer.accentColor = layer.accentColor || '#e3cf6c'; else delete layer.accentColor;
@@ -6109,7 +6267,9 @@ let tsTool = 'move';
 const tsTypeDefaults = { family: 'Manrope', size: 72, weight: 600, italic: false, lineHeight: 1.2, letterSpacing: 0, transform: 'none', color: '#ffffff', align: 'left' };
 const tsShapeDefaults = { shape: 'rect', color: '#ed1c24', radius: 0 };
 
-function selectTool(tool) {
+// showShapes: chosen by hand (a click, or U) — the Shape tool then opens its
+// list of shapes (tsShapeFlyout, below).
+function selectTool(tool, { showShapes = false } = {}) {
   if (!TS_TOOLS[tool]) return;
   tsTool = tool;
   // The tools float over the canvas (.ts-tool-float), not in the bar under
@@ -6118,40 +6278,94 @@ function selectTool(tool) {
   const wrap = document.querySelector('.ts-preview-wrap');
   wrap?.classList.toggle('ts-tool-type', tool === 'type');
   wrap?.classList.toggle('ts-tool-shape', tool === 'shape');
+  if (tool !== 'shape') tsShapeFlyout.close();
+  else if (showShapes) tsShapeFlyout.open();
 }
-document.querySelectorAll('.ts-tool-btn').forEach(b => b.addEventListener('click', () => selectTool(b.dataset.tool)));
+document.querySelectorAll('.ts-tool-btn').forEach(b => b.addEventListener('click', () => {
+  if (b.dataset.tool === 'shape' && tsShapeFlyout.isOpen()) { tsShapeFlyout.close(); return; }
+  selectTool(b.dataset.tool, { showShapes: true });
+}));
 
-// The Shape tool's own corner caret (Photoshop's flyout): which shape gets
-// drawn next, shown as icons rather than names — picking one also switches
-// to the Shape tool. TS_SHAPE_KINDS/tsShapeIconSvg are shared with the Shape
-// section's own picker (shapeKindPicker) so a shape reads the same icon
-// everywhere it's chosen.
+// A quick name-only label on hover, instantly, for every tool (including
+// Image) — not left to the OS's own title tooltip, which is slow and easy
+// to never actually trigger while just passing the pointer over the bar
+// (2026-09-30: "hover state on tools should show the names of what they
+// do"). The longer title= detail is still there underneath it for whoever
+// keeps hovering past that.
 {
-  const caretBtn = document.getElementById('ts-tool-shape-caret');
+  const tip = document.getElementById('ts-tool-tooltip');
+  if (tip) {
+    document.querySelectorAll('.ts-tool-btn[data-tool-name]').forEach(b => {
+      b.addEventListener('mouseenter', () => {
+        tip.textContent = b.dataset.toolName;
+        tip.classList.add('visible');
+      });
+      b.addEventListener('mouseleave', () => tip.classList.remove('visible'));
+    });
+  }
+}
+
+// Choosing the Shape tool opens every shape it draws, by icon and name, the
+// way Photoshop's tool flyout lists its shape tools — not left behind a
+// sliver of a caret on the button's corner (2026-09-30: "when a shape tool is
+// selected, it should bring out all the options so the user can select the
+// one they want, not just a small secondary button"). Picking one closes it,
+// as do Esc, a second click on the tool, and starting to draw. The tool's own
+// icon is the shape picked. TS_SHAPE_KINDS/tsShapeIconSvg are shared with the
+// Shape section's own picker (shapeKindPicker) so a shape reads the same icon
+// everywhere it's chosen.
+const tsShapeFlyout = (() => {
+  const toolBtn = document.getElementById('ts-tool-shape-btn');
   let flyout = null;
-  function closeShapeFlyout() { flyout?.remove(); flyout = null; document.removeEventListener('mousedown', onOutside, true); }
-  function onOutside(e) { if (flyout && !flyout.contains(e.target) && e.target !== caretBtn && !caretBtn?.contains(e.target)) closeShapeFlyout(); }
-  caretBtn?.addEventListener('click', (e) => {
-    e.stopPropagation();
-    if (flyout) { closeShapeFlyout(); return; }
+  function syncIcon() {
+    if (!toolBtn) return;
+    const kind = TS_SHAPE_KINDS.find(k => k.id === tsShapeDefaults.shape) || TS_SHAPE_KINDS[0];
+    toolBtn.innerHTML = tsShapeIconSvg(kind.id, 17);
+    toolBtn.dataset.toolName = `${kind.label} · U`;
+  }
+  function close() {
+    if (!flyout) return;
+    flyout.remove(); flyout = null;
+    toolBtn?.setAttribute('aria-expanded', 'false');
+    document.removeEventListener('mousedown', onOutside, true);
+    document.removeEventListener('keydown', onKey, true);
+  }
+  function onOutside(e) { if (!flyout.contains(e.target) && !toolBtn?.contains(e.target)) close(); }
+  function onKey(e) {
+    if (e.key !== 'Escape') return;
+    e.preventDefault(); e.stopPropagation();
+    close();
+  }
+  function open() {
+    if (flyout || !toolBtn) return;
     flyout = document.createElement('div');
-    flyout.className = 'ts-shape-picker-panel';
-    const rect = caretBtn.getBoundingClientRect();
-    flyout.style.left = rect.left + 'px';
-    flyout.style.top = (rect.bottom + 4) + 'px';
+    flyout.className = 'ts-shape-flyout';
+    flyout.setAttribute('role', 'menu');
     TS_SHAPE_KINDS.forEach(k => {
-      const tile = document.createElement('button');
-      tile.type = 'button';
-      tile.className = 'ts-shape-picker-tile' + (k.id === tsShapeDefaults.shape ? ' active' : '');
-      tile.title = k.label;
-      tile.innerHTML = tsShapeIconSvg(k.id, 20);
-      tile.addEventListener('click', () => { tsShapeDefaults.shape = k.id; selectTool('shape'); closeShapeFlyout(); });
-      flyout.appendChild(tile);
+      const item = document.createElement('button');
+      item.type = 'button';
+      item.setAttribute('role', 'menuitemradio');
+      item.setAttribute('aria-checked', String(k.id === tsShapeDefaults.shape));
+      item.className = 'ts-shape-flyout-item' + (k.id === tsShapeDefaults.shape ? ' active' : '');
+      item.innerHTML = `${tsShapeIconSvg(k.id, 18)}<span>${k.label}</span>`;
+      item.addEventListener('click', () => { tsShapeDefaults.shape = k.id; syncIcon(); close(); });
+      flyout.appendChild(item);
     });
     document.body.appendChild(flyout);
-    setTimeout(() => document.addEventListener('mousedown', onOutside, true), 0);
-  });
-}
+    const r = toolBtn.getBoundingClientRect();
+    flyout.style.left = Math.max(8, Math.min(r.left + r.width / 2 - flyout.offsetWidth / 2, window.innerWidth - flyout.offsetWidth - 8)) + 'px';
+    flyout.style.top = (r.bottom + 6) + 'px';
+    toolBtn.setAttribute('aria-expanded', 'true');
+    document.getElementById('ts-tool-tooltip')?.classList.remove('visible');
+    // Straight away, not a tick later: the click that opened it is past its
+    // mousedown already, and an Esc pressed at once must close this list —
+    // ahead of the studio's own Esc (bubbling), which would close the studio.
+    document.addEventListener('mousedown', onOutside, true);
+    document.addEventListener('keydown', onKey, true);
+  }
+  syncIcon();
+  return { open, close, syncIcon, isOpen: () => !!flyout };
+})();
 
 // Move, Type and Shape are chosen here and pick the canvas's interaction —
 // drag to move/resize/turn, drag out a text box, drag out a shape (below).
@@ -6287,11 +6501,14 @@ document.addEventListener('keydown', (e) => {
       e.preventDefault();
       const i = TS_SHAPE_KINDS.findIndex(k => k.id === tsShapeDefaults.shape);
       tsShapeDefaults.shape = TS_SHAPE_KINDS[(i + 1) % TS_SHAPE_KINDS.length].id;
+      tsShapeFlyout.syncIcon();
+      // An open list follows along: it shows the shape now picked.
+      if (tsShapeFlyout.isOpen()) { tsShapeFlyout.close(); tsShapeFlyout.open(); }
       selectTool('shape');
       return;
     }
     const tool = Object.keys(TS_TOOLS).find(k => TS_TOOLS[k].key === key);
-    if (tool && !e.shiftKey) { e.preventDefault(); selectTool(tool); return; }
+    if (tool && !e.shiftKey) { e.preventDefault(); selectTool(tool, { showShapes: true }); return; }
     const layer = !multiSelectedLayerIds.size ? activeLayer : null;
     if (/^[0-9]$/.test(e.key) && layer) {
       e.preventDefault();

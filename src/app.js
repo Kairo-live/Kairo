@@ -329,8 +329,16 @@ function handleConnectionState(state, error) {
     if (micLabel) micLabel.classList.add('pulse');
     if (lsBcastDot) lsBcastDot.classList.add('broadcasting');
     if (lsBcastLbl) { lsBcastLbl.classList.add('broadcasting'); lsBcastLbl.textContent = 'Broadcasting'; }
-    if (!startTime) {
+    // Each listening session times from its own start. This used to start
+    // only "if never started", and nothing ever cleared startTime, so a second
+    // Start Listening in the same window never restarted the clock: Time stayed
+    // wherever the first session had stopped (owner, 2026-09-30: "it says 15s
+    // in my web" while a freshly opened window counted fine). A reconnect
+    // mid-session ('reconnecting', then 'connected' again) leaves it running —
+    // only a stop or an error ends a session.
+    if (!elapsedInterval) {
       startTime = Date.now();
+      updateElapsed();
       elapsedInterval = setInterval(updateElapsed, 1000);
     }
     showEmptyTranscript(false);
@@ -352,6 +360,7 @@ function handleConnectionState(state, error) {
     if (micLabel) micLabel.classList.remove('pulse');
     if (lsBcastDot) lsBcastDot.classList.remove('broadcasting');
     if (lsBcastLbl) { lsBcastLbl.classList.remove('broadcasting'); lsBcastLbl.textContent = 'Idle'; }
+    clearInterval(elapsedInterval); elapsedInterval = null;   // Time keeps the length of the session just ended
     stopAudioCapture();
     window.KairoService?.setAutoFollow?.(false);
     if (state === 'error' && error) toast(error, 'error');
@@ -1909,7 +1918,7 @@ async function startListening() {
 async function stopListening() {
   await fetch(`${SERVER}/api/stop-listening`, { method: 'POST' }).catch(err => console.warn('[KAIRO] stop-listening request failed:', err.message));
   stopAudioCapture();
-  clearInterval(elapsedInterval);
+  clearInterval(elapsedInterval); elapsedInterval = null;
 }
 
 function stopAudioCapture() {

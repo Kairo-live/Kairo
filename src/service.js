@@ -3015,7 +3015,7 @@
         }
         if (layer.fill === 'transparent') { host.classList.add('is-alpha'); return; }
         if (layer.fill === 'gradient') {
-          d.style.background = `linear-gradient(${layer.angle || 0}deg, ${hexA(layer.color, layer.opacity)}, ${hexA(layer.color2 || layer.color, layer.opacity)})`;
+          d.style.background = gradientCss(layer, c => hexA(c, layer.opacity));
         } else if (layer.fill === 'image') {
           // Theme cards and slide lists are small: they take the thumbnail.
           d.style.background = imageFillCss(layer, { small: scale * DESIGN_W <= 360 });
@@ -3196,7 +3196,17 @@
       d.style.textAlign = ov.align || layer.align;
       const color = ov.color || layer.color;
       const opacity = ov.opacity ?? layer.opacity;
-      d.style.color = hexA(color, opacity);
+      // A per-item colour override (ov.color) means "this slide's own solid
+      // colour" — it wins over the theme's gradient, same as it already
+      // wins over the theme's plain colour.
+      if (layer.colorFill === 'gradient' && !ov.color) {
+        d.style.background = gradientCss(layer, c => hexA(c, opacity));
+        d.style.backgroundClip = 'text'; d.style.webkitBackgroundClip = 'text';
+        d.style.color = 'transparent';
+      } else {
+        d.style.background = ''; d.style.backgroundClip = ''; d.style.webkitBackgroundClip = '';
+        d.style.color = hexA(color, opacity);
+      }
       if (isTimer || isTimerPart) {
         // Timer state colours (see display.html buildLayerDOM) — onTimerAction
         // recolours the element as the countdown enters warning / overtime.

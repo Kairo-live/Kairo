@@ -988,8 +988,13 @@ input[type="range"]:disabled { opacity: 0.4; cursor: default; }
 .conf-good  { background: rgba(42,42,46,0.8);  color: var(--blue); border: 1px solid rgba(255,255,255,0.28); }
 .conf-mid   { background: rgba(59,47,8,0.8);   color: #fde68a; border: 1px solid rgba(253,230,138,0.2);  }
 .conf-low   { background: rgba(59,15,15,0.8);  color: #fca5a5; border: 1px solid rgba(252,165,165,0.2);  }
-/* Pulse — same verse re-detected, card already at top */
-@keyframes sentPulse { 0%,100% { border-left-color: var(--blue); } 50% { border-left-color: var(--green); box-shadow: 0 0 0 2px var(--green-dim); } }
+/* Pulse — a verse sent again (auto-send re-detecting one further down the
+   queue, which brings it back to the top, or a double-click): a flash of the
+   live outline's own orange. It used to flash green — a green border and
+   ring breaking through the orange LIVE outline every time auto-send
+   re-sent a verse (2026-09-30: "the focus ring in auto send sometimes bleed
+   green") — the one green left in a queue whose only accent is the brand. */
+@keyframes sentPulse { 50% { border-color: var(--brand); box-shadow: 0 0 0 2px rgba(245,48,26,0.45); } }
 .locked-verse-card.sent-pulse { animation: sentPulse 0.6s ease; }
 
 /* ── Topic detection chips ── */
@@ -1400,6 +1405,11 @@ input[type="range"]:disabled { opacity: 0.4; cursor: default; }
   background: var(--brand);
   border-color: var(--brand);
 }
+/* Its own focus ring, not WebKit's: unstyled, a focused checkbox (Auto-send
+   among them) draws the system's ring in the Mac's accent colour — green on a
+   green-accent Mac. The app's neutral accent instead, from the keyboard only. */
+.bs-check-label input:focus { outline: none; }
+.bs-check-label input:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
 .bs-check-label input:checked::after {
   content: '';
   position: absolute;
@@ -5407,15 +5417,20 @@ mark.help-hit.is-current { background: rgba(255,255,255,0.38); }
 }
 .ts-danger-btn:hover { background: #c9181f !important; }
 
-/* ── Tools (after Compositor) ──
-   The tools (V, T, U) sit in one segmented group under the canvas, with what
-   gets placed (Image, Design), Play and the canvas size beside them; a line
-   under that says what the tool does. Their PROPERTIES are the panel on the
-   right's (renderLayoutProps, renderTextProps, renderBgProps) — nothing
-   floats over the canvas. */
-.ts-add-bar.ts-tool-bar { padding: var(--space-2) var(--space-4) 4px; }
+/* ── Tools (after Compositor/Figma) ──
+   Move, Type, Shape and Image sit in one segmented group floating centred
+   over the TOP of the canvas (.ts-tool-float) — Image isn't a drag-on-canvas
+   tool like the other three, grouped here anyway since it's picked the same
+   way (a click), not tucked into a bar under the canvas on its own (Design
+   moved into the Layout tab instead — a whole-slide choice, not a tool).
+   Their PROPERTIES are the panel on the right's (transformControls,
+   renderTextProps, renderBgProps) — nothing else floats over the canvas.
+   A quick name-only label (data-tool-name) shows on hover, instantly
+   (.ts-tool-tooltip below) — the fuller title= detail is still there for
+   whoever hovers long enough to reach the OS's own tooltip too. */
 .ts-tools {
   display: inline-flex;
+  align-items: center;
   gap: 2px;
   padding: 2px;
   background: rgba(255, 255, 255, 0.04);
@@ -5423,6 +5438,28 @@ mark.help-hit.is-current { background: rgba(255,255,255,0.38); }
   border-radius: 9px;
   flex: none;
 }
+.ts-tool-sep { width: 1px; height: 18px; background: var(--border-md); margin: 0 2px; flex: none; }
+.ts-tool-tooltip {
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  margin-top: 7px;
+  padding: 3px 8px;
+  background: #141416;
+  border: 1px solid var(--border-md);
+  border-radius: 5px;
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.1s ease;
+  z-index: 50;
+}
+.ts-tool-tooltip.visible { opacity: 1; }
 .ts-tool-btn {
   width: 32px;
   height: 32px;
@@ -5474,23 +5511,43 @@ mark.help-hit.is-current { background: rgba(255,255,255,0.38); }
 .ts-draw-band.is-triangle { clip-path: polygon(50% 0, 100% 100%, 0 100%); background: rgba(255, 255, 255, 0.3); border: 0; }
 .ts-draw-band.is-diamond { clip-path: polygon(50% 0, 100% 50%, 50% 100%, 0 50%); background: rgba(255, 255, 255, 0.3); border: 0; }
 
-/* The Shape tool's own corner caret (a Photoshop flyout, not a dropdown): a
-   sliver glued to the tool button, opening TS_SHAPE_KINDS as icons. */
-.ts-tool-shape-group { position: relative; display: inline-flex; }
-.ts-tool-shape-caret {
-  position: absolute; right: -1px; bottom: -1px;
-  width: 11px; height: 11px;
-  display: flex; align-items: center; justify-content: center;
-  padding: 0;
-  background: rgba(30, 30, 32, 0.9);
-  border: 0; border-radius: 3px 0 7px 0;
-  color: var(--text-3);
+/* Choosing the Shape tool opens every shape it draws, under it — icon and
+   name a row, the way Photoshop's tool flyout lists its shape tools
+   (tsShapeFlyout). The one picked carries the tool's accent. */
+.ts-shape-flyout {
+  position: fixed;
+  z-index: 10000;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 148px;
+  padding: 4px;
+  background: #232326;
+  border: 1px solid var(--border-md);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+}
+.ts-shape-flyout-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 30px;
+  padding: 0 10px;
+  background: transparent;
+  border: 0;
+  border-radius: 5px;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 12px;
+  text-align: left;
   cursor: pointer;
 }
-.ts-tool-shape-caret svg { width: 7px; height: 7px; }
-.ts-tool-shape-caret:hover { color: #fff; }
+.ts-shape-flyout-item svg { flex: none; color: var(--text-2); }
+.ts-shape-flyout-item:hover { background: var(--bg-hover); }
+.ts-shape-flyout-item.active { background: var(--red-dim); }
+.ts-shape-flyout-item.active svg { color: var(--red); }
 /* A shape's kind and corners row in the panel on the right (renderBgProps),
-   and the flyout itself — shared with the tool's own caret above. */
+   and the row of icons it opens (shapeKindPicker). */
 .ts-shape-picker-btn {
   height: 24px;
   display: flex; align-items: center; gap: 6px;
@@ -6064,8 +6121,16 @@ body.ts-dragging-guide-h, body.ts-dragging-guide-h * { cursor: row-resize !impor
    (2026-09-30: "I don't see the rotation from the corners" — the ring was
    too thin to reliably land in, with no way to tell it was even there). */
 .ts-handle-nw::after, .ts-handle-ne::after, .ts-handle-se::after, .ts-handle-sw::after { inset: -14px; }
-.ts-handle-rotatable { cursor: grab !important; }
-.ts-handle-rotatable:active { cursor: grabbing !important; }
+/* The rotate cursor: a circular arrow, the rotate handle's own icon, white
+   with a dark rim so it reads on any slide — not the hand (2026-09-30: "the
+   anchor points for rotation should not be hand, it should be the universal
+   rotate icon"). PNGs at 1x and 2x, not an SVG, which not every webview will
+   draw as a cursor. It stays for the whole turn (html.ts-rotating, set while
+   tsDrag rotates), since the pointer leaves the handle as soon as it moves. */
+.ts-handle-rotatable, .ts-handle-rot, html.ts-rotating, html.ts-rotating * {
+  cursor: url("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABgAAAAYCAYAAADgdz34AAACpElEQVR4AbSUO28aQRSFFzuJkrREUYrQ2l3KWNDwkJCgds0/gBJKrFBCaf6Ba9cgCrQVKCnT2WWcKhJlYitKRM432ruafUBIJKM5zJ37OHfu7J05Ch759y8J3msvBom5A3vC8LcEBFwpIo0b6UBPMz6aAmT8TI8u2JfABbRardpqtTrfbrcnPsbjcVG4EAuk+HblVwLSdQWXOC8BhisRD3CezWZvy+XyCwUkRr/fLwJ8ms3mUMY3+AHJ8chL0NPO2j7xer2+b7fbXw2TyWQDYIFwsVi8qtfrL1mnkU7Q085r7AxHI65UKtfz+TwUzoXxYDD4IHwvFApf8MFXCQrMafgJOJouO8eJQBHfQah1J8InzZcC40F/z+Vz3Gg0fg2Hw99aZ4af4ExHUzQPBd5JngpGKDEe7oPqo78Wni2XyyfMsdUT/AR8eWey89Uij5xKZcofVB5ZqDbZpnb2kQO7j8TEROCUCvUNbj18k/xT+mN5fxbcsAoSu1LJ9866+4/KTmW2b8P8EIbhU7Ut3+KdbI7TEmidGR8zmqyCasCZuu+oWq0WaFvfzRLgFHjnhw+3k/l/4TgtASROgaCWi7uJ9QHoqlXdbfcaxIX5CYLRaLRBS5kquSb5kCqcz64G8RNc6lL9sGOKqqB1HYGS5Q1s7k6YUTecTdIETuUn4IimfhXqiJK8SGJPMIR0By/ojap0DyIVyy/grdKcaG8/gWwBVYR2jgTqhp5ww4ULCIVrgSe8xLOCD4GQ6wRCyfHuJScvGgqhozJnBEh2g/MFEBqMmCPFNyLnPrgY+0tXYPqOAsa6mbdUA8zADCmAWDeXB5GdZ8jx3ZUAG6Weqhqe5g3JDJAK7gmXI8RAYnbsS2DeLpEW/tPgyzSHzPnjkAR+JGTA1+2V/wAAAP//JdaZbAAAAAZJREFUAwBC5D9AB5boCAAAAABJRU5ErkJggg==") 12 12, alias !important;
+  cursor: -webkit-image-set(url("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABgAAAAYCAYAAADgdz34AAACpElEQVR4AbSUO28aQRSFFzuJkrREUYrQ2l3KWNDwkJCgds0/gBJKrFBCaf6Ba9cgCrQVKCnT2WWcKhJlYitKRM432ruafUBIJKM5zJ37OHfu7J05Ch759y8J3msvBom5A3vC8LcEBFwpIo0b6UBPMz6aAmT8TI8u2JfABbRardpqtTrfbrcnPsbjcVG4EAuk+HblVwLSdQWXOC8BhisRD3CezWZvy+XyCwUkRr/fLwJ8ms3mUMY3+AHJ8chL0NPO2j7xer2+b7fbXw2TyWQDYIFwsVi8qtfrL1mnkU7Q085r7AxHI65UKtfz+TwUzoXxYDD4IHwvFApf8MFXCQrMafgJOJouO8eJQBHfQah1J8InzZcC40F/z+Vz3Gg0fg2Hw99aZ4af4ExHUzQPBd5JngpGKDEe7oPqo78Wni2XyyfMsdUT/AR8eWey89Uij5xKZcofVB5ZqDbZpnb2kQO7j8TEROCUCvUNbj18k/xT+mN5fxbcsAoSu1LJ9866+4/KTmW2b8P8EIbhU7Ut3+KdbI7TEmidGR8zmqyCasCZuu+oWq0WaFvfzRLgFHjnhw+3k/l/4TgtASROgaCWi7uJ9QHoqlXdbfcaxIX5CYLRaLRBS5kquSb5kCqcz64G8RNc6lL9sGOKqqB1HYGS5Q1s7k6YUTecTdIETuUn4IimfhXqiJK8SGJPMIR0By/ojap0DyIVyy/grdKcaG8/gWwBVYR2jgTqhp5ww4ULCIVrgSe8xLOCD4GQ6wRCyfHuJScvGgqhozJnBEh2g/MFEBqMmCPFNyLnPrgY+0tXYPqOAsa6mbdUA8zADCmAWDeXB5GdZ8jx3ZUAG6Weqhqe5g3JDJAK7gmXI8RAYnbsS2DeLpEW/tPgyzSHzPnjkAR+JGTA1+2V/wAAAP//JdaZbAAAAAZJREFUAwBC5D9AB5boCAAAAABJRU5ErkJggg==") 1x, url("data:image/png;base64,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") 2x) 12 12, alias !important;
+}
 /* Corners */
 .ts-handle-nw { left: -7px;  top: -7px;    cursor: nwse-resize; }
 .ts-handle-ne { right: -7px; top: -7px;    cursor: nesw-resize; }
@@ -6081,9 +6146,8 @@ body.ts-dragging-guide-h, body.ts-dragging-guide-h * { cursor: row-resize !impor
 /* Rotate — a round button hanging below the bottom edge */
 .ts-handle-rot {
   width: 22px; height: 22px; left: 50%; bottom: -36px; transform: translateX(-50%);
-  display: flex; align-items: center; justify-content: center; color: #2a2a2e; cursor: grab;
+  display: flex; align-items: center; justify-content: center; color: #2a2a2e;
 }
-.ts-handle-rot:active { cursor: grabbing; }
 /* The live readout while moving, resizing or rotating */
 .ts-drag-badge {
   position: absolute; transform: translate(-50%, 0); z-index: 45; pointer-events: none;
@@ -6239,6 +6303,8 @@ body.ts-dragging-guide-h, body.ts-dragging-guide-h * { cursor: row-resize !impor
 }
 .ts-layer-vis:hover { color: var(--text); }
 .ts-layer-vis.is-off { opacity: 0.3; }
+.ts-layer-vis.is-locked { opacity: 0.45; cursor: default; }
+.ts-layer-vis.is-locked:hover { color: inherit; }
 
 .ts-layer-type-icon {
   width: 18px; height: 18px;
@@ -7436,6 +7502,38 @@ body.ts-scrubbing, body.ts-scrubbing * { cursor: ew-resize !important; user-sele
 .ts-motion-tile-label { display: flex; flex-direction: column; gap: 2px; padding: 8px 10px 10px; }
 .ts-motion-tile-label strong { font-size: 12.5px; font-weight: 700; }
 .ts-motion-tile-label span { font-size: 11.5px; color: var(--text-2); line-height: 1.35; }
+
+/* Gradient points, after Photoshop's own editor (gradientEditorRows) — the
+   live gradient across a bar, a diamond marker per stop along its bottom
+   edge, drag to move, click to select, click empty bar to add. */
+.ts-gradient-bar {
+  position: relative;
+  width: 100%;
+  height: 28px;
+  border-radius: 5px;
+  border: 1px solid var(--border-md);
+  cursor: copy;
+  /* A faint checker so an all-transparent stretch (once opacity-per-stop
+     exists) would still read as "empty", not just black. */
+  background-image: linear-gradient(45deg, rgba(255,255,255,.06) 25%, transparent 25%, transparent 75%, rgba(255,255,255,.06) 75%),
+                     linear-gradient(45deg, rgba(255,255,255,.06) 25%, transparent 25%, transparent 75%, rgba(255,255,255,.06) 75%);
+  background-size: 10px 10px;
+  background-position: 0 0, 5px 5px;
+}
+.ts-gradient-stop {
+  position: absolute;
+  bottom: -7px;
+  width: 14px; height: 14px;
+  transform: translateX(-50%) rotate(45deg);
+  background: var(--stop-color);
+  border: 1.5px solid #fff;
+  border-radius: 3px 3px 3px 0;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.5);
+  cursor: grab;
+  z-index: 2;
+}
+.ts-gradient-stop:active { cursor: grabbing; }
+.ts-gradient-stop.active { border-color: var(--red); box-shadow: 0 0 0 1px var(--red), 0 1px 4px rgba(0,0,0,0.5); z-index: 3; }
 
 /* The bundled backgrounds: a grid of thumbnails in the canvas's Picture
    section, and tiles in the Background gallery. */
